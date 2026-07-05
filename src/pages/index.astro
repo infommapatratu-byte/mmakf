@@ -1,6 +1,7 @@
 ---
 import Base from '@/layouts/Base.astro';
 import Icon from '@/components/Icon.astro';
+import EnrollCTA from '@/components/EnrollCTA.astro';
 import { getAll } from '@/lib/storage';
 
 export const prerender = false;
@@ -517,7 +518,7 @@ const grading = data.beltGrading;
                 <span class="prod-price">₹{p.p.toLocaleString()}</span>
                 {p.m && <span class="prod-orig">₹{p.m.toLocaleString()}</span>}
               </div>
-              <button class="btn-link" onclick={`showNotif('Order ${p.n.replace(/'/g, "\\'")}: pay via UPI ${fed.upi}, then message us with the screenshot.')`}>+ Order</button>
+              <button class="btn-link" data-order-name={p.n} data-order-upi={fed.upi}>+ Order</button>
             </div>
           </div>
         ))}
@@ -555,31 +556,7 @@ const grading = data.beltGrading;
   </section>
 
   {/* ═══════ CTA / ENROLL ═══════ */}
-  <section id="enroll" class="cta">
-    <div class="container">
-      <div class="cta-inner fade">
-        <div class="eyebrow center">Begin</div>
-        <h2 class="display-2" style="margin-top:16px;font-size:clamp(2rem,5vw,3.4rem)">
-          Step onto the <em class="r">mat</em>.
-        </h2>
-        <p class="lead" style="margin:18px auto 32px">
-          Your first class is on us. Walk in. Try one session. Decide from there.
-        </p>
-        <form class="enroll-form" id="enrollForm">
-          <input class="input" name="name" placeholder="Full name" required />
-          <input class="input" name="phone" placeholder="Phone (+91)" required />
-          <select class="input" name="program" required>
-            <option value="">Choose a program</option>
-            {programs.map((p: any) => <option value={p.name}>{p.name}</option>)}
-          </select>
-          <button type="submit" class="btn btn-gold">Book Free Trial</button>
-        </form>
-        <div style="margin-top:14px;color:var(--muted);font-size:.78rem">
-          Or call <a href="tel:+919939144318" class="text-gold">+91 99391 44318</a>
-        </div>
-      </div>
-    </div>
-  </section>
+  <EnrollCTA programs={programs} phone={fed.contact.phone} />
 
   {/* ═══════ CONTACT ═══════ */}
   <section id="contact">
@@ -770,6 +747,9 @@ const grading = data.beltGrading;
   @keyframes ticker {
     from { transform: translateX(0); }
     to   { transform: translateX(-50%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ticker-track { animation: none; }
   }
 
   /* ═══════ EXPLORE ═══════ */
@@ -1195,24 +1175,6 @@ const grading = data.beltGrading;
     margin-left: 6px;
   }
 
-  /* ═══════ CTA ═══════ */
-  .cta {
-    background:
-      radial-gradient(ellipse 600px 300px at 50% 30%, rgba(168, 0, 0, 0.15), transparent),
-      var(--bg-2);
-    text-align: center;
-  }
-  .cta-inner { max-width: 720px; margin: 0 auto; }
-  .enroll-form {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1.2fr auto;
-    gap: 10px;
-    margin-top: 32px;
-  }
-  @media (max-width: 700px) {
-    .enroll-form { grid-template-columns: 1fr; }
-  }
-
   /* ═══════ CONTACT ═══════ */
   .contact-grid {
     display: grid;
@@ -1223,22 +1185,13 @@ const grading = data.beltGrading;
 </style>
 
 <script>
-  // Enroll form
-  const form = document.getElementById('enrollForm');
-  form?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(form);
-    const body = Object.fromEntries(fd.entries());
-    try {
-      await fetch('/api/enroll', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      window.showNotif('Oss. Free trial booked. We will call you shortly.');
-      form.reset();
-    } catch {
-      window.showNotif('Could not submit. Please call +91 99391 44318.');
-    }
+  // Shop order intents — data attributes instead of inline handlers (MASTER-SPEC §9.6)
+  document.querySelectorAll('[data-order-name]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const el = btn as HTMLElement;
+      (window as any).showNotif(
+        `Order ${el.dataset.orderName}: pay via UPI ${el.dataset.orderUpi}, then message us with the screenshot.`
+      );
+    });
   });
 </script>

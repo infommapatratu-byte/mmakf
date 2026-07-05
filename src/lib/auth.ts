@@ -48,7 +48,11 @@ export function isAuthenticated(cookieHeader: string | null | undefined): boolea
   const [payload, sig] = token.split('.');
   if (!payload || !sig) return false;
   const expected = sign(payload);
-  if (sig !== expected) return false;
+  // NFR-SEC-3: constant-time signature comparison
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  if (!crypto.timingSafeEqual(a, b)) return false;
   try {
     const { t } = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (!t || typeof t !== 'number') return false;

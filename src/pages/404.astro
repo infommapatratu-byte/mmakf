@@ -1,0 +1,45 @@
+---
+import Base from '@/layouts/Base.astro';
+
+export const prerender = false;
+---
+
+<Base title="Page not found — MMAKF" description="The page you were looking for does not exist.">
+  <section class="nf">
+    <div class="nf-kanji kanji" aria-hidden="true">道</div>
+    <div class="container" style="position:relative;z-index:1;text-align:center">
+      <div class="eyebrow center">404</div>
+      <h1 class="display-1" style="margin-top:16px">Lost on the <em>mat</em>?</h1>
+      <p class="lead" style="margin:20px auto 36px">
+        The page you were looking for doesn't exist — it may have moved,
+        or the address was mistyped. The dojo is this way.
+      </p>
+      <div class="flex flex-wrap gap-3 justify-center">
+        <a href="/" class="btn btn-primary">Back to home</a>
+        <a href="/programs" class="btn btn-ghost">Training programs</a>
+        <a href="/contact" class="btn btn-ghost">Contact the dojo</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .nf {
+    min-height: 70vh;
+    display: flex;
+    align-items: center;
+    position: relative;
+    overflow: hidden;
+    border-top: 0;
+  }
+  .nf-kanji {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: clamp(16rem, 40vw, 30rem);
+    line-height: 1;
+    color: rgba(237, 234, 227, 0.02);
+    pointer-events: none;
+    user-select: none;
+  }
+</style>

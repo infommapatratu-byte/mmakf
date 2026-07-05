@@ -42,7 +42,7 @@ const cats = [...new Set(products.map((p: any) => p.cat))];
                 <span class="prod-price">₹{Number(p.p).toLocaleString()}</span>
                 {p.m && <span class="prod-orig">₹{Number(p.m).toLocaleString()}</span>}
               </div>
-              <button class="btn-link" onclick={`showNotif('Order ${String(p.n).replace(/'/g, "\\'")}: pay via UPI ${fed.upi}, then message us with the screenshot.')`}>+ Order</button>
+              <button class="btn-link" data-order-name={p.n} data-order-upi={fed.upi}>+ Order</button>
             </div>
           </div>
         ))}
@@ -154,6 +154,16 @@ const cats = [...new Set(products.map((p: any) => p.cat))];
         const show = cat === 'all' || (p as HTMLElement).dataset.cat === cat;
         p.classList.toggle('hidden', !show);
       });
+    });
+  });
+
+  // Order intents via data attributes (MASTER-SPEC §9.6)
+  document.querySelectorAll('[data-order-name]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const el = btn as HTMLElement;
+      (window as any).showNotif(
+        `Order ${el.dataset.orderName}: pay via UPI ${el.dataset.orderUpi}, then message us with the screenshot.`
+      );
     });
   });
 </script>

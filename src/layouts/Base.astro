@@ -67,7 +67,7 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
             <a href="/contact#enroll" class="nav-enroll">Enroll</a>
           </div>
 
-          <button class="nav-hamburger" id="navHamburger" aria-label="Toggle navigation">
+          <button class="nav-hamburger" id="navHamburger" aria-label="Toggle navigation" aria-expanded="false" aria-controls="navLinks">
             <span></span><span></span><span></span>
           </button>
         </div>
@@ -132,7 +132,7 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
       </footer>
     )}
 
-    <div class="notif" id="notif"><span id="notif-txt"></span></div>
+    <div class="notif" id="notif" role="status" aria-live="polite"><span id="notif-txt"></span></div>
 
     <style is:global>
       /* Nav */
@@ -299,12 +299,14 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
       const ham = document.getElementById('navHamburger');
       const links = document.getElementById('navLinks');
       ham?.addEventListener('click', () => {
-        ham.classList.toggle('open');
+        const open = ham.classList.toggle('open');
         links?.classList.toggle('open');
+        ham.setAttribute('aria-expanded', String(open));
       });
       links?.querySelectorAll('a').forEach((a) => a.addEventListener('click', () => {
         ham?.classList.remove('open');
         links?.classList.remove('open');
+        ham?.setAttribute('aria-expanded', 'false');
       }));
 
       // Notif toast

@@ -43,13 +43,16 @@ if (authed) {
       f.addEventListener('submit', async (e) => {
         e.preventDefault();
         err.style.display = 'none';
+        const btn = f.querySelector('button[type=submit]');
         const password = (new FormData(f).get('password')) || '';
+        if (btn) btn.disabled = true;
         const r = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ password }),
-        });
-        if (r.ok) { location.reload(); return; }
+        }).catch(() => null);
+        if (btn) btn.disabled = false;
+        if (r && r.ok) { location.reload(); return; }
         err.style.display = 'block';
         f.querySelector('input[name=password]').select();
       });
@@ -86,7 +89,7 @@ if (authed) {
       </aside>
 
       <main class="admin-main">
-        <div class="admin-toast" id="toast">Saved</div>
+        <div class="admin-toast" id="toast" role="status" aria-live="polite">Saved</div>
 
         <section id="dashboard" class="admin-panel">
           <h2 class="admin-h">Dashboard</h2>
@@ -137,7 +140,7 @@ if (authed) {
 
         <ListPanel id="programs" title="Programs" subtitle="Training programs shown on the public site." apiKey="programs"
           rows={data!.programs} fields={[
-            {n:'ico',l:'Icon'},{n:'name',l:'Name'},{n:'lvl',l:'Level'},{n:'mode',l:'Mode'},{n:'fee',l:'Fee (₹/mo)',type:'number'},{n:'desc',l:'Description',full:true}
+            {n:'icon',l:'Icon (e.g. karate-gi, kata)'},{n:'name',l:'Name'},{n:'lvl',l:'Level'},{n:'mode',l:'Mode'},{n:'fee',l:'Fee (₹/mo)',type:'number'},{n:'desc',l:'Description',full:true}
           ]} />
 
         <ListPanel id="schedule" title="Schedule" subtitle="Weekly class schedule." apiKey="schedule"
@@ -182,12 +185,12 @@ if (authed) {
 
         <ListPanel id="products" title="Shop Products" subtitle="Equipment & merchandise." apiKey="products"
           rows={data!.products} fields={[
-            {n:'e',l:'Emoji'},{n:'cat',l:'Category'},{n:'badge',l:'Badge'},{n:'p',l:'Price (₹)',type:'number'},{n:'m',l:'MRP (₹)',type:'number'},{n:'n',l:'Name',full:true}
+            {n:'icon',l:'Icon (e.g. karate-gi, shield)'},{n:'cat',l:'Category'},{n:'badge',l:'Badge'},{n:'p',l:'Price (₹)',type:'number'},{n:'m',l:'MRP (₹)',type:'number'},{n:'n',l:'Name',full:true}
           ]} />
 
         <ListPanel id="achievements" title="Achievements" subtitle="Institutional achievements." apiKey="achievements"
           rows={data!.achievements} fields={[
-            {n:'ico',l:'Icon'},{n:'title',l:'Title'},{n:'badge',l:'Badge'},{n:'body',l:'Body',full:true,textarea:true}
+            {n:'icon',l:'Icon (e.g. medal, book)'},{n:'title',l:'Title'},{n:'badge',l:'Badge'},{n:'body',l:'Body',full:true,textarea:true}
           ]} />
 
         <ListPanel id="testimonials" title="Testimonials" subtitle="Words of warriors." apiKey="testimonials"
@@ -358,15 +361,18 @@ if (authed) {
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
         const key = form.dataset.key;
+        const btn = form.querySelector('button[type=submit]');
         const fd = new FormData(form);
         const out = JSON.parse(JSON.stringify(data[key]));
         fd.forEach((v, k) => setNested(out, k, v));
+        if (btn) btn.disabled = true;
         const r = await fetch('/api/data/' + key, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(out),
-        });
-        if (r.ok) { data[key] = out; toast('Profile saved'); }
+        }).catch(() => null);
+        if (btn) btn.disabled = false;
+        if (r && r.ok) { data[key] = out; toast('Profile saved'); }
         else toast('Save failed');
       });
     });
@@ -395,20 +401,25 @@ if (authed) {
         }).join('');
         listEl.querySelectorAll('button.lp-btn-del').forEach((b) => {
           b.addEventListener('click', async () => {
+            if (!confirm('Delete this item?')) return;
             const idx = +b.dataset.idx;
             const rows = data[key].slice();
             rows.splice(idx, 1);
+            b.disabled = true;
             const r = await fetch('/api/data/' + key, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(rows),
             });
+            b.disabled = false;
             if (r.ok) { data[key] = rows; render(); toast('Deleted'); }
+            else toast('Delete failed');
           });
         });
       }
 
       addForm.addEventListener('submit', async (e) => {
         e.preventDefault();
+        const btn = addForm.querySelector('button[type=submit]');
         const fd = new FormData(addForm);
         const item = {};
         fields.forEach((f) => {
@@ -421,11 +432,13 @@ if (authed) {
         if (key === 'products') item.id = Date.now();
         const rows = (data[key] || []).slice();
         rows.unshift(item);
+        if (btn) btn.disabled = true;
         const r = await fetch('/api/data/' + key, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(rows),
-        });
-        if (r.ok) { data[key] = rows; addForm.reset(); render(); toast('Added'); }
+        }).catch(() => null);
+        if (btn) btn.disabled = false;
+        if (r && r.ok) { data[key] = rows; addForm.reset(); render(); toast('Added'); }
         else toast('Add failed');
       });
 

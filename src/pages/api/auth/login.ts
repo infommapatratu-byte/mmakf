@@ -6,6 +6,15 @@ import { checkPassword, createSessionCookie } from '@/lib/auth';
 export const prerender = false;
 
 export const POST: APIRoute = async ({ request }) => {
+  // NFR-SEC-2: dev defaults must not function in production.
+  if (import.meta.env.PROD && (!process.env.ADMIN_PASSWORD || !process.env.ADMIN_SESSION_SECRET)) {
+    console.error('ADMIN_PASSWORD / ADMIN_SESSION_SECRET not configured — refusing logins');
+    return new Response(JSON.stringify({ error: 'Server not configured' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
   let body: any;
   try {
     body = await request.json();

@@ -1,6 +1,6 @@
 ---
 // Reusable enrolment CTA with the free-trial form. Posts to /api/enroll —
-// same endpoint as the homepage form.
+// the single conversion action of the site (MASTER-SPEC F15).
 
 interface Props {
   programs: any[];
@@ -19,17 +19,25 @@ const tel = phone.replace(/\s/g, '');
         Your first class is on us. Walk in. Try one session. Decide from there.
       </p>
       <form class="cta-form" data-enroll-form>
-        <input class="input" name="name" placeholder="Full name" required />
-        <input class="input" name="phone" placeholder="Phone (+91)" required />
-        <select class="input" name="program" required>
+        <input class="input" name="name" placeholder="Full name" aria-label="Full name" required />
+        <input class="input" name="phone" placeholder="Phone (+91)" aria-label="Phone number" required />
+        <select class="input" name="program" aria-label="Choose a program" required>
           <option value="">Choose a program</option>
           {programs.map((p: any) => <option value={p.name}>{p.name}</option>)}
         </select>
         <button type="submit" class="btn btn-gold">Book Free Trial</button>
       </form>
-      <div style="margin-top:14px;color:var(--muted);font-size:.78rem">
+      <div style="margin-top:12px;color:var(--muted);font-size:.74rem">
+        We use these details only to contact you about your trial class.
+      </div>
+      <div style="margin-top:8px;color:var(--muted);font-size:.78rem">
         Or call <a href={`tel:${tel}`} class="text-gold">{phone}</a>
       </div>
+      <noscript>
+        <div style="margin-top:12px;color:var(--off-white);font-size:.82rem">
+          JavaScript is required to submit online — call <a href={`tel:${tel}`} class="text-gold">{phone}</a> instead.
+        </div>
+      </noscript>
     </div>
   </div>
 </section>
@@ -37,7 +45,7 @@ const tel = phone.replace(/\s/g, '');
 <style>
   .cta-section {
     background:
-      radial-gradient(ellipse 600px 300px at 50% 30%, rgba(168, 0, 0, 0.15), transparent),
+      radial-gradient(ellipse 600px 300px at 50% 30%, rgba(142, 18, 18, 0.15), transparent),
       var(--bg-2);
     text-align: center;
   }
@@ -55,18 +63,25 @@ const tel = phone.replace(/\s/g, '');
   document.querySelectorAll('form[data-enroll-form]').forEach((form) => {
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const fd = new FormData(form as HTMLFormElement);
+      const f = form as HTMLFormElement;
+      const btn = f.querySelector('button[type=submit]') as HTMLButtonElement | null;
+      const fd = new FormData(f);
       const body = Object.fromEntries(fd.entries());
+      if (btn) { btn.disabled = true; btn.textContent = 'Booking…'; }
       try {
-        await fetch('/api/enroll', {
+        const res = await fetch('/api/enroll', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
+        if (!res.ok) throw new Error('bad status');
         (window as any).showNotif('Oss. Free trial booked. We will call you shortly.');
-        (form as HTMLFormElement).reset();
+        f.reset();
       } catch {
+        // Inputs are preserved so the visitor can retry (MASTER-SPEC F15).
         (window as any).showNotif('Could not submit. Please call +91 99391 44318.');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Book Free Trial'; }
       }
     });
   });
