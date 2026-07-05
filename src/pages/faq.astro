@@ -1,0 +1,98 @@
+---
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import EnrollCTA from '@/components/EnrollCTA.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const faqs = await get<any[]>('faqs');
+const programs = await get<any[]>('programs');
+---
+
+<Base
+  title="FAQ — MMAKF"
+  description="Answers to common questions about training at MMAKF — ages, experience, fees, gradings, women's programs and online training."
+>
+  <PageHero
+    eyebrow="Questions"
+    title={`Before you <em>begin</em>.`}
+    lead="The questions every new student and parent asks — answered plainly. Anything else, call the dojo office."
+  />
+
+  <section>
+    <div class="container" style="max-width:860px">
+      <div class="faq-list fade">
+        {faqs.map((f: any, i: number) => (
+          <details class="faq-item" open={i === 0}>
+            <summary>
+              <span class="faq-q">{f.q}</span>
+              <span class="faq-toggle" aria-hidden="true"></span>
+            </summary>
+            <div class="faq-a">{f.a}</div>
+          </details>
+        ))}
+      </div>
+
+      <div class="card mt-8 fade" style="text-align:center">
+        <div class="card-title" style="font-size:1rem">Still have a question?</div>
+        <div class="card-body">
+          Call <a href="tel:+919939144318" class="text-gold">{fed.contact.phone}</a> during office hours,
+          or write to <a href={`mailto:${fed.contact.email}`} class="text-gold">{fed.contact.email}</a>.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <EnrollCTA programs={programs} phone={fed.contact.phone} />
+</Base>
+
+<style>
+  .faq-list { display: flex; flex-direction: column; gap: 10px; }
+  .faq-item {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    transition: border-color 0.2s;
+  }
+  .faq-item[open] { border-color: var(--border-2); }
+  .faq-item summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 20px 24px;
+    cursor: pointer;
+    list-style: none;
+  }
+  .faq-item summary::-webkit-details-marker { display: none; }
+  .faq-q {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--white);
+  }
+  .faq-toggle {
+    position: relative;
+    width: 14px; height: 14px;
+    flex-shrink: 0;
+  }
+  .faq-toggle::before, .faq-toggle::after {
+    content: '';
+    position: absolute;
+    background: var(--gold);
+    transition: transform 0.2s;
+  }
+  .faq-toggle::before { top: 6px; left: 0; width: 14px; height: 1.5px; }
+  .faq-toggle::after  { top: 0; left: 6px; width: 1.5px; height: 14px; }
+  .faq-item[open] .faq-toggle::after { transform: rotate(90deg); }
+  .faq-a {
+    padding: 0 24px 22px;
+    color: var(--off-white);
+    font-size: 0.94rem;
+    line-height: 1.75;
+    max-width: 68ch;
+  }
+</style>

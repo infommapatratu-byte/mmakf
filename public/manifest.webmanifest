@@ -1,0 +1,22 @@
+{
+  "name": "MMAKF — Modern Martial Arts Karate-Do Federation of India",
+  "short_name": "MMAKF",
+  "description": "Official site of the Modern Martial Arts Karate-Do Federation of India. Est. 1983. Patratu, Jharkhand. Shotokan Karate. Tiger Lee Lineage.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#060606",
+  "theme_color": "#A80000",
+  "orientation": "any",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "categories": ["sports", "education", "health"],
+  "shortcuts": [
+    { "name": "Programs", "short_name": "Programs", "url": "/#programs" },
+    { "name": "Events",   "short_name": "Events",   "url": "/#events" },
+    { "name": "Schedule", "short_name": "Schedule", "url": "/#schedule" },
+    { "name": "Admin",    "short_name": "Admin",    "url": "/admin" }
+  ]
+}

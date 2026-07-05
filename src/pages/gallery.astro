@@ -1,0 +1,134 @@
+---
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import PageHero from '@/components/PageHero.astro';
+import EnrollCTA from '@/components/EnrollCTA.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const gallery = await get<any[]>('gallery');
+const programs = await get<any[]>('programs');
+
+const cats = [...new Set(gallery.map((g: any) => g.cat))];
+---
+
+<Base
+  title="Gallery — MMAKF"
+  description="Life inside MMAKF — the dojo floor, tournaments, gradings, community programs and training camps."
+>
+  <PageHero
+    eyebrow="Gallery"
+    title={`Life on the <em>mat</em>.`}
+    lead="The dojo floor, the podiums, the gradings and the community programs — four decades of the federation at work."
+  />
+
+  <section>
+    <div class="container">
+      <div class="flex flex-wrap gap-3 fade" style="margin-bottom:32px" id="galleryFilters">
+        <button class="gfilter active" data-cat="all">All</button>
+        {cats.map((c) => <button class="gfilter" data-cat={c}>{c}</button>)}
+      </div>
+
+      <div class="gallery-grid" id="galleryGrid">
+        {gallery.map((g: any) => (
+          <figure class="gitem fade" data-cat={g.cat}>
+            <div class="gitem-visual">
+              <Icon name={g.icon || 'kata'} size={56} color="var(--gold)" />
+            </div>
+            <figcaption>
+              <div class="gitem-cat">{g.cat}</div>
+              <div class="gitem-title">{g.title}</div>
+              <div class="gitem-desc">{g.desc}</div>
+            </figcaption>
+          </figure>
+        ))}
+      </div>
+
+      <div class="mt-8 text-muted" style="text-align:center;font-size:.85rem">
+        Follow the federation's events calendar to see the next tournament or camp in person —
+        <a href="/events" class="text-gold">upcoming events →</a>
+      </div>
+    </div>
+  </section>
+
+  <EnrollCTA programs={programs} phone={fed.contact.phone} />
+</Base>
+
+<style>
+  .gfilter {
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    color: var(--off-white);
+    padding: 8px 18px;
+    border-radius: 100px;
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    transition: all 0.2s;
+  }
+  .gfilter:hover { border-color: var(--gold); color: var(--gold); }
+  .gfilter.active { background: var(--red); border-color: var(--red); color: #fff; }
+
+  .gallery-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+  }
+  @media (max-width: 900px) { .gallery-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .gallery-grid { grid-template-columns: 1fr; } }
+
+  .gitem {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: border-color 0.24s, transform 0.24s;
+  }
+  .gitem:hover { border-color: var(--gold); transform: translateY(-2px); }
+  .gitem.hidden { display: none; }
+  .gitem-visual {
+    aspect-ratio: 16 / 10;
+    background:
+      radial-gradient(circle at center, rgba(191, 144, 10, 0.07), transparent 65%),
+      var(--bg-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-bottom: 1px solid var(--border);
+  }
+  .gitem figcaption { padding: 16px 18px 18px; }
+  .gitem-cat {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  .gitem-title {
+    font-family: var(--font-display);
+    font-size: 0.98rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-top: 6px;
+  }
+  .gitem-desc { font-size: 0.82rem; color: var(--muted); margin-top: 6px; line-height: 1.6; }
+</style>
+
+<script>
+  const filters = document.querySelectorAll('.gfilter');
+  const items = document.querySelectorAll('.gitem');
+  filters.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      filters.forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      const cat = (btn as HTMLElement).dataset.cat;
+      items.forEach((it) => {
+        const show = cat === 'all' || (it as HTMLElement).dataset.cat === cat;
+        it.classList.toggle('hidden', !show);
+      });
+    });
+  });
+</script>

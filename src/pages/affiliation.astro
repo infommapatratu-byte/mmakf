@@ -1,0 +1,248 @@
+---
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import PageHero from '@/components/PageHero.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const branches = await get<any[]>('branches');
+---
+
+<Base
+  title="Affiliation & Certification — MMAKF"
+  description="Affiliate your dojo or school with MMAKF — charter requirements, instructor certification, referee and coach pathways, and the federation branch network."
+>
+  <PageHero
+    eyebrow="The Federation"
+    title={`Join the <em>federation</em>.`}
+    lead="MMAKF charters dojos, certifies instructors and registers athletes on the WKF international pathway. This is how clubs, schools and coaches come under the federation."
+    pills={[fed.affiliation, 'Charters granted annually']}
+  />
+
+  {/* ═══════ MEMBERSHIP TYPES ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Structure</div>
+        <h2 class="display-2">Four ways <em class="r">in</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-4">
+        {[
+          { icon: 'users',      t: 'Student Membership',   d: 'Individual enrolment at the hombu dojo, an affiliated centre or the Online University. Grading record maintained by the federation.' },
+          { icon: 'karate-gi',  t: 'Dojo Affiliation',     d: 'Existing clubs adopt the MMAKF syllabus and grading authority under an annual charter, keeping their own identity.' },
+          { icon: 'school',     t: 'School Programs',      d: 'Schools host structured MMAKF batches on campus — the model that reached 130+ schools at its peak.' },
+          { icon: 'globe',      t: 'Athlete Registration', d: 'Competitive members are registered under WKF SportsID and Sportdata for national and international ranking.' },
+        ].map((m) => (
+          <div class="card hoverable fade">
+            <div class="card-icon"><Icon name={m.icon} size={32} color="var(--gold)" /></div>
+            <div class="card-title" style="font-size:1rem">{m.t}</div>
+            <div class="card-body" style="font-size:.88rem">{m.d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ AFFILIATION PROCESS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="affil-grid">
+        <div class="fade">
+          <div class="eyebrow">Dojo Charter</div>
+          <h2 class="display-2" style="margin-top:14px">How a dojo <em class="r">affiliates</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            Affiliation places your club under the technical authority of the federation —
+            your students grade on the MMAKF syllabus, your instructors join the faculty
+            development pathway, and your athletes compete under the federation banner.
+          </p>
+          <div class="mt-8">
+            <div class="eyebrow" style="font-size:.62rem">Requirements</div>
+            <ul class="req-list mt-4">
+              <li>A lead instructor holding II Dan or above (or an MMAKF-appointed sensei)</li>
+              <li>Safe training premises meeting federation facility standards</li>
+              <li>Full adoption of the MMAKF Shotokan syllabus and code of conduct</li>
+              <li>Annual charter renewal and grading records submitted to the hombu</li>
+            </ul>
+          </div>
+        </div>
+        <div class="fade">
+          <div class="steps">
+            {[
+              { n: '01', t: 'Apply',                 d: `Write to ${fed.contact.email} with your club profile, instructor credentials and premises details.` },
+              { n: '02', t: 'Technical review',      d: 'A senior sensei visits (or reviews by video) — instructors demonstrate the syllabus, premises are inspected.' },
+              { n: '03', t: 'Provisional charter',   d: 'One probationary year under a mentor sensei. Your first joint grading is held with hombu examiners.' },
+              { n: '04', t: 'Full affiliation',      d: 'Charter granted. Your dojo appears in the federation register and gains grading and tournament rights.' },
+            ].map((s) => (
+              <div class="step">
+                <div class="step-n">{s.n}</div>
+                <div>
+                  <div class="step-t">{s.t}</div>
+                  <div class="step-d">{s.d}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ OFFICIALS PATHWAYS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Officials</div>
+        <h2 class="display-2">Referee &amp; coach <em class="r">certification</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">The federation trains and certifies its own officials — every tournament runs on MMAKF-certified judges, referees and coaches.</p>
+      </div>
+      <div class="grid grid-3">
+        {[
+          { icon: 'shield', t: 'Judge (Table Official)',  lvl: 'From 1st Kyu',   d: 'Scorekeeping, timing and kata judging fundamentals. Certified over one seminar plus two supervised tournaments.' },
+          { icon: 'kumite', t: 'Kumite Referee',          lvl: 'From I Dan',     d: 'Match control, WKF kumite rules, safety protocol. Annual re-certification at the federation referee seminar.' },
+          { icon: 'medal',  t: 'Certified Coach',         lvl: 'From II Dan',    d: 'Athlete development, competition strategy and WKF coach-accreditation pathway for national events.' },
+        ].map((o) => (
+          <div class="card fade">
+            <div class="card-icon"><Icon name={o.icon} size={32} color="var(--gold)" /></div>
+            <div class="card-title" style="font-size:1rem">{o.t}</div>
+            <div style="font-family:var(--font-display);font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:var(--gold);margin-bottom:12px">{o.lvl}</div>
+            <div class="card-body" style="font-size:.88rem">{o.d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ BRANCH NETWORK ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Register</div>
+        <h2 class="display-2">The federation <em>network</em>.</h2>
+        <div class="rule gold"></div>
+      </div>
+      <div class="branch-wrap fade">
+        <table class="branch-tbl">
+          <thead>
+            <tr><th>Centre</th><th>City</th><th>District</th><th>In-charge</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {branches.map((b: any) => (
+              <tr>
+                <td style="font-family:var(--font-display);font-weight:600">{b.name}</td>
+                <td>{b.city}</td>
+                <td class="text-muted">{b.district}</td>
+                <td class="text-muted">{b.incharge}</td>
+                <td><span class={`pill ${b.status === 'Headquarters' ? 'featured' : ''}`}>{b.status}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ CTA ═══════ */}
+  <section>
+    <div class="container" style="text-align:center;max-width:720px">
+      <div class="eyebrow center fade">Begin</div>
+      <h2 class="display-2 fade" style="margin-top:16px">Bring your dojo <em class="r">under the banner</em>.</h2>
+      <p class="lead fade" style="margin:18px auto 32px">
+        Write to the federation office with your club profile — the technical committee responds
+        to every affiliation enquiry personally.
+      </p>
+      <div class="flex flex-wrap gap-3 justify-center fade">
+        <a href={`mailto:${fed.contact.email}?subject=Dojo Affiliation Enquiry`} class="btn btn-primary">Email the federation</a>
+        <a href="tel:+919939144318" class="btn btn-ghost">{fed.contact.phone}</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .affil-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 56px;
+    align-items: start;
+  }
+  @media (max-width: 860px) { .affil-grid { grid-template-columns: 1fr; } }
+
+  .req-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .req-list li {
+    color: var(--off-white);
+    font-size: 0.92rem;
+    padding-left: 22px;
+    position: relative;
+    line-height: 1.6;
+  }
+  .req-list li::before {
+    content: '◆';
+    position: absolute; left: 0; top: 4px;
+    color: var(--gold);
+    font-size: 0.7rem;
+  }
+
+  .steps { display: flex; flex-direction: column; }
+  .step {
+    display: flex;
+    gap: 22px;
+    padding: 22px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .step:first-child { padding-top: 0; }
+  .step:last-child { border-bottom: 0; }
+  .step-n {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--red-3);
+    flex-shrink: 0;
+    line-height: 1.2;
+  }
+  .step-t {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--white);
+  }
+  .step-d { color: var(--off-white); font-size: 0.9rem; margin-top: 6px; line-height: 1.7; }
+
+  .branch-wrap { overflow-x: auto; }
+  .branch-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    min-width: 760px;
+  }
+  .branch-tbl th, .branch-tbl td {
+    padding: 14px 18px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+  }
+  .branch-tbl th {
+    background: var(--bg-2);
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-weight: 500;
+  }
+  .branch-tbl tr:last-child td { border-bottom: 0; }
+</style>

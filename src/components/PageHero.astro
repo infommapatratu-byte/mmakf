@@ -1,0 +1,57 @@
+---
+// Shared header for dedicated pages: eyebrow, display title (HTML allowed for
+// <em> emphasis), lead paragraph and optional status pills.
+
+interface Props {
+  eyebrow: string;
+  title: string;      // may contain <em> / <em class="r"> emphasis markup
+  lead?: string;
+  pills?: string[];
+  kanji?: string;     // decorative watermark glyphs
+}
+const { eyebrow, title, lead, pills = [], kanji = '空手道' } = Astro.props;
+---
+
+<section class="page-hero">
+  <div class="page-hero-bg" aria-hidden="true"></div>
+  <div class="page-hero-kanji kanji" aria-hidden="true">{kanji}</div>
+  <div class="container" style="position:relative;z-index:1">
+    {pills.length > 0 && (
+      <div class="flex flex-wrap gap-3" style="margin-bottom:20px">
+        {pills.map((p) => <span class="pill featured"><span class="pill-dot"></span>{p}</span>)}
+      </div>
+    )}
+    <div class="eyebrow">{eyebrow}</div>
+    <h1 class="display-1" style="margin-top:16px" set:html={title} />
+    <div class="rule"></div>
+    {lead && <p class="lead">{lead}</p>}
+  </div>
+</section>
+
+<style>
+  .page-hero {
+    position: relative;
+    padding: 96px 0 72px;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border);
+  }
+  @media (max-width: 640px) { .page-hero { padding: 64px 0 48px; } }
+  .page-hero-bg {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse 700px 350px at 85% 10%, rgba(142, 18, 18, 0.11), transparent),
+      radial-gradient(ellipse 500px 500px at 5% 90%, rgba(194, 162, 75, 0.045), transparent);
+    pointer-events: none;
+  }
+  .page-hero-kanji {
+    position: absolute;
+    top: 16px; right: -14px;
+    writing-mode: vertical-rl;
+    font-size: clamp(6rem, 13vw, 10rem);
+    line-height: 1;
+    color: rgba(237, 234, 227, 0.025);
+    pointer-events: none;
+    user-select: none;
+    z-index: 0;
+  }
+</style>

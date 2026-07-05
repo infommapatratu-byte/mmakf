@@ -1,0 +1,159 @@
+---
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import PageHero from '@/components/PageHero.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const products = await get<any[]>('products');
+
+const cats = [...new Set(products.map((p: any) => p.cat))];
+---
+
+<Base
+  title="Shop — MMAKF"
+  description="Authentic MMAKF gear — federation-certified karate-gis, belts, sparring equipment and merchandise."
+>
+  <PageHero
+    eyebrow="Equipment"
+    title={`Federation-certified <em>gear</em>.`}
+    lead="Gis, belts, sparring equipment and merchandise — the same gear the federation trains and competes in. Order at the dojo desk or by UPI."
+    pills={[`UPI · ${fed.upi}`]}
+  />
+
+  <section>
+    <div class="container">
+      <div class="flex flex-wrap gap-3 fade" style="margin-bottom:32px">
+        <button class="sfilter active" data-cat="all">All</button>
+        {cats.map((c) => <button class="sfilter" data-cat={c}>{c}</button>)}
+      </div>
+
+      <div class="grid grid-4" id="shopGrid">
+        {products.map((p: any) => (
+          <div class="prod fade" data-cat={p.cat}>
+            {p.badge && <div class="prod-badge">{p.badge}</div>}
+            <div class="prod-thumb"><Icon name={p.icon || 'karate-gi'} size={56} color="var(--gold)" /></div>
+            <div class="prod-cat">{p.cat}</div>
+            <div class="prod-name">{p.n}</div>
+            <div class="prod-foot">
+              <div>
+                <span class="prod-price">₹{Number(p.p).toLocaleString()}</span>
+                {p.m && <span class="prod-orig">₹{Number(p.m).toLocaleString()}</span>}
+              </div>
+              <button class="btn-link" onclick={`showNotif('Order ${String(p.n).replace(/'/g, "\\'")}: pay via UPI ${fed.upi}, then message us with the screenshot.')`}>+ Order</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style="text-align:center;margin-top:32px;color:var(--muted);font-size:.85rem">
+        Payments via UPI: <strong class="text-gold">{fed.upi}</strong> · Or message us on WhatsApp at {fed.contact.phone}.
+        Collection at the dojo desk; outstation delivery on request.
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .sfilter {
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    color: var(--off-white);
+    padding: 8px 18px;
+    border-radius: 100px;
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    transition: all 0.2s;
+  }
+  .sfilter:hover { border-color: var(--gold); color: var(--gold); }
+  .sfilter.active { background: var(--red); border-color: var(--red); color: #fff; }
+
+  .prod {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    position: relative;
+    transition: border-color 0.24s, transform 0.24s;
+  }
+  .prod:hover { border-color: var(--gold); transform: translateY(-2px); }
+  .prod.hidden { display: none; }
+  .prod-badge {
+    position: absolute; top: 12px; right: 12px;
+    background: var(--gold);
+    color: #000;
+    font-family: var(--font-display);
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 2px;
+    z-index: 1;
+  }
+  .prod-thumb {
+    aspect-ratio: 1;
+    background:
+      radial-gradient(circle at center, rgba(191,144,10,0.06), transparent 60%),
+      var(--bg-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-bottom: 1px solid var(--border);
+  }
+  .prod-cat {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold);
+    padding: 14px 16px 6px;
+  }
+  .prod-name {
+    font-family: var(--font-display);
+    font-size: 0.92rem;
+    font-weight: 600;
+    padding: 0 16px 14px;
+    color: var(--white);
+    line-height: 1.3;
+  }
+  .prod-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 16px;
+    border-top: 1px solid var(--border);
+  }
+  .prod-price {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--gold);
+  }
+  .prod-orig {
+    text-decoration: line-through;
+    color: var(--muted);
+    font-size: 0.72rem;
+    margin-left: 6px;
+  }
+</style>
+
+<script>
+  const filters = document.querySelectorAll('.sfilter');
+  const prods = document.querySelectorAll('.prod');
+  filters.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      filters.forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      const cat = (btn as HTMLElement).dataset.cat;
+      prods.forEach((p) => {
+        const show = cat === 'all' || (p as HTMLElement).dataset.cat === cat;
+        p.classList.toggle('hidden', !show);
+      });
+    });
+  });
+</script>

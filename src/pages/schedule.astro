@@ -1,0 +1,169 @@
+---
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import PageHero from '@/components/PageHero.astro';
+import EnrollCTA from '@/components/EnrollCTA.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const schedule = await get<any[]>('schedule');
+const programs = await get<any[]>('programs');
+
+const etiquette = [
+  'Bow (rei) when entering and leaving the dojo floor.',
+  'Arrive 10 minutes early; late entrants wait at the edge of the mat for the sensei\'s signal.',
+  'Train barefoot — no shoes, jewellery or watches on the tatami.',
+  'Keep your gi clean and your belt tied correctly.',
+  'Address instructors as Sensei or Shihan; respond with "Oss".',
+  'No free sparring without an instructor\'s supervision.',
+];
+---
+
+<Base
+  title="Class Schedule — MMAKF"
+  description="The MMAKF weekly class timetable — dojo and online batches for kids, beginners, women, competitors and black belts."
+>
+  <PageHero
+    eyebrow="Class Calendar"
+    title={`The weekly <em>timetable</em>.`}
+    lead={`Twelve batches a week across dojo and online. ${fed.contact.hours}.`}
+    pills={['Dojo · Patratu', 'Online · Worldwide']}
+  />
+
+  {/* ═══════ TIMETABLE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="schedule-wrap fade">
+        <table class="schedule-tbl">
+          <thead>
+            <tr><th>Day</th><th>Time</th><th>Discipline</th><th>Level</th><th>Instructor</th><th>Mode</th></tr>
+          </thead>
+          <tbody>
+            {schedule.map((s: any) => (
+              <tr>
+                <td><strong>{s.day}</strong></td>
+                <td class="text-gold" style="font-family:var(--font-display)">{s.t}</td>
+                <td>{s.d}</td>
+                <td class="text-muted">{s.lvl}</td>
+                <td class="text-muted">{s.ins}</td>
+                <td><span class={`pill ${s.mode === 'online' ? 'live' : ''}`}>{s.mode}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div class="mt-6 text-muted" style="font-size:.82rem">
+        Timings may shift on tournament and grading weekends — changes are posted in the
+        <a href="/events" class="text-gold">events calendar</a> and announced in class.
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ DOJO ETIQUETTE ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="etq-grid">
+        <div class="fade">
+          <div class="eyebrow">Reigi</div>
+          <h2 class="display-2" style="margin-top:14px">Dojo <em class="r">etiquette</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            Etiquette is the fifth pillar of the MMAKF system. These rules apply to every
+            student, every batch, every belt — including black.
+          </p>
+        </div>
+        <div class="fade">
+          <ol class="etq-list">
+            {etiquette.map((e, i) => (
+              <li>
+                <span class="etq-num">{String(i + 1).padStart(2, '0')}</span>
+                <span>{e}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ PLANNING ═══════ */}
+  <section>
+    <div class="container">
+      <div class="grid grid-3">
+        {[
+          { icon: 'clock',  t: 'Morning batches',  d: 'Weekday 6:00 AM sessions suit school and college students — train before the day begins.' },
+          { icon: 'monitor', t: 'Online evenings', d: 'Tue / Thu / Sun online sessions carry the same syllabus for remote students worldwide.' },
+          { icon: 'users',  t: 'Saturday open mat', d: 'The whole federation trains together — grading prep, questions, and cross-batch sparring.' },
+        ].map((c) => (
+          <div class="card fade">
+            <div class="card-icon"><Icon name={c.icon} size={32} color="var(--gold)" /></div>
+            <div class="card-title" style="font-size:1rem">{c.t}</div>
+            <div class="card-body">{c.d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <EnrollCTA programs={programs} phone={fed.contact.phone} />
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .schedule-wrap { overflow-x: auto; }
+  .schedule-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    min-width: 720px;
+  }
+  .schedule-tbl th, .schedule-tbl td {
+    padding: 14px 18px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+  }
+  .schedule-tbl th {
+    background: var(--bg-2);
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-weight: 500;
+  }
+  .schedule-tbl tr:last-child td { border-bottom: 0; }
+
+  .etq-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.2fr;
+    gap: 48px;
+    align-items: start;
+  }
+  @media (max-width: 800px) { .etq-grid { grid-template-columns: 1fr; } }
+  .etq-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+  }
+  .etq-list li {
+    display: flex;
+    gap: 18px;
+    padding: 16px 4px;
+    border-bottom: 1px solid var(--border);
+    color: var(--off-white);
+    font-size: 0.94rem;
+    line-height: 1.6;
+  }
+  .etq-list li:last-child { border-bottom: 0; }
+  .etq-num {
+    font-family: var(--font-display);
+    font-weight: 600;
+    color: var(--gold);
+    flex-shrink: 0;
+  }
+</style>

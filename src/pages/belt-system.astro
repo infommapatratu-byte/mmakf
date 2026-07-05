@@ -1,0 +1,195 @@
+---
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import EnrollCTA from '@/components/EnrollCTA.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const grading = await get('beltGrading');
+const syllabus = await get<any[]>('syllabus');
+const programs = await get<any[]>('programs');
+
+// Visual swatch colours for the kyu belt list (order matches SEED kyu ranks)
+const beltColors = ['#e8e8e8', '#e6c619', '#e07820', '#2e8b3a', '#2456b0', '#6a3ab0', '#6b4226', '#5c3820', '#4d2f1b', '#3d2515'];
+---
+
+<Base
+  title="Belt System & Syllabus — MMAKF"
+  description="The MMAKF Shotokan grading system — ten kyu grades to black belt, Dan progression to Shihan, and the kata syllabus for every examination."
+>
+  <PageHero
+    eyebrow="Grading"
+    title={`From white belt to <em>Shihan</em>.`}
+    lead="Ten kyu grades carry you from white to brown. Dan grades carry you from Shodan to grandmaster. Every examination follows the formal Shotokan syllabus of the Tiger Lee lineage."
+    pills={['Formal syllabus', 'WKF pathway']}
+  />
+
+  {/* ═══════ KYU / DAN TABLES ═══════ */}
+  <section>
+    <div class="container">
+      <div class="belts-grid">
+        <div class="belts-col fade">
+          <div class="belts-h">Kyu — Coloured Belts</div>
+          <div>
+            {grading.kyu.map((k: any, i: number) => (
+              <div class="belts-row">
+                <span class="flex items-center" style="gap:12px">
+                  <span class="belt-swatch" style={`background:${beltColors[i] || '#888'}`}></span>
+                  {k.rank}
+                </span>
+                <span class="text-gold">₹{Number(k.fee).toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div class="belts-col fade">
+          <div class="belts-h">Dan — Black Belts</div>
+          <div>
+            {grading.dan.map((d: any) => (
+              <div class="belts-row dan">
+                <div>
+                  <div style="font-weight:600">{d.rank}</div>
+                  <div class="text-muted" style="font-size:.78rem;margin-top:2px">{d.note}</div>
+                </div>
+                <span class="pill" style="font-size:.55rem">{d.wkf}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ SYLLABUS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Examination</div>
+        <h2 class="display-2">Kata <em class="r">syllabus</em> by grade.</h2>
+        <div class="rule"></div>
+        <p class="lead">What is examined at each grading — kihon, kata and kumite requirements.</p>
+      </div>
+      <div class="syllabus-wrap fade">
+        <table class="syllabus-tbl">
+          <thead>
+            <tr><th>Grading</th><th>Belt</th><th>Kihon</th><th>Kata</th><th>Kumite</th></tr>
+          </thead>
+          <tbody>
+            {syllabus.map((s: any) => (
+              <tr>
+                <td style="font-family:var(--font-display);font-weight:600;white-space:nowrap">{s.grade}</td>
+                <td class="text-gold" style="white-space:nowrap">{s.belt}</td>
+                <td class="text-muted">{s.kihon}</td>
+                <td><strong>{s.kata}</strong></td>
+                <td class="text-muted">{s.kumite}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div class="mt-6 text-muted" style="font-size:.82rem">
+        Gradings are held quarterly at the hombu dojo and by video submission through the Online University.
+        Dan examinations are conducted personally under the authority of Shihan Pramod Kumar Pathak.
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ GRADING PRINCIPLES ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Principles</div>
+        <h2 class="display-2">A belt is <em class="r">earned</em>, never given.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {[
+          { num: '01', t: 'Time in grade',  d: 'Minimum training periods apply between every examination — there is no accelerated path.' },
+          { num: '02', t: 'Full syllabus',  d: 'Every grading re-examines all previous material. A brown belt must still own their white-belt basics.' },
+          { num: '03', t: 'Character counts', d: 'Attendance, etiquette and conduct in the dojo weigh as much as technique on grading day.' },
+        ].map((p) => (
+          <div class="card fade">
+            <div style="font-family:var(--font-display);font-size:2rem;font-weight:600;color:var(--red-3);line-height:1;margin-bottom:14px">{p.num}</div>
+            <div class="card-title" style="font-size:1rem">{p.t}</div>
+            <div class="card-body">{p.d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <EnrollCTA programs={programs} phone={fed.contact.phone} />
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .belts-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+  }
+  @media (max-width: 800px) { .belts-grid { grid-template-columns: 1fr; } }
+  .belts-col {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .belts-h {
+    background: var(--bg-2);
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-display);
+    font-size: 0.75rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  .belts-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.92rem;
+  }
+  .belts-row:last-child { border: 0; }
+  .belts-row.dan { padding: 16px 24px; gap: 14px; }
+  .belts-row.dan > div:first-child { flex: 1; min-width: 0; }
+  .belt-swatch {
+    display: inline-block;
+    width: 26px; height: 8px;
+    border-radius: 2px;
+    border: 1px solid rgba(255,255,255,0.15);
+    flex-shrink: 0;
+  }
+
+  .syllabus-wrap { overflow-x: auto; }
+  .syllabus-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    min-width: 860px;
+  }
+  .syllabus-tbl th, .syllabus-tbl td {
+    padding: 14px 18px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+    vertical-align: top;
+  }
+  .syllabus-tbl th {
+    background: var(--bg-2);
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-weight: 500;
+  }
+  .syllabus-tbl tr:last-child td { border-bottom: 0; }
+</style>

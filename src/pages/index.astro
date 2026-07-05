@@ -1,0 +1,1244 @@
+---
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import { getAll } from '@/lib/storage';
+
+export const prerender = false;
+
+const data = await getAll();
+const fed = data.federation;
+const stats = data.stats;
+const leadership = data.leadership;
+const programs = data.programs;
+const schedule = data.schedule;
+const events = data.events;
+const news = data.news;
+const products = data.products;
+const achievements = data.achievements;
+const testimonials = data.testimonials;
+const grading = data.beltGrading;
+---
+
+<Base title={`MMAKF — ${fed.tagline}`}>
+
+  {/* ═══════ HERO ═══════ */}
+  <section id="hero" class="hero">
+    <div class="hero-bg" aria-hidden="true"></div>
+    <div class="hero-kanji kanji" aria-hidden="true">空手道</div>
+    <div class="container hero-inner">
+      <div class="hero-left">
+        <div class="pill featured fade">
+          <span class="pill-dot"></span> Established {fed.founded} · {fed.style} · {fed.lineage}
+        </div>
+        <h1 class="display-1 hero-title fade">
+          Forging warriors<br />
+          through <em>discipline</em>,<br />
+          <em>lineage</em>, and <em>purpose</em>.
+        </h1>
+        <p class="lead fade" style="margin-top:24px">
+          {fed.name} — {fed.shortName}. Train under Grandmaster Shihan Pramod Kumar Pathak
+          at our dojo in {fed.headquarters}, or join the Online University from anywhere in the world.
+        </p>
+        <div class="hero-actions fade" style="margin-top:36px">
+          <a href="/programs" class="btn btn-primary">Explore Programs</a>
+          <a href="#enroll" class="btn btn-gold">Book a Free Trial</a>
+          <a href="/affiliation" class="btn btn-ghost">Affiliate a Dojo</a>
+        </div>
+      </div>
+
+      <aside class="hero-right fade">
+        <div class="hero-card">
+          <div class="hero-card-h">Senior Technical Authority</div>
+          {leadership.slice(0, 4).map((p: any, i: number) => (
+            <div class="hero-card-row">
+              <div class="hero-card-num">{String(i + 1).padStart(2, '0')}</div>
+              <div>
+                <div class="hero-card-name">{p.name}</div>
+                <div class="hero-card-role">{p.role} · {p.rank}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </aside>
+    </div>
+
+    <div class="hero-stats container">
+      {stats.map((s: any) => (
+        <div class="hero-stat">
+          <div class="hero-stat-v">{s.value}</div>
+          <div class="hero-stat-l">{s.label}</div>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  {/* ═══════ TICKER ═══════ */}
+  <div class="ticker" aria-hidden="true">
+    <div class="ticker-track">
+      {Array(2).fill(0).map(() => (
+        <>
+          <span>Shotokan Karate</span><span class="dot">◆</span>
+          <span>Kihon · Kata · Kumite</span><span class="dot">◆</span>
+          <span>WKF Affiliated</span><span class="dot">◆</span>
+          <span>Limca Book of Records</span><span class="dot">◆</span>
+          <span>Guinness Recognized</span><span class="dot">◆</span>
+          <span>Tiger Lee Lineage</span><span class="dot">◆</span>
+          <span>Est. 1983</span><span class="dot">◆</span>
+          <span>5,000+ Students</span><span class="dot">◆</span>
+        </>
+      ))}
+    </div>
+  </div>
+
+  {/* ═══════ ABOUT / EYE OF THE WARRIOR ═══════ */}
+  <section id="about">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">The Federation</div>
+        <h2 class="display-2">The eye of the <em class="r">warrior</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="two-col">
+        <p class="lead fade">
+          Traditional martial arts schools teach techniques. MMAKF teaches a lineage.
+          Since 1983, the federation has carried the Tiger Lee inheritance of Shotokan Karate
+          through three generations of senseis and tens of thousands of students.
+        </p>
+        <div class="body-txt fade" style="display:flex;flex-direction:column;gap:18px">
+          <p>
+            We are not one dojo. We are an institutional federation — running structured programs
+            across 130+ schools at our peak, with 34 active black belts, a women's empowerment
+            division, an online university, and a formal pathway to the World Karate Federation.
+          </p>
+          <p>
+            The MMAKF system develops the whole martial artist: technique, character, body, breath,
+            and bearing. Train with us once, and you will understand the difference between learning
+            karate and inheriting it.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ EXPLORE THE FEDERATION ═══════ */}
+  <section id="explore" class="bg-2" style="padding:64px 0">
+    <div class="container">
+      <div class="explore-grid fade">
+        {[
+          { href: '/about',       n: '01', t: 'About & Lineage',        d: 'Four decades, three generations, one transmission.' },
+          { href: '/programs',    n: '02', t: 'Training Programs',      d: 'Nine pathways — dojo and online, ages 5 to 50+.' },
+          { href: '/facilities',  n: '03', t: 'Dojo Facilities',        d: 'Inside the hombu — training hall to first-aid.' },
+          { href: '/belt-system', n: '04', t: 'Belt System & Syllabus', d: 'Ten kyu grades, Dan progression, kata syllabus.' },
+          { href: '/affiliation', n: '05', t: 'Affiliation',            d: 'Charter your dojo or school under the federation.' },
+          { href: '/gallery',     n: '06', t: 'Gallery',                d: 'Life on the mat — dojo, podiums and gradings.' },
+        ].map((x) => (
+          <a href={x.href} class="explore-item">
+            <div class="explore-n">{x.n}</div>
+            <div>
+              <div class="explore-t">{x.t}</div>
+              <div class="explore-d">{x.d}</div>
+            </div>
+            <div class="explore-arrow">→</div>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ LINEAGE ═══════ */}
+  <section id="lineage" class="bg-2">
+    <div class="container">
+      <div class="section-head center fade">
+        <div class="eyebrow center">Heritage</div>
+        <h2 class="display-2">Our <em>lineage</em> &amp; legacy.</h2>
+        <div class="rule gold center"></div>
+        <p class="lead" style="margin:0 auto">
+          Three generations. One unbroken transmission.
+        </p>
+      </div>
+      <div class="lineage-grid">
+        <div class="lineage-step fade">
+          <div class="lineage-num">01</div>
+          <div class="lineage-h">Jr. Tiger Lee</div>
+          <div class="lineage-sub">Source Lineage</div>
+          <div class="body-txt mt-4">
+            The original Shotokan authority from whom the MMAKF transmission descends.
+          </div>
+        </div>
+        <div class="lineage-step fade">
+          <div class="lineage-num">02</div>
+          <div class="lineage-h">Shihan Pramod Kumar Pathak</div>
+          <div class="lineage-sub">VI Dan · Grandmaster · Soke</div>
+          <div class="body-txt mt-4">
+            Founder of MMAKF (1983). Direct inheritor of the Tiger Lee lineage in India.
+            The federation's senior technical authority.
+          </div>
+        </div>
+        <div class="lineage-step fade">
+          <div class="lineage-num">03</div>
+          <div class="lineage-h">Active Senseis</div>
+          <div class="lineage-sub">III–IV Dan · Federation Faculty</div>
+          <div class="body-txt mt-4">
+            Sensei Vikas, Sensei Dhiraj, and Sensei Sumitra — the active generation
+            transmitting the system to today's students.
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ LEADERSHIP ═══════ */}
+  <section id="leadership">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Governance</div>
+        <h2 class="display-2">Senior <em class="r">technical</em> authority.</h2>
+        <div class="rule"></div>
+        <p class="lead">The active faculty and federation officers carrying the lineage forward.</p>
+      </div>
+      <div class="grid grid-3">
+        {leadership.map((p: any) => (
+          <div class="card hoverable fade">
+            <div class="card-eyebrow">{p.role}</div>
+            <div class="card-title">{p.name}</div>
+            <div style="font-family:var(--font-display);font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--gold);margin-bottom:14px">{p.rank}</div>
+            <div class="card-body">{p.note}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ PROGRAMS ═══════ */}
+  <section id="programs" class="bg-2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Curriculum</div>
+        <h2 class="display-2">Training <em class="r">programs</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">Nine pathways across dojo and online. Choose by age, level, or intent.</p>
+      </div>
+      <div class="grid grid-3" id="programs-grid">
+        {programs.map((p: any) => (
+          <div class="card hoverable fade">
+            <div class="card-icon"><Icon name={p.icon || 'karate-gi'} size={36} color="var(--gold)" /></div>
+            <div class="card-title">{p.name}</div>
+            <div class="card-body" style="margin-bottom:18px">{p.desc}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px">
+              <span class="pill">{p.lvl}</span>
+              <span class="pill">{p.mode}</span>
+            </div>
+            <div style="display:flex;align-items:baseline;justify-content:space-between;padding-top:18px;border-top:1px solid var(--border)">
+              <div>
+                <span style="font-family:var(--font-display);font-size:1.8rem;font-weight:600;color:var(--gold)">₹{p.fee.toLocaleString()}</span>
+                <span style="color:var(--muted);font-size:.85rem">/ month</span>
+              </div>
+              <a href="#enroll" class="btn-link">Enroll →</a>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ TRAINING SYSTEM ═══════ */}
+  <section id="training">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Methodology</div>
+        <h2 class="display-2">MMAKF <em class="r">training</em> system.</h2>
+        <div class="rule"></div>
+        <p class="lead">Five pillars — every class. Every student. Every belt.</p>
+      </div>
+      <div class="pillars">
+        {[
+          { k: 'Ki', label: 'Kihon', desc: 'Fundamentals — stance, posture, basic technique, breathing.' },
+          { k: 'Ka', label: 'Kata',  desc: 'Forms — codified sequences carrying the lineage in motion.' },
+          { k: 'Ku', label: 'Kumite', desc: 'Sparring — tactical application, distance, timing, control.' },
+          { k: 'Bu', label: 'Bunkai', desc: 'Application — extracting real combat principles from kata.' },
+          { k: 'Re', label: 'Reigi',  desc: 'Etiquette — the discipline that holds the rest together.' },
+        ].map((p) => (
+          <div class="pillar fade">
+            <div class="pillar-k">{p.k}</div>
+            <div class="pillar-label">{p.label}</div>
+            <div class="pillar-desc">{p.desc}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ BELT PROGRESSION ═══════ */}
+  <section id="belts" class="bg-2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Grading</div>
+        <h2 class="display-2">Belt <em>progression</em> system.</h2>
+        <div class="rule"></div>
+        <p class="lead">Kyu grades (10 → 1) for coloured-belt progression. Dan grades (I → X) for black-belt mastery.</p>
+      </div>
+      <div class="belts-grid">
+        <div class="belts-col fade">
+          <div class="belts-h">Kyu — Coloured Belts</div>
+          <div class="belts-table">
+            {grading.kyu.map((k: any) => (
+              <div class="belts-row">
+                <span>{k.rank}</span>
+                <span class="text-gold">₹{k.fee.toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div class="belts-col fade">
+          <div class="belts-h">Dan — Black Belts</div>
+          <div class="belts-table">
+            {grading.dan.map((d: any) => (
+              <div class="belts-row dan">
+                <div>
+                  <div style="font-weight:600">{d.rank}</div>
+                  <div class="text-muted" style="font-size:.78rem;margin-top:2px">{d.note}</div>
+                </div>
+                <span class="pill" style="font-size:.55rem">{d.wkf}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ VIRTUAL UNIVERSITY ═══════ */}
+  <section id="virtual">
+    <div class="container">
+      <div class="virtual-grid">
+        <div class="fade">
+          <div class="eyebrow">Online University</div>
+          <h2 class="display-2" style="margin-top:14px">Train anywhere, <em class="r">anytime</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            The complete Shotokan curriculum on demand. Recorded library, live weekly sessions,
+            grading evaluation by video submission, and a global community of MMAKF students.
+          </p>
+          <ul class="virtual-list mt-6">
+            <li>180+ recorded lessons across all kyu and dan grades</li>
+            <li>Weekly live sessions with senior senseis</li>
+            <li>Belt-progression evaluation by video submission</li>
+            <li>Active learner community across India and abroad</li>
+            <li>Same lineage. Same standard. Anywhere on earth.</li>
+          </ul>
+          <div style="display:flex;gap:12px;margin-top:28px;flex-wrap:wrap">
+            <a href="#enroll" class="btn btn-gold">Join Online · ₹999/mo</a>
+            <a href="#programs" class="btn btn-ghost">View all programs</a>
+          </div>
+        </div>
+        <div class="virtual-visual fade">
+          <div class="virtual-card">
+            <div class="virtual-screen">
+              <div class="virtual-tag">LIVE</div>
+              <Icon name="kata" size={64} color="var(--gold)" />
+              <div style="font-family:var(--font-display);font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-top:14px">Kata Session</div>
+              <div class="text-muted" style="font-size:.8rem;margin-top:4px">Sensei Dhiraj · Tue 7:00 PM</div>
+            </div>
+            <div class="virtual-stats">
+              <div><div class="virtual-stats-v">180+</div><div class="virtual-stats-l">Lessons</div></div>
+              <div><div class="virtual-stats-v">12+</div><div class="virtual-stats-l">Live / wk</div></div>
+              <div><div class="virtual-stats-v">∞</div><div class="virtual-stats-l">Community</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ SCHEDULE ═══════ */}
+  <section id="schedule" class="bg-2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Class Calendar</div>
+        <h2 class="display-2">Weekly <em class="r">schedule</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="schedule-wrap fade">
+        <table class="schedule-tbl">
+          <thead>
+            <tr>
+              <th>Day</th>
+              <th>Time</th>
+              <th>Discipline</th>
+              <th>Level</th>
+              <th>Instructor</th>
+              <th>Mode</th>
+            </tr>
+          </thead>
+          <tbody>
+            {schedule.map((s: any) => (
+              <tr>
+                <td><strong>{s.day}</strong></td>
+                <td class="text-gold" style="font-family:var(--font-display)">{s.t}</td>
+                <td>{s.d}</td>
+                <td class="text-muted">{s.lvl}</td>
+                <td class="text-muted">{s.ins}</td>
+                <td><span class={`pill ${s.mode === 'online' ? 'live' : ''}`}>{s.mode}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ WOMEN'S DIVISION ═══════ */}
+  <section id="women">
+    <div class="container">
+      <div class="women-grid">
+        <div class="fade">
+          <div class="eyebrow">Empowerment</div>
+          <h2 class="display-2" style="margin-top:14px">Women's <em class="r">empowerment</em> division.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            Led by Sensei Sumitra Devi (III Dan), MMAKF's Women's Wing is one of the longest-running
+            women's martial arts programs in eastern India. Safety. Confidence. Physical authority.
+          </p>
+          <ul class="virtual-list mt-6">
+            <li>Practical self-defense for real-world situations</li>
+            <li>Confidence building and assertiveness training</li>
+            <li>Free 12-week curriculum delivered through partner schools</li>
+            <li>Currently running in 14 schools across Jharkhand</li>
+          </ul>
+          <a href="#enroll" class="btn btn-primary mt-8">Join the program</a>
+        </div>
+        <div class="fade women-stats">
+          <div class="women-stat"><div class="women-stat-v">14</div><div class="women-stat-l">Partner schools</div></div>
+          <div class="women-stat"><div class="women-stat-v">1,200+</div><div class="women-stat-l">Women trained</div></div>
+          <div class="women-stat"><div class="women-stat-v">12 wk</div><div class="women-stat-l">Curriculum length</div></div>
+          <div class="women-stat"><div class="women-stat-v">Free</div><div class="women-stat-l">For schools</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ ACHIEVEMENTS ═══════ */}
+  <section id="achievements" class="bg-2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Recognition</div>
+        <h2 class="display-2">Institutional <em>achievements</em>.</h2>
+        <div class="rule gold"></div>
+      </div>
+      <div class="grid grid-3">
+        {achievements.map((a: any) => (
+          <div class="card fade">
+            <div class="card-icon"><Icon name={a.icon || 'medal'} size={36} color="var(--gold)" /></div>
+            <div class="card-title">{a.title}</div>
+            <div class="card-body">{a.body}</div>
+            <div style="margin-top:18px"><span class="pill featured">{a.badge}</span></div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ EVENTS ═══════ */}
+  <section id="events">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Calendar</div>
+        <h2 class="display-2">Events &amp; <em class="r">tournaments</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="events-list fade">
+        {events.map((e: any) => (
+          <div class="event-row">
+            <div class="event-date">
+              <div class="event-day">{e.day}</div>
+              <div class="event-mo">{e.mo}</div>
+              {e.year && <div class="event-yr">{e.year}</div>}
+            </div>
+            <div class="event-body">
+              <div class="event-type">{e.type}</div>
+              <div class="event-title">{e.t}</div>
+              <div class="event-loc"><svg width="13" height="13" viewBox="0 0 32 32" fill="none" stroke="var(--gold)" stroke-width="2" style="display:inline-block;vertical-align:-2px;margin-right:4px"><path d="M16 28s10-10 10-17a10 10 0 00-20 0c0 7 10 17 10 17z"/><circle cx="16" cy="11" r="3.5"/></svg>{e.loc}</div>
+            </div>
+            <div class="event-right">
+              <div class="event-fee">{e.fee}</div>
+              <button class="btn btn-ghost" onclick="showNotif('Registration desk opens 30 days before each event. Call +91 99391 44318.')">Register</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ NEWS ═══════ */}
+  <section id="news" class="bg-2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Latest</div>
+        <h2 class="display-2">News &amp; <em class="r">announcements</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {news && news.length > 0 ? news.map((n: any) => (
+          <article class="card fade">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+              <span class="pill featured">{n.type || 'News'}</span>
+              <span class="pill">{n.date}</span>
+            </div>
+            <div class="card-title" style="font-size:1.05rem">{n.title}</div>
+            <div class="card-body">{n.body}</div>
+          </article>
+        )) : (
+          <div style="grid-column:1/-1;text-align:center;color:var(--muted);padding:24px">
+            Announcements will appear here.
+          </div>
+        )}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ SHOP ═══════ */}
+  <section id="shop">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Equipment</div>
+        <h2 class="display-2">Equipment &amp; <em class="r">merchandise</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">Authentic MMAKF gear. Federation-certified gis, belts, and training equipment.</p>
+      </div>
+      <div class="grid grid-4" id="shop-grid">
+        {products.map((p: any) => (
+          <div class="prod fade" data-cat={p.cat}>
+            {p.badge && <div class="prod-badge">{p.badge}</div>}
+            <div class="prod-thumb"><Icon name={p.icon || 'karate-gi'} size={56} color="var(--gold)" /></div>
+            <div class="prod-cat">{p.cat}</div>
+            <div class="prod-name">{p.n}</div>
+            <div class="prod-foot">
+              <div>
+                <span class="prod-price">₹{p.p.toLocaleString()}</span>
+                {p.m && <span class="prod-orig">₹{p.m.toLocaleString()}</span>}
+              </div>
+              <button class="btn-link" onclick={`showNotif('Order ${p.n.replace(/'/g, "\\'")}: pay via UPI ${fed.upi}, then message us with the screenshot.')`}>+ Order</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style="text-align:center;margin-top:32px;color:var(--muted);font-size:.85rem">
+        Payments via UPI: <strong class="text-gold">{fed.upi}</strong> · Or message us on WhatsApp.
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ TESTIMONIALS ═══════ */}
+  <section id="testimonials" class="bg-2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Voices</div>
+        <h2 class="display-2">Words of <em class="r">warriors</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {testimonials.map((t: any) => (
+          <div class="card fade">
+            <div style="font-family:var(--font-accent);font-style:italic;font-size:2.5rem;color:var(--gold);line-height:1">"</div>
+            <p class="body-txt italic" style="font-size:1rem;margin:8px 0 20px">{t.txt}</p>
+            <div style="display:flex;align-items:center;gap:12px;padding-top:18px;border-top:1px solid var(--border)">
+              <div style="width:42px;height:42px;border-radius:50%;background:var(--card-2);display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-weight:600;color:var(--gold);font-size:.85rem">{t.name.split(' ').map((n: string) => n[0]).slice(0, 2).join('')}</div>
+              <div>
+                <div style="font-family:var(--font-display);font-weight:600;font-size:.92rem">{t.name}</div>
+                <div class="text-muted" style="font-size:.75rem">{t.role}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ CTA / ENROLL ═══════ */}
+  <section id="enroll" class="cta">
+    <div class="container">
+      <div class="cta-inner fade">
+        <div class="eyebrow center">Begin</div>
+        <h2 class="display-2" style="margin-top:16px;font-size:clamp(2rem,5vw,3.4rem)">
+          Step onto the <em class="r">mat</em>.
+        </h2>
+        <p class="lead" style="margin:18px auto 32px">
+          Your first class is on us. Walk in. Try one session. Decide from there.
+        </p>
+        <form class="enroll-form" id="enrollForm">
+          <input class="input" name="name" placeholder="Full name" required />
+          <input class="input" name="phone" placeholder="Phone (+91)" required />
+          <select class="input" name="program" required>
+            <option value="">Choose a program</option>
+            {programs.map((p: any) => <option value={p.name}>{p.name}</option>)}
+          </select>
+          <button type="submit" class="btn btn-gold">Book Free Trial</button>
+        </form>
+        <div style="margin-top:14px;color:var(--muted);font-size:.78rem">
+          Or call <a href="tel:+919939144318" class="text-gold">+91 99391 44318</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ CONTACT ═══════ */}
+  <section id="contact">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Visit</div>
+        <h2 class="display-2">Visit or <em class="r">connect</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="contact-grid">
+        <div class="card fade">
+          <div class="card-eyebrow">Address</div>
+          <div class="card-title" style="font-size:1.05rem">MMAKF Headquarters</div>
+          <div class="card-body">{fed.contact.address}</div>
+        </div>
+        <div class="card fade">
+          <div class="card-eyebrow">Email — Federation</div>
+          <div class="card-title" style="font-size:1.05rem">
+            <a href={`mailto:${fed.contact.email}`} class="text-gold">{fed.contact.email}</a>
+          </div>
+          <div class="card-body">For enrolment, federation queries, school programs.</div>
+        </div>
+        <div class="card fade">
+          <div class="card-eyebrow">Email — Grandmaster</div>
+          <div class="card-title" style="font-size:1.05rem">
+            <a href="mailto:karate.pramod@gmail.com" class="text-gold">karate.pramod@gmail.com</a>
+          </div>
+          <div class="card-body">Shihan Pramod Kumar Pathak — direct correspondence.</div>
+        </div>
+        <div class="card fade">
+          <div class="card-eyebrow">Phone</div>
+          <div class="card-title" style="font-size:1.05rem">
+            <a href={`tel:+919939144318`} class="text-gold">{fed.contact.phone}</a>
+          </div>
+          <div class="card-body">{fed.contact.hours}</div>
+        </div>
+        <div class="card fade">
+          <div class="card-eyebrow">UPI / Payments</div>
+          <div class="card-title" style="font-size:1.05rem">
+            <span class="text-gold">{fed.upi}</span>
+          </div>
+          <div class="card-body">Fees, grading, equipment orders. Any UPI app.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  /* ═══════ HERO ═══════ */
+  .hero {
+    position: relative;
+    padding: 120px 0 0;
+    overflow: hidden;
+    border-top: 0;
+  }
+  .hero-bg {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse 800px 400px at 80% 20%, rgba(142, 18, 18, 0.13), transparent),
+      radial-gradient(ellipse 600px 600px at 10% 80%, rgba(194, 162, 75, 0.05), transparent);
+    pointer-events: none;
+  }
+  .hero-kanji {
+    position: absolute;
+    top: 40px; right: -20px;
+    writing-mode: vertical-rl;
+    font-size: clamp(8rem, 18vw, 15rem);
+    line-height: 1;
+    color: rgba(237, 234, 227, 0.025);
+    pointer-events: none;
+    user-select: none;
+    z-index: 0;
+  }
+  .hero-inner {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr;
+    gap: 56px;
+    align-items: start;
+    position: relative;
+    z-index: 1;
+  }
+  @media (max-width: 900px) {
+    .hero-inner { grid-template-columns: 1fr; gap: 36px; }
+  }
+  .hero-title { margin-top: 24px; }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+
+  .hero-right { position: sticky; top: 96px; }
+  .hero-card {
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    padding: 24px;
+  }
+  .hero-card-h {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--gold);
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border-2);
+    margin-bottom: 14px;
+  }
+  .hero-card-row {
+    display: flex;
+    gap: 12px;
+    padding: 10px 0;
+  }
+  .hero-card-row + .hero-card-row { border-top: 1px solid var(--border); }
+  .hero-card-num {
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-top: 4px;
+    flex-shrink: 0;
+  }
+  .hero-card-name {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 0.92rem;
+    letter-spacing: 0.02em;
+    color: var(--white);
+  }
+  .hero-card-role {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--off-white);
+    margin-top: 3px;
+  }
+
+  .hero-stats {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    margin-top: 80px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  @media (max-width: 700px) {
+    .hero-stats { grid-template-columns: repeat(2, 1fr); }
+    .hero-stats > div:last-child { grid-column: 1 / -1; }
+  }
+  .hero-stat {
+    padding: 28px 12px;
+    text-align: center;
+    border-left: 1px solid var(--border);
+  }
+  .hero-stat:first-child { border-left: 0; }
+  .hero-stat-v {
+    font-family: var(--font-display);
+    font-size: 2rem;
+    font-weight: 600;
+    color: var(--gold);
+    line-height: 1;
+  }
+  .hero-stat-l {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--off-white);
+    margin-top: 8px;
+  }
+
+  /* ═══════ TICKER ═══════ */
+  .ticker {
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    padding: 16px 0;
+  }
+  .ticker-track {
+    display: flex;
+    gap: 32px;
+    white-space: nowrap;
+    animation: ticker 60s linear infinite;
+    font-family: var(--font-display);
+    font-size: 0.64rem;
+    font-weight: 400;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .ticker-track .dot { color: var(--gold-dim); font-size: 0.5rem; }
+  @keyframes ticker {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-50%); }
+  }
+
+  /* ═══════ EXPLORE ═══════ */
+  .explore-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+  }
+  @media (max-width: 900px) { .explore-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .explore-grid { grid-template-columns: 1fr; } }
+  .explore-item {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    background: var(--bg-2);
+    padding: 26px 24px;
+    transition: background 0.25s;
+    position: relative;
+  }
+  .explore-item:hover { background: var(--card); }
+  .explore-n {
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    color: var(--muted);
+    margin-top: 3px;
+  }
+  .explore-t {
+    font-family: var(--font-display);
+    font-size: 0.92rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--white);
+  }
+  .explore-d { font-size: 0.8rem; color: var(--muted); margin-top: 5px; line-height: 1.55; }
+  .explore-arrow {
+    margin-left: auto;
+    color: var(--muted-2);
+    transition: color 0.25s, transform 0.25s;
+  }
+  .explore-item:hover .explore-arrow { color: var(--gold-2); transform: translateX(3px); }
+
+  /* ═══════ SECTIONS ═══════ */
+  .bg-2 { background: var(--bg-2); }
+  section.bg-2 + section { border-top: 0; }
+  .two-col { display: grid; grid-template-columns: 1fr 1.2fr; gap: 48px; }
+  @media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } }
+
+  /* ═══════ LINEAGE ═══════ */
+  .lineage-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+    counter-reset: lin;
+  }
+  @media (max-width: 800px) { .lineage-grid { grid-template-columns: 1fr; } }
+  .lineage-step {
+    background: var(--card);
+    border: 1px solid var(--border);
+    padding: 32px 28px;
+    border-radius: var(--radius);
+    position: relative;
+  }
+  .lineage-num {
+    font-family: var(--font-display);
+    font-size: 2.4rem;
+    font-weight: 600;
+    color: var(--red-3);
+    line-height: 1;
+    margin-bottom: 16px;
+  }
+  .lineage-h {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin-bottom: 6px;
+  }
+  .lineage-sub {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+
+  /* ═══════ PILLARS ═══════ */
+  .pillars {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+  }
+  @media (max-width: 900px) { .pillars { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 500px) { .pillars { grid-template-columns: 1fr; } }
+  .pillar {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px 22px;
+    text-align: center;
+  }
+  .pillar-k {
+    font-family: var(--font-accent);
+    font-style: italic;
+    font-size: 2.6rem;
+    font-weight: 600;
+    color: var(--gold);
+    line-height: 1;
+    margin-bottom: 10px;
+  }
+  .pillar-label {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 10px;
+  }
+  .pillar-desc { font-size: 0.84rem; color: var(--off-white); line-height: 1.6; }
+
+  /* ═══════ BELTS ═══════ */
+  .belts-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+  }
+  @media (max-width: 800px) { .belts-grid { grid-template-columns: 1fr; } }
+  .belts-col {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .belts-h {
+    background: var(--bg-2);
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-display);
+    font-size: 0.75rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  .belts-table { padding: 8px 0; }
+  .belts-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.92rem;
+  }
+  .belts-row:last-child { border: 0; }
+  .belts-row.dan { padding: 16px 24px; gap: 14px; }
+  .belts-row.dan > div:first-child { flex: 1; min-width: 0; }
+
+  /* ═══════ VIRTUAL ═══════ */
+  .virtual-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 56px;
+    align-items: center;
+  }
+  @media (max-width: 800px) { .virtual-grid { grid-template-columns: 1fr; } }
+  .virtual-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .virtual-list li {
+    color: var(--off-white);
+    font-size: 0.92rem;
+    padding-left: 22px;
+    position: relative;
+  }
+  .virtual-list li::before {
+    content: '◆';
+    position: absolute; left: 0;
+    color: var(--gold);
+    font-size: 0.7rem;
+    top: 4px;
+  }
+  .virtual-card {
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    padding: 32px;
+  }
+  .virtual-screen {
+    aspect-ratio: 16 / 10;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    position: relative;
+    margin-bottom: 24px;
+  }
+  .virtual-tag {
+    position: absolute; top: 14px; right: 14px;
+    background: var(--red);
+    color: #fff;
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    padding: 4px 10px;
+    border-radius: 2px;
+  }
+  .virtual-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    text-align: center;
+  }
+  .virtual-stats-v {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--gold);
+  }
+  .virtual-stats-l {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  /* ═══════ SCHEDULE ═══════ */
+  .schedule-wrap { overflow-x: auto; }
+  .schedule-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    min-width: 720px;
+  }
+  .schedule-tbl th, .schedule-tbl td {
+    padding: 14px 18px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+  }
+  .schedule-tbl th {
+    background: var(--bg-2);
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-weight: 500;
+  }
+  .schedule-tbl tr:last-child td { border-bottom: 0; }
+
+  /* ═══════ WOMEN ═══════ */
+  .women-grid {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    gap: 48px;
+    align-items: center;
+  }
+  @media (max-width: 800px) { .women-grid { grid-template-columns: 1fr; } }
+  .women-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .women-stat {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px 22px;
+    text-align: center;
+  }
+  .women-stat-v {
+    font-family: var(--font-display);
+    font-size: 2rem;
+    font-weight: 600;
+    color: var(--gold);
+    line-height: 1;
+  }
+  .women-stat-l {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--off-white);
+    margin-top: 8px;
+  }
+
+  /* ═══════ EVENTS ═══════ */
+  .events-list { display: flex; flex-direction: column; gap: 12px; }
+  .event-row {
+    display: grid;
+    grid-template-columns: 90px 1fr auto;
+    gap: 24px;
+    align-items: center;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    transition: border-color 0.2s;
+  }
+  .event-row:hover { border-color: var(--gold); }
+  @media (max-width: 640px) {
+    .event-row { grid-template-columns: 70px 1fr; }
+    .event-right { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; padding-top: 14px; border-top: 1px dashed var(--border); }
+  }
+  .event-date { text-align: center; }
+  .event-day {
+    font-family: var(--font-display);
+    font-size: 2rem;
+    font-weight: 600;
+    color: var(--red-2);
+    line-height: 1;
+  }
+  .event-mo {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--white);
+    margin-top: 4px;
+  }
+  .event-yr { font-size: 0.66rem; color: var(--muted); margin-top: 2px; }
+  .event-type {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  .event-title {
+    font-family: var(--font-display);
+    font-size: 1.02rem;
+    font-weight: 600;
+    color: var(--white);
+    margin: 4px 0;
+  }
+  .event-loc { font-size: 0.85rem; color: var(--off-white); }
+  .event-right { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+  .event-fee {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--gold);
+  }
+
+  /* ═══════ SHOP ═══════ */
+  .prod {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    position: relative;
+    transition: border-color 0.24s, transform 0.24s;
+  }
+  .prod:hover { border-color: var(--gold); transform: translateY(-2px); }
+  .prod-badge {
+    position: absolute; top: 12px; right: 12px;
+    background: var(--gold);
+    color: #000;
+    font-family: var(--font-display);
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 2px;
+    z-index: 1;
+  }
+  .prod-thumb {
+    aspect-ratio: 1;
+    background:
+      radial-gradient(circle at center, rgba(191,144,10,0.06), transparent 60%),
+      var(--bg-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-bottom: 1px solid var(--border);
+  }
+  .prod-cat {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold);
+    padding: 14px 16px 6px;
+  }
+  .prod-name {
+    font-family: var(--font-display);
+    font-size: 0.92rem;
+    font-weight: 600;
+    padding: 0 16px 14px;
+    color: var(--white);
+    line-height: 1.3;
+  }
+  .prod-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 16px;
+    border-top: 1px solid var(--border);
+  }
+  .prod-price {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--gold);
+  }
+  .prod-orig {
+    text-decoration: line-through;
+    color: var(--muted);
+    font-size: 0.72rem;
+    margin-left: 6px;
+  }
+
+  /* ═══════ CTA ═══════ */
+  .cta {
+    background:
+      radial-gradient(ellipse 600px 300px at 50% 30%, rgba(168, 0, 0, 0.15), transparent),
+      var(--bg-2);
+    text-align: center;
+  }
+  .cta-inner { max-width: 720px; margin: 0 auto; }
+  .enroll-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1.2fr auto;
+    gap: 10px;
+    margin-top: 32px;
+  }
+  @media (max-width: 700px) {
+    .enroll-form { grid-template-columns: 1fr; }
+  }
+
+  /* ═══════ CONTACT ═══════ */
+  .contact-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 14px;
+  }
+  @media (max-width: 500px) { .contact-grid { grid-template-columns: 1fr; } }
+</style>
+
+<script>
+  // Enroll form
+  const form = document.getElementById('enrollForm');
+  form?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const body = Object.fromEntries(fd.entries());
+    try {
+      await fetch('/api/enroll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      window.showNotif('Oss. Free trial booked. We will call you shortly.');
+      form.reset();
+    } catch {
+      window.showNotif('Could not submit. Please call +91 99391 44318.');
+    }
+  });
+</script>

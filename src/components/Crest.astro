@@ -1,0 +1,35 @@
+---
+// MMAKF official crest — uses the real federation logo at /logo.png.
+// Sized via the size prop. Includes a subtle drop-shadow for visibility on light backgrounds.
+
+interface Props {
+  size?: number;
+  showLabel?: boolean;
+  class?: string;
+}
+const { size = 56, showLabel = false, class: className = '' } = Astro.props;
+---
+
+<div class={`crest ${className}`} style={`width:${size}px;display:inline-flex;flex-direction:column;align-items:center;gap:6px`}>
+  <img
+    src="/logo.png"
+    alt="MMAKF — Modern Martial Arts Karate-Do Federation of India"
+    width={size}
+    height={size}
+    style={`width:${size}px;height:${size}px;object-fit:contain;display:block`}
+    loading="eager"
+    decoding="async"
+  />
+  {showLabel && (
+    <div style="font-family:'Oswald',sans-serif;font-size:0.6rem;letter-spacing:0.18em;text-transform:uppercase;color:#BF900A;text-align:center;line-height:1.2">
+      Karate-Do Federation of India
+    </div>
+  )}
+</div>
+
+<style>
+  .crest { user-select: none; }
+  .crest img {
+    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.4));
+  }
+</style>

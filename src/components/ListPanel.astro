@@ -1,0 +1,49 @@
+---
+export interface Field {
+  n: string;       // field name
+  l: string;       // label
+  type?: 'number' | 'text';
+  full?: boolean;
+  textarea?: boolean;
+}
+
+interface Props {
+  id: string;
+  title: string;
+  subtitle: string;
+  apiKey: string;
+  rows: any[];
+  fields: Field[];
+}
+
+const { id, title, subtitle, apiKey, rows, fields } = Astro.props;
+---
+
+<section
+  id={id}
+  class="admin-panel"
+  data-key={apiKey}
+  data-fields={JSON.stringify(fields)}
+>
+  <h2 class="admin-h">{title}</h2>
+  <p class="admin-sub">{subtitle}</p>
+
+  <form class="lp-form">
+    <div style="font-family:var(--font-display);font-size:.66rem;letter-spacing:.2em;text-transform:uppercase;color:var(--gold);margin-bottom:14px">Add new</div>
+    <div class="lp-form-grid">
+      {fields.map((f) => (
+        <div class={f.full ? 'full' : ''}>
+          <label class="input-label">{f.l}</label>
+          {f.textarea ? (
+            <textarea class="input" name={f.n} rows="3"></textarea>
+          ) : (
+            <input class="input" name={f.n} type={f.type || 'text'} />
+          )}
+        </div>
+      ))}
+    </div>
+    <button type="submit" class="btn btn-primary" style="margin-top:16px">Add</button>
+  </form>
+
+  <div class="lp-list"></div>
+</section>

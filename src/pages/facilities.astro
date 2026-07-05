@@ -1,0 +1,105 @@
+---
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import PageHero from '@/components/PageHero.astro';
+import EnrollCTA from '@/components/EnrollCTA.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const facilities = await get<any[]>('facilities');
+const programs = await get<any[]>('programs');
+---
+
+<Base
+  title="Dojo Facilities — MMAKF"
+  description="Inside the MMAKF headquarters dojo at Patratu, Jharkhand — training hall, impact bay, conditioning zone, changing rooms, first-aid, CCTV and more."
+>
+  <PageHero
+    eyebrow="The Dojo"
+    title={`Inside the <em>hombu</em> dojo.`}
+    lead={`Everything at ${fed.shortName} headquarters is built around one thing: serious, safe, structured training. These are the facilities every member trains with.`}
+    pills={[`${fed.headquarters}`, 'Open Mon–Sat']}
+  />
+
+  {/* ═══════ FACILITIES GRID ═══════ */}
+  <section>
+    <div class="container">
+      <div class="grid grid-3">
+        {facilities.map((f: any) => (
+          <div class="card hoverable fade">
+            <div class="card-icon"><Icon name={f.icon || 'mat'} size={36} color="var(--gold)" /></div>
+            <div class="card-title" style="font-size:1.05rem">{f.name}</div>
+            <div class="card-body">{f.desc}</div>
+            <div style="margin-top:18px"><span class="pill">{f.tag}</span></div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ SAFETY STANDARDS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Standards</div>
+        <h2 class="display-2">Safety is a <em class="r">discipline</em> too.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-4">
+        {[
+          { icon: 'shield',    t: 'Supervised Training',  d: 'No student trains unsupervised. Every batch runs under a Dan-graded instructor.' },
+          { icon: 'first-aid', t: 'First Response',       d: 'Senior instructors are trained in sports first aid; a stocked station is on the floor.' },
+          { icon: 'users',     t: 'Age-Matched Batches',  d: 'Kids, teens, adults and women train in separate, level-appropriate batches.' },
+          { icon: 'cctv',      t: 'Monitored Premises',   d: 'CCTV covers all training areas and entrances, reviewable by parents on request.' },
+        ].map((s) => (
+          <div class="card fade">
+            <div class="card-icon"><Icon name={s.icon} size={32} color="var(--gold)" /></div>
+            <div class="card-title" style="font-size:.98rem">{s.t}</div>
+            <div class="card-body" style="font-size:.86rem">{s.d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ VISIT ═══════ */}
+  <section>
+    <div class="container">
+      <div class="visit-grid">
+        <div class="fade">
+          <div class="eyebrow">Visit</div>
+          <h2 class="display-2" style="margin-top:14px">See it in <em class="r">person</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            The best way to judge a dojo is to stand in it. Walk in during any open batch,
+            watch a class, and talk to the senseis — no appointment needed.
+          </p>
+          <div class="mt-8 flex flex-wrap gap-3">
+            <a href="/contact" class="btn btn-primary">Plan your visit</a>
+            <a href="/schedule" class="btn btn-ghost">See class timings</a>
+          </div>
+        </div>
+        <div class="card fade" style="align-self:center">
+          <div class="card-eyebrow">Headquarters</div>
+          <div class="card-title" style="font-size:1.05rem">{fed.shortName} Hombu Dojo</div>
+          <div class="card-body">{fed.contact.address}</div>
+          <div class="card-body" style="margin-top:12px"><span class="text-gold">{fed.contact.hours}</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <EnrollCTA programs={programs} phone={fed.contact.phone} />
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .visit-grid {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 48px;
+  }
+  @media (max-width: 800px) { .visit-grid { grid-template-columns: 1fr; } }
+</style>

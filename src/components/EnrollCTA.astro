@@ -1,0 +1,73 @@
+---
+// Reusable enrolment CTA with the free-trial form. Posts to /api/enroll —
+// same endpoint as the homepage form.
+
+interface Props {
+  programs: any[];
+  phone?: string;
+}
+const { programs, phone = '+91 99391 44318' } = Astro.props;
+const tel = phone.replace(/\s/g, '');
+---
+
+<section id="enroll" class="cta-section">
+  <div class="container">
+    <div class="cta-box fade">
+      <div class="eyebrow center">Begin</div>
+      <h2 class="display-2" style="margin-top:16px">Step onto the <em class="r">mat</em>.</h2>
+      <p class="lead" style="margin:18px auto 32px">
+        Your first class is on us. Walk in. Try one session. Decide from there.
+      </p>
+      <form class="cta-form" data-enroll-form>
+        <input class="input" name="name" placeholder="Full name" required />
+        <input class="input" name="phone" placeholder="Phone (+91)" required />
+        <select class="input" name="program" required>
+          <option value="">Choose a program</option>
+          {programs.map((p: any) => <option value={p.name}>{p.name}</option>)}
+        </select>
+        <button type="submit" class="btn btn-gold">Book Free Trial</button>
+      </form>
+      <div style="margin-top:14px;color:var(--muted);font-size:.78rem">
+        Or call <a href={`tel:${tel}`} class="text-gold">{phone}</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .cta-section {
+    background:
+      radial-gradient(ellipse 600px 300px at 50% 30%, rgba(168, 0, 0, 0.15), transparent),
+      var(--bg-2);
+    text-align: center;
+  }
+  .cta-box { max-width: 720px; margin: 0 auto; }
+  .cta-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1.2fr auto;
+    gap: 10px;
+    margin-top: 32px;
+  }
+  @media (max-width: 700px) { .cta-form { grid-template-columns: 1fr; } }
+</style>
+
+<script>
+  document.querySelectorAll('form[data-enroll-form]').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form as HTMLFormElement);
+      const body = Object.fromEntries(fd.entries());
+      try {
+        await fetch('/api/enroll', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        (window as any).showNotif('Oss. Free trial booked. We will call you shortly.');
+        (form as HTMLFormElement).reset();
+      } catch {
+        (window as any).showNotif('Could not submit. Please call +91 99391 44318.');
+      }
+    });
+  });
+</script>

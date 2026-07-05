@@ -1,0 +1,333 @@
+---
+import '@/styles/global.css';
+import Crest from '@/components/Crest.astro';
+
+export interface Props {
+  title?: string;
+  description?: string;
+  showNav?: boolean;
+  showFooter?: boolean;
+}
+
+const {
+  title = 'MMAKF — Modern Martial Arts Karate-Do Federation of India',
+  description = "Modern Martial Arts Karate-Do Federation of India (MMAKF). Established 1983. Shotokan Karate under Grandmaster Shihan Pramod Kumar Pathak. Tiger Lee lineage. Patratu, Jharkhand. WKF affiliated.",
+  showNav = true,
+  showFooter = true,
+} = Astro.props;
+
+const navItems = [
+  { href: '/about',       label: 'About' },
+  { href: '/programs',    label: 'Programs' },
+  { href: '/facilities',  label: 'Facilities' },
+  { href: '/schedule',    label: 'Schedule' },
+  { href: '/events',      label: 'Events' },
+  { href: '/affiliation', label: 'Affiliation' },
+  { href: '/shop',        label: 'Shop' },
+  { href: '/contact',     label: 'Contact' },
+];
+const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#060606" />
+    <title>{title}</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://www.mmakf.in" />
+    <meta name="twitter:card" content="summary_large_image" />
+  </head>
+  <body>
+    {showNav && (
+      <nav id="mainNav">
+        <div class="nav-inner container">
+          <a href="/" class="nav-brand">
+            <Crest size={44} />
+            <div class="nav-name">
+              <div class="nav-name-1">MMAKF</div>
+              <div class="nav-name-2">Karate-Do Federation of India</div>
+            </div>
+          </a>
+
+          <div class="nav-links" id="navLinks">
+            {navItems.map((item) => (
+              <a href={item.href} class={currentPath === item.href ? 'active' : ''} aria-current={currentPath === item.href ? 'page' : undefined}>
+                {item.label}
+              </a>
+            ))}
+            <a href="/contact#enroll" class="nav-enroll">Enroll</a>
+          </div>
+
+          <button class="nav-hamburger" id="navHamburger" aria-label="Toggle navigation">
+            <span></span><span></span><span></span>
+          </button>
+        </div>
+      </nav>
+    )}
+
+    <main>
+      <slot />
+    </main>
+
+    {showFooter && (
+      <footer>
+        <div class="container">
+          <div class="ft-grid">
+            <div class="ft-col ft-brand">
+              <div class="nav-brand">
+                <Crest size={52} />
+                <div class="nav-name">
+                  <div class="nav-name-1">MMAKF</div>
+                  <div class="nav-name-2">Est. 1983 · Patratu, Jharkhand</div>
+                </div>
+              </div>
+              <p class="body-txt mt-6" style="font-size:.86rem;max-width:42ch">
+                Modern Martial Arts Karate-Do Federation of India. Shotokan Karate under the Tiger Lee lineage.
+                Forging warriors through discipline, lineage, and purpose since 1983.
+              </p>
+            </div>
+
+            <div class="ft-col">
+              <div class="ft-h">Training</div>
+              <a href="/programs">Programs</a>
+              <a href="/schedule">Class Schedule</a>
+              <a href="/belt-system">Belt System & Syllabus</a>
+              <a href="/facilities">Dojo Facilities</a>
+              <a href="/faq">FAQ</a>
+            </div>
+
+            <div class="ft-col">
+              <div class="ft-h">Federation</div>
+              <a href="/about">About & Leadership</a>
+              <a href="/affiliation">Affiliation & Certification</a>
+              <a href="/events">Events & News</a>
+              <a href="/gallery">Gallery</a>
+              <a href="/shop">Shop</a>
+            </div>
+
+            <div class="ft-col">
+              <div class="ft-h">Connect</div>
+              <a href="mailto:admin@mmakf.in">admin@mmakf.in</a>
+              <a href="mailto:karate.pramod@gmail.com">karate.pramod@gmail.com</a>
+              <a href="tel:+919939144318">+91 99391 44318</a>
+              <a href="/contact">Visit the dojo</a>
+              <a href="/admin">Admin →</a>
+            </div>
+          </div>
+
+          <div class="ft-bottom">
+            <div>© {new Date().getFullYear()} MMAKF — Modern Martial Arts Karate-Do Federation of India.</div>
+            <div class="text-muted">Made in Bharat with discipline.</div>
+          </div>
+        </div>
+      </footer>
+    )}
+
+    <div class="notif" id="notif"><span id="notif-txt"></span></div>
+
+    <style is:global>
+      /* Nav */
+      nav#mainNav {
+        position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+        background: rgba(6, 6, 7, 0.88);
+        backdrop-filter: blur(24px);
+        -webkit-backdrop-filter: blur(24px);
+        border-bottom: 1px solid var(--border);
+      }
+      .nav-inner {
+        display: flex; align-items: center; justify-content: space-between;
+        height: 72px;
+      }
+      .nav-brand { display: flex; align-items: center; gap: 13px; }
+      .nav-name-1 {
+        font-family: var(--font-display);
+        font-size: 1.08rem;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        color: var(--white);
+        line-height: 1;
+      }
+      .nav-name-2 {
+        font-family: var(--font-display);
+        font-size: 0.52rem;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
+        color: var(--gold);
+        margin-top: 4px;
+        font-weight: 400;
+      }
+      .nav-links { display: flex; align-items: center; gap: 2px; }
+      .nav-links a {
+        font-family: var(--font-display);
+        font-size: 0.68rem;
+        font-weight: 400;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--off-white);
+        padding: 8px 11px;
+        transition: color .18s;
+        position: relative;
+      }
+      .nav-links a:hover { color: var(--gold-2); }
+      .nav-links a.active { color: var(--gold-2); }
+      .nav-links a.active::after {
+        content: '';
+        position: absolute;
+        left: 11px; right: 11px; bottom: 0;
+        height: 1px;
+        background: var(--gold);
+      }
+      .nav-links .nav-enroll {
+        border: 1px solid var(--red-2);
+        background: var(--red);
+        color: #f5f0ea;
+        margin-left: 10px;
+        padding: 9px 20px;
+        border-radius: var(--radius);
+        letter-spacing: 0.2em;
+      }
+      .nav-links .nav-enroll:hover { background: var(--red-2); color: #fff; }
+      .nav-links .nav-enroll.active::after { display: none; }
+
+      .nav-hamburger {
+        display: none;
+        flex-direction: column; gap: 5px;
+        background: transparent; border: 0; padding: 8px;
+      }
+      .nav-hamburger span {
+        display: block; width: 22px; height: 1.6px; background: var(--white);
+        transition: .3s;
+      }
+      .nav-hamburger.open span:nth-child(1) { transform: rotate(45deg) translate(4px, 5px); }
+      .nav-hamburger.open span:nth-child(2) { opacity: 0; }
+      .nav-hamburger.open span:nth-child(3) { transform: rotate(-45deg) translate(4px, -5px); }
+
+      @media (max-width: 1080px) {
+        .nav-links {
+          position: fixed; top: 72px; left: 0; right: 0;
+          background: var(--bg);
+          flex-direction: column;
+          align-items: stretch;
+          padding: 12px 18px 24px;
+          border-bottom: 1px solid var(--border);
+          transform: translateY(-120%);
+          transition: transform .3s;
+        }
+        .nav-links.open { transform: none; }
+        .nav-links a {
+          padding: 14px 4px;
+          border-bottom: 1px solid var(--border);
+          font-size: 0.95rem;
+        }
+        .nav-links a:last-of-type { border: 0; }
+        .nav-links a.active::after { display: none; }
+        .nav-links .nav-enroll { text-align: center; margin: 12px 0 0; }
+        .nav-hamburger { display: flex; }
+      }
+
+      main { padding-top: 72px; min-height: 60vh; }
+
+      /* Footer */
+      footer {
+        background: var(--bg-2);
+        border-top: 1px solid var(--border);
+        padding: 72px 0 30px;
+        position: relative;
+        overflow: hidden;
+      }
+      footer::before {
+        content: '空手道';
+        position: absolute;
+        right: -30px; bottom: -60px;
+        font-family: var(--font-kanji);
+        font-size: 15rem;
+        line-height: 1;
+        color: rgba(237, 234, 227, 0.018);
+        pointer-events: none;
+        user-select: none;
+      }
+      .ft-grid {
+        display: grid;
+        grid-template-columns: 1.4fr 1fr 1fr 1fr;
+        gap: 40px;
+        margin-bottom: 56px;
+      }
+      @media (max-width: 800px) {
+        .ft-grid { grid-template-columns: 1fr 1fr; }
+        .ft-brand { grid-column: 1 / -1; }
+      }
+      @media (max-width: 480px) {
+        .ft-grid { grid-template-columns: 1fr; }
+      }
+      .ft-col { display: flex; flex-direction: column; gap: 10px; }
+      .ft-col a {
+        font-size: 0.86rem; color: var(--off-white);
+      }
+      .ft-col a:hover { color: var(--gold); }
+      .ft-h {
+        font-family: var(--font-display);
+        font-size: 0.7rem;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--gold);
+        margin-bottom: 8px;
+        font-weight: 600;
+      }
+      .ft-bottom {
+        display: flex;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 12px;
+        padding-top: 24px;
+        border-top: 1px solid var(--border);
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+    </style>
+
+    <script>
+      // Mobile nav
+      const ham = document.getElementById('navHamburger');
+      const links = document.getElementById('navLinks');
+      ham?.addEventListener('click', () => {
+        ham.classList.toggle('open');
+        links?.classList.toggle('open');
+      });
+      links?.querySelectorAll('a').forEach((a) => a.addEventListener('click', () => {
+        ham?.classList.remove('open');
+        links?.classList.remove('open');
+      }));
+
+      // Notif toast
+      window.showNotif = (msg) => {
+        const n = document.getElementById('notif');
+        const t = document.getElementById('notif-txt');
+        if (!n || !t) return;
+        t.textContent = msg;
+        n.classList.add('show');
+        setTimeout(() => n.classList.remove('show'), 3500);
+      };
+
+      // Fade reveal
+      const obs = new IntersectionObserver(
+        (entries) => entries.forEach((e) => e.isIntersecting && e.target.classList.add('vis')),
+        { threshold: 0.08 }
+      );
+      document.querySelectorAll('.fade').forEach((el) => obs.observe(el));
+
+      // Service worker
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,143 @@
+---
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import EnrollCTA from '@/components/EnrollCTA.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const events = await get<any[]>('events');
+const news = await get<any[]>('news');
+const programs = await get<any[]>('programs');
+---
+
+<Base
+  title="Events & News — MMAKF"
+  description="Upcoming MMAKF tournaments, gradings, seminars and workshops — plus the latest federation news and announcements."
+>
+  <PageHero
+    eyebrow="Calendar"
+    title={`Tournaments, gradings & <em>seminars</em>.`}
+    lead="The federation calendar — championships from district to state level, quarterly grading camps, open seminars and free community workshops."
+    pills={['Registration by phone', `${fed.contact.phone}`]}
+  />
+
+  {/* ═══════ EVENTS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="events-list fade">
+        {events.map((e: any) => (
+          <div class="event-row">
+            <div class="event-date">
+              <div class="event-day">{e.day}</div>
+              <div class="event-mo">{e.mo}</div>
+              {e.year && <div class="event-yr">{e.year}</div>}
+            </div>
+            <div>
+              <div class="event-type">{e.type}</div>
+              <div class="event-title">{e.t}</div>
+              <div class="event-loc">
+                <svg width="13" height="13" viewBox="0 0 32 32" fill="none" stroke="var(--gold)" stroke-width="2" style="display:inline-block;vertical-align:-2px;margin-right:4px"><path d="M16 28s10-10 10-17a10 10 0 00-20 0c0 7 10 17 10 17z"/><circle cx="16" cy="11" r="3.5"/></svg>
+                {e.loc}
+              </div>
+            </div>
+            <div class="event-right">
+              <div class="event-fee">{e.fee}</div>
+              <button class="btn btn-ghost" onclick="showNotif('Registration desk opens 30 days before each event. Call +91 99391 44318.')">Register</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ NEWS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Latest</div>
+        <h2 class="display-2">News &amp; <em class="r">announcements</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {news && news.length > 0 ? news.map((n: any) => (
+          <article class="card fade">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+              <span class="pill featured">{n.type || 'News'}</span>
+              <span class="pill">{n.date}</span>
+            </div>
+            <div class="card-title" style="font-size:1.05rem">{n.title}</div>
+            <div class="card-body">{n.body}</div>
+          </article>
+        )) : (
+          <div style="grid-column:1/-1;text-align:center;color:var(--muted);padding:24px">
+            Announcements will appear here.
+          </div>
+        )}
+      </div>
+    </div>
+  </section>
+
+  <EnrollCTA programs={programs} phone={fed.contact.phone} />
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .events-list { display: flex; flex-direction: column; gap: 12px; }
+  .event-row {
+    display: grid;
+    grid-template-columns: 90px 1fr auto;
+    gap: 24px;
+    align-items: center;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    transition: border-color 0.2s;
+  }
+  .event-row:hover { border-color: var(--gold); }
+  @media (max-width: 640px) {
+    .event-row { grid-template-columns: 70px 1fr; }
+    .event-right { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; padding-top: 14px; border-top: 1px dashed var(--border); }
+  }
+  .event-date { text-align: center; }
+  .event-day {
+    font-family: var(--font-display);
+    font-size: 2rem;
+    font-weight: 600;
+    color: var(--red-2);
+    line-height: 1;
+  }
+  .event-mo {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--white);
+    margin-top: 4px;
+  }
+  .event-yr { font-size: 0.66rem; color: var(--muted); margin-top: 2px; }
+  .event-type {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  .event-title {
+    font-family: var(--font-display);
+    font-size: 1.02rem;
+    font-weight: 600;
+    color: var(--white);
+    margin: 4px 0;
+  }
+  .event-loc { font-size: 0.85rem; color: var(--off-white); }
+  .event-right { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+  .event-fee {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--gold);
+  }
+</style>

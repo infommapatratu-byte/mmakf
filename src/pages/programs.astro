@@ -1,0 +1,148 @@
+---
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import PageHero from '@/components/PageHero.astro';
+import EnrollCTA from '@/components/EnrollCTA.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const programs = await get<any[]>('programs');
+
+const pillars = [
+  { k: 'Ki', label: 'Kihon',  desc: 'Fundamentals — stance, posture, basic technique, breathing.' },
+  { k: 'Ka', label: 'Kata',   desc: 'Forms — codified sequences carrying the lineage in motion.' },
+  { k: 'Ku', label: 'Kumite', desc: 'Sparring — tactical application, distance, timing, control.' },
+  { k: 'Bu', label: 'Bunkai', desc: 'Application — extracting real combat principles from kata.' },
+  { k: 'Re', label: 'Reigi',  desc: 'Etiquette — the discipline that holds the rest together.' },
+];
+---
+
+<Base
+  title="Training Programs — MMAKF"
+  description="Nine training pathways at MMAKF — Shotokan Karate, kata, kumite, self-defense, women's and kids programs, WKF competitive track and the Online University."
+>
+  <PageHero
+    eyebrow="Curriculum"
+    title={`Nine <em>pathways</em>. One standard.`}
+    lead="Dojo and online, ages five to fifty-plus, beginner to black belt. Every program runs on the same Shotokan syllabus under the same Dan-graded faculty."
+    pills={['Dojo & Online', 'First class free']}
+  />
+
+  {/* ═══════ PROGRAMS GRID ═══════ */}
+  <section>
+    <div class="container">
+      <div class="grid grid-3">
+        {programs.map((p: any) => (
+          <div class="card hoverable fade">
+            <div class="card-icon"><Icon name={p.icon || 'karate-gi'} size={36} color="var(--gold)" /></div>
+            <div class="card-title">{p.name}</div>
+            <div class="card-body" style="margin-bottom:18px">{p.desc}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px">
+              <span class="pill">{p.lvl}</span>
+              <span class="pill">{p.mode}</span>
+            </div>
+            <div style="display:flex;align-items:baseline;justify-content:space-between;padding-top:18px;border-top:1px solid var(--border)">
+              <div>
+                <span style="font-family:var(--font-display);font-size:1.8rem;font-weight:600;color:var(--gold)">₹{Number(p.fee).toLocaleString()}</span>
+                <span style="color:var(--muted);font-size:.85rem">/ month</span>
+              </div>
+              <a href="#enroll" class="btn-link">Enroll →</a>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ TRAINING SYSTEM ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Methodology</div>
+        <h2 class="display-2">The MMAKF <em class="r">training</em> system.</h2>
+        <div class="rule"></div>
+        <p class="lead">Five pillars — every class. Every student. Every belt.</p>
+      </div>
+      <div class="pillars">
+        {pillars.map((p) => (
+          <div class="pillar fade">
+            <div class="pillar-k">{p.k}</div>
+            <div class="pillar-label">{p.label}</div>
+            <div class="pillar-desc">{p.desc}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ HOW TO CHOOSE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Guidance</div>
+        <h2 class="display-2">Not sure where to <em class="r">start</em>?</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {[
+          { icon: 'star',   t: 'For children (5–14)',       d: 'Start with the Kids Program — motor skills, focus and discipline first, technique layered in as they grow.', link: 'Kids Program' },
+          { icon: 'karate-gi', t: 'For complete beginners', d: 'Join Shotokan Karate — the core art. Kihon fundamentals batches assume zero experience.', link: 'Shotokan Karate' },
+          { icon: 'women',  t: 'For women',                 d: "The Women's Program combines self-defense, fitness and confidence in dedicated women-only batches.", link: "Women's Program" },
+          { icon: 'globe',  t: 'Training remotely',         d: 'The Online University carries the full syllabus with live sessions and video grading, anywhere on earth.', link: 'Online University' },
+          { icon: 'medal',  t: 'Aiming to compete',         d: 'The Competitive / WKF Track builds tournament athletes from district level to international registration.', link: 'Competitive / WKF Track' },
+          { icon: 'black-belt', t: 'Chasing the black belt', d: 'Brown belts join Dan Grading Preparation — intensive syllabus polishing under Shihan Pathak himself.', link: 'Dan Grading Preparation' },
+        ].map((g) => (
+          <div class="card fade">
+            <div class="card-icon"><Icon name={g.icon} size={32} color="var(--gold)" /></div>
+            <div class="card-title" style="font-size:1rem">{g.t}</div>
+            <div class="card-body" style="font-size:.88rem">{g.d}</div>
+          </div>
+        ))}
+      </div>
+      <div class="mt-8 flex flex-wrap gap-3 justify-center">
+        <a href="/belt-system" class="btn btn-ghost">See the belt system →</a>
+        <a href="/schedule" class="btn btn-ghost">See weekly schedule →</a>
+      </div>
+    </div>
+  </section>
+
+  <EnrollCTA programs={programs} phone={fed.contact.phone} />
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .pillars {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+  }
+  @media (max-width: 900px) { .pillars { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 500px) { .pillars { grid-template-columns: 1fr; } }
+  .pillar {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px 22px;
+    text-align: center;
+  }
+  .pillar-k {
+    font-family: var(--font-accent);
+    font-style: italic;
+    font-size: 2.6rem;
+    font-weight: 600;
+    color: var(--gold);
+    line-height: 1;
+    margin-bottom: 10px;
+  }
+  .pillar-label {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 10px;
+  }
+  .pillar-desc { font-size: 0.84rem; color: var(--off-white); line-height: 1.6; }
+</style>

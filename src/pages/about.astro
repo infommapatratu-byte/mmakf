@@ -1,0 +1,230 @@
+---
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import PageHero from '@/components/PageHero.astro';
+import EnrollCTA from '@/components/EnrollCTA.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const leadership = await get<any[]>('leadership');
+const achievements = await get<any[]>('achievements');
+const testimonials = await get<any[]>('testimonials');
+const programs = await get<any[]>('programs');
+
+const dojoKun = [
+  { jp: 'Jinkaku kansei ni tsutomuru koto',   en: 'Seek perfection of character' },
+  { jp: 'Makoto no michi wo mamoru koto',     en: 'Be faithful' },
+  { jp: 'Doryoku no seishin wo yashinau koto', en: 'Endeavour' },
+  { jp: 'Reigi wo omonzuru koto',             en: 'Respect others' },
+  { jp: 'Kekki no yū wo imashimuru koto',     en: 'Refrain from violent behaviour' },
+];
+---
+
+<Base
+  title="About — MMAKF"
+  description="The story, lineage and leadership of the Modern Martial Arts Karate-Do Federation of India — Shotokan Karate under the Tiger Lee lineage since 1983."
+>
+  <PageHero
+    eyebrow="The Federation"
+    title={`A <em>lineage</em>, not just a dojo.`}
+    lead={`${fed.name} — established ${fed.founded} at ${fed.headquarters}. Carrying the Tiger Lee inheritance of ${fed.style} through three generations of senseis and tens of thousands of students.`}
+    pills={[`Est. ${fed.founded}`, fed.lineage, fed.affiliation]}
+  />
+
+  {/* ═══════ STORY ═══════ */}
+  <section>
+    <div class="container">
+      <div class="story-grid">
+        <div class="fade">
+          <div class="eyebrow">Our Story</div>
+          <h2 class="display-2" style="margin-top:14px">Four decades on the <em class="r">mat</em>.</h2>
+          <div class="rule"></div>
+        </div>
+        <div class="body-txt fade" style="display:flex;flex-direction:column;gap:18px">
+          <p>
+            MMAKF was founded in {fed.founded} by Shihan Pramod Kumar Pathak, direct inheritor of the
+            Jr. Tiger Lee Shotokan lineage in India. What began as a single training hall in Patratu
+            grew into an institutional federation — at its peak running structured karate programs
+            across more than 130 schools, with thousands of students each quarter.
+          </p>
+          <p>
+            The federation has produced national champions, WKF-registered athletes and coaches,
+            34 active black belts, and record-book recognition — while never departing from its core:
+            authentic Shotokan Karate-Do, transmitted the traditional way, one grading at a time.
+          </p>
+          <p>
+            Today MMAKF trains students in the hombu dojo, through partner schools, and worldwide
+            through its Online University — the same syllabus, the same standard, everywhere.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ DOJO KUN ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head center fade">
+        <div class="eyebrow center">Dōjō Kun</div>
+        <h2 class="display-2">The five <em>precepts</em>.</h2>
+        <div class="rule gold center"></div>
+        <p class="lead" style="margin:0 auto">Recited at the close of every class — the code every MMAKF student trains under.</p>
+      </div>
+      <div class="kun-list">
+        {dojoKun.map((k, i) => (
+          <div class="kun-row fade">
+            <div class="kun-num">{String(i + 1).padStart(2, '0')}</div>
+            <div>
+              <div class="kun-en">{k.en}</div>
+              <div class="kun-jp">{k.jp}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ LINEAGE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Heritage</div>
+        <h2 class="display-2">One unbroken <em class="r">transmission</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {[
+          { num: '01', h: 'Jr. Tiger Lee',                sub: 'Source Lineage',                    d: 'The original Shotokan authority from whom the MMAKF transmission descends.' },
+          { num: '02', h: 'Shihan Pramod Kumar Pathak',   sub: 'VI Dan · Grandmaster · Soke',       d: `Founder of MMAKF (${fed.founded}). Direct inheritor of the Tiger Lee lineage in India and the federation's senior technical authority.` },
+          { num: '03', h: 'Active Senseis',               sub: 'III–IV Dan · Federation Faculty',   d: "Sensei Vikas, Sensei Dhiraj and Sensei Sumitra — the active generation transmitting the system to today's students." },
+        ].map((l) => (
+          <div class="card fade">
+            <div style="font-family:var(--font-display);font-size:2.4rem;font-weight:600;color:var(--red-3);line-height:1;margin-bottom:16px">{l.num}</div>
+            <div class="card-title">{l.h}</div>
+            <div style="font-family:var(--font-display);font-size:.68rem;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin-bottom:14px">{l.sub}</div>
+            <div class="card-body">{l.d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ LEADERSHIP ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Governance</div>
+        <h2 class="display-2">Senior <em class="r">technical</em> authority.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {leadership.map((p: any) => (
+          <div class="card hoverable fade">
+            <div class="card-eyebrow">{p.role}</div>
+            <div class="card-title">{p.name}</div>
+            <div style="font-family:var(--font-display);font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--gold);margin-bottom:14px">{p.rank}</div>
+            <div class="card-body">{p.note}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ ACHIEVEMENTS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Recognition</div>
+        <h2 class="display-2">Institutional <em>achievements</em>.</h2>
+        <div class="rule gold"></div>
+      </div>
+      <div class="grid grid-3">
+        {achievements.map((a: any) => (
+          <div class="card fade">
+            <div class="card-icon"><Icon name={a.icon || 'medal'} size={36} color="var(--gold)" /></div>
+            <div class="card-title">{a.title}</div>
+            <div class="card-body">{a.body}</div>
+            <div style="margin-top:18px"><span class="pill featured">{a.badge}</span></div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ TESTIMONIALS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Voices</div>
+        <h2 class="display-2">Words of <em class="r">warriors</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {testimonials.map((t: any) => (
+          <div class="card fade">
+            <div style="font-family:var(--font-accent);font-style:italic;font-size:2.5rem;color:var(--gold);line-height:1">"</div>
+            <p class="body-txt italic" style="font-size:1rem;margin:8px 0 20px">{t.txt}</p>
+            <div style="display:flex;align-items:center;gap:12px;padding-top:18px;border-top:1px solid var(--border)">
+              <div style="width:42px;height:42px;border-radius:50%;background:var(--card-2);display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-weight:600;color:var(--gold);font-size:.85rem">{t.name.split(' ').map((n: string) => n[0]).slice(0, 2).join('')}</div>
+              <div>
+                <div style="font-family:var(--font-display);font-weight:600;font-size:.92rem">{t.name}</div>
+                <div class="text-muted" style="font-size:.75rem">{t.role}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <EnrollCTA programs={programs} phone={fed.contact.phone} />
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .story-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.3fr;
+    gap: 48px;
+  }
+  @media (max-width: 800px) { .story-grid { grid-template-columns: 1fr; } }
+
+  .kun-list {
+    max-width: 680px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .kun-row {
+    display: flex;
+    gap: 24px;
+    align-items: baseline;
+    padding: 22px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .kun-row:last-child { border-bottom: 0; }
+  .kun-num {
+    font-family: var(--font-display);
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: var(--red-3);
+    flex-shrink: 0;
+  }
+  .kun-en {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--white);
+  }
+  .kun-jp {
+    font-family: var(--font-accent);
+    font-style: italic;
+    font-size: 0.95rem;
+    color: var(--gold);
+    margin-top: 4px;
+  }
+</style>
