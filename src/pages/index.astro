@@ -53,16 +53,20 @@ const grading = data.beltGrading;
 
       <aside class="hero-right fade">
         <div class="hero-card">
-          <div class="hero-card-h">Senior Technical Authority</div>
-          {leadership.slice(0, 4).map((p: any, i: number) => (
+          <div class="hero-card-h">Next on the Calendar</div>
+          {events.slice(0, 3).map((e: any) => (
             <div class="hero-card-row">
-              <div class="hero-card-num">{String(i + 1).padStart(2, '0')}</div>
+              <div class="hero-ev-date">
+                <span class="hero-ev-day">{e.day}</span>
+                <span class="hero-ev-mo">{e.mo}</span>
+              </div>
               <div>
-                <div class="hero-card-name">{p.name}</div>
-                <div class="hero-card-role">{p.role} · {p.rank}</div>
+                <div class="hero-card-name">{e.t}</div>
+                <div class="hero-card-role">{e.type} · {e.loc}</div>
               </div>
             </div>
           ))}
+          <a href="/events" class="hero-card-link">Full calendar & announcements →</a>
         </div>
       </aside>
     </div>
@@ -94,6 +98,70 @@ const grading = data.beltGrading;
       ))}
     </div>
   </div>
+
+  {/* ═══════ NEWS (federation homepages lead with news — MASTER-SPEC/WKF·AIFF pattern) ═══════ */}
+  <section id="news">
+    <div class="container">
+      <div class="section-head fade" style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:16px">
+        <div>
+          <div class="eyebrow">Latest</div>
+          <h2 class="display-2">News &amp; <em class="r">announcements</em>.</h2>
+          <div class="rule"></div>
+        </div>
+        <a href="/events" class="btn-link" style="margin-bottom:8px">All news & results →</a>
+      </div>
+      <div class="grid grid-3">
+        {news && news.length > 0 ? news.slice(0, 3).map((n: any) => (
+          <article class="card hoverable fade">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+              <span class="pill featured">{n.type || 'News'}</span>
+              <span class="pill">{n.date}</span>
+            </div>
+            <div class="card-title" style="font-size:1.05rem">{n.title}</div>
+            <div class="card-body">{n.body}</div>
+          </article>
+        )) : (
+          <div style="grid-column:1/-1;text-align:center;color:var(--muted);padding:24px">
+            Announcements will appear here.
+          </div>
+        )}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ EVENTS / CALENDAR ═══════ */}
+  <section id="events" class="bg-2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Calendar</div>
+        <h2 class="display-2">Events &amp; <em class="r">tournaments</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="events-list fade">
+        {events.slice(0, 4).map((e: any) => (
+          <div class="event-row">
+            <div class="event-date">
+              <div class="event-day">{e.day}</div>
+              <div class="event-mo">{e.mo}</div>
+              {e.year && <div class="event-yr">{e.year}</div>}
+            </div>
+            <div class="event-body">
+              <div class="event-type">{e.type}</div>
+              <div class="event-title">{e.t}</div>
+              <div class="event-loc"><svg width="13" height="13" viewBox="0 0 32 32" fill="none" stroke="var(--gold)" stroke-width="2" style="display:inline-block;vertical-align:-2px;margin-right:4px"><path d="M16 28s10-10 10-17a10 10 0 00-20 0c0 7 10 17 10 17z"/><circle cx="16" cy="11" r="3.5"/></svg>{e.loc}</div>
+            </div>
+            <div class="event-right">
+              <div class="event-fee">{e.fee}</div>
+              <button class="btn btn-ghost" onclick="showNotif('Registration desk opens 30 days before each event. Call +91 99391 44318.')">Register</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div class="mt-6">
+        <a href="/events" class="btn btn-ghost">Full calendar →</a>
+      </div>
+    </div>
+  </section>
 
   {/* ═══════ ABOUT / EYE OF THE WARRIOR ═══════ */}
   <section id="about">
@@ -130,12 +198,12 @@ const grading = data.beltGrading;
     <div class="container">
       <div class="explore-grid fade">
         {[
-          { href: '/about',       n: '01', t: 'About & Lineage',        d: 'Four decades, three generations, one transmission.' },
-          { href: '/programs',    n: '02', t: 'Training Programs',      d: 'Nine pathways — dojo and online, ages 5 to 50+.' },
+          { href: '/programs',    n: '01', t: 'Training Programs',      d: 'Nine pathways — dojo and online, ages 5 to 50+.' },
+          { href: '/belt-system', n: '02', t: 'Belt System & Syllabus', d: 'Ten kyu grades, Dan progression, kata syllabus.' },
           { href: '/facilities',  n: '03', t: 'Dojo Facilities',        d: 'Inside the hombu — training hall to first-aid.' },
-          { href: '/belt-system', n: '04', t: 'Belt System & Syllabus', d: 'Ten kyu grades, Dan progression, kata syllabus.' },
-          { href: '/affiliation', n: '05', t: 'Affiliation',            d: 'Charter your dojo or school under the federation.' },
-          { href: '/gallery',     n: '06', t: 'Gallery',                d: 'Life on the mat — dojo, podiums and gradings.' },
+          { href: '/gallery',     n: '04', t: 'Gallery',                d: 'Life on the mat — dojo, podiums and gradings.' },
+          { href: '/shop',        n: '05', t: 'Federation Shop',        d: 'Certified gis, belts, equipment and merchandise.' },
+          { href: '/faq',         n: '06', t: 'FAQ',                    d: 'Ages, fees, gradings and online training — answered.' },
         ].map((x) => (
           <a href={x.href} class="explore-item">
             <div class="explore-n">{x.n}</div>
@@ -188,28 +256,6 @@ const grading = data.beltGrading;
             transmitting the system to today's students.
           </div>
         </div>
-      </div>
-    </div>
-  </section>
-
-  {/* ═══════ LEADERSHIP ═══════ */}
-  <section id="leadership">
-    <div class="container">
-      <div class="section-head fade">
-        <div class="eyebrow">Governance</div>
-        <h2 class="display-2">Senior <em class="r">technical</em> authority.</h2>
-        <div class="rule"></div>
-        <p class="lead">The active faculty and federation officers carrying the lineage forward.</p>
-      </div>
-      <div class="grid grid-3">
-        {leadership.map((p: any) => (
-          <div class="card hoverable fade">
-            <div class="card-eyebrow">{p.role}</div>
-            <div class="card-title">{p.name}</div>
-            <div style="font-family:var(--font-display);font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--gold);margin-bottom:14px">{p.rank}</div>
-            <div class="card-body">{p.note}</div>
-          </div>
-        ))}
       </div>
     </div>
   </section>
@@ -443,64 +489,6 @@ const grading = data.beltGrading;
     </div>
   </section>
 
-  {/* ═══════ EVENTS ═══════ */}
-  <section id="events">
-    <div class="container">
-      <div class="section-head fade">
-        <div class="eyebrow">Calendar</div>
-        <h2 class="display-2">Events &amp; <em class="r">tournaments</em>.</h2>
-        <div class="rule"></div>
-      </div>
-      <div class="events-list fade">
-        {events.map((e: any) => (
-          <div class="event-row">
-            <div class="event-date">
-              <div class="event-day">{e.day}</div>
-              <div class="event-mo">{e.mo}</div>
-              {e.year && <div class="event-yr">{e.year}</div>}
-            </div>
-            <div class="event-body">
-              <div class="event-type">{e.type}</div>
-              <div class="event-title">{e.t}</div>
-              <div class="event-loc"><svg width="13" height="13" viewBox="0 0 32 32" fill="none" stroke="var(--gold)" stroke-width="2" style="display:inline-block;vertical-align:-2px;margin-right:4px"><path d="M16 28s10-10 10-17a10 10 0 00-20 0c0 7 10 17 10 17z"/><circle cx="16" cy="11" r="3.5"/></svg>{e.loc}</div>
-            </div>
-            <div class="event-right">
-              <div class="event-fee">{e.fee}</div>
-              <button class="btn btn-ghost" onclick="showNotif('Registration desk opens 30 days before each event. Call +91 99391 44318.')">Register</button>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  </section>
-
-  {/* ═══════ NEWS ═══════ */}
-  <section id="news" class="bg-2">
-    <div class="container">
-      <div class="section-head fade">
-        <div class="eyebrow">Latest</div>
-        <h2 class="display-2">News &amp; <em class="r">announcements</em>.</h2>
-        <div class="rule"></div>
-      </div>
-      <div class="grid grid-3">
-        {news && news.length > 0 ? news.map((n: any) => (
-          <article class="card fade">
-            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
-              <span class="pill featured">{n.type || 'News'}</span>
-              <span class="pill">{n.date}</span>
-            </div>
-            <div class="card-title" style="font-size:1.05rem">{n.title}</div>
-            <div class="card-body">{n.body}</div>
-          </article>
-        )) : (
-          <div style="grid-column:1/-1;text-align:center;color:var(--muted);padding:24px">
-            Announcements will appear here.
-          </div>
-        )}
-      </div>
-    </div>
-  </section>
-
   {/* ═══════ SHOP ═══════ */}
   <section id="shop">
     <div class="container">
@@ -693,12 +681,28 @@ const grading = data.beltGrading;
     padding: 10px 0;
   }
   .hero-card-row + .hero-card-row { border-top: 1px solid var(--border); }
-  .hero-card-num {
-    font-family: var(--font-display);
-    font-size: 0.72rem;
-    color: var(--muted);
-    margin-top: 4px;
+  .hero-ev-date {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     flex-shrink: 0;
+    min-width: 34px;
+    margin-top: 2px;
+  }
+  .hero-ev-day {
+    font-family: var(--font-display);
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--red-2);
+    line-height: 1;
+  }
+  .hero-ev-mo {
+    font-family: var(--font-display);
+    font-size: 0.56rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 3px;
   }
   .hero-card-name {
     font-family: var(--font-display);
@@ -715,6 +719,18 @@ const grading = data.beltGrading;
     color: var(--off-white);
     margin-top: 3px;
   }
+  .hero-card-link {
+    display: block;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-2);
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+  }
+  .hero-card-link:hover { color: var(--gold-3); }
 
   .hero-stats {
     display: grid;

@@ -1,0 +1,332 @@
+---
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const leadership = await get<any[]>('leadership');
+
+const featured = leadership[0];
+const faculty = leadership.slice(1);
+
+const initials = (name: string) =>
+  name.replace(/^(Shihan|Sensei|Senpai)\s+/i, '').split(/\s+/).map((n) => n[0]).slice(0, 2).join('').toUpperCase();
+
+const committees = [
+  {
+    name: 'Technical Committee & Examination Board',
+    chair: 'Shihan Pramod Kumar Pathak (Chairman)',
+    remit: 'Custodian of the Shotokan syllabus. Sanctions all kyu and Dan examinations, appoints examiners, and rules on technical standards across every affiliated centre.',
+  },
+  {
+    name: 'Tournament Commission',
+    chair: 'Sensei Sumitra Devi (Tournament Secretary)',
+    remit: 'Sanctions the federation calendar — district to state championships — appoints certified referees and judges, and maintains competition records and results.',
+  },
+  {
+    name: "Women's Wing",
+    chair: 'Sensei Sumitra Devi (Head)',
+    remit: "Governs the Women's Empowerment Division: women-only batches, the 12-week school self-defense curriculum, and women-officials development.",
+  },
+  {
+    name: 'Coaching & Referee Directorate',
+    chair: 'Sensei Vikas Pathak (Chief Instructor)',
+    remit: 'Certifies judges, kumite referees and coaches; runs the annual referee seminar and instructor development pathway (see Affiliation & Certification).',
+  },
+  {
+    name: 'Online University Directorate',
+    chair: 'Siddharth Prasad (Co-CEO)',
+    remit: 'Operates the digital arm — recorded syllabus library, live classes, video-submission gradings, and WKF SportsID / Sportdata registrations.',
+  },
+  {
+    name: 'Athletes Commission',
+    chair: 'Daksh Mohan Mishra (National Champion)',
+    remit: 'Represents competitive athletes in federation decisions and manages the Competitive / WKF Track from district level to international ranking.',
+  },
+];
+
+const orgLevels = [
+  { tier: 'Patron & Supreme Technical Authority', body: 'Grandmaster · Soke (VI Dan)', detail: 'Final authority on syllabus, gradings and charters' },
+  { tier: 'National Federation Executive', body: 'Office Bearers & Co-CEO', detail: 'Administration, finance, international registration' },
+  { tier: 'National Standing Bodies', body: 'Technical Committee · Tournament Commission · Women\'s Wing · Coaching Directorate · Online University · Athletes Commission', detail: 'Functional governance' },
+  { tier: 'State Associations', body: 'Chartered state units — one per state (see the national register on Affiliation)', detail: 'State championships · state member registers' },
+  { tier: 'District Associations', body: 'District units affiliated through their state association', detail: 'District championships · gradings to brown belt' },
+  { tier: 'Clubs, Dojos & Academies', body: 'Chartered clubs and centres under their district unit', detail: 'Delivery of training and gradings' },
+  { tier: 'School Programs & Community Wings', body: '130+ school programs at historical peak', detail: 'Grassroots development' },
+];
+---
+
+<Base
+  title="Governance & Officials — MMAKF"
+  description="The governance of MMAKF — office bearers, standing committees, organisational structure and the senior technical faculty of the federation."
+>
+  <PageHero
+    image="https://images.unsplash.com/photo-1564415315949-7a0c4c73aab4?auto=format&fit=crop&w=1800&q=70"
+    kanji="師範"
+    eyebrow="The Federation"
+    title={`Governance & <em>officials</em>.`}
+    lead={`${fed.name} is governed by its office bearers and standing committees under the supreme technical authority of the Grandmaster. Constituted ${fed.founded} · ${fed.affiliation}.`}
+    pills={[`Est. ${fed.founded}`, fed.affiliation]}
+  />
+
+  {/* ═══════ OFFICE BEARERS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Register of Officials</div>
+        <h2 class="display-2">Office <em class="r">bearers</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="ob-wrap fade">
+        <table class="ob-tbl">
+          <thead>
+            <tr><th style="width:52px">No.</th><th>Designation</th><th>Name</th><th>Grade / Credential</th><th>Serving since</th></tr>
+          </thead>
+          <tbody>
+            {leadership.map((p: any, i: number) => (
+              <tr>
+                <td class="text-muted">{String(i + 1).padStart(2, '0')}</td>
+                <td style="font-family:var(--font-display);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold)">{p.role}</td>
+                <td style="font-family:var(--font-display);font-weight:600;font-size:.98rem">{p.name}</td>
+                <td class="text-muted">{p.rank}</td>
+                <td class="text-muted">{p.since || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div class="mt-6 text-muted" style="font-size:.82rem">
+        The register is maintained by the federation office. Officials serve under the code of conduct
+        of the federation and the technical authority of the Grandmaster.
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ COMMITTEES ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Standing Bodies</div>
+        <h2 class="display-2">Committees &amp; <em class="r">commissions</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {committees.map((c) => (
+          <div class="card fade">
+            <div class="card-title" style="font-size:1rem">{c.name}</div>
+            <div style="font-family:var(--font-display);font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);margin-bottom:12px">{c.chair}</div>
+            <div class="card-body" style="font-size:.88rem">{c.remit}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ ORG STRUCTURE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Structure</div>
+        <h2 class="display-2">Organisational <em>hierarchy</em>.</h2>
+        <div class="rule gold"></div>
+      </div>
+      <div class="org fade">
+        {orgLevels.map((l, i) => (
+          <div class="org-level">
+            <div class="org-tier">
+              <span class="org-num">{String(i + 1).padStart(2, '0')}</span>
+              {l.tier}
+            </div>
+            <div class="org-body">{l.body}</div>
+            <div class="org-detail">{l.detail}</div>
+          </div>
+        ))}
+      </div>
+      <div class="mt-6 flex flex-wrap gap-3">
+        <a href="/affiliation" class="btn btn-ghost">Federation network & charters →</a>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ FEATURED — GRANDMASTER ═══════ */}
+  {featured && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">Senior Technical Authority</div>
+          <h2 class="display-2">The <em>faculty</em>.</h2>
+          <div class="rule"></div>
+        </div>
+        <div class="feat-grid fade">
+          <div class="feat-visual">
+            {featured.img
+              ? <img src={featured.img} alt={featured.name} loading="lazy" />
+              : <div class="monogram-xl kanji">師</div>}
+          </div>
+          <div>
+            <div class="card-eyebrow">{featured.role}</div>
+            <h3 class="display-2" style="font-size:clamp(1.6rem,3vw,2.2rem)">{featured.name}</h3>
+            <div class="flex flex-wrap gap-3 mt-4">
+              <span class="pill featured">{featured.rank}</span>
+              {featured.since && <span class="pill">Since {featured.since}</span>}
+              {featured.specialty && <span class="pill">{featured.specialty}</span>}
+            </div>
+            <p class="body-txt mt-6" style="font-size:.98rem;max-width:62ch">{featured.bio || featured.note}</p>
+          </div>
+        </div>
+
+        <div class="grid grid-2 mt-8">
+          {faculty.map((p: any) => (
+            <div class="card fade">
+              <div class="prof-head">
+                {p.img
+                  ? <img class="prof-avatar" src={p.img} alt={p.name} loading="lazy" />
+                  : <div class="prof-mono">{initials(p.name)}</div>}
+                <div>
+                  <div style="font-family:var(--font-display);font-weight:600;font-size:1.05rem;color:var(--white)">{p.name}</div>
+                  <div style="font-family:var(--font-display);font-size:.66rem;letter-spacing:.16em;text-transform:uppercase;color:var(--gold);margin-top:4px">{p.role}</div>
+                </div>
+              </div>
+              <div class="flex flex-wrap gap-3" style="margin:14px 0">
+                <span class="pill">{p.rank}</span>
+                {p.since && <span class="pill">Since {p.since}</span>}
+              </div>
+              <div class="card-body" style="font-size:.88rem">{p.bio || p.note}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ CTA ═══════ */}
+  <section>
+    <div class="container" style="text-align:center;max-width:720px">
+      <div class="eyebrow center fade">Train</div>
+      <h2 class="display-2 fade" style="margin-top:16px">Train under the <em class="r">faculty</em>.</h2>
+      <p class="lead fade" style="margin:18px auto 32px">
+        Every batch — dojo or online — runs under a Dan-graded member of this faculty.
+      </p>
+      <div class="flex flex-wrap gap-3 justify-center fade">
+        <a href="/programs" class="btn btn-primary">View programs</a>
+        <a href="/contact#enroll" class="btn btn-gold">Book a free trial</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+
+  .ob-wrap { overflow-x: auto; }
+  .ob-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    min-width: 780px;
+  }
+  .ob-tbl th, .ob-tbl td {
+    padding: 15px 18px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .ob-tbl th {
+    background: var(--bg-2);
+    font-family: var(--font-display);
+    font-size: 0.64rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-weight: 500;
+  }
+  .ob-tbl tr:last-child td { border-bottom: 0; }
+
+  .org { display: flex; flex-direction: column; max-width: 860px; }
+  .org-level {
+    position: relative;
+    padding: 22px 26px 22px 64px;
+    background: var(--card);
+    border: 1px solid var(--border);
+  }
+  .org-level + .org-level { margin-top: 14px; }
+  .org-level + .org-level::before {
+    content: '';
+    position: absolute;
+    left: 33px; top: -15px;
+    width: 1px; height: 15px;
+    background: var(--gold-dim);
+  }
+  .org-num {
+    position: absolute; left: 22px; top: 24px;
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    color: var(--red-2);
+  }
+  .org-tier {
+    font-family: var(--font-display);
+    font-size: 0.95rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--white);
+  }
+  .org-body { color: var(--off-white); font-size: 0.88rem; margin-top: 6px; }
+  .org-detail {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+
+  .feat-grid {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 40px;
+    align-items: start;
+    background: var(--card);
+    border: 1px solid var(--border);
+    padding: 36px;
+  }
+  @media (max-width: 760px) { .feat-grid { grid-template-columns: 1fr; } }
+  .feat-visual {
+    aspect-ratio: 4 / 5;
+    background: var(--bg-2);
+    border: 1px solid var(--border-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .feat-visual img { width: 100%; height: 100%; object-fit: cover; filter: grayscale(0.2) brightness(0.9); }
+  .monogram-xl {
+    font-size: 7rem;
+    color: rgba(194, 162, 75, 0.35);
+    line-height: 1;
+  }
+
+  .prof-head { display: flex; gap: 16px; align-items: center; }
+  .prof-avatar {
+    width: 64px; height: 64px;
+    object-fit: cover;
+    border: 1px solid var(--border-2);
+    filter: grayscale(0.2) brightness(0.9);
+    flex-shrink: 0;
+  }
+  .prof-mono {
+    width: 64px; height: 64px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg-2);
+    border: 1px solid var(--border-2);
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 1.2rem;
+    color: var(--gold);
+    flex-shrink: 0;
+  }
+</style>

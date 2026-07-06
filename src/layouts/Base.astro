@@ -18,12 +18,12 @@ const {
 
 const navItems = [
   { href: '/about',       label: 'About' },
+  { href: '/governance',  label: 'Governance' },
   { href: '/programs',    label: 'Programs' },
   { href: '/facilities',  label: 'Facilities' },
   { href: '/schedule',    label: 'Schedule' },
   { href: '/events',      label: 'Events' },
   { href: '/affiliation', label: 'Affiliation' },
-  { href: '/shop',        label: 'Shop' },
   { href: '/contact',     label: 'Contact' },
 ];
 const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
@@ -107,7 +107,8 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
 
             <div class="ft-col">
               <div class="ft-h">Federation</div>
-              <a href="/about">About & Leadership</a>
+              <a href="/governance">Governance & Officials</a>
+              <a href="/about">About & Lineage</a>
               <a href="/affiliation">Affiliation & Certification</a>
               <a href="/events">Events & News</a>
               <a href="/gallery">Gallery</a>

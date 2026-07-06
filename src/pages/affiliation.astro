@@ -8,6 +8,14 @@ export const prerender = false;
 
 const fed = await get('federation');
 const branches = await get<any[]>('branches');
+const stateUnits = await get<any[]>('stateUnits');
+
+const ladder = [
+  { n: '01', t: 'National Federation', d: 'MMAKF — the apex body. Syllabus, gradings, national calendar, WKF pathway and the register of all affiliated units.' },
+  { n: '02', t: 'State Associations', d: 'One chartered unit per state. Conducts state championships, sanctions district units, and maintains the state register of members.' },
+  { n: '03', t: 'District Associations', d: 'Affiliate through their state association. Run district championships, gradings up to brown belt, and local officials development.' },
+  { n: '04', t: 'Clubs, Dojos & Schools', d: 'Charter under their district (or directly under the hombu where no unit exists yet). Deliver training and present candidates for grading.' },
+];
 ---
 
 <Base
@@ -17,16 +25,72 @@ const branches = await get<any[]>('branches');
   <PageHero
     image="https://images.unsplash.com/photo-1509563268479-0f004cf3f58b?auto=format&fit=crop&w=1800&q=70"
     eyebrow="The Federation"
-    title={`Join the <em>federation</em>.`}
-    lead="MMAKF charters dojos, certifies instructors and registers athletes on the WKF international pathway. This is how clubs, schools and coaches come under the federation."
-    pills={[fed.affiliation, 'Charters granted annually']}
+    title={`The national <em>structure</em>.`}
+    lead="MMAKF is the apex national body: state associations charter under the federation, district units under their state, and clubs, dojos and schools under their district. This is how the structure works and how to come under the banner."
+    pills={[fed.affiliation, 'State · District · Club charters']}
   />
+
+  {/* ═══════ NATIONAL LADDER ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Hierarchy</div>
+        <h2 class="display-2">The affiliation <em class="r">ladder</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="ladder fade">
+        {ladder.map((l) => (
+          <div class="ladder-step">
+            <div class="ladder-n">{l.n}</div>
+            <div class="ladder-t">{l.t}</div>
+            <div class="ladder-d">{l.d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ STATE UNITS REGISTER ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">National Register</div>
+        <h2 class="display-2">State <em>associations</em>.</h2>
+        <div class="rule gold"></div>
+        <p class="lead">Chartered state units of the federation. District associations affiliate through their state unit.</p>
+      </div>
+      <div class="branch-wrap fade">
+        <table class="branch-tbl">
+          <thead>
+            <tr><th>State</th><th>Unit</th><th>Headquarters</th><th>District Units</th><th>Since</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {stateUnits.map((s: any) => (
+              <tr>
+                <td style="font-family:var(--font-display);font-weight:600">{s.state}</td>
+                <td class="text-muted">{s.unit}</td>
+                <td class="text-muted">{s.hq}</td>
+                <td class="text-muted">{s.districts}</td>
+                <td class="text-muted">{s.since}</td>
+                <td><span class={`pill ${String(s.status).includes('Host') ? 'featured' : ''}`}>{s.status}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div class="mt-6 text-muted" style="font-size:.82rem">
+        To charter a new state or district unit, write to
+        <a href={`mailto:${fed.contact.email}?subject=State/District Unit Charter Enquiry`} class="text-gold"> {fed.contact.email}</a> —
+        the federation office will issue the charter requirements and constitution template.
+      </div>
+    </div>
+  </section>
 
   {/* ═══════ MEMBERSHIP TYPES ═══════ */}
   <section>
     <div class="container">
       <div class="section-head fade">
-        <div class="eyebrow">Structure</div>
+        <div class="eyebrow">Membership</div>
         <h2 class="display-2">Four ways <em class="r">in</em>.</h2>
         <div class="rule"></div>
       </div>
@@ -166,6 +230,39 @@ const branches = await get<any[]>('branches');
 
 <style>
   .bg2 { background: var(--bg-2); }
+
+  .ladder {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+  }
+  @media (max-width: 900px) { .ladder { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .ladder { grid-template-columns: 1fr; } }
+  .ladder-step {
+    background: var(--card);
+    padding: 28px 24px;
+    position: relative;
+  }
+  .ladder-n {
+    font-family: var(--font-display);
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: var(--red-3);
+    line-height: 1;
+    margin-bottom: 14px;
+  }
+  .ladder-t {
+    font-family: var(--font-display);
+    font-size: 0.98rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--white);
+  }
+  .ladder-d { color: var(--off-white); font-size: 0.86rem; line-height: 1.7; margin-top: 10px; }
+
   .affil-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;

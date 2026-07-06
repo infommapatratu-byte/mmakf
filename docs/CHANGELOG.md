@@ -2,6 +2,15 @@
 
 Content-key and schema migrations are recorded here (MASTER-SPEC §5.5).
 
+## 1.3.0 — 2026-07-06 — National federation structure & governance
+
+- **Schema**: new content key `stateUnits` (state associations register: state, unit, hq, districts, status, since) — 17 public keys total. `leadership[]` gains `since`, `specialty`, `img`, `bio` (full profiles).
+- New page **/governance** (in main nav): office-bearers register table, six standing committees/commissions, seven-tier organisational hierarchy (National → State → District → Club → School), featured Grandmaster profile + full faculty biographies with monogram/portrait support.
+- **/affiliation** reframed as the national structure: four-step affiliation ladder (National Federation → State Associations → District Associations → Clubs/Dojos/Schools) + chartered State Associations register + unit-charter enquiry contact.
+- **Homepage rebuilt on the national-federation pattern** (researched WKF + AIFF): no officials' names on the homepage; hero side panel is now "Next on the Calendar" (upcoming events); News and Events sections moved to the top (news-first); leadership card grid removed in favour of the /governance page.
+- Nav: **Governance** added; **Shop** moved to footer/explore strip (federation convention).
+- Admin: State Associations panel; Leadership panel now edits designation, grade, since, specialty, portrait URL, note and full biography.
+
 ## 1.2.0 — 2026-07-06 — Photography pass (AS-6 revised)
 
 - **Schema**: `products[]` and `gallery[]` gain optional `img` (image URL). When present it renders as a dark-treated cover photo; `icon` remains the fallback. Admin panels expose the field.

@@ -76,6 +76,7 @@ if (authed) {
           <a href="#faqs">FAQs</a>
           <a href="#gallery">Gallery</a>
           <a href="#syllabus">Syllabus</a>
+          <a href="#stateUnits">State Units</a>
           <a href="#branches">Branches</a>
           <a href="#products">Shop Products</a>
           <a href="#achievements">Achievements</a>
@@ -133,9 +134,9 @@ if (authed) {
           </form>
         </section>
 
-        <ListPanel id="leadership" title="Leadership"     subtitle="Office bearers and active senseis." apiKey="leadership"
+        <ListPanel id="leadership" title="Leadership & Governance" subtitle="Office bearers, committees and faculty — drives the /governance page, homepage table and hero card." apiKey="leadership"
           rows={data!.leadership} fields={[
-            {n:'name',l:'Name'},{n:'role',l:'Role'},{n:'rank',l:'Rank'},{n:'note',l:'Note',full:true}
+            {n:'name',l:'Name'},{n:'role',l:'Designation'},{n:'rank',l:'Grade / Credential'},{n:'since',l:'Serving since'},{n:'specialty',l:'Specialty'},{n:'img',l:'Portrait URL (optional)',full:true},{n:'note',l:'Short note',full:true},{n:'bio',l:'Full biography',full:true,textarea:true}
           ]} />
 
         <ListPanel id="programs" title="Programs" subtitle="Training programs shown on the public site." apiKey="programs"
@@ -176,6 +177,11 @@ if (authed) {
         <ListPanel id="syllabus" title="Grading Syllabus" subtitle="Kata syllabus rows on the /belt-system page." apiKey="syllabus"
           rows={data!.syllabus} fields={[
             {n:'grade',l:'Grading (e.g. 10th → 9th Kyu)'},{n:'belt',l:'Belt'},{n:'kumite',l:'Kumite'},{n:'kihon',l:'Kihon',full:true},{n:'kata',l:'Kata',full:true}
+          ]} />
+
+        <ListPanel id="stateUnits" title="State Associations" subtitle="Affiliated state units — the national register on /affiliation and /governance." apiKey="stateUnits"
+          rows={data!.stateUnits} fields={[
+            {n:'state',l:'State'},{n:'unit',l:'Unit name',full:true},{n:'hq',l:'Headquarters'},{n:'districts',l:'District units',type:'number'},{n:'status',l:'Status (Active/Provisional/Forming)'},{n:'since',l:'Since'}
           ]} />
 
         <ListPanel id="branches" title="Branch Network" subtitle="Centres listed on the /affiliation page." apiKey="branches"

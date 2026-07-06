@@ -29,13 +29,22 @@ export const SEED = {
     { value: 'WKF', label: 'International Pathway' },
   ],
 
+  // Full profiles rendered on /leadership; the hero card and grids use the
+  // short fields. `img` (portrait URL) is optional — a monogram tile renders
+  // when absent. Every field is admin-editable.
   leadership: [
-    { name: 'Shihan Pramod Kumar Pathak', role: 'Grandmaster · Soke', rank: 'VI Dan Black Belt', note: 'Jr. Tiger Lee Lineage · Senior Technical Authority' },
-    { name: 'Sensei Vikas Pathak',        role: 'Chief Instructor',    rank: 'IV Dan Black Belt', note: 'Kumite & Sparring' },
-    { name: 'Sensei Dhiraj Pathak',       role: 'Kata Specialist',     rank: 'III Dan Black Belt', note: 'Form Training · Competition Preparation' },
-    { name: 'Sensei Sumitra Devi',        role: 'Lady Instructor · Tournament Secretary', rank: 'III Dan Black Belt', note: "Women's Program & Self-Defense" },
-    { name: 'Siddharth Prasad',           role: 'Co-CEO',              rank: 'WKF Registered', note: 'WKF Registered Athlete & Coach' },
-    { name: 'Daksh Mohan Mishra',         role: 'National Champion',   rank: 'II Dan Black Belt', note: 'Competitive / WKF Track' },
+    { name: 'Shihan Pramod Kumar Pathak', role: 'Grandmaster · Soke', rank: 'VI Dan Black Belt', since: '1983', specialty: 'System authority · Dan gradings', note: 'Jr. Tiger Lee Lineage · Senior Technical Authority', img: '',
+      bio: 'Founder of MMAKF and direct inheritor of the Jr. Tiger Lee Shotokan lineage in India. Over four decades, Shihan Pathak has built the federation from a single Patratu training hall into an institution spanning 130+ school programs at its peak, with record-book recognition and a formal WKF pathway. Every Dan examination in the federation is conducted under his personal authority.' },
+    { name: 'Sensei Vikas Pathak', role: 'Chief Instructor', rank: 'IV Dan Black Belt', since: '2004', specialty: 'Kumite & competitive sparring', note: 'Kumite & Sparring', img: '',
+      bio: 'The federation\'s Chief Instructor and head of kumite. Elevated to IV Dan in recognition of two decades of service, Sensei Vikas runs the sparring systems, reaction drills and competitive preparation that carry MMAKF athletes from their first bout to state-level podiums.' },
+    { name: 'Sensei Dhiraj Pathak', role: 'Kata Specialist', rank: 'III Dan Black Belt', since: '2008', specialty: 'Kata & competition preparation', note: 'Form Training · Competition Preparation', img: '',
+      bio: 'MMAKF\'s technical specialist for kata. Sensei Dhiraj leads form training across all grades — precision, memory and technical sequencing — and prepares competition kata athletes and grading candidates for examination.' },
+    { name: 'Sensei Sumitra Devi', role: 'Lady Instructor · Tournament Secretary', rank: 'III Dan Black Belt', since: '2010', specialty: "Women's self-defense & empowerment", note: "Women's Program & Self-Defense", img: '',
+      bio: "Head of the Women's Empowerment Division and the federation's Tournament Secretary. Sensei Sumitra leads dedicated women-only batches and the free 12-week self-defense curriculum now running in 14 partner schools across Ramgarh and Hazaribagh districts." },
+    { name: 'Siddharth Prasad', role: 'Co-CEO', rank: 'WKF Registered', since: '2018', specialty: 'WKF registration · digital operations', note: 'WKF Registered Athlete & Coach', img: '',
+      bio: 'WKF-registered athlete and coach, and the federation\'s Co-CEO. Siddharth manages MMAKF\'s international registrations (WKF SportsID, Sportdata), the Online University, and the federation\'s digital operations.' },
+    { name: 'Daksh Mohan Mishra', role: 'National Champion', rank: 'II Dan Black Belt', since: '2015', specialty: 'Competitive / WKF track', note: 'Competitive / WKF Track', img: '',
+      bio: 'National champion and the federation\'s standard-bearer on the competitive circuit. Daksh coaches the Competitive / WKF Track, taking athletes from district championships toward national and international ranking.' },
   ],
 
   // `icon` is a key into <Icon name="..."/> — no emojis
@@ -163,6 +172,18 @@ export const SEED = {
     { grade: '1st Kyu → Shodan', belt: 'Brown → Black',   kihon: 'Complete kihon syllabus, both sides, at full intent',     kata: 'Bassai Dai · Kanku Dai · tokui kata', kumite: 'Jiyu Kumite (free sparring)' },
   ],
 
+  // National structure: state associations affiliated to the federation.
+  // Districts affiliate under their state unit; clubs/dojos under districts.
+  stateUnits: [
+    { state: 'Jharkhand',     unit: 'Jharkhand Karate-Do Association (MMAKF)', hq: 'Patratu',    districts: 6, status: 'Host State · Active', since: '1983' },
+    { state: 'Bihar',         unit: 'Bihar State MMAKF Unit',                  hq: 'Patna',      districts: 4, status: 'Active',      since: '1996' },
+    { state: 'West Bengal',   unit: 'West Bengal MMAKF Unit',                  hq: 'Kolkata',    districts: 3, status: 'Active',      since: '2003' },
+    { state: 'Odisha',        unit: 'Odisha State MMAKF Unit',                 hq: 'Bhubaneswar',districts: 2, status: 'Active',      since: '2011' },
+    { state: 'Uttar Pradesh', unit: 'Uttar Pradesh MMAKF Unit',                hq: 'Varanasi',   districts: 2, status: 'Provisional', since: '2019' },
+    { state: 'Chhattisgarh',  unit: 'Chhattisgarh MMAKF Unit',                 hq: 'Raipur',     districts: 1, status: 'Provisional', since: '2022' },
+    { state: 'Maharashtra',   unit: 'Maharashtra MMAKF Unit',                  hq: 'Nagpur',     districts: 1, status: 'Forming',     since: '2025' },
+  ],
+
   branches: [
     { name: 'MMAKF Hombu Dojo',              city: 'Patratu',    district: 'Ramgarh',    incharge: 'Shihan Pramod Kumar Pathak', status: 'Headquarters' },
     { name: 'MMAKF Ramgarh Centre',          city: 'Ramgarh',    district: 'Ramgarh',    incharge: 'Sensei Vikas Pathak',        status: 'Affiliated' },
@@ -201,7 +222,7 @@ export const SEED = {
 export const KEYS = [
   'federation', 'stats', 'leadership', 'programs', 'schedule',
   'events', 'news', 'products', 'achievements', 'testimonials', 'beltGrading',
-  'facilities', 'faqs', 'gallery', 'syllabus', 'branches',
+  'facilities', 'faqs', 'gallery', 'syllabus', 'branches', 'stateUnits',
 ] as const;
 
 export type DataKey = typeof KEYS[number];

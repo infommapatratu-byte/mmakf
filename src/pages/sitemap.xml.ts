@@ -8,6 +8,7 @@ export const prerender = false;
 const ROUTES = [
   '/', '/about', '/programs', '/facilities', '/schedule', '/belt-system',
   '/events', '/gallery', '/shop', '/faq', '/contact', '/affiliation',
+  '/governance',
 ];
 
 export const GET: APIRoute = ({ site }) => {
