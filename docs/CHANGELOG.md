@@ -2,6 +2,14 @@
 
 Content-key and schema migrations are recorded here (MASTER-SPEC §5.5).
 
+## 1.6.0 — 2026-07-06 — Multi-level federation management (Unit Portal)
+
+- **New surface `/unit`** — the management portal for State Associations, District Associations and Clubs. Each unit signs in with an access code and gets tools scoped server-side to its state: members register (read-only), registration applications to verify (with contact details — that's their workflow role), and a submissions channel to the national office (Result report / News report / Event proposal / Grading report, ≤2000 chars).
+- **Fully controlled by the national admin panel**: new `unitAccess` key (ADMIN-ONLY — writable via the authenticated data API through a new allow-list, never present in public KEYS or `/api/data`) with a Unit Access ListPanel to issue, edit, and instantly revoke codes (Status → Disabled). New read-only **Unit Submissions** queue in admin; publishing remains a national-admin action via the News/Events/Results panels.
+- **Auth**: second signed-cookie session type `mmakf_unit` carrying `{name, level, state}` (HMAC-SHA256, 7-day, HttpOnly, SameSite=Lax, timing-safe verify). New endpoints `POST /api/unit/login` (400 ms damping on failure), `POST /api/unit/logout`, `POST /api/unit/submit` (401 without session; unit identity stamped server-side from the session, never from the request body).
+- New private key `submissions` (cap 500, excluded from public KEYS like `leads`/`registrations`).
+- Footer gains a "Unit Portal →" link beside Admin. Sample access codes in seed are placeholders — rotate before production.
+
 ## 1.5.0 — 2026-07-06 — National member registration & ID verification
 
 - **Schema**: new public key `members` (national register: id, name, type, grade, state, unit, status, validTill — no contact data; 20 public keys total) and new **private** key `registrations` (applications with phone — excluded from KEYS, never served by /api/data, mirroring `leads`).

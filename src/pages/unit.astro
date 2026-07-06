@@ -1,0 +1,279 @@
+---
+// Unit Portal — the management surface for State Associations, District
+// Associations and Clubs. Access codes are issued and revoked exclusively by
+// the national admin (Unit Access panel). All data shown is scoped to the
+// signed-in unit's state, server-side.
+
+import Base from '@/layouts/Base.astro';
+import { get } from '@/lib/storage';
+import { getUnitSession } from '@/lib/auth';
+
+export const prerender = false;
+
+const session = getUnitSession(Astro.request.headers.get('cookie'));
+
+let members: any[] = [];
+let applications: any[] = [];
+let mySubmissions: any[] = [];
+
+if (session) {
+  const st = session.state.toLowerCase();
+  members = ((await get<any[]>('members')) || []).filter(
+    (m: any) => String(m.state || '').toLowerCase() === st
+  );
+  applications = (((await get<any[]>('registrations')) || []).filter(
+    (r: any) => String(r.state || '').toLowerCase() === st
+  )).slice(0, 100);
+  mySubmissions = (((await get<any[]>('submissions')) || []).filter(
+    (s: any) => s.unit === session.name
+  )).slice(0, 50);
+}
+---
+
+<Base title="Unit Portal — MMAKF" showNav={false} showFooter={false}>
+  {!session ? (
+    <section style="min-height:90vh;display:flex;align-items:center;justify-content:center;padding:64px 24px">
+      <div style="width:100%;max-width:440px">
+        <div style="text-align:center;margin-bottom:36px">
+          <div style="font-family:var(--font-display);font-size:1.8rem;font-weight:600;letter-spacing:.1em">MMAKF</div>
+          <div style="font-family:var(--font-display);font-size:.7rem;letter-spacing:.24em;text-transform:uppercase;color:var(--gold);margin-top:6px">Unit Portal</div>
+        </div>
+        <form id="unitLoginForm" class="card" style="padding:32px">
+          <h1 class="card-title" style="font-size:1.15rem;margin-bottom:8px">Unit sign in</h1>
+          <p class="card-body" style="font-size:.84rem;margin-bottom:22px">
+            For chartered state associations, district associations and clubs.
+            Access codes are issued by the federation office.
+          </p>
+          <label class="input-label" for="unit-code">Unit access code</label>
+          <input class="input" type="password" id="unit-code" name="code" required autofocus autocomplete="off" />
+          <div id="unitLoginErr" style="color:#ff6464;font-size:.85rem;margin-top:12px;display:none">Invalid or disabled access code</div>
+          <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;justify-content:center">Enter Portal</button>
+          <p style="margin-top:20px;font-size:.75rem;color:var(--muted);text-align:center">
+            Lost your code? Contact the federation office — <a href="mailto:admin@mmakf.in" class="text-gold">admin@mmakf.in</a>
+          </p>
+        </form>
+        <div style="text-align:center;margin-top:18px">
+          <a href="/" class="btn-link">← Back to the federation site</a>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      const f = document.getElementById('unitLoginForm') as HTMLFormElement;
+      const err = document.getElementById('unitLoginErr') as HTMLElement;
+      f?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        err.style.display = 'none';
+        const btn = f.querySelector('button[type=submit]') as HTMLButtonElement;
+        btn.disabled = true;
+        const code = new FormData(f).get('code') || '';
+        const r = await fetch('/api/unit/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code }),
+        }).catch(() => null);
+        btn.disabled = false;
+        if (r && r.ok) { location.reload(); return; }
+        err.style.display = 'block';
+        (f.querySelector('input[name=code]') as HTMLInputElement).select();
+      });
+    </script>
+  ) : (
+    <div class="up-wrap container">
+      <header class="up-head">
+        <div>
+          <div class="eyebrow">Unit Portal · {session.level} Level</div>
+          <h1 class="display-2" style="margin-top:12px;font-size:clamp(1.5rem,3vw,2.2rem)">{session.name}</h1>
+          <div class="flex flex-wrap gap-3 mt-4">
+            <span class="pill featured">{session.level} Unit</span>
+            <span class="pill">{session.state}</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <a href="/" target="_blank" class="btn btn-ghost">View site →</a>
+          <button id="unitLogout" class="btn btn-ghost">Sign out</button>
+        </div>
+      </header>
+
+      <div class="grid grid-3" style="margin:32px 0">
+        <div class="card"><div class="card-eyebrow">Registered members — {session.state}</div><div class="up-stat">{members.length}</div></div>
+        <div class="card"><div class="card-eyebrow">Applications to verify</div><div class="up-stat">{applications.length}</div></div>
+        <div class="card"><div class="card-eyebrow">Your submissions</div><div class="up-stat">{mySubmissions.length}</div></div>
+      </div>
+
+      {/* ── Submit to national office ── */}
+      <section class="up-panel">
+        <h2 class="up-h">Submit to the national office</h2>
+        <p class="up-sub">Results, news, event proposals and grading reports are reviewed and published by the federation office.</p>
+        <form id="unitSubmitForm" class="card" style="margin-top:18px">
+          <div class="up-form-grid">
+            <div>
+              <label class="input-label" for="sub-kind">Type</label>
+              <select class="input" id="sub-kind" name="kind" required>
+                <option value="">Select type</option>
+                <option>Result report</option>
+                <option>News report</option>
+                <option>Event proposal</option>
+                <option>Grading report</option>
+              </select>
+            </div>
+            <div class="up-full">
+              <label class="input-label" for="sub-title">Title</label>
+              <input class="input" id="sub-title" name="title" required maxlength="160" placeholder="e.g. Ramgarh District Championship 2026 — results" />
+            </div>
+            <div class="up-full">
+              <label class="input-label" for="sub-detail">Details</label>
+              <textarea class="input" id="sub-detail" name="detail" rows="4" maxlength="2000" placeholder="Dates, venue, medal table, candidates examined — everything the office needs to publish."></textarea>
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary" style="margin-top:16px">Submit Report</button>
+        </form>
+
+        {mySubmissions.length > 0 && (
+          <div class="card" style="margin-top:18px;padding:0;overflow:hidden">
+            <div style="overflow-x:auto">
+              <table class="up-tbl">
+                <thead><tr><th>When</th><th>Type</th><th>Title</th><th>Status</th></tr></thead>
+                <tbody>
+                  {mySubmissions.map((s: any) => (
+                    <tr>
+                      <td class="text-muted" style="font-size:.78rem;white-space:nowrap">{new Date(s.ts).toLocaleDateString('en-IN')}</td>
+                      <td class="text-gold" style="white-space:nowrap">{s.kind}</td>
+                      <td>{s.title}</td>
+                      <td><span class="pill">{s.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* ── Applications to verify ── */}
+      <section class="up-panel">
+        <h2 class="up-h">Registration applications — {session.state}</h2>
+        <p class="up-sub">Verify each applicant with their club, then confirm to the federation office for ID issuance.</p>
+        <div class="card" style="margin-top:18px;padding:0;overflow:hidden">
+          {applications.length === 0 ? (
+            <div style="padding:28px;text-align:center;color:var(--muted)">No pending applications from {session.state}.</div>
+          ) : (
+            <div style="overflow-x:auto">
+              <table class="up-tbl">
+                <thead><tr><th>App No.</th><th>Name</th><th>Phone</th><th>Type</th><th>District</th><th>Grade</th></tr></thead>
+                <tbody>
+                  {applications.map((r: any) => (
+                    <tr>
+                      <td class="text-gold" style="font-family:var(--font-display);white-space:nowrap">{r.appNo}</td>
+                      <td>{r.name}</td>
+                      <td>{r.phone}</td>
+                      <td>{r.type}</td>
+                      <td class="text-muted">{r.district || '—'}</td>
+                      <td class="text-muted">{r.grade || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* ── State members register ── */}
+      <section class="up-panel" style="border-bottom:0">
+        <h2 class="up-h">Members register — {session.state}</h2>
+        <p class="up-sub">Read-only view of the national register for your state. Corrections go to the federation office.</p>
+        <div class="card" style="margin-top:18px;padding:0;overflow:hidden">
+          {members.length === 0 ? (
+            <div style="padding:28px;text-align:center;color:var(--muted)">No registered members recorded for {session.state} yet.</div>
+          ) : (
+            <div style="overflow-x:auto">
+              <table class="up-tbl">
+                <thead><tr><th>Member ID</th><th>Name</th><th>Type</th><th>Grade</th><th>Unit</th><th>Status</th></tr></thead>
+                <tbody>
+                  {members.map((m: any) => (
+                    <tr>
+                      <td class="text-gold" style="font-family:var(--font-display);white-space:nowrap">{m.id}</td>
+                      <td>{m.name}</td>
+                      <td>{m.type}</td>
+                      <td class="text-muted">{m.grade}</td>
+                      <td class="text-muted">{m.unit}</td>
+                      <td><span class="pill">{m.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+
+    <script>
+      document.getElementById('unitLogout')?.addEventListener('click', async () => {
+        await fetch('/api/unit/logout', { method: 'POST' });
+        location.reload();
+      });
+
+      const sf = document.getElementById('unitSubmitForm') as HTMLFormElement | null;
+      sf?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = sf.querySelector('button[type=submit]') as HTMLButtonElement;
+        btn.disabled = true; btn.textContent = 'Submitting…';
+        const body = Object.fromEntries(new FormData(sf).entries());
+        try {
+          const r = await fetch('/api/unit/submit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!r.ok) throw new Error('bad');
+          (window as any).showNotif('Submitted to the national office.');
+          setTimeout(() => location.reload(), 900);
+        } catch {
+          (window as any).showNotif('Could not submit. Try again or call the office.');
+          btn.disabled = false; btn.textContent = 'Submit Report';
+        }
+      });
+    </script>
+  )}
+</Base>
+
+<style is:global>
+  .up-wrap { padding: 40px 28px 72px; }
+  .up-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 24px;
+    flex-wrap: wrap;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--border);
+  }
+  .up-stat {
+    font-family: var(--font-display);
+    font-size: 2.2rem;
+    font-weight: 600;
+    color: var(--gold);
+    margin-top: 6px;
+    line-height: 1;
+  }
+  .up-panel { padding: 36px 0; border-bottom: 1px solid var(--border); }
+  .up-h { font-family: var(--font-display); font-size: 1.3rem; font-weight: 600; letter-spacing: 0.02em; }
+  .up-sub { color: var(--muted); font-size: 0.88rem; margin-top: 6px; }
+  .up-form-grid { display: grid; grid-template-columns: 240px 1fr; gap: 14px; }
+  @media (max-width: 700px) { .up-form-grid { grid-template-columns: 1fr; } }
+  .up-full { grid-column: 1 / -1; }
+  .up-tbl { width: 100%; border-collapse: collapse; min-width: 640px; }
+  .up-tbl th, .up-tbl td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.87rem; }
+  .up-tbl th {
+    background: var(--bg-2);
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-weight: 500;
+  }
+  .up-tbl tr:last-child td { border-bottom: 0; }
+</style>

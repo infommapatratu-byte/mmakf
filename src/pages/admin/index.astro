@@ -11,10 +11,14 @@ const data = authed ? await getAll() : null;
 
 let leadList: any[] = [];
 let regList: any[] = [];
+let subList: any[] = [];
+let unitAccessList: any[] = [];
 if (authed) {
   const { get } = await import('@/lib/storage');
   leadList = (await get<any[]>('leads')) || [];
   regList = (await get<any[]>('registrations')) || [];
+  subList = (await get<any[]>('submissions')) || [];
+  unitAccessList = (await get<any[]>('unitAccess')) || [];
 }
 ---
 
@@ -80,6 +84,8 @@ if (authed) {
           <a href="#syllabus">Syllabus</a>
           <a href="#members">Members Register</a>
           <a href="#applications">Applications</a>
+          <a href="#unitAccess">Unit Access</a>
+          <a href="#submissions">Unit Submissions</a>
           <a href="#documents">Documents</a>
           <a href="#results">Results</a>
           <a href="#stateUnits">State Units</a>
@@ -210,6 +216,39 @@ if (authed) {
                         <td>{r.type}</td>
                         <td class="text-muted">{r.state}{r.district ? ` · ${r.district}` : ''}</td>
                         <td class="text-muted">{r.grade || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <ListPanel id="unitAccess" title="Unit Access — State / District / Club portals" subtitle="Issue and revoke access codes for the /unit portal. Set Status to 'Disabled' to revoke instantly. Codes are private — never shown on the public site or data API." apiKey="unitAccess"
+          rows={unitAccessList} fields={[
+            {n:'code',l:'Access code'},{n:'name',l:'Unit name',full:true},{n:'level',l:'Level (State/District/Club)'},{n:'state',l:'State (scopes their data)'},{n:'status',l:'Status (Active/Disabled)'}
+          ]} />
+
+        <section id="submissions" class="admin-panel">
+          <h2 class="admin-h">Unit Submissions</h2>
+          <p class="admin-sub">Reports submitted by state, district and club units through the Unit Portal. Publish accepted items via the News, Events or Results panels; then inform the unit. Most recent first.</p>
+          <div class="card" style="margin-top:20px;padding:0;overflow:hidden">
+            {subList.length === 0 ? (
+              <div style="padding:32px;text-align:center;color:var(--muted)">No submissions yet.</div>
+            ) : (
+              <div style="overflow-x:auto">
+                <table class="schedule-tbl" style="min-width:820px">
+                  <thead><tr><th>When</th><th>Unit</th><th>Level</th><th>Type</th><th>Title</th><th>Details</th></tr></thead>
+                  <tbody>
+                    {subList.slice(0, 200).map((s: any) => (
+                      <tr>
+                        <td class="text-muted" style="font-size:.78rem;white-space:nowrap">{new Date(s.ts).toLocaleString('en-IN')}</td>
+                        <td style="font-size:.85rem">{s.unit}<div class="text-muted" style="font-size:.72rem">{s.state}</div></td>
+                        <td class="text-muted">{s.level}</td>
+                        <td class="text-gold" style="white-space:nowrap">{s.kind}</td>
+                        <td>{s.title}</td>
+                        <td class="text-muted" style="font-size:.8rem;max-width:340px">{s.detail}</td>
                       </tr>
                     ))}
                   </tbody>

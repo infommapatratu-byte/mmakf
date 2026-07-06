@@ -63,6 +63,60 @@ export function isAuthenticated(cookieHeader: string | null | undefined): boolea
   }
 }
 
+// ─── Unit portal sessions (state / district / club level) ───
+// Same HMAC scheme as the admin cookie, but the payload carries the unit's
+// identity so every portal view/action is scoped server-side.
+
+const UNIT_COOKIE = 'mmakf_unit';
+
+export interface UnitSession {
+  name: string;   // unit display name
+  level: string;  // State | District | Club
+  state: string;  // scoping state
+}
+
+export function createUnitSessionCookie(u: UnitSession): string {
+  const payload = b64url(JSON.stringify({ t: Date.now(), n: u.name, l: u.level, s: u.state }));
+  const sig = sign(payload);
+  return `${UNIT_COOKIE}=${payload}.${sig}; Path=/; Max-Age=${MAX_AGE}; HttpOnly; SameSite=Lax${
+    process.env.NODE_ENV === 'production' ? '; Secure' : ''
+  }`;
+}
+
+export function clearUnitSessionCookie(): string {
+  return `${UNIT_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${
+    process.env.NODE_ENV === 'production' ? '; Secure' : ''
+  }`;
+}
+
+export function getUnitSession(cookieHeader: string | null | undefined): UnitSession | null {
+  if (!cookieHeader) return null;
+  const cookies = Object.fromEntries(
+    cookieHeader.split(';').map((c) => {
+      const [k, ...rest] = c.trim().split('=');
+      return [k, rest.join('=')];
+    })
+  );
+  const token = cookies[UNIT_COOKIE];
+  if (!token) return null;
+  const [payload, sig] = token.split('.');
+  if (!payload || !sig) return null;
+  const expected = sign(payload);
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return null;
+  if (!crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const { t, n, l, s } = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!t || typeof t !== 'number') return null;
+    if (Date.now() - t > MAX_AGE * 1000) return null;
+    if (!n || !l || !s) return null;
+    return { name: String(n), level: String(l), state: String(s) };
+  } catch {
+    return null;
+  }
+}
+
 export function checkPassword(submitted: string): boolean {
   const target = process.env.ADMIN_PASSWORD || 'mmakf2025';
   if (!submitted) return false;

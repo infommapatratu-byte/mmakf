@@ -217,6 +217,17 @@ export const SEED = {
     { id: 'MMAKF-D-1996-00004', name: 'MMAKF Ramgarh Centre', type: 'Dojo',       grade: '—',              state: 'Jharkhand',   unit: 'Ramgarh District',      status: 'Chartered', validTill: 'Mar 2027' },
   ],
 
+  // Unit-portal access codes — ADMIN-ONLY key (never in public KEYS/API).
+  // The national admin issues, edits and revokes these in the admin panel;
+  // a unit signs in to /unit with its code. Rotate the sample codes before
+  // real use (see ADMIN-GUIDE).
+  unitAccess: [
+    { code: 'JH-STATE-8471',  name: 'Jharkhand Karate-Do Association (MMAKF)', level: 'State',    state: 'Jharkhand',   status: 'Active' },
+    { code: 'BR-STATE-5529',  name: 'Bihar State MMAKF Unit',                  level: 'State',    state: 'Bihar',       status: 'Active' },
+    { code: 'RAM-DIST-2210',  name: 'Ramgarh District Association',            level: 'District', state: 'Jharkhand',   status: 'Active' },
+    { code: 'RAN-CLUB-7734',  name: 'MMAKF Ranchi Training Centre',            level: 'Club',     state: 'Jharkhand',   status: 'Active' },
+  ],
+
   branches: [
     { name: 'MMAKF Hombu Dojo',              city: 'Patratu',    district: 'Ramgarh',    incharge: 'Shihan Pramod Kumar Pathak', status: 'Headquarters' },
     { name: 'MMAKF Ramgarh Centre',          city: 'Ramgarh',    district: 'Ramgarh',    incharge: 'Sensei Vikas Pathak',        status: 'Affiliated' },

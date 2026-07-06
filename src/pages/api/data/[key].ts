@@ -15,8 +15,12 @@ export const POST: APIRoute = async ({ request, params }) => {
     });
   }
 
+  // Keys writable only through the authenticated admin panel and never
+  // exposed via the public GET /api/data (they are not in KEYS).
+  const ADMIN_ONLY_KEYS = ['unitAccess'];
+
   const key = params.key as string;
-  if (!KEYS.includes(key as any)) {
+  if (!KEYS.includes(key as any) && !ADMIN_ONLY_KEYS.includes(key)) {
     return new Response(JSON.stringify({ error: 'Invalid key' }), {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
