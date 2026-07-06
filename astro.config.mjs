@@ -1,5 +1,5 @@
 import { defineConfig } from 'astro/config';
-import vercel from '@astrojs/vercel/serverless';
+import vercel from '@astrojs/vercel';
 
 // MMAKF — Astro config. Server-rendered for /api routes and admin auth.
 export default defineConfig({
