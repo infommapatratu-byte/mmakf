@@ -2,6 +2,13 @@
 
 Content-key and schema migrations are recorded here (MASTER-SPEC §5.5).
 
+## 1.4.0 — 2026-07-06 — Federation audit: homepage, documents & results registers
+
+- **Homepage audit fix**: fee/curriculum surfaces removed from the homepage — programs grid (₹ fees), training-system pillars, belt fee tables, Online University pricing, weekly schedule table, shop teaser and testimonials now live only on their dedicated pages. Homepage = hero + calendar panel, news, events, about, explore strip, lineage, women's division, achievements, enroll, contact.
+- **Schema**: new content keys `documents` (official register: title, cat, ref, url — empty url renders a "request from office" mailto) and `results` (championship results: title, date, venue, note) — 19 public keys total.
+- /governance gains **Documents & Policies** (constitution, code of conduct, NADA/WADA anti-doping, safeguarding, charter/grading/tournament forms); /events gains **Championship Results** register.
+- Admin: Documents and Results panels; footer links to both registers.
+
 ## 1.3.0 — 2026-07-06 — National federation structure & governance
 
 - **Schema**: new content key `stateUnits` (state associations register: state, unit, hq, districts, status, since) — 17 public keys total. `leadership[]` gains `since`, `specialty`, `img`, `bio` (full profiles).

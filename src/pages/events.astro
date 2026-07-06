@@ -9,6 +9,7 @@ export const prerender = false;
 const fed = await get('federation');
 const events = await get<any[]>('events');
 const news = await get<any[]>('news');
+const results = await get<any[]>('results');
 const programs = await get<any[]>('programs');
 ---
 
@@ -53,8 +54,33 @@ const programs = await get<any[]>('programs');
     </div>
   </section>
 
+  {/* ═══════ RESULTS ═══════ */}
+  <section id="results" class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Records</div>
+        <h2 class="display-2">Championship <em class="r">results</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">Official results and grading outcomes recorded by the Tournament Commission.</p>
+      </div>
+      <div class="results-list fade">
+        {results && results.length > 0 ? results.map((r: any) => (
+          <div class="result-row">
+            <div>
+              <div class="result-title">{r.title}</div>
+              <div class="result-meta">{r.date} · {r.venue}</div>
+            </div>
+            <div class="result-note">{r.note}</div>
+          </div>
+        )) : (
+          <div style="text-align:center;color:var(--muted);padding:24px">Results will be published here after each sanctioned event.</div>
+        )}
+      </div>
+    </div>
+  </section>
+
   {/* ═══════ NEWS ═══════ */}
-  <section class="bg2">
+  <section>
     <div class="container">
       <div class="section-head fade">
         <div class="eyebrow">Latest</div>
@@ -85,6 +111,35 @@ const programs = await get<any[]>('programs');
 
 <style>
   .bg2 { background: var(--bg-2); }
+
+  .results-list { display: flex; flex-direction: column; gap: 12px; }
+  .result-row {
+    display: grid;
+    grid-template-columns: minmax(240px, 1fr) 1.6fr;
+    gap: 24px;
+    align-items: start;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+  }
+  @media (max-width: 700px) { .result-row { grid-template-columns: 1fr; gap: 10px; } }
+  .result-title {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--white);
+  }
+  .result-meta {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin-top: 6px;
+  }
+  .result-note { color: var(--off-white); font-size: 0.9rem; line-height: 1.7; }
+
   .events-list { display: flex; flex-direction: column; gap: 12px; }
   .event-row {
     display: grid;

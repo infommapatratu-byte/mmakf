@@ -7,6 +7,7 @@ export const prerender = false;
 
 const fed = await get('federation');
 const leadership = await get<any[]>('leadership');
+const documents = await get<any[]>('documents');
 
 const featured = leadership[0];
 const faculty = leadership.slice(1);
@@ -201,8 +202,45 @@ const orgLevels = [
     </section>
   )}
 
+  {/* ═══════ DOCUMENTS & POLICIES ═══════ */}
+  <section id="documents">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Official Documents</div>
+        <h2 class="display-2">Documents &amp; <em class="r">policies</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">The federation's constitution, compliance policies and application forms.</p>
+      </div>
+      <div class="doc-wrap fade">
+        <table class="doc-tbl">
+          <thead>
+            <tr><th>Document</th><th>Category</th><th>Reference</th><th>Access</th></tr>
+          </thead>
+          <tbody>
+            {documents.map((d: any) => (
+              <tr>
+                <td style="font-family:var(--font-display);font-weight:600;font-size:.95rem">{d.title}</td>
+                <td><span class="pill">{d.cat}</span></td>
+                <td class="text-muted">{d.ref}</td>
+                <td>
+                  {d.url
+                    ? <a href={d.url} class="text-gold" target="_blank" rel="noopener">Download →</a>
+                    : <a href={`mailto:${fed.contact.email}?subject=Document request: ${encodeURIComponent(d.title)}`} class="text-muted">Request from office</a>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div class="mt-6 text-muted" style="font-size:.82rem">
+        The federation observes NADA / WADA anti-doping norms and maintains a safeguarding policy for
+        minors across all affiliated units. Certified copies of any document are issued by the federation office.
+      </div>
+    </div>
+  </section>
+
   {/* ═══════ CTA ═══════ */}
-  <section>
+  <section class="bg2">
     <div class="container" style="text-align:center;max-width:720px">
       <div class="eyebrow center fade">Train</div>
       <h2 class="display-2 fade" style="margin-top:16px">Train under the <em class="r">faculty</em>.</h2>
@@ -219,6 +257,32 @@ const orgLevels = [
 
 <style>
   .bg2 { background: var(--bg-2); }
+
+  .doc-wrap { overflow-x: auto; }
+  .doc-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    min-width: 720px;
+  }
+  .doc-tbl th, .doc-tbl td {
+    padding: 14px 18px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+    vertical-align: middle;
+  }
+  .doc-tbl th {
+    background: var(--bg-2);
+    font-family: var(--font-display);
+    font-size: 0.64rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-weight: 500;
+  }
+  .doc-tbl tr:last-child td { border-bottom: 0; }
 
   .ob-wrap { overflow-x: auto; }
   .ob-tbl {

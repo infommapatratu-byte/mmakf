@@ -184,6 +184,26 @@ export const SEED = {
     { state: 'Maharashtra',   unit: 'Maharashtra MMAKF Unit',                  hq: 'Nagpur',     districts: 1, status: 'Forming',     since: '2025' },
   ],
 
+  // Official documents & policies register (governance page). `url` empty →
+  // "request from the federation office" mailto link renders instead.
+  documents: [
+    { title: 'Constitution & Bye-Laws',                          cat: 'Governance',  ref: 'MMAKF/CONST',  url: '' },
+    { title: 'Code of Conduct — Members & Officials',            cat: 'Governance',  ref: 'MMAKF/COC',    url: '' },
+    { title: 'Anti-Doping Policy (NADA / WADA aligned)',         cat: 'Compliance',  ref: 'MMAKF/ADP',    url: '' },
+    { title: 'Athlete Safeguarding & Child Protection Policy',   cat: 'Compliance',  ref: 'MMAKF/SGP',    url: '' },
+    { title: 'Dojo / Club Charter Application',                  cat: 'Affiliation', ref: 'Form A-1',     url: '' },
+    { title: 'State / District Unit Charter Application',        cat: 'Affiliation', ref: 'Form A-2',     url: '' },
+    { title: 'Grading Examination Application',                  cat: 'Grading',     ref: 'Form G-1',     url: '' },
+    { title: 'Tournament Entry Form',                            cat: 'Tournament',  ref: 'Form T-1',     url: '' },
+  ],
+
+  // Championship results register (events page).
+  results: [
+    { title: 'District Karate Championship 2026',      date: '22 Jun 2026', venue: 'Indoor Sports Complex, Ramgarh', note: 'MMAKF Ramgarh topped the medal table — 34 golds across kata and kumite divisions.' },
+    { title: 'State Invitational Cup 2026',            date: '09 Mar 2026', venue: 'Ranchi',                          note: 'Federation team: 11 gold · 9 silver · 14 bronze. Six athletes selected for the state squad.' },
+    { title: 'MMAKF National Grading Camp — Winter',   date: '14 Dec 2025', venue: 'Hombu Dojo, Patratu',             note: '214 candidates examined; 3 new Shodan awarded by the Examination Board.' },
+  ],
+
   branches: [
     { name: 'MMAKF Hombu Dojo',              city: 'Patratu',    district: 'Ramgarh',    incharge: 'Shihan Pramod Kumar Pathak', status: 'Headquarters' },
     { name: 'MMAKF Ramgarh Centre',          city: 'Ramgarh',    district: 'Ramgarh',    incharge: 'Sensei Vikas Pathak',        status: 'Affiliated' },
@@ -223,6 +243,7 @@ export const KEYS = [
   'federation', 'stats', 'leadership', 'programs', 'schedule',
   'events', 'news', 'products', 'achievements', 'testimonials', 'beltGrading',
   'facilities', 'faqs', 'gallery', 'syllabus', 'branches', 'stateUnits',
+  'documents', 'results',
 ] as const;
 
 export type DataKey = typeof KEYS[number];

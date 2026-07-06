@@ -76,6 +76,8 @@ if (authed) {
           <a href="#faqs">FAQs</a>
           <a href="#gallery">Gallery</a>
           <a href="#syllabus">Syllabus</a>
+          <a href="#documents">Documents</a>
+          <a href="#results">Results</a>
           <a href="#stateUnits">State Units</a>
           <a href="#branches">Branches</a>
           <a href="#products">Shop Products</a>
@@ -177,6 +179,16 @@ if (authed) {
         <ListPanel id="syllabus" title="Grading Syllabus" subtitle="Kata syllabus rows on the /belt-system page." apiKey="syllabus"
           rows={data!.syllabus} fields={[
             {n:'grade',l:'Grading (e.g. 10th → 9th Kyu)'},{n:'belt',l:'Belt'},{n:'kumite',l:'Kumite'},{n:'kihon',l:'Kihon',full:true},{n:'kata',l:'Kata',full:true}
+          ]} />
+
+        <ListPanel id="documents" title="Documents & Policies" subtitle="Official register on /governance. Leave URL empty to show 'Request from office'." apiKey="documents"
+          rows={data!.documents} fields={[
+            {n:'title',l:'Document title',full:true},{n:'cat',l:'Category'},{n:'ref',l:'Reference no.'},{n:'url',l:'Download URL (optional)',full:true}
+          ]} />
+
+        <ListPanel id="results" title="Championship Results" subtitle="Official results register on /events." apiKey="results"
+          rows={data!.results} fields={[
+            {n:'title',l:'Event title',full:true},{n:'date',l:'Date'},{n:'venue',l:'Venue'},{n:'note',l:'Result summary',full:true,textarea:true}
           ]} />
 
         <ListPanel id="stateUnits" title="State Associations" subtitle="Affiliated state units — the national register on /affiliation and /governance." apiKey="stateUnits"
