@@ -10,9 +10,11 @@ const authed = isAuthenticated(Astro.request.headers.get('cookie'));
 const data = authed ? await getAll() : null;
 
 let leadList: any[] = [];
+let regList: any[] = [];
 if (authed) {
   const { get } = await import('@/lib/storage');
   leadList = (await get<any[]>('leads')) || [];
+  regList = (await get<any[]>('registrations')) || [];
 }
 ---
 
@@ -76,6 +78,8 @@ if (authed) {
           <a href="#faqs">FAQs</a>
           <a href="#gallery">Gallery</a>
           <a href="#syllabus">Syllabus</a>
+          <a href="#members">Members Register</a>
+          <a href="#applications">Applications</a>
           <a href="#documents">Documents</a>
           <a href="#results">Results</a>
           <a href="#stateUnits">State Units</a>
@@ -180,6 +184,40 @@ if (authed) {
           rows={data!.syllabus} fields={[
             {n:'grade',l:'Grading (e.g. 10th → 9th Kyu)'},{n:'belt',l:'Belt'},{n:'kumite',l:'Kumite'},{n:'kihon',l:'Kihon',full:true},{n:'kata',l:'Kata',full:true}
           ]} />
+
+        <ListPanel id="members" title="Members Register" subtitle="The national register powering public ID verification. Add a member here after approving their application. ID format: MMAKF-A/I/D/O-YYYY-NNNNN." apiKey="members"
+          rows={data!.members} fields={[
+            {n:'id',l:'Member ID (MMAKF-A-2026-00001)'},{n:'name',l:'Name'},{n:'type',l:'Type (Athlete/Instructor/Dojo/Official)'},{n:'grade',l:'Grade'},{n:'state',l:'State'},{n:'unit',l:'Unit / Centre'},{n:'status',l:'Status (Active/Suspended/Expired)'},{n:'validTill',l:'Valid till'}
+          ]} />
+
+        <section id="applications" class="admin-panel">
+          <h2 class="admin-h">Registration Applications</h2>
+          <p class="admin-sub">Submitted from /registration. Verify with the unit, collect the fee, then add the member to the Members Register above. Most recent first.</p>
+          <div class="card" style="margin-top:20px;padding:0;overflow:hidden">
+            {regList.length === 0 ? (
+              <div style="padding:32px;text-align:center;color:var(--muted)">No applications yet.</div>
+            ) : (
+              <div style="overflow-x:auto">
+                <table class="schedule-tbl" style="min-width:760px">
+                  <thead><tr><th>When</th><th>App No.</th><th>Name</th><th>Phone</th><th>Type</th><th>State / District</th><th>Grade</th></tr></thead>
+                  <tbody>
+                    {regList.slice(0, 200).map((r: any) => (
+                      <tr>
+                        <td class="text-muted" style="font-size:.78rem">{new Date(r.ts).toLocaleString('en-IN')}</td>
+                        <td class="text-gold" style="font-family:var(--font-display);white-space:nowrap">{r.appNo}</td>
+                        <td>{r.name}</td>
+                        <td>{r.phone}</td>
+                        <td>{r.type}</td>
+                        <td class="text-muted">{r.state}{r.district ? ` · ${r.district}` : ''}</td>
+                        <td class="text-muted">{r.grade || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
 
         <ListPanel id="documents" title="Documents & Policies" subtitle="Official register on /governance. Leave URL empty to show 'Request from office'." apiKey="documents"
           rows={data!.documents} fields={[

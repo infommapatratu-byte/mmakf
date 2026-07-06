@@ -204,6 +204,19 @@ export const SEED = {
     { title: 'MMAKF National Grading Camp — Winter',   date: '14 Dec 2025', venue: 'Hombu Dojo, Patratu',             note: '214 candidates examined; 3 new Shodan awarded by the Examination Board.' },
   ],
 
+  // Federation members register — powers the public ID verification tool on
+  // /registration and the admin Members panel. Public data only (no phone).
+  // ID format: MMAKF-{A|I|D|O}-{year}-{serial}  (Athlete/Instructor/Dojo/Official)
+  members: [
+    { id: 'MMAKF-I-1983-00001', name: 'Pramod Kumar Pathak',  type: 'Instructor', grade: 'VI Dan',         state: 'Jharkhand',   unit: 'Hombu Dojo, Patratu',   status: 'Active',    validTill: 'Lifetime' },
+    { id: 'MMAKF-I-2004-00023', name: 'Vikas Pathak',         type: 'Instructor', grade: 'IV Dan',         state: 'Jharkhand',   unit: 'Hombu Dojo, Patratu',   status: 'Active',    validTill: 'Dec 2026' },
+    { id: 'MMAKF-I-2010-00047', name: 'Sumitra Devi',         type: 'Instructor', grade: 'III Dan',        state: 'Jharkhand',   unit: "Women's Wing",          status: 'Active',    validTill: 'Dec 2026' },
+    { id: 'MMAKF-A-2015-00891', name: 'Daksh Mohan Mishra',   type: 'Athlete',    grade: 'II Dan',         state: 'Jharkhand',   unit: 'Competitive / WKF Track', status: 'Active',  validTill: 'Dec 2026' },
+    { id: 'MMAKF-A-2018-01204', name: 'Siddharth Prasad',     type: 'Athlete · Coach', grade: 'WKF Registered', state: 'Jharkhand', unit: 'Online University',   status: 'Active',    validTill: 'Dec 2026' },
+    { id: 'MMAKF-A-2022-03412', name: 'Ankan Roy',            type: 'Athlete',    grade: 'I Dan',          state: 'West Bengal', unit: 'Kolkata Centre',        status: 'Active',    validTill: 'Dec 2026' },
+    { id: 'MMAKF-D-1996-00004', name: 'MMAKF Ramgarh Centre', type: 'Dojo',       grade: '—',              state: 'Jharkhand',   unit: 'Ramgarh District',      status: 'Chartered', validTill: 'Mar 2027' },
+  ],
+
   branches: [
     { name: 'MMAKF Hombu Dojo',              city: 'Patratu',    district: 'Ramgarh',    incharge: 'Shihan Pramod Kumar Pathak', status: 'Headquarters' },
     { name: 'MMAKF Ramgarh Centre',          city: 'Ramgarh',    district: 'Ramgarh',    incharge: 'Sensei Vikas Pathak',        status: 'Affiliated' },
@@ -243,7 +256,7 @@ export const KEYS = [
   'federation', 'stats', 'leadership', 'programs', 'schedule',
   'events', 'news', 'products', 'achievements', 'testimonials', 'beltGrading',
   'facilities', 'faqs', 'gallery', 'syllabus', 'branches', 'stateUnits',
-  'documents', 'results',
+  'documents', 'results', 'members',
 ] as const;
 
 export type DataKey = typeof KEYS[number];

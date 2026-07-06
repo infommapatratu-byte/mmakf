@@ -17,14 +17,14 @@ const {
 } = Astro.props;
 
 const navItems = [
-  { href: '/about',       label: 'About' },
-  { href: '/governance',  label: 'Governance' },
-  { href: '/programs',    label: 'Programs' },
-  { href: '/facilities',  label: 'Facilities' },
-  { href: '/schedule',    label: 'Schedule' },
-  { href: '/events',      label: 'Events' },
-  { href: '/affiliation', label: 'Affiliation' },
-  { href: '/contact',     label: 'Contact' },
+  { href: '/about',        label: 'About' },
+  { href: '/governance',   label: 'Governance' },
+  { href: '/programs',     label: 'Programs' },
+  { href: '/schedule',     label: 'Schedule' },
+  { href: '/events',       label: 'Events' },
+  { href: '/affiliation',  label: 'Affiliation' },
+  { href: '/registration', label: 'Registration' },
+  { href: '/contact',      label: 'Contact' },
 ];
 const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
 ---
@@ -109,7 +109,8 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
               <div class="ft-h">Federation</div>
               <a href="/governance">Governance & Officials</a>
               <a href="/governance#documents">Documents & Policies</a>
-              <a href="/about">About & Lineage</a>
+              <a href="/registration">Member Registration</a>
+              <a href="/registration#verify">Verify a Member ID</a>
               <a href="/affiliation">Affiliation & Certification</a>
               <a href="/events#results">Results</a>
               <a href="/gallery">Gallery</a>

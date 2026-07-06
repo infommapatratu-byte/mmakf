@@ -158,6 +158,26 @@ const achievements = data.achievements;
     </div>
   </section>
 
+  {/* ═══════ MEMBER SERVICES ═══════ */}
+  <section id="member-services" style="padding:64px 0">
+    <div class="container">
+      <div class="ms-grid fade">
+        <a href="/registration" class="ms-card">
+          <div class="ms-eyebrow">Member Services</div>
+          <div class="ms-title">Register with the federation</div>
+          <div class="ms-desc">Athletes, instructors, dojos and officials — apply online, get your application number instantly.</div>
+          <div class="ms-arrow">→</div>
+        </a>
+        <a href="/registration#verify" class="ms-card">
+          <div class="ms-eyebrow">Bonafide Check</div>
+          <div class="ms-title">Verify a member ID</div>
+          <div class="ms-desc">Check any MMAKF ID against the national register — open to schools, organisers and parents.</div>
+          <div class="ms-arrow">→</div>
+        </a>
+      </div>
+    </div>
+  </section>
+
   {/* ═══════ ABOUT / EYE OF THE WARRIOR ═══════ */}
   <section id="about">
     <div class="container">
@@ -594,6 +614,51 @@ const achievements = data.achievements;
     transition: color 0.25s, transform 0.25s;
   }
   .explore-item:hover .explore-arrow { color: var(--gold-2); transform: translateX(3px); }
+
+  /* ═══════ MEMBER SERVICES ═══════ */
+  .ms-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 700px) { .ms-grid { grid-template-columns: 1fr; } }
+  .ms-card {
+    position: relative;
+    display: block;
+    background: linear-gradient(135deg, var(--card) 0%, var(--bg-2) 100%);
+    border: 1px solid var(--border-2);
+    border-left: 3px solid var(--red);
+    border-radius: var(--radius);
+    padding: 28px 56px 28px 28px;
+    transition: border-color 0.25s;
+  }
+  .ms-card:hover { border-color: var(--gold-dim); border-left-color: var(--gold); }
+  .ms-eyebrow {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.26em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  .ms-title {
+    font-family: var(--font-display);
+    font-size: 1.2rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--white);
+    margin-top: 10px;
+  }
+  .ms-desc { color: var(--off-white); font-size: 0.88rem; margin-top: 8px; line-height: 1.65; max-width: 52ch; }
+  .ms-arrow {
+    position: absolute;
+    right: 24px; top: 50%;
+    transform: translateY(-50%);
+    font-size: 1.3rem;
+    color: var(--muted-2);
+    transition: color 0.25s, transform 0.25s;
+  }
+  .ms-card:hover .ms-arrow { color: var(--gold-2); transform: translateY(-50%) translateX(4px); }
 
   /* ═══════ SECTIONS ═══════ */
   .bg-2 { background: var(--bg-2); }

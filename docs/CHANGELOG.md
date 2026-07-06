@@ -2,6 +2,15 @@
 
 Content-key and schema migrations are recorded here (MASTER-SPEC §5.5).
 
+## 1.5.0 — 2026-07-06 — National member registration & ID verification
+
+- **Schema**: new public key `members` (national register: id, name, type, grade, state, unit, status, validTill — no contact data; 20 public keys total) and new **private** key `registrations` (applications with phone — excluded from KEYS, never served by /api/data, mirroring `leads`).
+- New page **/registration** (in main nav, replacing Facilities which remains in the explore strip/footer): membership categories with fees (Athlete ₹300/yr · Instructor ₹1,000/yr · Dojo per charter · Official ₹500/yr), four-step process, online application form, and the public **Verify a Member ID** tool.
+- New endpoints: `POST /api/register` (validates type against the four categories, issues application number `MMAKF-R-{year}-{serial}`, stores privately, cap 2000) and `GET /api/verify?id=` (case-insensitive lookup against the members register; returns register data only; no-store).
+- Member ID scheme: `MMAKF-{A|I|D|O}-{year}-{serial}`.
+- Homepage gains a Member Services band (Register / Verify) after the events calendar; footer links both.
+- Admin: **Members Register** panel (full CRUD — approval workflow: verify application → collect fee → add member) and read-only **Registration Applications** table (first 200 shown).
+
 ## 1.4.0 — 2026-07-06 — Federation audit: homepage, documents & results registers
 
 - **Homepage audit fix**: fee/curriculum surfaces removed from the homepage — programs grid (₹ fees), training-system pillars, belt fee tables, Online University pricing, weekly schedule table, shop teaser and testimonials now live only on their dedicated pages. Homepage = hero + calendar panel, news, events, about, explore strip, lineage, women's division, achievements, enroll, contact.
