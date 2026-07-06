@@ -170,7 +170,7 @@ if (authed) {
 
         <ListPanel id="gallery" title="Gallery" subtitle="Items shown on the /gallery page." apiKey="gallery"
           rows={data!.gallery} fields={[
-            {n:'icon',l:'Icon'},{n:'title',l:'Title'},{n:'cat',l:'Category'},{n:'desc',l:'Caption',full:true}
+            {n:'title',l:'Title'},{n:'cat',l:'Category'},{n:'icon',l:'Icon (fallback)'},{n:'img',l:'Image URL',full:true},{n:'desc',l:'Caption',full:true}
           ]} />
 
         <ListPanel id="syllabus" title="Grading Syllabus" subtitle="Kata syllabus rows on the /belt-system page." apiKey="syllabus"
@@ -185,7 +185,7 @@ if (authed) {
 
         <ListPanel id="products" title="Shop Products" subtitle="Equipment & merchandise." apiKey="products"
           rows={data!.products} fields={[
-            {n:'icon',l:'Icon (e.g. karate-gi, shield)'},{n:'cat',l:'Category'},{n:'badge',l:'Badge'},{n:'p',l:'Price (₹)',type:'number'},{n:'m',l:'MRP (₹)',type:'number'},{n:'n',l:'Name',full:true}
+            {n:'cat',l:'Category'},{n:'badge',l:'Badge'},{n:'p',l:'Price (₹)',type:'number'},{n:'m',l:'MRP (₹)',type:'number'},{n:'icon',l:'Icon (fallback)'},{n:'n',l:'Name',full:true},{n:'img',l:'Image URL',full:true}
           ]} />
 
         <ListPanel id="achievements" title="Achievements" subtitle="Institutional achievements." apiKey="achievements"

@@ -81,19 +81,21 @@ export const SEED = {
     { id: 3, title: "Women's Self-Defense program now in 14 schools",      date: '21 Apr 2026', type: 'Community',     body: "MMAKF's Women's Self-Defense initiative, led by Sensei Sumitra Devi, has now been adopted by 14 schools across the Ramgarh and Hazaribagh districts. The program runs as a free 12-week curriculum covering practical defense, situational awareness, and confidence building." },
   ],
 
+  // `img` is an Unsplash hotlink (photography pass — MASTER-SPEC AS-6 revised);
+  // `icon` remains the fallback when img is absent or fails.
   products: [
-    { id: 1,  n: 'Karate-Gi Premium — MMAKF',     cat: 'uniform',     icon: 'karate-gi',  p: 1800, m: 2600, badge: 'Best Seller' },
-    { id: 2,  n: 'Competition Gi — Lightweight',  cat: 'uniform',     icon: 'karate-gi',  p: 2400, m: 3500, badge: null },
-    { id: 3,  n: 'Kids Training Gi',              cat: 'uniform',     icon: 'karate-gi',  p: 1200, m: 1800, badge: 'New' },
-    { id: 4,  n: 'MMAKF Belt Set (White–Brown)',  cat: 'accessories', icon: 'black-belt', p: 650,  m: 1000, badge: null },
-    { id: 5,  n: 'Black Belt — MMAKF Certified',  cat: 'accessories', icon: 'black-belt', p: 900,  m: 1400, badge: null },
-    { id: 6,  n: 'Boxing Gloves 12oz',            cat: 'equipment',   icon: 'kumite',     p: 1400, m: 2000, badge: null },
-    { id: 7,  n: 'Shin Guards — Competition',     cat: 'equipment',   icon: 'shield',     p: 950,  m: 1500, badge: 'Sale' },
-    { id: 8,  n: 'Focus Mitts Pair',              cat: 'equipment',   icon: 'kumite',     p: 1100, m: 1700, badge: null },
-    { id: 9,  n: 'Sparring Headgear',             cat: 'equipment',   icon: 'shield',     p: 1700, m: 2600, badge: null },
-    { id: 10, n: 'MMAKF Training Bag',            cat: 'accessories', icon: 'book',       p: 1300, m: 1900, badge: 'New' },
-    { id: 11, n: 'MMAKF T-Shirt — Black',         cat: 'merch',       icon: 'karate-gi',  p: 599,  m: 899,  badge: 'Popular' },
-    { id: 12, n: 'Tiger Lee Edition Hoodie',      cat: 'merch',       icon: 'medal',      p: 1499, m: 2200, badge: 'Limited' },
+    { id: 1,  n: 'Karate-Gi Premium — MMAKF',     cat: 'uniform',     icon: 'karate-gi',  p: 1800, m: 2600, badge: 'Best Seller', img: 'https://images.unsplash.com/photo-1620799140408-edc6dcb6d633?auto=format&fit=crop&w=900&q=70' },
+    { id: 2,  n: 'Competition Gi — Lightweight',  cat: 'uniform',     icon: 'karate-gi',  p: 2400, m: 3500, badge: null,          img: 'https://images.unsplash.com/photo-1564415315949-7a0c4c73aab4?auto=format&fit=crop&w=900&q=70' },
+    { id: 3,  n: 'Kids Training Gi',              cat: 'uniform',     icon: 'karate-gi',  p: 1200, m: 1800, badge: 'New',         img: 'https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=900&q=70' },
+    { id: 4,  n: 'MMAKF Belt Set (White–Brown)',  cat: 'accessories', icon: 'black-belt', p: 650,  m: 1000, badge: null,          img: 'https://images.unsplash.com/photo-1526506118085-60ce8714f8c5?auto=format&fit=crop&w=900&q=70' },
+    { id: 5,  n: 'Black Belt — MMAKF Certified',  cat: 'accessories', icon: 'black-belt', p: 900,  m: 1400, badge: null,          img: 'https://images.unsplash.com/photo-1605296867304-46d5465a13f1?auto=format&fit=crop&w=900&q=70' },
+    { id: 6,  n: 'Boxing Gloves 12oz',            cat: 'equipment',   icon: 'kumite',     p: 1400, m: 2000, badge: null,          img: 'https://images.unsplash.com/photo-1549719386-74dfcbf7dbed?auto=format&fit=crop&w=900&q=70' },
+    { id: 7,  n: 'Shin Guards — Competition',     cat: 'equipment',   icon: 'shield',     p: 950,  m: 1500, badge: 'Sale',        img: 'https://images.unsplash.com/photo-1622599511051-16f55a1234d0?auto=format&fit=crop&w=900&q=70' },
+    { id: 8,  n: 'Focus Mitts Pair',              cat: 'equipment',   icon: 'kumite',     p: 1100, m: 1700, badge: null,          img: 'https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=900&q=70' },
+    { id: 9,  n: 'Sparring Headgear',             cat: 'equipment',   icon: 'shield',     p: 1700, m: 2600, badge: null,          img: 'https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=900&q=70' },
+    { id: 10, n: 'MMAKF Training Bag',            cat: 'accessories', icon: 'book',       p: 1300, m: 1900, badge: 'New',         img: 'https://images.unsplash.com/photo-1584735935682-2f2b69dff9d2?auto=format&fit=crop&w=900&q=70' },
+    { id: 11, n: 'MMAKF T-Shirt — Black',         cat: 'merch',       icon: 'karate-gi',  p: 599,  m: 899,  badge: 'Popular',     img: 'https://images.unsplash.com/photo-1618354691373-d851c5c3a990?auto=format&fit=crop&w=900&q=70' },
+    { id: 12, n: 'Tiger Lee Edition Hoodie',      cat: 'merch',       icon: 'medal',      p: 1499, m: 2200, badge: 'Limited',     img: 'https://images.unsplash.com/photo-1556821840-3a63f95609a7?auto=format&fit=crop&w=900&q=70' },
   ],
 
   achievements: [
@@ -139,15 +141,15 @@ export const SEED = {
   ],
 
   gallery: [
-    { icon: 'kata',       title: 'Kata Training — Main Hall',        cat: 'Dojo',       desc: 'Morning kata session under Sensei Dhiraj Pathak.' },
-    { icon: 'kumite',     title: 'Kumite Court',                     cat: 'Dojo',       desc: 'Sparring drills on the competition-marked tatami.' },
-    { icon: 'medal',      title: 'District Championship Podium',     cat: 'Tournament', desc: 'MMAKF athletes sweeping the district championship.' },
-    { icon: 'black-belt', title: 'Black Belt Grading Ceremony',      cat: 'Grading',    desc: 'Dan candidates before the grading panel.' },
-    { icon: 'women',      title: "Women's Self-Defense Workshop",    cat: 'Community',  desc: 'Sensei Sumitra Devi leading a partner-school workshop.' },
-    { icon: 'star',       title: 'Kids Program in Action',           cat: 'Dojo',       desc: 'The youngest warriors learning their first kihon.' },
-    { icon: 'school',     title: 'School Outreach Program',          cat: 'Community',  desc: 'One of 130+ school programs at our historical peak.' },
-    { icon: 'globe',      title: 'Online University Live Session',   cat: 'Digital',    desc: 'A live kata class broadcasting to students worldwide.' },
-    { icon: 'users',      title: 'Annual Training Camp',             cat: 'Camp',       desc: 'The federation gathered for the summer gasshuku.' },
+    { icon: 'kata',       title: 'Kata at First Light',              cat: 'Dojo',       desc: 'Morning kata practice — the discipline begins before sunrise.',            img: 'https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'kumite',     title: 'Impact Training',                  cat: 'Dojo',       desc: 'Full-contact drills in the impact bay under supervision.',                 img: 'https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'medal',      title: 'Walk-out — District Championship', cat: 'Tournament', desc: 'An MMAKF athlete enters the arena on finals night.',                       img: 'https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'black-belt', title: 'Grading Day — Groundwork',         cat: 'Grading',    desc: "Candidates demonstrate under the examiners' eyes.",                        img: 'https://images.unsplash.com/photo-1564415315949-7a0c4c73aab4?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'women',      title: "Women's Strength Division",        cat: 'Community',  desc: "Sensei Sumitra Devi's division builds physical authority.",                img: 'https://images.unsplash.com/photo-1574680096145-d05b474e2155?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'star',       title: 'Conditioning Camp',                cat: 'Camp',       desc: 'Summer gasshuku — endurance day at the training grounds.',                 img: 'https://images.unsplash.com/photo-1599058917212-d750089bc07e?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'dumbbell',   title: 'Strength & Conditioning Zone',     cat: 'Dojo',       desc: 'Karate-specific strength work at the hombu.',                              img: 'https://images.unsplash.com/photo-1605296867304-46d5465a13f1?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'book',       title: 'The Dojo Library',                 cat: 'Dojo',       desc: 'Study corner — rulebooks, syllabus manuals and karate texts.',             img: 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'globe',      title: 'Fight Night',                      cat: 'Tournament', desc: 'State championship finals under the lights.',                              img: 'https://images.unsplash.com/photo-1509563268479-0f004cf3f58b?auto=format&fit=crop&w=1000&q=70' },
   ],
 
   syllabus: [

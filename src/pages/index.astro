@@ -24,6 +24,10 @@ const grading = data.beltGrading;
 
   {/* ═══════ HERO ═══════ */}
   <section id="hero" class="hero">
+    <div class="hero-photo" aria-hidden="true">
+      <img src="https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=1800&q=70" alt="" loading="eager" fetchpriority="high" />
+      <div class="hero-shade"></div>
+    </div>
     <div class="hero-bg" aria-hidden="true"></div>
     <div class="hero-kanji kanji" aria-hidden="true">空手道</div>
     <div class="container hero-inner">
@@ -510,7 +514,11 @@ const grading = data.beltGrading;
         {products.map((p: any) => (
           <div class="prod fade" data-cat={p.cat}>
             {p.badge && <div class="prod-badge">{p.badge}</div>}
-            <div class="prod-thumb"><Icon name={p.icon || 'karate-gi'} size={56} color="var(--gold)" /></div>
+            <div class="prod-thumb">
+              {p.img
+                ? <img class="prod-photo" src={p.img} alt={p.n} loading="lazy" />
+                : <Icon name={p.icon || 'karate-gi'} size={56} color="var(--gold)" />}
+            </div>
             <div class="prod-cat">{p.cat}</div>
             <div class="prod-name">{p.n}</div>
             <div class="prod-foot">
@@ -613,10 +621,27 @@ const grading = data.beltGrading;
     overflow: hidden;
     border-top: 0;
   }
-  .hero-bg {
+  .hero-photo {
+    position: absolute; inset: 0;
+    z-index: 0;
+  }
+  .hero-photo img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    object-position: 70% 40%;
+    filter: grayscale(0.35) contrast(1.05) brightness(0.62);
+  }
+  .hero-shade {
     position: absolute; inset: 0;
     background:
-      radial-gradient(ellipse 800px 400px at 80% 20%, rgba(142, 18, 18, 0.13), transparent),
+      linear-gradient(90deg, rgba(6, 6, 7, 0.96) 0%, rgba(6, 6, 7, 0.86) 42%, rgba(6, 6, 7, 0.5) 75%, rgba(6, 6, 7, 0.65) 100%),
+      linear-gradient(180deg, rgba(6, 6, 7, 0.6) 0%, transparent 30%, rgba(6, 6, 7, 0.97) 96%);
+  }
+  .hero-bg {
+    position: absolute; inset: 0;
+    z-index: 1;
+    background:
+      radial-gradient(ellipse 800px 400px at 80% 20%, rgba(142, 18, 18, 0.12), transparent),
       radial-gradient(ellipse 600px 600px at 10% 80%, rgba(194, 162, 75, 0.05), transparent);
     pointer-events: none;
   }
@@ -626,10 +651,10 @@ const grading = data.beltGrading;
     writing-mode: vertical-rl;
     font-size: clamp(8rem, 18vw, 15rem);
     line-height: 1;
-    color: rgba(237, 234, 227, 0.025);
+    color: rgba(237, 234, 227, 0.04);
     pointer-events: none;
     user-select: none;
-    z-index: 0;
+    z-index: 1;
   }
   .hero-inner {
     display: grid;
@@ -697,6 +722,10 @@ const grading = data.beltGrading;
     margin-top: 80px;
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
+    position: relative;
+    z-index: 2;
+    background: rgba(6, 6, 7, 0.55);
+    backdrop-filter: blur(4px);
   }
   @media (max-width: 700px) {
     .hero-stats { grid-template-columns: repeat(2, 1fr); }
@@ -1138,6 +1167,17 @@ const grading = data.beltGrading;
     align-items: center;
     justify-content: center;
     border-bottom: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .prod-thumb .prod-photo {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    filter: grayscale(0.25) contrast(1.02) brightness(0.88);
+    transition: filter 0.3s, transform 0.4s;
+  }
+  .prod:hover .prod-photo {
+    filter: grayscale(0) contrast(1.02) brightness(0.96);
+    transform: scale(1.03);
   }
   .prod-cat {
     font-family: var(--font-display);
