@@ -1,0 +1,186 @@
+---
+// Online Academy — the LMS surface of the federation's Online University.
+// Courses and lessons are fully admin-managed; lessons gain a Watch link the
+// moment the office pastes a video URL into the admin panel.
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import EnrollCTA from '@/components/EnrollCTA.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const courses = await get<any[]>('courses');
+const lessons = await get<any[]>('lessons');
+const programs = await get<any[]>('programs');
+
+const lessonsFor = (title: string) => lessons.filter((l: any) => l.course === title);
+const freeCount = lessons.filter((l: any) => l.access === 'Free').length;
+---
+
+<Base
+  title="Online Academy — MMAKF"
+  description="The MMAKF Online University curriculum — structured Shotokan courses from white belt to Dan preparation, with recorded lessons, live sessions and video grading."
+>
+  <PageHero
+    image="https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=1800&q=70"
+    kanji="修行"
+    eyebrow="Online University"
+    title={`The <em>academy</em>.`}
+    lead="The complete Shotokan curriculum of the federation, structured as courses from your first stance to the Dan examination — recorded lessons, weekly live sessions, and belt grading by video submission."
+    pills={[`${lessons.length}+ structured lessons`, `${freeCount} free previews`, 'Video grading']}
+  />
+
+  {/* ═══════ HOW IT WORKS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Method</div>
+        <h2 class="display-2">How online training <em class="r">works</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {[
+          { num: '01', t: 'Enrol in the Online University', d: `Join from anywhere in the world at ₹999/month. Your enrolment is registered with the federation like any dojo student's.` },
+          { num: '02', t: 'Train the curriculum + live sessions', d: 'Work through your belt-level course below, and join the weekly live classes on the schedule (Tue · Thu · Sun online batches).' },
+          { num: '03', t: 'Grade by video submission', d: 'Submit your examination kata and kihon by video. The Examination Board reviews quarterly — same syllabus, same standard as the hombu.' },
+        ].map((s) => (
+          <div class="card fade">
+            <div style="font-family:var(--font-display);font-size:2rem;font-weight:600;color:var(--red-3);line-height:1;margin-bottom:14px">{s.num}</div>
+            <div class="card-title" style="font-size:1rem">{s.t}</div>
+            <div class="card-body">{s.d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ COURSE CATALOGUE ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Curriculum</div>
+        <h2 class="display-2">Courses by <em class="r">belt level</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">Every course follows the examination syllabus for its grades — see the <a href="/belt-system" class="text-gold">kata syllabus</a> for what each grading requires.</p>
+      </div>
+
+      <div class="course-list">
+        {courses.map((c: any) => {
+          const ls = lessonsFor(c.title);
+          return (
+            <article class="course fade">
+              <header class="course-head">
+                <div>
+                  <div class="course-eyebrow">{c.level} · {c.belt}</div>
+                  <h3 class="course-title">{c.title}</h3>
+                  <p class="course-desc">{c.desc}</p>
+                </div>
+                <div class="course-count">
+                  <span class="course-count-v">{ls.length}</span>
+                  <span class="course-count-l">Lessons</span>
+                </div>
+              </header>
+              {ls.length > 0 && (
+                <div class="lesson-wrap">
+                  <table class="lesson-tbl">
+                    <tbody>
+                      {ls.map((l: any, i: number) => (
+                        <tr>
+                          <td class="l-no">{String(i + 1).padStart(2, '0')}</td>
+                          <td class="l-title">{l.title}</td>
+                          <td class="l-dur">{l.dur}</td>
+                          <td class="l-access"><span class={`pill ${l.access === 'Free' ? 'live' : ''}`}>{l.access}</span></td>
+                          <td class="l-watch">
+                            {l.video
+                              ? <a href={l.video} target="_blank" rel="noopener" class="text-gold">Watch →</a>
+                              : <span class="text-muted" style="font-size:.78rem">{l.access === 'Free' ? 'Coming online' : 'Members library'}</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+
+      <div class="mt-8 text-muted" style="font-size:.84rem;max-width:70ch">
+        Recorded lessons are released to enrolled members through the federation's members library;
+        free previews are open to everyone. Live-session timings are on the
+        <a href="/schedule" class="text-gold"> class schedule</a>.
+      </div>
+    </div>
+  </section>
+
+  <EnrollCTA programs={programs} phone={fed.contact.phone} />
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .course-list { display: flex; flex-direction: column; gap: 20px; }
+  .course {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .course-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 28px;
+    padding: 26px 28px;
+  }
+  .course-eyebrow {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  .course-title {
+    font-family: var(--font-display);
+    font-size: 1.3rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--white);
+    margin-top: 8px;
+  }
+  .course-desc { color: var(--off-white); font-size: 0.9rem; line-height: 1.7; margin-top: 10px; max-width: 72ch; }
+  .course-count { text-align: center; flex-shrink: 0; }
+  .course-count-v {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 2rem;
+    font-weight: 600;
+    color: var(--gold);
+    line-height: 1;
+  }
+  .course-count-l {
+    font-family: var(--font-display);
+    font-size: 0.58rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .lesson-wrap { overflow-x: auto; border-top: 1px solid var(--border); }
+  .lesson-tbl { width: 100%; border-collapse: collapse; min-width: 640px; }
+  .lesson-tbl td {
+    padding: 13px 18px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+    vertical-align: middle;
+  }
+  .lesson-tbl tr:last-child td { border-bottom: 0; }
+  .lesson-tbl tr:hover td { background: rgba(255, 255, 255, 0.015); }
+  .l-no { font-family: var(--font-display); color: var(--muted); width: 48px; }
+  .l-title { color: var(--white); }
+  .l-dur { color: var(--muted); white-space: nowrap; width: 80px; }
+  .l-access { width: 110px; }
+  .l-watch { text-align: right; white-space: nowrap; width: 140px; font-family: var(--font-display); font-size: 0.74rem; letter-spacing: 0.1em; text-transform: uppercase; }
+</style>

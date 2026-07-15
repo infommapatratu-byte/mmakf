@@ -217,6 +217,43 @@ export const SEED = {
     { id: 'MMAKF-D-1996-00004', name: 'MMAKF Ramgarh Centre', type: 'Dojo',       grade: '—',              state: 'Jharkhand',   unit: 'Ramgarh District',      status: 'Chartered', validTill: 'Mar 2027' },
   ],
 
+  // ─── Online Academy (LMS) ───
+  // Courses group lessons by `course` title match. Lessons with a `video` URL
+  // show a Watch link; access 'Free' is open, 'Members' points to enrolment.
+  courses: [
+    { id: 'found',  title: 'White Belt Foundations',      belt: '10th – 9th Kyu',  level: 'Beginner',     desc: 'Your first hundred hours: stances, first punches and blocks, dojo etiquette, and Taikyoku Shodan / Heian Shodan — everything examined at your first two gradings.' },
+    { id: 'colour', title: 'Coloured Belt Curriculum',    belt: '8th – 5th Kyu',   level: 'Intermediate', desc: 'Heian Nidan through Heian Godan, expanding kihon combinations, and the transition from five-step to one-step kumite.' },
+    { id: 'brown',  title: 'Brown Belt & Tekki',          belt: '4th – 1st Kyu',   level: 'Advanced',     desc: 'Tekki Shodan and Bassai Dai, full-syllabus review under pressure, and semi-free kumite — the road to the black-belt examination.' },
+    { id: 'dan',    title: 'Dan Grading Preparation',     belt: 'Shodan +',        level: 'Black Belt',   desc: 'Kanku Dai, Jion, tokui kata refinement and jiyu kumite. Prepared under the direct authority of the Examination Board.' },
+    { id: 'kids',   title: 'Kids Foundations',            belt: 'Ages 5–14',       level: 'Kids',         desc: 'Focus, balance and discipline through games and structured drills — the syllabus adapted for young warriors.' },
+    { id: 'selfdef', title: "Women's Self-Defense Series", belt: 'Open',           level: 'Community',    desc: "The 12-week curriculum of the Women's Wing: escapes, situational awareness and assertive response, as taught in partner schools." },
+  ],
+
+  lessons: [
+    { course: 'White Belt Foundations',       title: 'Dojo etiquette & the five pillars',      dur: '12 min', video: '', access: 'Free' },
+    { course: 'White Belt Foundations',       title: 'Zenkutsu-dachi & oi-zuki fundamentals',   dur: '18 min', video: '', access: 'Free' },
+    { course: 'White Belt Foundations',       title: 'Age-uke · gedan-barai blocking series',   dur: '15 min', video: '', access: 'Members' },
+    { course: 'White Belt Foundations',       title: 'Taikyoku Shodan — full walkthrough',      dur: '22 min', video: '', access: 'Members' },
+    { course: 'White Belt Foundations',       title: 'Heian Shodan — count by count',           dur: '25 min', video: '', access: 'Members' },
+    { course: 'Coloured Belt Curriculum',     title: 'Heian Nidan — technical breakdown',       dur: '24 min', video: '', access: 'Free' },
+    { course: 'Coloured Belt Curriculum',     title: 'Sanbon kumite: distance & timing',        dur: '19 min', video: '', access: 'Members' },
+    { course: 'Coloured Belt Curriculum',     title: 'Heian Sandan & Yondan — paired study',    dur: '31 min', video: '', access: 'Members' },
+    { course: 'Brown Belt & Tekki',           title: 'Tekki Shodan — the horse-stance kata',    dur: '27 min', video: '', access: 'Members' },
+    { course: 'Brown Belt & Tekki',           title: 'Bassai Dai part I — opening sequences',   dur: '23 min', video: '', access: 'Members' },
+    { course: 'Dan Grading Preparation',      title: 'Kanku Dai — examination standard',        dur: '34 min', video: '', access: 'Members' },
+    { course: 'Dan Grading Preparation',      title: 'Jiyu kumite: strategy for the panel',     dur: '20 min', video: '', access: 'Members' },
+    { course: 'Kids Foundations',             title: 'Balance games & first stances',           dur: '14 min', video: '', access: 'Free' },
+    { course: "Women's Self-Defense Series",  title: 'Week 1 — awareness & stance',             dur: '16 min', video: '', access: 'Free' },
+  ],
+
+  // Official circulars from the national office — shown in the Unit Portal
+  // and listed on /governance.
+  circulars: [
+    { no: 'MMAKF/CIR/2026-07', date: '01 Jul 2026', title: 'State-squad selection criteria for the 2026 season', body: 'All state units must submit their squad longlists (max 20 athletes per category) to the Tournament Commission by 31 July. Selection trials follow the WKF kumite/kata format.' },
+    { no: 'MMAKF/CIR/2026-05', date: '15 May 2026', title: 'Revised grading fee schedule effective 1 June 2026', body: 'The kyu grading fee table published on the Belt System page applies to all units from 1 June. District associations may not levy additional examination charges.' },
+    { no: 'MMAKF/CIR/2026-03', date: '02 Mar 2026', title: 'Annual charter renewals due — Forms A-1 / A-2', body: 'All dojo and unit charters expire 31 March. Submit renewal forms with grading records for the year to the federation office. Late renewals suspend tournament rights.' },
+  ],
+
   // Unit-portal access codes — ADMIN-ONLY key (never in public KEYS/API).
   // The national admin issues, edits and revokes these in the admin panel;
   // a unit signs in to /unit with its code. Rotate the sample codes before
@@ -267,7 +304,7 @@ export const KEYS = [
   'federation', 'stats', 'leadership', 'programs', 'schedule',
   'events', 'news', 'products', 'achievements', 'testimonials', 'beltGrading',
   'facilities', 'faqs', 'gallery', 'syllabus', 'branches', 'stateUnits',
-  'documents', 'results', 'members',
+  'documents', 'results', 'members', 'courses', 'lessons', 'circulars',
 ] as const;
 
 export type DataKey = typeof KEYS[number];

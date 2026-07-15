@@ -15,6 +15,8 @@ const session = getUnitSession(Astro.request.headers.get('cookie'));
 let members: any[] = [];
 let applications: any[] = [];
 let mySubmissions: any[] = [];
+let circulars: any[] = [];
+let documents: any[] = [];
 
 if (session) {
   const st = session.state.toLowerCase();
@@ -27,6 +29,8 @@ if (session) {
   mySubmissions = (((await get<any[]>('submissions')) || []).filter(
     (s: any) => s.unit === session.name
   )).slice(0, 50);
+  circulars = ((await get<any[]>('circulars')) || []).slice(0, 20);
+  documents = (await get<any[]>('documents')) || [];
 }
 ---
 
@@ -100,6 +104,53 @@ if (session) {
         <div class="card"><div class="card-eyebrow">Applications to verify</div><div class="up-stat">{applications.length}</div></div>
         <div class="card"><div class="card-eyebrow">Your submissions</div><div class="up-stat">{mySubmissions.length}</div></div>
       </div>
+
+      {/* ── Circulars from the national office ── */}
+      <section class="up-panel">
+        <h2 class="up-h">Circulars from the national office</h2>
+        <p class="up-sub">Official notices binding on all units. Acknowledge and act by the stated deadlines.</p>
+        <div style="display:flex;flex-direction:column;gap:12px;margin-top:18px">
+          {circulars.length === 0 ? (
+            <div class="card" style="text-align:center;color:var(--muted)">No circulars issued yet.</div>
+          ) : circulars.map((c: any) => (
+            <div class="card" style="padding:20px 24px">
+              <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+                <span class="pill featured">{c.no}</span>
+                <span class="pill">{c.date}</span>
+              </div>
+              <div style="font-family:var(--font-display);font-weight:600;font-size:1rem;color:var(--white);margin-top:12px">{c.title}</div>
+              <div style="color:var(--off-white);font-size:.88rem;line-height:1.7;margin-top:8px">{c.body}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* ── Official documents ── */}
+      <section class="up-panel">
+        <h2 class="up-h">Official documents & forms</h2>
+        <p class="up-sub">Charter renewals, grading applications and federation policies.</p>
+        <div class="card" style="margin-top:18px;padding:0;overflow:hidden">
+          <div style="overflow-x:auto">
+            <table class="up-tbl">
+              <thead><tr><th>Document</th><th>Category</th><th>Reference</th><th>Access</th></tr></thead>
+              <tbody>
+                {documents.map((d: any) => (
+                  <tr>
+                    <td style="font-family:var(--font-display);font-weight:600">{d.title}</td>
+                    <td><span class="pill">{d.cat}</span></td>
+                    <td class="text-muted">{d.ref}</td>
+                    <td>
+                      {d.url
+                        ? <a href={d.url} target="_blank" rel="noopener" class="text-gold">Download →</a>
+                        : <span class="text-muted" style="font-size:.8rem">Request from office</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
 
       {/* ── Submit to national office ── */}
       <section class="up-panel">

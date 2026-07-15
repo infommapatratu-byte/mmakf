@@ -2,6 +2,13 @@
 
 Content-key and schema migrations are recorded here (MASTER-SPEC §5.5).
 
+## 1.7.0 — 2026-07-07 — Online Academy (LMS) + circulars channel
+
+- **Schema**: three new public keys — `courses` (id, title, belt, level, desc), `lessons` (course [exact-title join], title, dur, video URL, access Free/Members), `circulars` (no, date, title, body) — 23 public keys total.
+- **New page /academy** — the LMS surface behind the Online University claim: how-online-training-works, course catalogue grouped by belt level with numbered lesson tables (duration, access pill, Watch link when a video URL is present; "Coming online"/"Members library" states otherwise). Linked from the homepage explore strip and footer Training column; in the sitemap (15 routes).
+- **Unit Portal deepened**: units now see official **Circulars from the national office** (top of portal) and the **Documents & forms register** (charter renewals, grading applications) without leaving the portal.
+- Admin: three new panels — Academy Courses, Academy Lessons (paste a video URL to activate Watch), Circulars.
+
 ## 1.6.0 — 2026-07-06 — Multi-level federation management (Unit Portal)
 
 - **New surface `/unit`** — the management portal for State Associations, District Associations and Clubs. Each unit signs in with an access code and gets tools scoped server-side to its state: members register (read-only), registration applications to verify (with contact details — that's their workflow role), and a submissions channel to the national office (Result report / News report / Event proposal / Grading report, ≤2000 chars).

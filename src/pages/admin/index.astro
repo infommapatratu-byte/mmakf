@@ -82,6 +82,9 @@ if (authed) {
           <a href="#faqs">FAQs</a>
           <a href="#gallery">Gallery</a>
           <a href="#syllabus">Syllabus</a>
+          <a href="#courses">Academy Courses</a>
+          <a href="#lessons">Academy Lessons</a>
+          <a href="#circulars">Circulars</a>
           <a href="#members">Members Register</a>
           <a href="#applications">Applications</a>
           <a href="#unitAccess">Unit Access</a>
@@ -189,6 +192,21 @@ if (authed) {
         <ListPanel id="syllabus" title="Grading Syllabus" subtitle="Kata syllabus rows on the /belt-system page." apiKey="syllabus"
           rows={data!.syllabus} fields={[
             {n:'grade',l:'Grading (e.g. 10th → 9th Kyu)'},{n:'belt',l:'Belt'},{n:'kumite',l:'Kumite'},{n:'kihon',l:'Kihon',full:true},{n:'kata',l:'Kata',full:true}
+          ]} />
+
+        <ListPanel id="courses" title="Academy — Courses" subtitle="Course catalogue on /academy. Lessons attach by exact course title." apiKey="courses"
+          rows={data!.courses} fields={[
+            {n:'id',l:'Short id'},{n:'title',l:'Course title',full:true},{n:'belt',l:'Belt range (e.g. 10th – 9th Kyu)'},{n:'level',l:'Level label'},{n:'desc',l:'Description',full:true,textarea:true}
+          ]} />
+
+        <ListPanel id="lessons" title="Academy — Lessons" subtitle="Paste a video URL to activate the Watch link. Access: Free or Members." apiKey="lessons"
+          rows={data!.lessons} fields={[
+            {n:'course',l:'Course title (exact match)',full:true},{n:'title',l:'Lesson title',full:true},{n:'dur',l:'Duration (e.g. 18 min)'},{n:'access',l:'Access (Free/Members)'},{n:'video',l:'Video URL (optional)',full:true}
+          ]} />
+
+        <ListPanel id="circulars" title="Circulars" subtitle="Official notices to all units — shown in the Unit Portal." apiKey="circulars"
+          rows={data!.circulars} fields={[
+            {n:'no',l:'Circular no. (MMAKF/CIR/2026-08)'},{n:'date',l:'Date'},{n:'title',l:'Title',full:true},{n:'body',l:'Body',full:true,textarea:true}
           ]} />
 
         <ListPanel id="members" title="Members Register" subtitle="The national register powering public ID verification. Add a member here after approving their application. ID format: MMAKF-A/I/D/O-YYYY-NNNNN." apiKey="members"
