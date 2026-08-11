@@ -11,9 +11,15 @@ import {
 // Dev-default secret (no env vars set in test runs)
 const SECRET = 'dev-secret-change-me';
 
+// Since P0-1 (audience separation) each cookie type signs with a derived key
+// and carries an audience claim `k`. The forge helper mirrors that scheme.
+function adminKey(secret = SECRET): Buffer {
+  return crypto.createHmac('sha256', secret).update('mmakf:session:admin:v2').digest();
+}
+
 function forgeCookie(payloadObj: object, secret = SECRET): string {
-  const payload = Buffer.from(JSON.stringify(payloadObj)).toString('base64url');
-  const sig = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+  const payload = Buffer.from(JSON.stringify({ k: 'admin', ...payloadObj })).toString('base64url');
+  const sig = crypto.createHmac('sha256', adminKey(secret)).update(payload).digest('base64url');
   return `mmakf_admin=${payload}.${sig}`;
 }
 

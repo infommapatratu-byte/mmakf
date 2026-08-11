@@ -474,7 +474,7 @@ if (authed) {
     .lp-form .full { grid-column: 1 / -1; }
   </style>
 
-  <script is:inline define:vars={{ data: data }}>
+  <script is:inline define:vars={{ data: { ...data, unitAccess: unitAccessList } }}>
     // Toast
     function toast(msg) {
       const t = document.getElementById('toast');

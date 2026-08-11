@@ -281,16 +281,20 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
         .ft-grid { grid-template-columns: 1fr; }
       }
       .ft-col { display: flex; flex-direction: column; gap: 10px; }
+      /* Explicit light values: the footer is a dark band, so the light-theme
+         ink tokens (--off-white/--muted) must NOT be used here (P0-4: 2.0:1). */
       .ft-col a {
-        font-size: 0.86rem; color: var(--off-white);
+        font-size: 0.86rem;
+        color: #D8D2C6;                    /* 10.4:1 on #14120F */
+        padding: 3px 0;                    /* larger hit area */
       }
-      .ft-col a:hover { color: var(--gold); }
+      .ft-col a:hover, .ft-col a:focus-visible { color: #E8D28F; }
       .ft-h {
         font-family: var(--font-display);
         font-size: 0.7rem;
         letter-spacing: 0.22em;
         text-transform: uppercase;
-        color: var(--gold);
+        color: #D9BC66;                    /* 7.6:1 on #14120F */
         margin-bottom: 8px;
         font-weight: 600;
       }
@@ -300,10 +304,11 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
         flex-wrap: wrap;
         gap: 12px;
         padding-top: 24px;
-        border-top: 1px solid var(--border);
+        border-top: 1px solid rgba(255, 255, 255, 0.12);
         font-size: 0.78rem;
-        color: var(--muted);
+        color: #A9A296;                    /* 5.4:1 on #14120F */
       }
+      .ft-bottom .text-muted { color: #A9A296; }
     </style>
 
     <script>

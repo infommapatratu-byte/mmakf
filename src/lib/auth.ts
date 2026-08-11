@@ -1,10 +1,23 @@
-// Admin auth — signed-cookie session, no JWT lib needed.
-// Cookie value = base64(payload) + "." + base64(hmac-sha256(payload, secret))
+// MMAKF session auth — signed-cookie sessions, no JWT library.
+//
+// Cookie value = base64url(payload) + "." + base64url(HMAC-SHA256(payload, key))
+//
+// SECURITY (P0-1, fixed 2026-08-11): admin and unit sessions are separate
+// *audiences*. Two independent defences prevent a low-privilege unit token from
+// being replayed as a national-admin token:
+//   1. the payload carries an audience claim `k` which the verifier must match;
+//   2. each audience signs with its own derived key (HMAC domain separation),
+//      so a token minted for one audience cannot validate under the other even
+//      if the claim check were bypassed.
+// Legacy tokens (no `k` claim) are rejected — holders simply sign in again.
 
 import crypto from 'node:crypto';
 
-const COOKIE_NAME = 'mmakf_admin';
+const ADMIN_COOKIE = 'mmakf_admin';
+const UNIT_COOKIE = 'mmakf_unit';
 const MAX_AGE = 60 * 60 * 24 * 7; // 7 days
+
+type Audience = 'admin' | 'unit';
 
 function getSecret(): string {
   const s = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD || 'dev-secret-change-me';
@@ -12,115 +25,108 @@ function getSecret(): string {
   return s;
 }
 
+/** Per-audience signing key: HMAC(secret, "mmakf:session:<audience>:v2"). */
+function keyFor(aud: Audience): Buffer {
+  return crypto.createHmac('sha256', getSecret()).update(`mmakf:session:${aud}:v2`).digest();
+}
+
 function b64url(buf: Buffer | string): string {
   return Buffer.from(buf).toString('base64url');
 }
 
-function sign(payload: string): string {
-  return crypto.createHmac('sha256', getSecret()).update(payload).digest('base64url');
+function sign(payload: string, aud: Audience): string {
+  return crypto.createHmac('sha256', keyFor(aud)).update(payload).digest('base64url');
 }
 
-export function createSessionCookie(): string {
-  const payload = b64url(JSON.stringify({ t: Date.now() }));
-  const sig = sign(payload);
-  const value = `${payload}.${sig}`;
-  return `${COOKIE_NAME}=${value}; Path=/; Max-Age=${MAX_AGE}; HttpOnly; SameSite=Lax${
-    process.env.NODE_ENV === 'production' ? '; Secure' : ''
-  }`;
-}
-
-export function clearSessionCookie(): string {
-  return `${COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${
-    process.env.NODE_ENV === 'production' ? '; Secure' : ''
-  }`;
-}
-
-export function isAuthenticated(cookieHeader: string | null | undefined): boolean {
-  if (!cookieHeader) return false;
-  const cookies = Object.fromEntries(
-    cookieHeader.split(';').map((c) => {
+function parseCookies(header: string | null | undefined): Record<string, string> {
+  if (!header) return {};
+  return Object.fromEntries(
+    header.split(';').map((c) => {
       const [k, ...rest] = c.trim().split('=');
       return [k, rest.join('=')];
     })
   );
-  const token = cookies[COOKIE_NAME];
-  if (!token) return false;
-  const [payload, sig] = token.split('.');
-  if (!payload || !sig) return false;
-  const expected = sign(payload);
-  // NFR-SEC-3: constant-time signature comparison
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  if (!crypto.timingSafeEqual(a, b)) return false;
-  try {
-    const { t } = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!t || typeof t !== 'number') return false;
-    if (Date.now() - t > MAX_AGE * 1000) return false;
-    return true;
-  } catch {
-    return false;
-  }
 }
 
-// ─── Unit portal sessions (state / district / club level) ───
-// Same HMAC scheme as the admin cookie, but the payload carries the unit's
-// identity so every portal view/action is scoped server-side.
-
-const UNIT_COOKIE = 'mmakf_unit';
-
-export interface UnitSession {
-  name: string;   // unit display name
-  level: string;  // State | District | Club
-  state: string;  // scoping state
-}
-
-export function createUnitSessionCookie(u: UnitSession): string {
-  const payload = b64url(JSON.stringify({ t: Date.now(), n: u.name, l: u.level, s: u.state }));
-  const sig = sign(payload);
-  return `${UNIT_COOKIE}=${payload}.${sig}; Path=/; Max-Age=${MAX_AGE}; HttpOnly; SameSite=Lax${
+function attrs(): string {
+  return `Path=/; Max-Age=${MAX_AGE}; HttpOnly; SameSite=Lax${
     process.env.NODE_ENV === 'production' ? '; Secure' : ''
   }`;
 }
 
-export function clearUnitSessionCookie(): string {
-  return `${UNIT_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${
+function clearAttrs(): string {
+  return `Path=/; Max-Age=0; HttpOnly; SameSite=Lax${
     process.env.NODE_ENV === 'production' ? '; Secure' : ''
   }`;
 }
 
-export function getUnitSession(cookieHeader: string | null | undefined): UnitSession | null {
-  if (!cookieHeader) return null;
-  const cookies = Object.fromEntries(
-    cookieHeader.split(';').map((c) => {
-      const [k, ...rest] = c.trim().split('=');
-      return [k, rest.join('=')];
-    })
-  );
-  const token = cookies[UNIT_COOKIE];
+/** Verify a token for an audience and return its payload object, or null. */
+function verify(token: string | undefined, aud: Audience): any | null {
   if (!token) return null;
   const [payload, sig] = token.split('.');
   if (!payload || !sig) return null;
-  const expected = sign(payload);
+
+  const expected = sign(payload, aud);
   const a = Buffer.from(sig);
   const b = Buffer.from(expected);
   if (a.length !== b.length) return null;
   if (!crypto.timingSafeEqual(a, b)) return null;
+
   try {
-    const { t, n, l, s } = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!t || typeof t !== 'number') return null;
-    if (Date.now() - t > MAX_AGE * 1000) return null;
-    if (!n || !l || !s) return null;
-    return { name: String(n), level: String(l), state: String(s) };
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!claims || typeof claims !== 'object') return null;
+    if (claims.k !== aud) return null;                      // audience must match
+    if (!claims.t || typeof claims.t !== 'number') return null;
+    if (Date.now() - claims.t > MAX_AGE * 1000) return null; // expiry
+    return claims;
   } catch {
     return null;
   }
 }
 
+// ─── Admin sessions ───
+
+export function createSessionCookie(): string {
+  const payload = b64url(JSON.stringify({ k: 'admin', t: Date.now() }));
+  return `${ADMIN_COOKIE}=${payload}.${sign(payload, 'admin')}; ${attrs()}`;
+}
+
+export function clearSessionCookie(): string {
+  return `${ADMIN_COOKIE}=; ${clearAttrs()}`;
+}
+
+export function isAuthenticated(cookieHeader: string | null | undefined): boolean {
+  return verify(parseCookies(cookieHeader)[ADMIN_COOKIE], 'admin') !== null;
+}
+
+// ─── Unit portal sessions (state / district / club) ───
+
+export interface UnitSession {
+  name: string;
+  level: string;
+  state: string;
+}
+
+export function createUnitSessionCookie(u: UnitSession): string {
+  const payload = b64url(JSON.stringify({ k: 'unit', t: Date.now(), n: u.name, l: u.level, s: u.state }));
+  return `${UNIT_COOKIE}=${payload}.${sign(payload, 'unit')}; ${attrs()}`;
+}
+
+export function clearUnitSessionCookie(): string {
+  return `${UNIT_COOKIE}=; ${clearAttrs()}`;
+}
+
+export function getUnitSession(cookieHeader: string | null | undefined): UnitSession | null {
+  const c = verify(parseCookies(cookieHeader)[UNIT_COOKIE], 'unit');
+  if (!c || !c.n || !c.l || !c.s) return null;
+  return { name: String(c.n), level: String(c.l), state: String(c.s) };
+}
+
+// ─── Password ───
+
 export function checkPassword(submitted: string): boolean {
   const target = process.env.ADMIN_PASSWORD || 'mmakf2025';
   if (!submitted) return false;
-  // constant-time compare
   const a = Buffer.from(submitted);
   const b = Buffer.from(target);
   if (a.length !== b.length) return false;
