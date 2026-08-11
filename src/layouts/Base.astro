@@ -11,7 +11,7 @@ export interface Props {
 
 const {
   title = 'MMAKF — Modern Martial Arts Karate-Do Federation of India',
-  description = "Modern Martial Arts Karate-Do Federation of India (MMAKF). Established 1983. Shotokan Karate under Grandmaster Shihan Pramod Kumar Pathak. Tiger Lee lineage. Patratu, Jharkhand. WKF affiliated.",
+  description = "Modern Martial Arts Karate-Do Federation of India (MMAKF). Established 1983. Shotokan Karate under Grandmaster Shihan Pramod Kumar Pathak. Tiger Lee lineage. Patratu, Jharkhand. WKF international pathway.",
   showNav = true,
   showFooter = true,
 } = Astro.props;
@@ -54,7 +54,7 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
             <Crest size={44} />
             <div class="nav-name">
               <div class="nav-name-1">MMAKF</div>
-              <div class="nav-name-2">Karate-Do Federation of India</div>
+              <div class="nav-name-2">Modern Martial Arts Karate-Do Federation of India</div>
             </div>
           </a>
 
@@ -131,7 +131,7 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
 
           <div class="ft-bottom">
             <div>© {new Date().getFullYear()} MMAKF — Modern Martial Arts Karate-Do Federation of India.</div>
-            <div class="text-muted">Made in Bharat with discipline.</div>
+            <div class="text-muted">Shotokan Karate-Do · Established 1983</div>
           </div>
         </div>
       </footer>
@@ -164,13 +164,16 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
       }
       .nav-name-2 {
         font-family: var(--font-display);
-        font-size: 0.52rem;
-        letter-spacing: 0.24em;
+        font-size: 0.5rem;
+        letter-spacing: 0.16em;
         text-transform: uppercase;
         color: var(--gold-2);
         margin-top: 4px;
         font-weight: 500;
+        max-width: 22ch;
+        line-height: 1.35;
       }
+      @media (max-width: 420px) { .nav-name-2 { max-width: 15ch; } }
       .nav-links { display: flex; align-items: center; gap: 2px; }
       .nav-links a {
         font-family: var(--font-display);
@@ -250,14 +253,15 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
         position: relative;
         overflow: hidden;
       }
+      /* Soft crimson glow instead of an image watermark — the crest asset is an
+         opaque JPEG and painted a visible grey square over the footer links. */
       footer::before {
         content: '';
         position: absolute;
-        right: -40px; bottom: -60px;
-        width: 340px; height: 340px;
-        background: url('/logo.png') no-repeat center / contain;
-        opacity: 0.05;
-        filter: grayscale(1) brightness(2);
+        right: -120px; bottom: -160px;
+        width: 520px; height: 520px;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(142, 18, 18, 0.18), transparent 65%);
         pointer-events: none;
       }
       footer .nav-name-1 { color: #F5F2EC; }

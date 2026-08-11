@@ -2,6 +2,24 @@
 
 Content-key and schema migrations are recorded here (MASTER-SPEC §5.5).
 
+## 1.9.0 — 2026-08-11 — Real transactions + multi-agent audit remediation
+
+**Real functionality replacing placeholder affordances**
+- **Event registration is real**: new `POST /api/event-register` issues an entry reference (`MMAKF-E-YYYY-NNNNNN`), stores entries privately (`eventRegs`, never in `/api/data`), and surfaces them in a new admin **Event Entries** queue. Row "Register" buttons now deep-link to the entry form and pre-select the event — the toast-only buttons are gone.
+- **Shop orders are real**: every product carries a `upi://pay` intent link (amount + payee pre-filled) and a WhatsApp order deep link, replacing the informational toast.
+- Visual depth: crossfading hero slideshow (3 slides, reduced-motion aware), horizontal gallery carousel on the homepage, photo cards for news (new admin `img` field on news).
+
+**Audit remediation** (30-agent visual/content/code audit with adversarial verification)
+- **Critical**: past events were advertised as "next" with live Register buttons. New `src/lib/events.ts` filters and sorts by real dates; concluded events move to an archive table on /events; empty states added.
+- Footer crest watermark painted a grey square (the asset is an opaque JPEG named .png) — replaced with a soft crimson glow; same fix on 404.
+- Shop product photos showed unrelated stock (sweatshirt for a gi, pull-ups for a belt set) — removed in favour of the branded icon fallback.
+- Unverifiable claims corrected: "WKF Affiliated" → "WKF International Pathway" (ticker + site-wide meta), invented "1,200+ women trained" stat, "longest-running in eastern India" superlative, invented state-unit charter years (now blank + "pending confirmation" note), a named individual's "world-record-level" claim, and hedge-worded Guinness copy.
+- Academy: "180+ recorded lessons" claim (14 exist) removed sitewide; pills now state real counts; "1 Lessons" pluralisation fixed; "Online University" unified to **Online Academy**.
+- Gallery captions no longer present stock photography as specific federation moments (now generic training/competition categories).
+- Governance: "National Champion" replaced as an office designation (athletic honour ≠ office); note added that statutory titles are constituted under the bye-laws.
+- Header wordmark shows the full federation name (no "Modern Martial Arts" truncation); footer meme tagline replaced; ad-agency homepage copy rewritten factually.
+- Mobile: Dan credential pills wrap instead of overflowing on /belt-system.
+
 ## 1.8.0 — 2026-08-11 — Light institutional redesign (Master Charter §5–§7)
 
 - **Full light theme**: warm-white paper body with ink text, controlled crimson/gold accents, dark photo heroes and a dark crest-watermarked footer — the national-federation convention (white-major per federation direction; black reserved for hero/footer bands). All 300+ component styles re-tokenized; semantic token names preserved (`--white` = primary text/ink, `--bg` = paper).

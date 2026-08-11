@@ -3,6 +3,7 @@ import Base from '@/layouts/Base.astro';
 import Icon from '@/components/Icon.astro';
 import EnrollCTA from '@/components/EnrollCTA.astro';
 import { getAll } from '@/lib/storage';
+import { upcomingEvents } from '@/lib/events';
 
 export const prerender = false;
 
@@ -10,9 +11,10 @@ const data = await getAll();
 const fed = data.federation;
 const stats = data.stats;
 const programs = data.programs;   // feeds the EnrollCTA program select
-const events = data.events;
+const events = upcomingEvents(data.events);
 const news = data.news;
 const achievements = data.achievements;
+const gallery = (data.gallery || []).filter((g: any) => g.img);
 ---
 
 <Base title={`MMAKF — ${fed.tagline}`}>
@@ -20,7 +22,9 @@ const achievements = data.achievements;
   {/* ═══════ HERO ═══════ */}
   <section id="hero" class="hero">
     <div class="hero-photo" aria-hidden="true">
-      <img src="https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=1800&q=70" alt="" loading="eager" fetchpriority="high" />
+      <img class="hero-slide s1" src="https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=1800&q=70" alt="" loading="eager" fetchpriority="high" />
+      <img class="hero-slide s2" src="https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=1800&q=70" alt="" loading="lazy" />
+      <img class="hero-slide s3" src="https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=1800&q=70" alt="" loading="lazy" />
       <div class="hero-shade"></div>
     </div>
     <div class="hero-bg" aria-hidden="true"></div>
@@ -36,7 +40,7 @@ const achievements = data.achievements;
         </h1>
         <p class="lead fade" style="margin-top:24px">
           {fed.name} — {fed.shortName}. Train under Grandmaster Shihan Pramod Kumar Pathak
-          at our dojo in {fed.headquarters}, or join the Online University from anywhere in the world.
+          at our dojo in {fed.headquarters}, or join the Online Academy from anywhere in the world.
         </p>
         <div class="hero-actions fade" style="margin-top:36px">
           <a href="/programs" class="btn btn-primary">Explore Programs</a>
@@ -48,6 +52,11 @@ const achievements = data.achievements;
       <aside class="hero-right fade">
         <div class="hero-card">
           <div class="hero-card-h">Next on the Calendar</div>
+          {events.length === 0 && (
+            <div class="hero-card-row" style="color:#CFC9BE;font-size:.86rem">
+              The next season's calendar is being finalised — announcements follow shortly.
+            </div>
+          )}
           {events.slice(0, 3).map((e: any) => (
             <div class="hero-card-row">
               <div class="hero-ev-date">
@@ -82,7 +91,7 @@ const achievements = data.achievements;
         <>
           <span>Shotokan Karate</span><span class="dot">·</span>
           <span>Kihon · Kata · Kumite</span><span class="dot">·</span>
-          <span>WKF Affiliated</span><span class="dot">·</span>
+          <span>WKF International Pathway</span><span class="dot">·</span>
           <span>Limca Book of Records</span><span class="dot">·</span>
           <span>Guinness Recognized</span><span class="dot">·</span>
           <span>Tiger Lee Lineage</span><span class="dot">·</span>
@@ -106,13 +115,20 @@ const achievements = data.achievements;
       </div>
       <div class="grid grid-3">
         {news && news.length > 0 ? news.slice(0, 3).map((n: any) => (
-          <article class="card hoverable fade">
-            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
-              <span class="pill featured">{n.type || 'News'}</span>
-              <span class="pill">{n.date}</span>
+          <article class="card hoverable fade news-card">
+            {n.img && (
+              <div class="news-thumb">
+                <img src={n.img} alt={n.title} loading="lazy" />
+              </div>
+            )}
+            <div class="news-body">
+              <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+                <span class="pill featured">{n.type || 'News'}</span>
+                <span class="pill">{n.date}</span>
+              </div>
+              <div class="card-title" style="font-size:1.05rem">{n.title}</div>
+              <div class="card-body">{n.body}</div>
             </div>
-            <div class="card-title" style="font-size:1.05rem">{n.title}</div>
-            <div class="card-body">{n.body}</div>
           </article>
         )) : (
           <div style="grid-column:1/-1;text-align:center;color:var(--muted);padding:24px">
@@ -132,6 +148,11 @@ const achievements = data.achievements;
         <div class="rule"></div>
       </div>
       <div class="events-list fade">
+        {events.length === 0 && (
+          <div class="card" style="text-align:center;color:var(--muted);padding:32px">
+            No events are currently open. The next season's calendar will be announced here.
+          </div>
+        )}
         {events.slice(0, 4).map((e: any) => (
           <div class="event-row">
             <div class="event-date">
@@ -146,7 +167,7 @@ const achievements = data.achievements;
             </div>
             <div class="event-right">
               <div class="event-fee">{e.fee}</div>
-              <button class="btn btn-ghost" onclick="showNotif('Registration desk opens 30 days before each event. Call +91 99391 44318.')">Register</button>
+              <a href="/events#register" class="btn btn-ghost">Register</a>
             </div>
           </div>
         ))}
@@ -187,9 +208,9 @@ const achievements = data.achievements;
       </div>
       <div class="two-col">
         <p class="lead fade">
-          Traditional martial arts schools teach techniques. MMAKF teaches a lineage.
-          Since 1983, the federation has carried the Tiger Lee inheritance of Shotokan Karate
-          through three generations of senseis and tens of thousands of students.
+          MMAKF has taught Shotokan Karate-Do since 1983, carrying the Tiger Lee inheritance
+          through three generations of instructors — from the hombu dojo at Patratu to affiliated
+          units across several states.
         </p>
         <div class="body-txt fade" style="display:flex;flex-direction:column;gap:18px">
           <p>
@@ -198,9 +219,8 @@ const achievements = data.achievements;
             division, an online university, and a formal pathway to the World Karate Federation.
           </p>
           <p>
-            The MMAKF system develops the whole martial artist: technique, character, body, breath,
-            and bearing. Train with us once, and you will understand the difference between learning
-            karate and inheriting it.
+            The MMAKF system develops the whole martial artist: technique, character, body, breath
+            and bearing — examined at every grading, from the first kyu examination to Dan.
           </p>
         </div>
       </div>
@@ -284,8 +304,8 @@ const achievements = data.achievements;
           <h2 class="display-2" style="margin-top:14px">Women's <em class="r">empowerment</em> division.</h2>
           <div class="rule"></div>
           <p class="lead">
-            Led by Sensei Sumitra Devi (III Dan), MMAKF's Women's Wing is one of the longest-running
-            women's martial arts programs in eastern India. Safety. Confidence. Physical authority.
+            Led by Sensei Sumitra Devi (III Dan), the federation's Women's Wing runs dedicated
+            women-only batches and a school self-defense curriculum. Safety. Confidence. Physical authority.
           </p>
           <ul class="virtual-list mt-6">
             <li>Practical self-defense for real-world situations</li>
@@ -297,7 +317,7 @@ const achievements = data.achievements;
         </div>
         <div class="fade women-stats">
           <div class="women-stat"><div class="women-stat-v">14</div><div class="women-stat-l">Partner schools</div></div>
-          <div class="women-stat"><div class="women-stat-v">1,200+</div><div class="women-stat-l">Women trained</div></div>
+          <div class="women-stat"><div class="women-stat-v">Women</div><div class="women-stat-l">Only batches</div></div>
           <div class="women-stat"><div class="women-stat-v">12 wk</div><div class="women-stat-l">Curriculum length</div></div>
           <div class="women-stat"><div class="women-stat-v">Free</div><div class="women-stat-l">For schools</div></div>
         </div>
@@ -325,6 +345,33 @@ const achievements = data.achievements;
       </div>
     </div>
   </section>
+
+  {/* ═══════ GALLERY CAROUSEL ═══════ */}
+  {gallery.length > 0 && (
+    <section id="gallery-strip" class="bg-2">
+      <div class="container">
+        <div class="section-head fade" style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:16px">
+          <div>
+            <div class="eyebrow">Gallery</div>
+            <h2 class="display-2">The federation in <em class="r">action</em>.</h2>
+            <div class="rule"></div>
+          </div>
+          <a href="/gallery" class="btn-link" style="margin-bottom:8px">Full gallery →</a>
+        </div>
+      </div>
+      <div class="gstrip fade" tabindex="0" aria-label="Federation photo gallery — scroll horizontally">
+        {gallery.map((g: any) => (
+          <a href="/gallery" class="gstrip-item">
+            <img src={g.img} alt={g.title} loading="lazy" />
+            <div class="gstrip-cap">
+              <div class="gstrip-cat">{g.cat}</div>
+              <div class="gstrip-title">{g.title}</div>
+            </div>
+          </a>
+        ))}
+      </div>
+    </section>
+  )}
 
   {/* ═══════ CTA / ENROLL ═══════ */}
   <EnrollCTA programs={programs} phone={fed.contact.phone} />
@@ -394,6 +441,26 @@ const achievements = data.achievements;
     object-fit: cover;
     object-position: 70% 40%;
     filter: grayscale(0.35) contrast(1.05) brightness(0.62);
+  }
+  /* Crossfading slideshow — 24s cycle, three slides */
+  .hero-slide {
+    position: absolute; inset: 0;
+    opacity: 0;
+    animation: heroFade 24s infinite;
+  }
+  .hero-slide.s1 { animation-delay: 0s; }
+  .hero-slide.s2 { animation-delay: 8s; }
+  .hero-slide.s3 { animation-delay: 16s; }
+  @keyframes heroFade {
+    0% { opacity: 0; }
+    4% { opacity: 1; }
+    33.3% { opacity: 1; }
+    41% { opacity: 0; }
+    100% { opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hero-slide { animation: none; }
+    .hero-slide.s1 { opacity: 1; }
   }
   .hero-shade {
     position: absolute; inset: 0;
@@ -872,6 +939,69 @@ const achievements = data.achievements;
     color: var(--gold);
   }
 
+  /* ═══════ NEWS CARDS ═══════ */
+  .news-card { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .news-thumb {
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border);
+    background: var(--card-2);
+  }
+  .news-thumb img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    filter: grayscale(0.2) brightness(0.95);
+    transition: filter 0.3s, transform 0.5s;
+  }
+  .news-card:hover .news-thumb img { filter: none; transform: scale(1.03); }
+  .news-body { padding: 24px 26px 28px; }
+
+  /* ═══════ GALLERY STRIP ═══════ */
+  .gstrip {
+    display: flex;
+    gap: 16px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    padding: 0 max(28px, calc((100vw - var(--max-w)) / 2 + 28px)) 8px;
+    scrollbar-width: thin;
+  }
+  .gstrip-item {
+    position: relative;
+    flex: 0 0 clamp(260px, 32vw, 420px);
+    aspect-ratio: 16 / 11;
+    scroll-snap-align: start;
+    border-radius: var(--radius);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--card-2);
+  }
+  .gstrip-item img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    filter: grayscale(0.25) brightness(0.92);
+    transition: filter 0.3s, transform 0.5s;
+  }
+  .gstrip-item:hover img { filter: none; transform: scale(1.03); }
+  .gstrip-cap {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 36px 18px 14px;
+    background: linear-gradient(180deg, transparent, rgba(16, 14, 11, 0.85));
+  }
+  .gstrip-cat {
+    font-family: var(--font-display);
+    font-size: 0.56rem;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: #D9BC66;
+  }
+  .gstrip-title {
+    font-family: var(--font-display);
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #F7F4EE;
+    margin-top: 4px;
+  }
+
   /* ═══════ CONTACT ═══════ */
   .contact-grid {
     display: grid;
@@ -881,14 +1011,3 @@ const achievements = data.achievements;
   @media (max-width: 500px) { .contact-grid { grid-template-columns: 1fr; } }
 </style>
 
-<script>
-  // Shop order intents — data attributes instead of inline handlers (MASTER-SPEC §9.6)
-  document.querySelectorAll('[data-order-name]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const el = btn as HTMLElement;
-      (window as any).showNotif(
-        `Order ${el.dataset.orderName}: pay via UPI ${el.dataset.orderUpi}, then message us with the screenshot.`
-      );
-    });
-  });
-</script>

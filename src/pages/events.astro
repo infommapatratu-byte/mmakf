@@ -3,11 +3,14 @@ import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import EnrollCTA from '@/components/EnrollCTA.astro';
 import { get } from '@/lib/storage';
+import { upcomingEvents, pastEvents } from '@/lib/events';
 
 export const prerender = false;
 
 const fed = await get('federation');
-const events = await get<any[]>('events');
+const allEvents = await get<any[]>('events');
+const events = upcomingEvents(allEvents);
+const concluded = pastEvents(allEvents);
 const news = await get<any[]>('news');
 const results = await get<any[]>('results');
 const programs = await get<any[]>('programs');
@@ -29,6 +32,11 @@ const programs = await get<any[]>('programs');
   <section>
     <div class="container">
       <div class="events-list fade">
+        {events.length === 0 && (
+          <div class="card" style="text-align:center;color:var(--muted);padding:32px">
+            No events are currently open for entry. The next season's calendar will be announced here and circulated to all units.
+          </div>
+        )}
         {events.map((e: any) => (
           <div class="event-row">
             <div class="event-date">
@@ -46,13 +54,98 @@ const programs = await get<any[]>('programs');
             </div>
             <div class="event-right">
               <div class="event-fee">{e.fee}</div>
-              <button class="btn btn-ghost" onclick="showNotif('Registration desk opens 30 days before each event. Call +91 99391 44318.')">Register</button>
+              <a href="#register" class="btn btn-ghost" data-reg-event={e.t}>Register</a>
             </div>
           </div>
         ))}
       </div>
     </div>
   </section>
+
+  {/* ═══════ EVENT REGISTRATION ═══════ */}
+  <section id="register">
+    <div class="container reg2-grid">
+      <div class="fade">
+        <div class="eyebrow">Entries</div>
+        <h2 class="display-2" style="margin-top:14px">Event <em class="r">registration</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Register your entry online — you receive an entry reference number instantly.
+          The Tournament Commission confirms categories, eligibility and any entry fee
+          with you before the event.
+        </p>
+      </div>
+      <div class="fade">
+        <form id="evRegForm" class="card" style="padding:28px">
+          <div class="ev-fields">
+            <div class="ev-full">
+              <label class="input-label" for="ev-event">Event</label>
+              <select class="input" id="ev-event" name="event" required>
+                <option value="">Select event</option>
+                {events.map((e: any) => <option>{e.t}</option>)}
+              </select>
+            </div>
+            <div>
+              <label class="input-label" for="ev-name">Full name</label>
+              <input class="input" id="ev-name" name="name" required maxlength="120" />
+            </div>
+            <div>
+              <label class="input-label" for="ev-phone">Phone (+91)</label>
+              <input class="input" id="ev-phone" name="phone" required maxlength="32" />
+            </div>
+            <div class="ev-full">
+              <label class="input-label" for="ev-unit">Dojo / Club / Unit (optional)</label>
+              <input class="input" id="ev-unit" name="unit" maxlength="120" />
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;margin-top:18px">Submit Entry</button>
+          <div style="margin-top:12px;color:var(--muted);font-size:.72rem;text-align:center">
+            Details are used only to process your entry for the selected event.
+          </div>
+          <noscript>
+            <div style="margin-top:12px;color:var(--off-white);font-size:.8rem;text-align:center">
+              JavaScript is required to register online — call <a href="tel:+919939144318" class="text-gold">{fed.contact.phone}</a>.
+            </div>
+          </noscript>
+        </form>
+        <div id="evRegDone" class="card" style="display:none;text-align:center;padding:28px">
+          <div style="font-family:var(--font-display);font-size:.7rem;letter-spacing:.24em;text-transform:uppercase;color:var(--gold-2);padding-bottom:16px;border-bottom:1px solid var(--border);margin-bottom:18px">Entry Received</div>
+          <p class="body-txt" style="margin-bottom:14px">Your entry reference number is</p>
+          <div id="evRegRef" style="font-family:var(--font-display);font-size:1.5rem;font-weight:600;letter-spacing:.08em;color:var(--gold-2);border:1px dashed var(--gold-dim);padding:14px;border-radius:var(--radius)"></div>
+          <p class="body-txt" style="margin-top:16px;font-size:.86rem">Quote it in all correspondence. The Tournament Commission will contact you to confirm your category.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ CONCLUDED EVENTS ═══════ */}
+  {concluded.length > 0 && (
+    <section id="archive">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">Archive</div>
+          <h2 class="display-2">Concluded <em>events</em>.</h2>
+          <div class="rule gold"></div>
+          <p class="lead">Entry for these events has closed. Outcomes appear in the results register below.</p>
+        </div>
+        <div class="arch-wrap fade">
+          <table class="arch-tbl">
+            <thead><tr><th>Date</th><th>Event</th><th>Type</th><th>Venue</th></tr></thead>
+            <tbody>
+              {concluded.map((e: any) => (
+                <tr>
+                  <td class="text-muted" style="white-space:nowrap">{e.day} {e.mo} {e.year}</td>
+                  <td style="font-family:var(--font-display);font-weight:600">{e.t}</td>
+                  <td class="text-muted">{e.type}</td>
+                  <td class="text-muted">{e.loc}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  )}
 
   {/* ═══════ RESULTS ═══════ */}
   <section id="results" class="bg2">
@@ -89,13 +182,18 @@ const programs = await get<any[]>('programs');
       </div>
       <div class="grid grid-3">
         {news && news.length > 0 ? news.map((n: any) => (
-          <article class="card fade">
-            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
-              <span class="pill featured">{n.type || 'News'}</span>
-              <span class="pill">{n.date}</span>
+          <article class="card hoverable fade news-card">
+            {n.img && (
+              <div class="news-thumb"><img src={n.img} alt={n.title} loading="lazy" /></div>
+            )}
+            <div class="news-body">
+              <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+                <span class="pill featured">{n.type || 'News'}</span>
+                <span class="pill">{n.date}</span>
+              </div>
+              <div class="card-title" style="font-size:1.05rem">{n.title}</div>
+              <div class="card-body">{n.body}</div>
             </div>
-            <div class="card-title" style="font-size:1.05rem">{n.title}</div>
-            <div class="card-body">{n.body}</div>
           </article>
         )) : (
           <div style="grid-column:1/-1;text-align:center;color:var(--muted);padding:24px">
@@ -109,8 +207,100 @@ const programs = await get<any[]>('programs');
   <EnrollCTA programs={programs} phone={fed.contact.phone} />
 </Base>
 
+<script>
+  // Row Register links pre-select their event in the entry form
+  document.querySelectorAll('[data-reg-event]').forEach((a) => {
+    a.addEventListener('click', () => {
+      const sel = document.querySelector('#ev-event') as HTMLSelectElement | null;
+      const t = (a as HTMLElement).dataset.regEvent || '';
+      if (sel) {
+        for (const opt of Array.from(sel.options)) {
+          if (opt.value === t || opt.text === t) { sel.value = opt.value || opt.text; break; }
+        }
+      }
+    });
+  });
+
+  // Entry submission
+  const evForm = document.getElementById('evRegForm') as HTMLFormElement | null;
+  evForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = evForm.querySelector('button[type=submit]') as HTMLButtonElement;
+    btn.disabled = true; btn.textContent = 'Submitting…';
+    const body = Object.fromEntries(new FormData(evForm).entries());
+    try {
+      const res = await fetch('/api/event-register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error('bad');
+      (document.getElementById('evRegRef') as HTMLElement).textContent = data.ref;
+      evForm.style.display = 'none';
+      (document.getElementById('evRegDone') as HTMLElement).style.display = 'block';
+      (window as any).showNotif('Entry received. Note your reference number.');
+    } catch {
+      (window as any).showNotif('Could not submit. Please call +91 99391 44318.');
+      btn.disabled = false; btn.textContent = 'Submit Entry';
+    }
+  });
+</script>
+
 <style>
   .bg2 { background: var(--bg-2); }
+
+  .reg2-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.1fr;
+    gap: 56px;
+    align-items: start;
+  }
+  @media (max-width: 900px) { .reg2-grid { grid-template-columns: 1fr; } }
+  .ev-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 520px) { .ev-fields { grid-template-columns: 1fr; } }
+  .ev-full { grid-column: 1 / -1; }
+
+  .news-card { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .news-thumb {
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border);
+    background: var(--card-2);
+  }
+  .news-thumb img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    filter: grayscale(0.2) brightness(0.95);
+    transition: filter 0.3s, transform 0.5s;
+  }
+  .news-card:hover .news-thumb img { filter: none; transform: scale(1.03); }
+  .news-body { padding: 24px 26px 28px; }
+
+  .arch-wrap { overflow-x: auto; }
+  .arch-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    min-width: 680px;
+  }
+  .arch-tbl th, .arch-tbl td {
+    padding: 13px 18px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.87rem;
+  }
+  .arch-tbl th {
+    background: var(--bg-2);
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    font-weight: 500;
+  }
+  .arch-tbl tr:last-child td { border-bottom: 0; }
 
   .results-list { display: flex; flex-direction: column; gap: 12px; }
   .result-row {

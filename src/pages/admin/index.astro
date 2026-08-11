@@ -13,12 +13,14 @@ let leadList: any[] = [];
 let regList: any[] = [];
 let subList: any[] = [];
 let unitAccessList: any[] = [];
+let eventRegList: any[] = [];
 if (authed) {
   const { get } = await import('@/lib/storage');
   leadList = (await get<any[]>('leads')) || [];
   regList = (await get<any[]>('registrations')) || [];
   subList = (await get<any[]>('submissions')) || [];
   unitAccessList = (await get<any[]>('unitAccess')) || [];
+  eventRegList = (await get<any[]>('eventRegs')) || [];
 }
 ---
 
@@ -34,7 +36,7 @@ if (authed) {
           <h1 class="card-title" style="font-size:1.2rem;margin-bottom:24px">Sign in</h1>
           <label class="input-label">Password</label>
           <input class="input" type="password" name="password" required autofocus />
-          <div id="loginErr" style="color:#ff6464;font-size:.85rem;margin-top:12px;display:none">Invalid password</div>
+          <div id="loginErr" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none">Invalid password</div>
           <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;justify-content:center">Unlock</button>
           <p style="margin-top:20px;font-size:.75rem;color:var(--muted);text-align:center">
             Authorised personnel only. All actions are logged.
@@ -87,6 +89,7 @@ if (authed) {
           <a href="#circulars">Circulars</a>
           <a href="#members">Members Register</a>
           <a href="#applications">Applications</a>
+          <a href="#eventRegs">Event Entries</a>
           <a href="#unitAccess">Unit Access</a>
           <a href="#submissions">Unit Submissions</a>
           <a href="#documents">Documents</a>
@@ -169,9 +172,9 @@ if (authed) {
             {n:'day',l:'Day'},{n:'mo',l:'Month'},{n:'year',l:'Year'},{n:'type',l:'Type'},{n:'fee',l:'Fee'},{n:'t',l:'Title',full:true},{n:'loc',l:'Location',full:true}
           ]} />
 
-        <ListPanel id="news" title="News & Announcements" subtitle="Posts shown in the News section." apiKey="news"
+        <ListPanel id="news" title="News & Announcements" subtitle="Posts shown in the News section. Add an image URL for a photo card." apiKey="news"
           rows={data!.news} fields={[
-            {n:'title',l:'Title',full:true},{n:'date',l:'Date'},{n:'type',l:'Type'},{n:'body',l:'Body',full:true,textarea:true}
+            {n:'title',l:'Title',full:true},{n:'date',l:'Date'},{n:'type',l:'Type'},{n:'img',l:'Image URL (optional)',full:true},{n:'body',l:'Body',full:true,textarea:true}
           ]} />
 
         <ListPanel id="facilities" title="Dojo Facilities" subtitle="Facilities shown on the /facilities page." apiKey="facilities"
@@ -234,6 +237,34 @@ if (authed) {
                         <td>{r.type}</td>
                         <td class="text-muted">{r.state}{r.district ? ` · ${r.district}` : ''}</td>
                         <td class="text-muted">{r.grade || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section id="eventRegs" class="admin-panel">
+          <h2 class="admin-h">Event Entries</h2>
+          <p class="admin-sub">Registrations submitted from /events. Confirm category, eligibility and entry fee with each entrant. Most recent first.</p>
+          <div class="card" style="margin-top:20px;padding:0;overflow:hidden">
+            {eventRegList.length === 0 ? (
+              <div style="padding:32px;text-align:center;color:var(--muted)">No entries yet.</div>
+            ) : (
+              <div style="overflow-x:auto">
+                <table class="schedule-tbl" style="min-width:780px">
+                  <thead><tr><th>When</th><th>Ref</th><th>Event</th><th>Name</th><th>Phone</th><th>Unit</th></tr></thead>
+                  <tbody>
+                    {eventRegList.slice(0, 200).map((r: any) => (
+                      <tr>
+                        <td class="text-muted" style="font-size:.78rem;white-space:nowrap">{new Date(r.ts).toLocaleString('en-IN')}</td>
+                        <td class="text-gold" style="font-family:var(--font-display);white-space:nowrap">{r.ref}</td>
+                        <td style="font-size:.85rem">{r.event}</td>
+                        <td>{r.name}</td>
+                        <td>{r.phone}</td>
+                        <td class="text-muted">{r.unit || '—'}</td>
                       </tr>
                     ))}
                   </tbody>

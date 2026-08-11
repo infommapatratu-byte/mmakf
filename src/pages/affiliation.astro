@@ -71,7 +71,7 @@ const ladder = [
                 <td class="text-muted">{s.unit}</td>
                 <td class="text-muted">{s.hq}</td>
                 <td class="text-muted">{s.districts}</td>
-                <td class="text-muted">{s.since}</td>
+                <td class="text-muted">{s.since || '—'}</td>
                 <td><span class={`pill ${String(s.status).includes('Host') ? 'featured' : ''}`}>{s.status}</span></td>
               </tr>
             ))}
@@ -79,7 +79,8 @@ const ladder = [
         </table>
       </div>
       <div class="mt-6 text-muted" style="font-size:.82rem">
-        To charter a new state or district unit, write to
+        Charter dates and district counts are maintained by the federation office; blank entries
+        are pending confirmation. To charter a new state or district unit, write to
         <a href={`mailto:${fed.contact.email}?subject=State/District Unit Charter Enquiry`} class="text-gold"> {fed.contact.email}</a> —
         the federation office will issue the charter requirements and constitution template.
       </div>
@@ -96,7 +97,7 @@ const ladder = [
       </div>
       <div class="grid grid-4">
         {[
-          { icon: 'users',      t: 'Student Membership',   d: 'Individual enrolment at the hombu dojo, an affiliated centre or the Online University. Grading record maintained by the federation.' },
+          { icon: 'users',      t: 'Student Membership',   d: 'Individual enrolment at the hombu dojo, an affiliated centre or the Online Academy. Grading record maintained by the federation.' },
           { icon: 'karate-gi',  t: 'Dojo Affiliation',     d: 'Existing clubs adopt the MMAKF syllabus and grading authority under an annual charter, keeping their own identity.' },
           { icon: 'school',     t: 'School Programs',      d: 'Schools host structured MMAKF batches on campus — the model that reached 130+ schools at its peak.' },
           { icon: 'globe',      t: 'Athlete Registration', d: 'Competitive members are registered under WKF SportsID and Sportdata for national and international ranking.' },

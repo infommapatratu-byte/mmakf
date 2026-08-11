@@ -6,7 +6,7 @@ export const prerender = false;
 
 <Base title="Page not found — MMAKF" description="The page you were looking for does not exist.">
   <section class="nf">
-    <img class="nf-crest" src="/logo.png" alt="" aria-hidden="true" />
+
     <div class="container" style="position:relative;z-index:1;text-align:center">
       <div class="eyebrow center">404</div>
       <h1 class="display-1" style="margin-top:16px">Lost on the <em>mat</em>?</h1>
@@ -32,14 +32,15 @@ export const prerender = false;
     overflow: hidden;
     border-top: 0;
   }
-  .nf-crest {
+  .nf::before {
+    content: '';
     position: absolute;
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
-    width: clamp(280px, 45vw, 520px);
-    opacity: 0.05;
-    filter: grayscale(1);
+    width: clamp(320px, 55vw, 640px);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(142, 18, 18, 0.07), transparent 62%);
     pointer-events: none;
-    user-select: none;
   }
 </style>

@@ -91,7 +91,7 @@ const beltColors = ['#e8e8e8', '#e6c619', '#e07820', '#2e8b3a', '#2456b0', '#6a3
         </table>
       </div>
       <div class="mt-6 text-muted" style="font-size:.82rem">
-        Gradings are held quarterly at the hombu dojo and by video submission through the Online University.
+        Gradings are held quarterly at the hombu dojo and by video submission through the Online Academy.
         Dan examinations are conducted personally under the authority of Shihan Pramod Kumar Pathak.
       </div>
     </div>
@@ -159,6 +159,10 @@ const beltColors = ['#e8e8e8', '#e6c619', '#e07820', '#2e8b3a', '#2456b0', '#6a3
   .belts-row:last-child { border: 0; }
   .belts-row.dan { padding: 16px 24px; gap: 14px; }
   .belts-row.dan > div:first-child { flex: 1; min-width: 0; }
+  @media (max-width: 560px) {
+    .belts-row.dan { flex-direction: column; align-items: flex-start; gap: 10px; }
+    .belts-row.dan .pill { white-space: normal; text-align: left; line-height: 1.5; }
+  }
   .belt-swatch {
     display: inline-block;
     width: 26px; height: 8px;

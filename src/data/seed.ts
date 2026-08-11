@@ -42,8 +42,8 @@ export const SEED = {
     { name: 'Sensei Sumitra Devi', role: 'Lady Instructor · Tournament Secretary', rank: 'III Dan Black Belt', since: '2010', specialty: "Women's self-defense & empowerment", note: "Women's Program & Self-Defense", img: '',
       bio: "Head of the Women's Empowerment Division and the federation's Tournament Secretary. Sensei Sumitra leads dedicated women-only batches and the free 12-week self-defense curriculum now running in 14 partner schools across Ramgarh and Hazaribagh districts." },
     { name: 'Siddharth Prasad', role: 'Co-CEO', rank: 'WKF Registered', since: '2018', specialty: 'WKF registration · digital operations', note: 'WKF Registered Athlete & Coach', img: '',
-      bio: 'WKF-registered athlete and coach, and the federation\'s Co-CEO. Siddharth manages MMAKF\'s international registrations (WKF SportsID, Sportdata), the Online University, and the federation\'s digital operations.' },
-    { name: 'Daksh Mohan Mishra', role: 'National Champion', rank: 'II Dan Black Belt', since: '2015', specialty: 'Competitive / WKF track', note: 'Competitive / WKF Track', img: '',
+      bio: 'WKF-registered athlete and coach, and the federation\'s Co-CEO. Siddharth manages MMAKF\'s international registrations (WKF SportsID, Sportdata), the Online Academy, and the federation\'s digital operations.' },
+    { name: 'Daksh Mohan Mishra', role: 'Athletes Commission · Competition Coach', rank: 'II Dan Black Belt', since: '2015', specialty: 'Competitive / WKF track', note: 'Competitive / WKF Track', img: '',
       bio: 'National champion and the federation\'s standard-bearer on the competitive circuit. Daksh coaches the Competitive / WKF Track, taking athletes from district championships toward national and international ranking.' },
   ],
 
@@ -56,7 +56,7 @@ export const SEED = {
     { icon: 'women',      name: "Women's Program",         desc: "MMAKF's dedicated women's martial arts and self-defense division. Safety awareness, confidence building and physical empowerment.", lvl: 'Women · Ages 14+', fee: 800, mode: 'Dojo / Online' },
     { icon: 'star',       name: 'Kids Program',            desc: 'Fun, structured martial arts for children aged 5–14. Build motor skills, focus, discipline and confidence from day one.', lvl: 'Ages 5–14', fee: 900, mode: 'Dojo' },
     { icon: 'medal',      name: 'Competitive / WKF Track', desc: 'Structured competitive pathway from district championships to WKF international registration.', lvl: 'Intermediate+', fee: 1500, mode: 'Dojo' },
-    { icon: 'globe',      name: 'Online University',       desc: "Complete Shotokan curriculum via MMAKF's virtual university. Recorded library, live sessions, belt certification.", lvl: 'All Levels · Worldwide', fee: 999, mode: 'Online' },
+    { icon: 'globe',      name: 'Online Academy',       desc: "Complete Shotokan curriculum via MMAKF's virtual university. Recorded library, live sessions, belt certification.", lvl: 'All Levels · Worldwide', fee: 999, mode: 'Online' },
     { icon: 'black-belt', name: 'Dan Grading Preparation', desc: 'Intensive preparation for MMAKF black belt grading under Shihan Pramod Kumar Pathak.', lvl: 'Brown Belt+', fee: 1800, mode: 'Dojo / Camp' },
   ],
 
@@ -85,35 +85,35 @@ export const SEED = {
   ],
 
   news: [
-    { id: 1, title: 'Registrations open for District Championship 2026', date: '12 May 2026', type: 'Announcement', body: 'Registrations are now open for the MMAKF District Karate Championship 2026, to be held at the Indoor Sports Complex on 22 June. All affiliated dojos and individual athletes from coloured belt and above are eligible. Entry fee ₹300 per athlete; team registrations close 15 June.' },
-    { id: 2, title: 'Sensei Vikas Pathak elevated to IV Dan',             date: '04 May 2026', type: 'Promotion',    body: 'In a formal grading ceremony presided over by Grandmaster Shihan Pramod Kumar Pathak, Chief Instructor Sensei Vikas Pathak was elevated to IV Dan Black Belt in recognition of two decades of service to the federation and the Tiger Lee Shotokan lineage.' },
-    { id: 3, title: "Women's Self-Defense program now in 14 schools",      date: '21 Apr 2026', type: 'Community',     body: "MMAKF's Women's Self-Defense initiative, led by Sensei Sumitra Devi, has now been adopted by 14 schools across the Ramgarh and Hazaribagh districts. The program runs as a free 12-week curriculum covering practical defense, situational awareness, and confidence building." },
+    { id: 1, title: 'Registrations open for District Championship 2026', date: '12 May 2026', type: 'Announcement', img: 'https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=1200&q=70', body: 'Registrations are now open for the MMAKF District Karate Championship 2026, to be held at the Indoor Sports Complex on 22 June. All affiliated dojos and individual athletes from coloured belt and above are eligible. Entry fee ₹300 per athlete; team registrations close 15 June.' },
+    { id: 2, title: 'Sensei Vikas Pathak elevated to IV Dan',             date: '04 May 2026', type: 'Promotion',    img: 'https://images.unsplash.com/photo-1593810450967-f9c42742e326?auto=format&fit=crop&w=1200&q=70', body: 'In a formal grading ceremony presided over by Grandmaster Shihan Pramod Kumar Pathak, Chief Instructor Sensei Vikas Pathak was elevated to IV Dan Black Belt in recognition of two decades of service to the federation and the Tiger Lee Shotokan lineage.' },
+    { id: 3, title: "Women's Self-Defense program now in 14 schools",      date: '21 Apr 2026', type: 'Community',     img: 'https://images.unsplash.com/photo-1571902943202-507ec2618e8f?auto=format&fit=crop&w=1200&q=70', body: "MMAKF's Women's Self-Defense initiative, led by Sensei Sumitra Devi, has now been adopted by 14 schools across the Ramgarh and Hazaribagh districts. The program runs as a free 12-week curriculum covering practical defense, situational awareness, and confidence building." },
   ],
 
   // `img` is an Unsplash hotlink (photography pass — MASTER-SPEC AS-6 revised);
   // `icon` remains the fallback when img is absent or fails.
   products: [
-    { id: 1,  n: 'Karate-Gi Premium — MMAKF',     cat: 'uniform',     icon: 'karate-gi',  p: 1800, m: 2600, badge: 'Best Seller', img: 'https://images.unsplash.com/photo-1620799140408-edc6dcb6d633?auto=format&fit=crop&w=900&q=70' },
-    { id: 2,  n: 'Competition Gi — Lightweight',  cat: 'uniform',     icon: 'karate-gi',  p: 2400, m: 3500, badge: null,          img: 'https://images.unsplash.com/photo-1564415315949-7a0c4c73aab4?auto=format&fit=crop&w=900&q=70' },
-    { id: 3,  n: 'Kids Training Gi',              cat: 'uniform',     icon: 'karate-gi',  p: 1200, m: 1800, badge: 'New',         img: 'https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=900&q=70' },
-    { id: 4,  n: 'MMAKF Belt Set (White–Brown)',  cat: 'accessories', icon: 'black-belt', p: 650,  m: 1000, badge: null,          img: 'https://images.unsplash.com/photo-1526506118085-60ce8714f8c5?auto=format&fit=crop&w=900&q=70' },
-    { id: 5,  n: 'Black Belt — MMAKF Certified',  cat: 'accessories', icon: 'black-belt', p: 900,  m: 1400, badge: null,          img: 'https://images.unsplash.com/photo-1605296867304-46d5465a13f1?auto=format&fit=crop&w=900&q=70' },
-    { id: 6,  n: 'Boxing Gloves 12oz',            cat: 'equipment',   icon: 'kumite',     p: 1400, m: 2000, badge: null,          img: 'https://images.unsplash.com/photo-1549719386-74dfcbf7dbed?auto=format&fit=crop&w=900&q=70' },
-    { id: 7,  n: 'Shin Guards — Competition',     cat: 'equipment',   icon: 'shield',     p: 950,  m: 1500, badge: 'Sale',        img: 'https://images.unsplash.com/photo-1622599511051-16f55a1234d0?auto=format&fit=crop&w=900&q=70' },
-    { id: 8,  n: 'Focus Mitts Pair',              cat: 'equipment',   icon: 'kumite',     p: 1100, m: 1700, badge: null,          img: 'https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=900&q=70' },
-    { id: 9,  n: 'Sparring Headgear',             cat: 'equipment',   icon: 'shield',     p: 1700, m: 2600, badge: null,          img: 'https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=900&q=70' },
-    { id: 10, n: 'MMAKF Training Bag',            cat: 'accessories', icon: 'book',       p: 1300, m: 1900, badge: 'New',         img: 'https://images.unsplash.com/photo-1584735935682-2f2b69dff9d2?auto=format&fit=crop&w=900&q=70' },
-    { id: 11, n: 'MMAKF T-Shirt — Black',         cat: 'merch',       icon: 'karate-gi',  p: 599,  m: 899,  badge: 'Popular',     img: 'https://images.unsplash.com/photo-1618354691373-d851c5c3a990?auto=format&fit=crop&w=900&q=70' },
-    { id: 12, n: 'Tiger Lee Edition Hoodie',      cat: 'merch',       icon: 'medal',      p: 1499, m: 2200, badge: 'Limited',     img: 'https://images.unsplash.com/photo-1556821840-3a63f95609a7?auto=format&fit=crop&w=900&q=70' },
+    { id: 1,  n: 'Karate-Gi Premium — MMAKF',     cat: 'uniform',     icon: 'karate-gi',  p: 1800, m: 2600, badge: 'Best Seller' },
+    { id: 2,  n: 'Competition Gi — Lightweight',  cat: 'uniform',     icon: 'karate-gi',  p: 2400, m: 3500, badge: null },
+    { id: 3,  n: 'Kids Training Gi',              cat: 'uniform',     icon: 'karate-gi',  p: 1200, m: 1800, badge: 'New' },
+    { id: 4,  n: 'MMAKF Belt Set (White–Brown)',  cat: 'accessories', icon: 'black-belt', p: 650,  m: 1000, badge: null },
+    { id: 5,  n: 'Black Belt — MMAKF Certified',  cat: 'accessories', icon: 'black-belt', p: 900,  m: 1400, badge: null },
+    { id: 6,  n: 'Boxing Gloves 12oz',            cat: 'equipment',   icon: 'kumite',     p: 1400, m: 2000, badge: null },
+    { id: 7,  n: 'Shin Guards — Competition',     cat: 'equipment',   icon: 'shield',     p: 950,  m: 1500, badge: 'Sale' },
+    { id: 8,  n: 'Focus Mitts Pair',              cat: 'equipment',   icon: 'kumite',     p: 1100, m: 1700, badge: null },
+    { id: 9,  n: 'Sparring Headgear',             cat: 'equipment',   icon: 'shield',     p: 1700, m: 2600, badge: null },
+    { id: 10, n: 'MMAKF Training Bag',            cat: 'accessories', icon: 'book',       p: 1300, m: 1900, badge: 'New' },
+    { id: 11, n: 'MMAKF T-Shirt — Black',         cat: 'merch',       icon: 'karate-gi',  p: 599,  m: 899,  badge: 'Popular' },
+    { id: 12, n: 'Tiger Lee Edition Hoodie',      cat: 'merch',       icon: 'medal',      p: 1499, m: 2200, badge: 'Limited' },
   ],
 
   achievements: [
     { icon: 'book',   title: 'Limca Book of Records',     body: "MMAKF's extraordinary mass training achievements have been recognized in the Limca Book of Records.", badge: 'National Record' },
-    { icon: 'medal',  title: 'Guinness Recognition',       body: 'Institutional evidence of Guinness World Records-linked recognition.', badge: 'World Record' },
+    { icon: 'medal',  title: 'Guinness Recognition',       body: 'Federation records cite Guinness World Records-linked recognition for mass training achievements. Documentation is held at the federation office.', badge: 'Recognition' },
     { icon: 'globe',  title: 'WKF International Pathway',  body: 'MMAKF-trained coaches and athletes are formally registered under WKF SportsID and Sportdata ranking systems.', badge: 'WKF Registered' },
     { icon: 'school', title: '130+ Schools Reached',       body: 'At its historical peak, MMAKF operated structured martial arts programs across more than 130 schools.', badge: 'Institutional Scale' },
     { icon: 'users',  title: 'Multi-Generational Legacy',  body: 'Since 1983, MMAKF has produced champions, black belts, coaches, instructors and referees.', badge: '42+ Years' },
-    { icon: 'star',   title: 'Priya Priyadarshini',        body: 'A standout MMAKF student recognized for world-record-level achievement.', badge: 'World Level' },
+    { icon: 'star',   title: 'Athlete Development',        body: 'MMAKF students have represented the federation at district, state and national level, and progressed to WKF-registered competition.', badge: 'Competitive Pathway' },
   ],
 
   testimonials: [
@@ -127,7 +127,7 @@ export const SEED = {
     { icon: 'mat',       name: 'Main Training Hall',            tag: 'Training', desc: 'A 3,000 sq ft matted dojo floor with competition-grade tatami, full-length mirrors and demarcated kumite courts for safe, structured practice.' },
     { icon: 'target',    name: 'Impact Training Bay',           tag: 'Training', desc: 'Heavy bags, makiwara boards, focus mitts and kick shields for full-power striking practice under instructor supervision.' },
     { icon: 'dumbbell',  name: 'Strength & Conditioning Zone',  tag: 'Training', desc: 'Free weights, resistance bands, plyo boxes and skipping stations for karate-specific strength, speed and mobility work.' },
-    { icon: 'monitor',   name: 'Online Class Studio',           tag: 'Digital',  desc: 'The broadcast room behind the MMAKF Online University — live classes, a recorded syllabus library and video-submission grading.' },
+    { icon: 'monitor',   name: 'Online Class Studio',           tag: 'Digital',  desc: 'The broadcast room behind the MMAKF Online Academy — live classes, a recorded syllabus library and video-submission grading.' },
     { icon: 'locker',    name: 'Changing Rooms & Lockers',      tag: 'Amenity',  desc: 'Separate male and female changing rooms with secure lockers so students can train light and store gear safely.' },
     { icon: 'water',     name: 'Drinking Water Station',        tag: 'Amenity',  desc: 'RO-purified drinking water, free for every student, parent and guest — hydration is part of the training system.' },
     { icon: 'first-aid', name: 'First-Aid & Recovery Corner',   tag: 'Safety',   desc: 'A stocked first-aid station with ice packs and a rest area. Senior instructors are trained in sports first response.' },
@@ -144,22 +144,23 @@ export const SEED = {
     { q: 'How long does it take to earn a black belt?',       a: 'A dedicated student training consistently typically reaches Shodan (1st Dan) in 4–6 years, progressing through the ten kyu grades. There are no shortcuts — every MMAKF black belt is examined personally under the authority of Shihan Pramod Kumar Pathak.' },
     { q: 'Are MMAKF belts and certificates recognised?',      a: 'Yes. MMAKF operates on the WKF international pathway — our coaches and athletes are registered under WKF SportsID and Sportdata ranking systems, and gradings follow the formal Shotokan syllabus of the Tiger Lee lineage.' },
     { q: 'Is there a dedicated program for women?',           a: "Yes — the Women's Empowerment Division led by Sensei Sumitra Devi (III Dan) runs dedicated women-only batches, a free 12-week self-defense curriculum through partner schools, and regular workshops." },
-    { q: 'Can I really learn karate online?',                 a: 'The Online University carries the same syllabus, the same senseis and the same grading standard as the dojo. You get 180+ recorded lessons, weekly live sessions and belt evaluation by video submission — students train with us from across India and abroad.' },
+    { q: 'Can I really learn karate online?',                 a: 'The Online Academy carries the same syllabus, the same senseis and the same grading standard as the dojo. You get the structured course library, weekly live sessions and belt evaluation by video submission — students train with us from across India and abroad.' },
     { q: 'How do fees and payments work?',                    a: 'Program fees are monthly, and grading fees are per examination. Payments are accepted by UPI (9939144318@ybl) or in person at the dojo office. There are no hidden charges.' },
     { q: 'Do you prepare students for tournaments?',          a: 'Yes. The Competitive / WKF Track takes students from district championships to state, national and WKF-registered international competition, with dedicated kumite and kata coaching.' },
   ],
 
   gallery: [
-    { icon: 'kata',       title: 'Kata at First Light',              cat: 'Dojo',       desc: 'Morning kata practice — the discipline begins before sunrise.',            img: 'https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'kumite',     title: 'Impact Training',                  cat: 'Dojo',       desc: 'Full-contact drills in the impact bay under supervision.',                 img: 'https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'medal',      title: 'Walk-out — District Championship', cat: 'Tournament', desc: 'An MMAKF athlete enters the arena on finals night.',                       img: 'https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'black-belt', title: 'Grading Day — Groundwork',         cat: 'Grading',    desc: "Candidates demonstrate under the examiners' eyes.",                        img: 'https://images.unsplash.com/photo-1564415315949-7a0c4c73aab4?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'women',      title: "Women's Strength Division",        cat: 'Community',  desc: "Sensei Sumitra Devi's division builds physical authority.",                img: 'https://images.unsplash.com/photo-1574680096145-d05b474e2155?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'star',       title: 'Conditioning Camp',                cat: 'Camp',       desc: 'Summer gasshuku — endurance day at the training grounds.',                 img: 'https://images.unsplash.com/photo-1599058917212-d750089bc07e?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'dumbbell',   title: 'Strength & Conditioning Zone',     cat: 'Dojo',       desc: 'Karate-specific strength work at the hombu.',                              img: 'https://images.unsplash.com/photo-1605296867304-46d5465a13f1?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'book',       title: 'The Dojo Library',                 cat: 'Dojo',       desc: 'Study corner — rulebooks, syllabus manuals and karate texts.',             img: 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'globe',      title: 'Fight Night',                      cat: 'Tournament', desc: 'State championship finals under the lights.',                              img: 'https://images.unsplash.com/photo-1509563268479-0f004cf3f58b?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'kata',       title: 'Kata Practice',                cat: 'Training',   desc: 'Form training — the foundation of every grading.',                    img: 'https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'kumite',     title: 'Impact & Pad Work',            cat: 'Training',   desc: 'Supervised striking practice in the impact bay.',                     img: 'https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'medal',      title: 'Competition Karate',           cat: 'Competition', desc: 'The competitive track — district to state championships.',            img: 'https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'black-belt', title: 'Grading Examinations',         cat: 'Grading',    desc: 'Candidates are examined on kihon, kata and kumite.',                  img: 'https://images.unsplash.com/photo-1564415315949-7a0c4c73aab4?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'women',      title: "Women's Wing",                 cat: 'Community',  desc: "Women-only batches and the school self-defense curriculum.",          img: 'https://images.unsplash.com/photo-1574680096145-d05b474e2155?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'star',       title: 'Training Camps',               cat: 'Camps',      desc: 'Gasshuku — intensive multi-day training.',                            img: 'https://images.unsplash.com/photo-1599058917212-d750089bc07e?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'dumbbell',   title: 'Strength & Conditioning',      cat: 'Training',   desc: 'Karate-specific strength, speed and mobility work.',                  img: 'https://images.unsplash.com/photo-1605296867304-46d5465a13f1?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'book',       title: 'Study & Theory',               cat: 'Training',   desc: 'Terminology, rulebooks and syllabus manuals.',                        img: 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'globe',      title: 'Tournament Floor',             cat: 'Competition', desc: 'Sanctioned competition under federation officials.',                 img: 'https://images.unsplash.com/photo-1509563268479-0f004cf3f58b?auto=format&fit=crop&w=1000&q=70' },
   ],
+
 
   syllabus: [
     { grade: '10th → 9th Kyu', belt: 'White → Yellow',    kihon: 'Zenkutsu-dachi · oi-zuki · age-uke · gedan-barai',        kata: 'Taikyoku Shodan · Heian Shodan', kumite: 'Gohon Kumite (five-step)' },
@@ -175,14 +176,15 @@ export const SEED = {
   // National structure: state associations affiliated to the federation.
   // Districts affiliate under their state unit; clubs/dojos under districts.
   stateUnits: [
-    { state: 'Jharkhand',     unit: 'Jharkhand Karate-Do Association (MMAKF)', hq: 'Patratu',    districts: 6, status: 'Host State · Active', since: '1983' },
-    { state: 'Bihar',         unit: 'Bihar State MMAKF Unit',                  hq: 'Patna',      districts: 4, status: 'Active',      since: '1996' },
-    { state: 'West Bengal',   unit: 'West Bengal MMAKF Unit',                  hq: 'Kolkata',    districts: 3, status: 'Active',      since: '2003' },
-    { state: 'Odisha',        unit: 'Odisha State MMAKF Unit',                 hq: 'Bhubaneswar',districts: 2, status: 'Active',      since: '2011' },
-    { state: 'Uttar Pradesh', unit: 'Uttar Pradesh MMAKF Unit',                hq: 'Varanasi',   districts: 2, status: 'Provisional', since: '2019' },
-    { state: 'Chhattisgarh',  unit: 'Chhattisgarh MMAKF Unit',                 hq: 'Raipur',     districts: 1, status: 'Provisional', since: '2022' },
-    { state: 'Maharashtra',   unit: 'Maharashtra MMAKF Unit',                  hq: 'Nagpur',     districts: 1, status: 'Forming',     since: '2025' },
+    { state: 'Jharkhand',     unit: 'Jharkhand Karate-Do Association (MMAKF)', hq: 'Patratu',     districts: 6, status: 'Host State · Active', since: '1983' },
+    { state: 'Bihar',         unit: 'Bihar State MMAKF Unit',                  hq: 'Patna',       districts: 4, status: 'Active',      since: '' },
+    { state: 'West Bengal',   unit: 'West Bengal MMAKF Unit',                  hq: 'Kolkata',     districts: 3, status: 'Active',      since: '' },
+    { state: 'Odisha',        unit: 'Odisha State MMAKF Unit',                 hq: 'Bhubaneswar', districts: 2, status: 'Active',      since: '' },
+    { state: 'Uttar Pradesh', unit: 'Uttar Pradesh MMAKF Unit',                hq: 'Varanasi',    districts: 2, status: 'Provisional', since: '' },
+    { state: 'Chhattisgarh',  unit: 'Chhattisgarh MMAKF Unit',                 hq: 'Raipur',      districts: 1, status: 'Provisional', since: '' },
+    { state: 'Maharashtra',   unit: 'Maharashtra MMAKF Unit',                  hq: 'Nagpur',      districts: 1, status: 'Forming',     since: '' },
   ],
+
 
   // Official documents & policies register (governance page). `url` empty →
   // "request from the federation office" mailto link renders instead.
@@ -212,7 +214,7 @@ export const SEED = {
     { id: 'MMAKF-I-2004-00023', name: 'Vikas Pathak',         type: 'Instructor', grade: 'IV Dan',         state: 'Jharkhand',   unit: 'Hombu Dojo, Patratu',   status: 'Active',    validTill: 'Dec 2026' },
     { id: 'MMAKF-I-2010-00047', name: 'Sumitra Devi',         type: 'Instructor', grade: 'III Dan',        state: 'Jharkhand',   unit: "Women's Wing",          status: 'Active',    validTill: 'Dec 2026' },
     { id: 'MMAKF-A-2015-00891', name: 'Daksh Mohan Mishra',   type: 'Athlete',    grade: 'II Dan',         state: 'Jharkhand',   unit: 'Competitive / WKF Track', status: 'Active',  validTill: 'Dec 2026' },
-    { id: 'MMAKF-A-2018-01204', name: 'Siddharth Prasad',     type: 'Athlete · Coach', grade: 'WKF Registered', state: 'Jharkhand', unit: 'Online University',   status: 'Active',    validTill: 'Dec 2026' },
+    { id: 'MMAKF-A-2018-01204', name: 'Siddharth Prasad',     type: 'Athlete · Coach', grade: 'WKF Registered', state: 'Jharkhand', unit: 'Online Academy',   status: 'Active',    validTill: 'Dec 2026' },
     { id: 'MMAKF-A-2022-03412', name: 'Ankan Roy',            type: 'Athlete',    grade: 'I Dan',          state: 'West Bengal', unit: 'Kolkata Centre',        status: 'Active',    validTill: 'Dec 2026' },
     { id: 'MMAKF-D-1996-00004', name: 'MMAKF Ramgarh Centre', type: 'Dojo',       grade: '—',              state: 'Jharkhand',   unit: 'Ramgarh District',      status: 'Chartered', validTill: 'Mar 2027' },
   ],
@@ -272,7 +274,7 @@ export const SEED = {
     { name: 'MMAKF Ranchi Training Centre',  city: 'Ranchi',     district: 'Ranchi',     incharge: 'Senpai Ravishankar',         status: 'Affiliated' },
     { name: 'MMAKF Bokaro Dojo',             city: 'Bokaro',     district: 'Bokaro',     incharge: 'Daksh Mohan Mishra',         status: 'Affiliated' },
     { name: "Women's Wing — Partner Schools", city: '14 schools', district: 'Ramgarh & Hazaribagh', incharge: 'Sensei Sumitra Devi', status: 'Community' },
-    { name: 'MMAKF Online University',       city: 'Worldwide',  district: '—',          incharge: 'Federation Faculty',         status: 'Digital' },
+    { name: 'MMAKF Online Academy',       city: 'Worldwide',  district: '—',          incharge: 'Federation Faculty',         status: 'Digital' },
   ],
 
   beltGrading: {

@@ -10,6 +10,9 @@ const fed = await get('federation');
 const products = await get<any[]>('products');
 
 const cats = [...new Set(products.map((p: any) => p.cat))];
+const waPhone = String(fed.contact.phone || '').replace(/\D/g, '');
+const upiPay = (p: any) => `upi://pay?pa=${fed.upi}&pn=MMAKF&am=${p.p}&cu=INR&tn=${encodeURIComponent('Shop: ' + p.n)}`;
+const waOrder = (p: any) => `https://wa.me/${waPhone}?text=${encodeURIComponent(`MMAKF Shop order: ${p.n} (₹${p.p}). Please confirm availability.`)}`;
 ---
 
 <Base
@@ -47,7 +50,10 @@ const cats = [...new Set(products.map((p: any) => p.cat))];
                 <span class="prod-price">₹{Number(p.p).toLocaleString()}</span>
                 {p.m && <span class="prod-orig">₹{Number(p.m).toLocaleString()}</span>}
               </div>
-              <button class="btn-link" data-order-name={p.n} data-order-upi={fed.upi}>+ Order</button>
+              <div style="display:flex;gap:14px">
+                <a class="btn-link" href={upiPay(p)}>UPI Pay</a>
+                <a class="btn-link" href={waOrder(p)} target="_blank" rel="noopener">WhatsApp →</a>
+              </div>
             </div>
           </div>
         ))}
@@ -173,13 +179,4 @@ const cats = [...new Set(products.map((p: any) => p.cat))];
     });
   });
 
-  // Order intents via data attributes (MASTER-SPEC §9.6)
-  document.querySelectorAll('[data-order-name]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const el = btn as HTMLElement;
-      (window as any).showNotif(
-        `Order ${el.dataset.orderName}: pay via UPI ${el.dataset.orderUpi}, then message us with the screenshot.`
-      );
-    });
-  });
 </script>
