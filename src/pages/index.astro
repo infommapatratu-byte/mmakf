@@ -24,7 +24,6 @@ const achievements = data.achievements;
       <div class="hero-shade"></div>
     </div>
     <div class="hero-bg" aria-hidden="true"></div>
-    <div class="hero-kanji kanji" aria-hidden="true">空手道</div>
     <div class="container hero-inner">
       <div class="hero-left">
         <div class="pill featured fade">
@@ -81,14 +80,14 @@ const achievements = data.achievements;
     <div class="ticker-track">
       {Array(2).fill(0).map(() => (
         <>
-          <span>Shotokan Karate</span><span class="dot">◆</span>
-          <span>Kihon · Kata · Kumite</span><span class="dot">◆</span>
-          <span>WKF Affiliated</span><span class="dot">◆</span>
-          <span>Limca Book of Records</span><span class="dot">◆</span>
-          <span>Guinness Recognized</span><span class="dot">◆</span>
-          <span>Tiger Lee Lineage</span><span class="dot">◆</span>
-          <span>Est. 1983</span><span class="dot">◆</span>
-          <span>5,000+ Students</span><span class="dot">◆</span>
+          <span>Shotokan Karate</span><span class="dot">·</span>
+          <span>Kihon · Kata · Kumite</span><span class="dot">·</span>
+          <span>WKF Affiliated</span><span class="dot">·</span>
+          <span>Limca Book of Records</span><span class="dot">·</span>
+          <span>Guinness Recognized</span><span class="dot">·</span>
+          <span>Tiger Lee Lineage</span><span class="dot">·</span>
+          <span>Est. 1983</span><span class="dot">·</span>
+          <span>5,000+ Students</span><span class="dot">·</span>
         </>
       ))}
     </div>
@@ -378,12 +377,13 @@ const achievements = data.achievements;
 </Base>
 
 <style>
-  /* ═══════ HERO ═══════ */
+  /* ═══════ HERO — dark photo band over the white page ═══════ */
   .hero {
     position: relative;
     padding: 120px 0 0;
     overflow: hidden;
     border-top: 0;
+    background: #14120F;
   }
   .hero-photo {
     position: absolute; inset: 0;
@@ -398,28 +398,26 @@ const achievements = data.achievements;
   .hero-shade {
     position: absolute; inset: 0;
     background:
-      linear-gradient(90deg, rgba(6, 6, 7, 0.96) 0%, rgba(6, 6, 7, 0.86) 42%, rgba(6, 6, 7, 0.5) 75%, rgba(6, 6, 7, 0.65) 100%),
-      linear-gradient(180deg, rgba(6, 6, 7, 0.6) 0%, transparent 30%, rgba(6, 6, 7, 0.97) 96%);
+      linear-gradient(90deg, rgba(16, 14, 11, 0.95) 0%, rgba(16, 14, 11, 0.84) 42%, rgba(16, 14, 11, 0.45) 75%, rgba(16, 14, 11, 0.6) 100%),
+      linear-gradient(180deg, rgba(16, 14, 11, 0.55) 0%, transparent 30%, rgba(16, 14, 11, 0.95) 96%);
   }
   .hero-bg {
     position: absolute; inset: 0;
     z-index: 1;
     background:
-      radial-gradient(ellipse 800px 400px at 80% 20%, rgba(142, 18, 18, 0.12), transparent),
-      radial-gradient(ellipse 600px 600px at 10% 80%, rgba(194, 162, 75, 0.05), transparent);
+      radial-gradient(ellipse 800px 400px at 80% 20%, rgba(142, 18, 18, 0.12), transparent);
     pointer-events: none;
   }
-  .hero-kanji {
-    position: absolute;
-    top: 40px; right: -20px;
-    writing-mode: vertical-rl;
-    font-size: clamp(8rem, 18vw, 15rem);
-    line-height: 1;
-    color: rgba(237, 234, 227, 0.04);
-    pointer-events: none;
-    user-select: none;
-    z-index: 1;
-  }
+
+  /* Light text inside the dark hero */
+  .hero .display-1 { color: #F7F4EE; }
+  .hero .display-1 em { color: #D9BC66; }
+  .hero .lead { color: #D9D3C8; }
+  .hero .pill.featured { color: #D9BC66; border-color: rgba(217, 188, 102, 0.45); }
+  .hero .btn-gold { color: #D9BC66; border-color: rgba(217, 188, 102, 0.5); }
+  .hero .btn-gold:hover { background: rgba(217, 188, 102, 0.1); color: #E8D28F; }
+  .hero .btn-ghost { color: #D9D3C8; border-color: rgba(255, 255, 255, 0.28); }
+  .hero .btn-ghost:hover { border-color: rgba(217, 188, 102, 0.5); color: #D9BC66; }
   .hero-inner {
     display: grid;
     grid-template-columns: 1.5fr 1fr;
@@ -512,11 +510,10 @@ const achievements = data.achievements;
     display: grid;
     grid-template-columns: repeat(5, 1fr);
     margin-top: 80px;
-    border-top: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
     position: relative;
     z-index: 2;
-    background: rgba(6, 6, 7, 0.55);
+    background: rgba(16, 14, 11, 0.6);
     backdrop-filter: blur(4px);
   }
   @media (max-width: 700px) {
@@ -526,14 +523,14 @@ const achievements = data.achievements;
   .hero-stat {
     padding: 28px 12px;
     text-align: center;
-    border-left: 1px solid var(--border);
+    border-left: 1px solid rgba(255, 255, 255, 0.1);
   }
   .hero-stat:first-child { border-left: 0; }
   .hero-stat-v {
     font-family: var(--font-display);
     font-size: 2rem;
     font-weight: 600;
-    color: var(--gold);
+    color: #E8D28F;
     line-height: 1;
   }
   .hero-stat-l {
@@ -541,16 +538,16 @@ const achievements = data.achievements;
     font-size: 0.62rem;
     letter-spacing: 0.18em;
     text-transform: uppercase;
-    color: var(--off-white);
+    color: #CFC9BE;
     margin-top: 8px;
   }
 
-  /* ═══════ TICKER ═══════ */
+  /* ═══════ TICKER — thin dark strip closing the hero ═══════ */
   .ticker {
-    background: var(--bg-2);
-    border-bottom: 1px solid var(--border);
+    background: #14120F;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
     overflow: hidden;
-    padding: 16px 0;
+    padding: 14px 0;
   }
   .ticker-track {
     display: flex;
@@ -562,9 +559,9 @@ const achievements = data.achievements;
     font-weight: 400;
     letter-spacing: 0.28em;
     text-transform: uppercase;
-    color: var(--muted);
+    color: #8F887B;
   }
-  .ticker-track .dot { color: var(--gold-dim); font-size: 0.5rem; }
+  .ticker-track .dot { color: rgba(217, 188, 102, 0.6); }
   @keyframes ticker {
     from { transform: translateX(0); }
     to   { transform: translateX(-50%); }
@@ -592,7 +589,7 @@ const achievements = data.achievements;
     transition: background 0.25s;
     position: relative;
   }
-  .explore-item:hover { background: var(--card); }
+  .explore-item:hover { background: var(--card-2); }
   .explore-n {
     font-family: var(--font-display);
     font-size: 0.7rem;
@@ -727,11 +724,11 @@ const achievements = data.achievements;
     position: relative;
   }
   .virtual-list li::before {
-    content: '◆';
+    content: '';
     position: absolute; left: 0;
-    color: var(--gold);
-    font-size: 0.7rem;
-    top: 4px;
+    top: 0.62em;
+    width: 12px; height: 2px;
+    background: var(--gold-dim);
   }
   .virtual-card {
     background: var(--card);

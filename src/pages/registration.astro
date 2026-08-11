@@ -10,10 +10,10 @@ const fed = await get('federation');
 const stateUnits = await get<any[]>('stateUnits');
 
 const memberTypes = [
-  { icon: 'medal',     t: 'Athlete',      fee: '₹300 / year',  d: 'Competitive and grading members. Carries your grading record and tournament eligibility across all sanctioned events.' },
-  { icon: 'black-belt', t: 'Instructor',  fee: '₹1,000 / year', d: 'Dan-graded teachers certified by the Technical Committee. Required to conduct MMAKF batches and present grading candidates.' },
-  { icon: 'karate-gi', t: 'Dojo / Club',  fee: 'Per charter',   d: 'Chartered training centres under a district or state unit. Listed in the federation register with grading and tournament rights.' },
-  { icon: 'shield',    t: 'Official',     fee: '₹500 / year',   d: 'Certified judges, referees and coaches empanelled by the Tournament Commission for sanctioned events.' },
+  { icon: 'medal',      t: 'Athlete',     d: 'Competitive and grading members. Carries your grading record and tournament eligibility across all sanctioned events.' },
+  { icon: 'black-belt', t: 'Instructor',  d: 'Dan-graded teachers certified by the Technical Committee. Required to conduct MMAKF batches and present grading candidates.' },
+  { icon: 'karate-gi',  t: 'Dojo / Club', d: 'Chartered training centres under a district or state unit. Listed in the federation register with grading and tournament rights.' },
+  { icon: 'shield',     t: 'Official',    d: 'Certified judges, referees and coaches empanelled by the Tournament Commission for sanctioned events.' },
 ];
 ---
 
@@ -42,7 +42,6 @@ const memberTypes = [
           <div class="card hoverable fade">
             <div class="card-icon"><Icon name={m.icon} size={32} color="var(--gold)" /></div>
             <div class="card-title" style="font-size:1rem">{m.t}</div>
-            <div style="font-family:var(--font-display);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);margin-bottom:12px">{m.fee}</div>
             <div class="card-body" style="font-size:.86rem">{m.d}</div>
           </div>
         ))}
@@ -60,7 +59,7 @@ const memberTypes = [
         <p class="lead">
           Submit the application online — you receive an application number instantly.
           The federation office verifies your details with your state or district unit and
-          issues your MMAKF ID. Fees are payable on approval via UPI <span class="text-gold">{fed.upi}</span>.
+          issues your MMAKF ID. Any applicable fee, as notified by the office, is payable on approval.
         </p>
         <ul class="reg-steps mt-6">
           <li><strong>01</strong> Submit the application — note your application number.</li>

@@ -35,7 +35,7 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={description} />
-    <meta name="theme-color" content="#060606" />
+    <meta name="theme-color" content="#FFFFFF" />
     <title>{title}</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/png" href="/favicon-32.png" />
@@ -140,13 +140,14 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
     <div class="notif" id="notif" role="status" aria-live="polite"><span id="notif-txt"></span></div>
 
     <style is:global>
-      /* Nav */
+      /* Nav — white glass over any hero */
       nav#mainNav {
         position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-        background: rgba(6, 6, 7, 0.88);
+        background: rgba(255, 255, 255, 0.94);
         backdrop-filter: blur(24px);
         -webkit-backdrop-filter: blur(24px);
         border-bottom: 1px solid var(--border);
+        box-shadow: 0 1px 2px rgba(26, 23, 19, 0.04);
       }
       .nav-inner {
         display: flex; align-items: center; justify-content: space-between;
@@ -166,9 +167,9 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
         font-size: 0.52rem;
         letter-spacing: 0.24em;
         text-transform: uppercase;
-        color: var(--gold);
+        color: var(--gold-2);
         margin-top: 4px;
-        font-weight: 400;
+        font-weight: 500;
       }
       .nav-links { display: flex; align-items: center; gap: 2px; }
       .nav-links a {
@@ -188,8 +189,8 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
         content: '';
         position: absolute;
         left: 11px; right: 11px; bottom: 0;
-        height: 1px;
-        background: var(--gold);
+        height: 2px;
+        background: var(--gold-2);
       }
       .nav-links .nav-enroll {
         border: 1px solid var(--red-2);
@@ -241,25 +242,27 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
 
       main { padding-top: 72px; min-height: 60vh; }
 
-      /* Footer */
+      /* Footer — dark institutional band with crest watermark */
       footer {
-        background: var(--bg-2);
-        border-top: 1px solid var(--border);
+        background: #14120F;
+        border-top: 3px solid var(--red);
         padding: 72px 0 30px;
         position: relative;
         overflow: hidden;
       }
       footer::before {
-        content: '空手道';
+        content: '';
         position: absolute;
-        right: -30px; bottom: -60px;
-        font-family: var(--font-kanji);
-        font-size: 15rem;
-        line-height: 1;
-        color: rgba(237, 234, 227, 0.018);
+        right: -40px; bottom: -60px;
+        width: 340px; height: 340px;
+        background: url('/logo.png') no-repeat center / contain;
+        opacity: 0.05;
+        filter: grayscale(1) brightness(2);
         pointer-events: none;
-        user-select: none;
       }
+      footer .nav-name-1 { color: #F5F2EC; }
+      footer .nav-name-2 { color: #D9BC66; }
+      footer .body-txt { color: #A9A296; }
       .ft-grid {
         display: grid;
         grid-template-columns: 1.4fr 1fr 1fr 1fr;

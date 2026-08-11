@@ -25,7 +25,6 @@ const freeCount = lessons.filter((l: any) => l.access === 'Free').length;
 >
   <PageHero
     image="https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=1800&q=70"
-    kanji="修行"
     eyebrow="Online University"
     title={`The <em>academy</em>.`}
     lead="The complete Shotokan curriculum of the federation, structured as courses from your first stance to the Dan examination — recorded lessons, weekly live sessions, and belt grading by video submission."
@@ -42,7 +41,7 @@ const freeCount = lessons.filter((l: any) => l.access === 'Free').length;
       </div>
       <div class="grid grid-3">
         {[
-          { num: '01', t: 'Enrol in the Online University', d: `Join from anywhere in the world at ₹999/month. Your enrolment is registered with the federation like any dojo student's.` },
+          { num: '01', t: 'Enrol in the Online University', d: `Join from anywhere in the world — your enrolment is registered with the federation like any dojo student's. Fees as notified by the office.` },
           { num: '02', t: 'Train the curriculum + live sessions', d: 'Work through your belt-level course below, and join the weekly live classes on the schedule (Tue · Thu · Sun online batches).' },
           { num: '03', t: 'Grade by video submission', d: 'Submit your examination kata and kihon by video. The Examination Board reviews quarterly — same syllabus, same standard as the hombu.' },
         ].map((s) => (
@@ -177,7 +176,7 @@ const freeCount = lessons.filter((l: any) => l.access === 'Free').length;
     vertical-align: middle;
   }
   .lesson-tbl tr:last-child td { border-bottom: 0; }
-  .lesson-tbl tr:hover td { background: rgba(255, 255, 255, 0.015); }
+  .lesson-tbl tr:hover td { background: rgba(26, 23, 19, 0.02); }
   .l-no { font-family: var(--font-display); color: var(--muted); width: 48px; }
   .l-title { color: var(--white); }
   .l-dur { color: var(--muted); white-space: nowrap; width: 80px; }

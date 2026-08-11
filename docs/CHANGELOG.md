@@ -2,6 +2,13 @@
 
 Content-key and schema migrations are recorded here (MASTER-SPEC §5.5).
 
+## 1.8.0 — 2026-08-11 — Light institutional redesign (Master Charter §5–§7)
+
+- **Full light theme**: warm-white paper body with ink text, controlled crimson/gold accents, dark photo heroes and a dark crest-watermarked footer — the national-federation convention (white-major per federation direction; black reserved for hero/footer bands). All 300+ component styles re-tokenized; semantic token names preserved (`--white` = primary text/ink, `--bg` = paper).
+- **Glyph cleanup**: all kanji watermarks (空手道 / 師範 / 修行 / 師 / 道) and ◆ diamond separators removed — they read as vague symbols and could render as broken boxes on devices without Japanese fonts. Replaced by the official federation crest (`/logo.png`) as the watermark (footer, 404, governance portrait placeholder) and clean middot/hairline separators.
+- **Invented fees removed** (Charter §68): registration category fee amounts and the academy's ₹999/month deleted — fees now read "as notified by the office". No official amount is stated anywhere unless supplied via admin-editable content.
+- White glass navigation with active-page underline; hero and page heroes keep dark photo treatment with light text overrides; PWA `theme-color` → white.
+
 ## 1.7.0 — 2026-07-07 — Online Academy (LMS) + circulars channel
 
 - **Schema**: three new public keys — `courses` (id, title, belt, level, desc), `lessons` (course [exact-title join], title, dur, video URL, access Free/Members), `circulars` (no, date, title, body) — 23 public keys total.

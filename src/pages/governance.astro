@@ -65,7 +65,6 @@ const orgLevels = [
 >
   <PageHero
     image="https://images.unsplash.com/photo-1564415315949-7a0c4c73aab4?auto=format&fit=crop&w=1800&q=70"
-    kanji="師範"
     eyebrow="The Federation"
     title={`Governance & <em>officials</em>.`}
     lead={`${fed.name} is governed by its office bearers and standing committees under the supreme technical authority of the Grandmaster. Constituted ${fed.founded} · ${fed.affiliation}.`}
@@ -164,7 +163,7 @@ const orgLevels = [
           <div class="feat-visual">
             {featured.img
               ? <img src={featured.img} alt={featured.name} loading="lazy" />
-              : <div class="monogram-xl kanji">師</div>}
+              : <img class="crest-ph" src="/logo.png" alt="" loading="lazy" />}
           </div>
           <div>
             <div class="card-eyebrow">{featured.role}</div>
@@ -368,10 +367,12 @@ const orgLevels = [
     overflow: hidden;
   }
   .feat-visual img { width: 100%; height: 100%; object-fit: cover; filter: grayscale(0.2) brightness(0.9); }
-  .monogram-xl {
-    font-size: 7rem;
-    color: rgba(194, 162, 75, 0.35);
-    line-height: 1;
+  .crest-ph {
+    width: 150px;
+    height: auto !important;
+    object-fit: contain !important;
+    opacity: 0.4;
+    filter: grayscale(0.5) !important;
   }
 
   .prof-head { display: flex; gap: 16px; align-items: center; }

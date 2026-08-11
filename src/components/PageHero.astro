@@ -2,16 +2,19 @@
 // Shared header for dedicated pages: eyebrow, display title (HTML allowed for
 // <em> emphasis — page-literal strings ONLY, never store content: XSS boundary
 // per MASTER-SPEC §9.6), lead paragraph, optional pills, optional photograph.
+//
+// Light theme: photo heroes are dark bands with light text (federation
+// convention — dark hero over a white page); heroes without a photo render
+// as light bands using the global ink tokens.
 
 interface Props {
   eyebrow: string;
   title: string;      // may contain <em> / <em class="r"> emphasis markup
   lead?: string;
   pills?: string[];
-  kanji?: string;     // decorative watermark glyphs
   image?: string;     // background photograph URL (dark-treated automatically)
 }
-const { eyebrow, title, lead, pills = [], kanji = '空手道', image } = Astro.props;
+const { eyebrow, title, lead, pills = [], image } = Astro.props;
 ---
 
 <section class="page-hero" class:list={[{ 'has-img': !!image }]}>
@@ -21,8 +24,6 @@ const { eyebrow, title, lead, pills = [], kanji = '空手道', image } = Astro.p
       <div class="page-hero-shade"></div>
     </div>
   )}
-  <div class="page-hero-bg" aria-hidden="true"></div>
-  <div class="page-hero-kanji kanji" aria-hidden="true">{kanji}</div>
   <div class="container" style="position:relative;z-index:2">
     {pills.length > 0 && (
       <div class="flex flex-wrap gap-3" style="margin-bottom:20px">
@@ -41,9 +42,10 @@ const { eyebrow, title, lead, pills = [], kanji = '空手道', image } = Astro.p
     position: relative;
     padding: 96px 0 72px;
     overflow: hidden;
+    background: var(--bg-2);
     border-bottom: 1px solid var(--border);
   }
-  .page-hero.has-img { padding: 128px 0 96px; }
+  .page-hero.has-img { padding: 128px 0 96px; background: #14120F; border-bottom: 0; }
   @media (max-width: 640px) {
     .page-hero { padding: 64px 0 48px; }
     .page-hero.has-img { padding: 88px 0 64px; }
@@ -55,32 +57,21 @@ const { eyebrow, title, lead, pills = [], kanji = '空手道', image } = Astro.p
   .page-hero-photo img {
     width: 100%; height: 100%;
     object-fit: cover;
-    filter: grayscale(0.45) contrast(1.05) brightness(0.6);
+    filter: grayscale(0.4) contrast(1.05) brightness(0.62);
   }
   .page-hero-shade {
     position: absolute; inset: 0;
     background:
-      linear-gradient(90deg, rgba(6, 6, 7, 0.94) 0%, rgba(6, 6, 7, 0.82) 45%, rgba(6, 6, 7, 0.55) 100%),
-      linear-gradient(180deg, rgba(6, 6, 7, 0.55) 0%, transparent 35%, rgba(6, 6, 7, 0.9) 100%);
+      linear-gradient(90deg, rgba(16, 14, 11, 0.92) 0%, rgba(16, 14, 11, 0.78) 45%, rgba(16, 14, 11, 0.45) 100%),
+      linear-gradient(180deg, rgba(16, 14, 11, 0.5) 0%, transparent 35%, rgba(16, 14, 11, 0.85) 100%);
   }
-  .page-hero-bg {
-    position: absolute; inset: 0;
-    z-index: 1;
-    background:
-      radial-gradient(ellipse 700px 350px at 85% 10%, rgba(142, 18, 18, 0.11), transparent),
-      radial-gradient(ellipse 500px 500px at 5% 90%, rgba(194, 162, 75, 0.045), transparent);
-    pointer-events: none;
-  }
-  .page-hero-kanji {
-    position: absolute;
-    top: 16px; right: -14px;
-    z-index: 1;
-    writing-mode: vertical-rl;
-    font-size: clamp(6rem, 13vw, 10rem);
-    line-height: 1;
-    color: rgba(237, 234, 227, 0.025);
-    pointer-events: none;
-    user-select: none;
-  }
-  .page-hero.has-img .page-hero-kanji { color: rgba(237, 234, 227, 0.045); }
+
+  /* Light text inside dark photo heroes */
+  .page-hero.has-img :global(.display-1) { color: #F7F4EE; }
+  .page-hero.has-img :global(.display-1 em) { color: #D9BC66; }
+  .page-hero.has-img :global(.lead) { color: #D9D3C8; }
+  .page-hero.has-img :global(.eyebrow) { color: #D9BC66; }
+  .page-hero.has-img :global(.eyebrow)::before { background: rgba(217, 188, 102, 0.55); }
+  .page-hero.has-img :global(.pill) { color: #E4DED2; border-color: rgba(255, 255, 255, 0.28); }
+  .page-hero.has-img :global(.pill.featured) { color: #D9BC66; border-color: rgba(217, 188, 102, 0.45); }
 </style>

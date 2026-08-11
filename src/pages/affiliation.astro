@@ -285,10 +285,11 @@ const ladder = [
     line-height: 1.6;
   }
   .req-list li::before {
-    content: '◆';
-    position: absolute; left: 0; top: 4px;
-    color: var(--gold);
-    font-size: 0.7rem;
+    content: '';
+    position: absolute; left: 0;
+    top: 0.62em;
+    width: 12px; height: 2px;
+    background: var(--gold-dim);
   }
 
   .steps { display: flex; flex-direction: column; }

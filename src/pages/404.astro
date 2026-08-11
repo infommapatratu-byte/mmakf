@@ -6,7 +6,7 @@ export const prerender = false;
 
 <Base title="Page not found — MMAKF" description="The page you were looking for does not exist.">
   <section class="nf">
-    <div class="nf-kanji kanji" aria-hidden="true">道</div>
+    <img class="nf-crest" src="/logo.png" alt="" aria-hidden="true" />
     <div class="container" style="position:relative;z-index:1;text-align:center">
       <div class="eyebrow center">404</div>
       <h1 class="display-1" style="margin-top:16px">Lost on the <em>mat</em>?</h1>
@@ -32,13 +32,13 @@ export const prerender = false;
     overflow: hidden;
     border-top: 0;
   }
-  .nf-kanji {
+  .nf-crest {
     position: absolute;
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
-    font-size: clamp(16rem, 40vw, 30rem);
-    line-height: 1;
-    color: rgba(237, 234, 227, 0.02);
+    width: clamp(280px, 45vw, 520px);
+    opacity: 0.05;
+    filter: grayscale(1);
     pointer-events: none;
     user-select: none;
   }
