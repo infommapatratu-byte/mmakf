@@ -15,12 +15,12 @@ let subList: any[] = [];
 let unitAccessList: any[] = [];
 let eventRegList: any[] = [];
 if (authed) {
-  const { get } = await import('@/lib/storage');
-  leadList = (await get<any[]>('leads')) || [];
-  regList = (await get<any[]>('registrations')) || [];
-  subList = (await get<any[]>('submissions')) || [];
+  const { get, getList } = await import('@/lib/storage');
+  leadList = await getList('leads', 500);
+  regList = await getList('registrations', 300);
+  subList = await getList('submissions', 300);
   unitAccessList = (await get<any[]>('unitAccess')) || [];
-  eventRegList = (await get<any[]>('eventRegs')) || [];
+  eventRegList = await getList('eventRegs', 300);
 }
 ---
 

@@ -4,7 +4,8 @@
 // public KEYS) and reviewed in the national admin panel.
 
 import type { APIRoute } from 'astro';
-import { get, set } from '@/lib/storage';
+import { pushToList } from '@/lib/storage';
+import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
 import { getUnitSession } from '@/lib/auth';
 
 export const prerender = false;
@@ -12,6 +13,9 @@ export const prerender = false;
 const KINDS = ['Result report', 'News report', 'Event proposal', 'Grading report'];
 
 export const POST: APIRoute = async ({ request }) => {
+  const rl = await rateLimit(request, 'unit-submit', 20, 60);
+  if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
+
   const session = getUnitSession(request.headers.get('cookie'));
   if (!session) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -44,9 +48,7 @@ export const POST: APIRoute = async ({ request }) => {
     status: 'Pending',
   };
 
-  const list = (await get<any[]>('submissions')) || [];
-  list.unshift(record);
-  await set('submissions', list.slice(0, 500));
+  await pushToList('submissions', record, 500);
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,

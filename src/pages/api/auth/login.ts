@@ -3,9 +3,14 @@
 import type { APIRoute } from 'astro';
 import { checkPassword, createSessionCookie } from '@/lib/auth';
 
+import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
+
 export const prerender = false;
 
 export const POST: APIRoute = async ({ request }) => {
+  const rl = await rateLimit(request, 'admin-login', 5, 60);
+  if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
+
   // NFR-SEC-2: dev defaults must not function in production.
   if (import.meta.env.PROD && (!process.env.ADMIN_PASSWORD || !process.env.ADMIN_SESSION_SECRET)) {
     console.error('ADMIN_PASSWORD / ADMIN_SESSION_SECRET not configured — refusing logins');

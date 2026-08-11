@@ -114,6 +114,61 @@ export async function getAll(): Promise<Record<string, any>> {
   return result;
 }
 
+/**
+ * Atomically prepend a record to a capped private list (P1-3).
+ *
+ * The previous pattern — get() → unshift() → set() — is a read-modify-write
+ * that loses records when concurrent lambda instances interleave. Redis LPUSH
+ * + LTRIM is atomic, so every submission survives.
+ *
+ * Lists written this way are stored as native Redis lists under
+ * `mmakf:list:{key}`. `getList()` reads them and transparently falls back to a
+ * legacy JSON blob at `mmakf:{key}` (records written before this change), so no
+ * existing data is stranded.
+ */
+export async function pushToList(key: string, record: any, cap: number): Promise<void> {
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      const listKey = `mmakf:list:${key}`;
+      await redis.lpush(listKey, JSON.stringify(record));
+      await redis.ltrim(listKey, 0, cap - 1);
+      return;
+    } catch (e) {
+      console.warn('Redis list push failed for', key, e);
+    }
+  }
+  // Local dev / degraded: fall back to the JSON blob path.
+  const list = (localGet<any[]>(`mmakf:${key}`, []) as any[]) || [];
+  list.unshift(record);
+  localSet(`mmakf:${key}`, list.slice(0, cap));
+}
+
+/** Read a capped private list written by pushToList, newest first. */
+export async function getList<T = any>(key: string, limit = 500): Promise<T[]> {
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      const raw: any[] = await redis.lrange(`mmakf:list:${key}`, 0, limit - 1);
+      const rows = (raw || []).map((r) => (typeof r === 'string' ? safeParse(r) : r)).filter(Boolean);
+      // Merge any legacy JSON-blob records written before the list migration.
+      const legacy = (await redis.get(`mmakf:${key}`)) as any[] | null;
+      if (Array.isArray(legacy) && legacy.length) {
+        return [...rows, ...legacy].slice(0, limit) as T[];
+      }
+      return rows as T[];
+    } catch (e) {
+      console.warn('Redis list read failed for', key, e);
+      return [] as T[];
+    }
+  }
+  return (localGet<any[]>(`mmakf:${key}`, []) as T[]) || ([] as T[]);
+}
+
+function safeParse(s: string): any {
+  try { return JSON.parse(s); } catch { return null; }
+}
+
 // Health probe for /api/health: true only when Redis is configured AND
 // answering. Never throws.
 export async function redisHealthy(): Promise<boolean> {

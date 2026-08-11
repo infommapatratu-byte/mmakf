@@ -6,9 +6,14 @@ import type { APIRoute } from 'astro';
 import { get } from '@/lib/storage';
 import { createUnitSessionCookie } from '@/lib/auth';
 
+import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
+
 export const prerender = false;
 
 export const POST: APIRoute = async ({ request }) => {
+  const rl = await rateLimit(request, 'unit-login', 5, 60);
+  if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
+
   let body: any;
   try { body = await request.json(); }
   catch { return new Response(JSON.stringify({ error: 'Invalid request' }), { status: 400 }); }

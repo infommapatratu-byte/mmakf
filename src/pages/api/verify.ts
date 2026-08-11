@@ -5,9 +5,14 @@
 import type { APIRoute } from 'astro';
 import { get } from '@/lib/storage';
 
+import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
+
 export const prerender = false;
 
-export const GET: APIRoute = async ({ url }) => {
+export const GET: APIRoute = async ({ url, request }) => {
+  const rl = await rateLimit(request, 'verify', 30, 60);
+  if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
+
   const q = (url.searchParams.get('id') || '').trim().toUpperCase();
   if (!q || q.length > 40) {
     return new Response(JSON.stringify({ found: false, error: 'Provide a member ID' }), {

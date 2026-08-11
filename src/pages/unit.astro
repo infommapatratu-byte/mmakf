@@ -5,7 +5,7 @@
 // signed-in unit's state, server-side.
 
 import Base from '@/layouts/Base.astro';
-import { get } from '@/lib/storage';
+import { get, getList } from '@/lib/storage';
 import { getUnitSession } from '@/lib/auth';
 
 export const prerender = false;
@@ -23,12 +23,12 @@ if (session) {
   members = ((await get<any[]>('members')) || []).filter(
     (m: any) => String(m.state || '').toLowerCase() === st
   );
-  applications = (((await get<any[]>('registrations')) || []).filter(
-    (r: any) => String(r.state || '').toLowerCase() === st
-  )).slice(0, 100);
-  mySubmissions = (((await get<any[]>('submissions')) || []).filter(
-    (s: any) => s.unit === session.name
-  )).slice(0, 50);
+  applications = (await getList<any>('registrations', 500))
+    .filter((r: any) => String(r.state || '').toLowerCase() === st)
+    .slice(0, 100);
+  mySubmissions = (await getList<any>('submissions', 500))
+    .filter((s: any) => s.unit === session.name)
+    .slice(0, 50);
   circulars = ((await get<any[]>('circulars')) || []).slice(0, 20);
   documents = (await get<any[]>('documents')) || [];
 }
