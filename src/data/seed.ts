@@ -85,7 +85,7 @@ export const SEED = {
   ],
 
   news: [
-    { id: 1, title: 'Registrations open for District Championship 2026', date: '12 May 2026', type: 'Announcement', img: 'https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=1200&q=70', body: 'Registrations are now open for the MMAKF District Karate Championship 2026, to be held at the Indoor Sports Complex on 22 June. All affiliated dojos and individual athletes from coloured belt and above are eligible. Entry fee ₹300 per athlete; team registrations close 15 June.' },
+    { id: 1, title: 'District Championship 2026 concluded at Ramgarh', date: '23 Jun 2026', type: 'Competition', img: 'https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=1200&q=70', body: 'The MMAKF District Karate Championship 2026 was held at the Indoor Sports Complex on 22 June, with athletes from affiliated dojos competing across kata and kumite divisions. Full results are recorded in the federation results register.' },
     { id: 2, title: 'Sensei Vikas Pathak elevated to IV Dan',             date: '04 May 2026', type: 'Promotion',    img: 'https://images.unsplash.com/photo-1593810450967-f9c42742e326?auto=format&fit=crop&w=1200&q=70', body: 'In a formal grading ceremony presided over by Grandmaster Shihan Pramod Kumar Pathak, Chief Instructor Sensei Vikas Pathak was elevated to IV Dan Black Belt in recognition of two decades of service to the federation and the Tiger Lee Shotokan lineage.' },
     { id: 3, title: "Women's Self-Defense program now in 14 schools",      date: '21 Apr 2026', type: 'Community',     img: 'https://images.unsplash.com/photo-1571902943202-507ec2618e8f?auto=format&fit=crop&w=1200&q=70', body: "MMAKF's Women's Self-Defense initiative, led by Sensei Sumitra Devi, has now been adopted by 14 schools across the Ramgarh and Hazaribagh districts. The program runs as a free 12-week curriculum covering practical defense, situational awareness, and confidence building." },
   ],
@@ -98,7 +98,7 @@ export const SEED = {
     { id: 3,  n: 'Kids Training Gi',              cat: 'uniform',     icon: 'karate-gi',  p: 1200, m: 1800, badge: 'New' },
     { id: 4,  n: 'MMAKF Belt Set (White–Brown)',  cat: 'accessories', icon: 'black-belt', p: 650,  m: 1000, badge: null },
     { id: 5,  n: 'Black Belt — MMAKF Certified',  cat: 'accessories', icon: 'black-belt', p: 900,  m: 1400, badge: null },
-    { id: 6,  n: 'Boxing Gloves 12oz',            cat: 'equipment',   icon: 'kumite',     p: 1400, m: 2000, badge: null },
+    { id: 6,  n: 'Kumite Mitts — WKF Style',      cat: 'equipment',   icon: 'kumite',     p: 1400, m: 2000, badge: null },
     { id: 7,  n: 'Shin Guards — Competition',     cat: 'equipment',   icon: 'shield',     p: 950,  m: 1500, badge: 'Sale' },
     { id: 8,  n: 'Focus Mitts Pair',              cat: 'equipment',   icon: 'kumite',     p: 1100, m: 1700, badge: null },
     { id: 9,  n: 'Sparring Headgear',             cat: 'equipment',   icon: 'shield',     p: 1700, m: 2600, badge: null },
@@ -112,7 +112,7 @@ export const SEED = {
     { icon: 'medal',  title: 'Guinness Recognition',       body: 'Federation records cite Guinness World Records-linked recognition for mass training achievements. Documentation is held at the federation office.', badge: 'Recognition' },
     { icon: 'globe',  title: 'WKF International Pathway',  body: 'MMAKF-trained coaches and athletes are formally registered under WKF SportsID and Sportdata ranking systems.', badge: 'WKF Registered' },
     { icon: 'school', title: '130+ Schools Reached',       body: 'At its historical peak, MMAKF operated structured martial arts programs across more than 130 schools.', badge: 'Institutional Scale' },
-    { icon: 'users',  title: 'Multi-Generational Legacy',  body: 'Since 1983, MMAKF has produced champions, black belts, coaches, instructors and referees.', badge: '42+ Years' },
+    { icon: 'users',  title: 'Multi-Generational Legacy',  body: 'Since 1983, MMAKF has produced champions, black belts, coaches, instructors and referees.', badge: 'Since 1983' },
     { icon: 'star',   title: 'Athlete Development',        body: 'MMAKF students have represented the federation at district, state and national level, and progressed to WKF-registered competition.', badge: 'Competitive Pathway' },
   ],
 

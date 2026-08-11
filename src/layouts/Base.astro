@@ -45,6 +45,10 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://www.mmakf.in" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script is:inline>
+      // P1-15: only enable the hidden-until-revealed state when JS is running.
+      document.documentElement.classList.add('js-reveal');
+    </script>
   </head>
   <body>
     {showNav && (
@@ -151,7 +155,10 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
       }
       .nav-inner {
         display: flex; align-items: center; justify-content: space-between;
-        height: 72px;
+        min-height: 72px;          /* P1-13: was fixed height — clipped the
+                                      wordmark at mobile widths */
+        padding: 8px 0;
+        gap: 12px;
       }
       .nav-brand { display: flex; align-items: center; gap: 13px; }
       .nav-name-1 {
@@ -243,7 +250,8 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
         .nav-hamburger { display: flex; }
       }
 
-      main { padding-top: 72px; min-height: 60vh; }
+      main { padding-top: 88px; min-height: 60vh; }
+      @media (min-width: 1081px) { main { padding-top: 76px; } }
 
       /* Footer — dark institutional band with crest watermark */
       footer {

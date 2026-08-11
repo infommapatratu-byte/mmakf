@@ -287,10 +287,22 @@ section + section { border-top: 1px solid var(--border); }
 @media (max-width: 600px) { .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; } }
 
 /* ─── Animation: scroll reveal ─── */
-.fade { opacity: 0; transform: translateY(14px); transition: opacity 0.7s ease, transform 0.7s ease; }
-.fade.vis { opacity: 1; transform: none; }
+/* Scroll reveal (P1-15).
+   The hidden state is applied ONLY when the reveal script has booted and set
+   .js-reveal on <html>. If the module script fails to load, is blocked, or JS
+   is off, content stays visible instead of being permanently invisible.
+   A safety animation also un-hides anything the observer never reached. */
+.fade { opacity: 1; transform: none; }
+html.js-reveal .fade {
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 0.7s ease, transform 0.7s ease;
+  animation: fade-failsafe 0s linear 4s forwards;
+}
+html.js-reveal .fade.vis { opacity: 1; transform: none; animation: none; }
+@keyframes fade-failsafe { to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
-  .fade { opacity: 1; transform: none; transition: none; }
+  html.js-reveal .fade { opacity: 1; transform: none; transition: none; animation: none; }
 }
 
 /* ─── Form inputs ─── */
@@ -343,6 +355,60 @@ select.input option { background: #fff; color: var(--white); }
   box-shadow: 0 16px 48px rgba(26, 23, 19, 0.18);
 }
 .notif.show { transform: none; opacity: 1; }
+
+/* ─── Scrollable data tables (P1-14) ───
+   Every federation table is wider than a phone. Without an affordance users
+   cannot tell the table scrolls. This adds a right-edge fade that disappears
+   at the end of the scroll, plus a visible slim scrollbar on touch. Applied by
+   adding `.tbl-scroll` to the existing overflow-x wrapper. */
+.tbl-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  background:
+    linear-gradient(to right, var(--card) 30%, rgba(255, 255, 255, 0)) left center,
+    linear-gradient(to left,  var(--card) 30%, rgba(255, 255, 255, 0)) right center,
+    radial-gradient(farthest-side at 0 50%, rgba(26, 23, 19, 0.16), rgba(0, 0, 0, 0)) left center,
+    radial-gradient(farthest-side at 100% 50%, rgba(26, 23, 19, 0.16), rgba(0, 0, 0, 0)) right center;
+  background-repeat: no-repeat;
+  background-size: 40px 100%, 40px 100%, 14px 100%, 14px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+.tbl-scroll::-webkit-scrollbar { height: 8px; }
+.tbl-scroll::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
+.tbl-hint {
+  display: none;
+  font-family: var(--font-display);
+  font-size: 0.6rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 8px;
+}
+@media (max-width: 760px) { .tbl-hint { display: block; } }
+
+/* Long button labels must wrap on narrow screens. `.btn` is nowrap for tidy
+   desktop rows, but on mobile a 57-character label rendered 513px wide and
+   overflowed the document by 143px (clipping page content). */
+@media (max-width: 620px) {
+  .btn {
+    white-space: normal;
+    max-width: 100%;
+    text-align: center;
+    line-height: 1.35;
+  }
+}
+
+/* Touch targets: interactive controls must be comfortably tappable. */
+@media (pointer: coarse) {
+  .btn, .gfilter, .sfilter { min-height: 44px; }
+  .btn-link, .nav-links a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  .nav-hamburger { min-width: 44px; min-height: 44px; justify-content: center; }
+}
 
 /* ─── Utility ─── */
 .text-gold { color: var(--gold-2); }
