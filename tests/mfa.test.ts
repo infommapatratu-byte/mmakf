@@ -3,7 +3,7 @@
 // Verified against RFC 6238's own published test vectors, because an
 // implementation that agrees only with itself agrees with no authenticator app.
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import crypto from 'node:crypto';
 import {
   base32Encode, base32Decode, totp, verifyTotp, beginEnrolment, confirmEnrolment,
@@ -118,17 +118,43 @@ describe('verification', () => {
     expect(verifyTotp('not-base32!!', '123456', at)).toBe(false);
   });
 
-  it('does not leak which step matched through timing', () => {
-    const time = (fn: () => void) => {
-      const t0 = performance.now();
-      for (let i = 0; i < 300; i++) fn();
-      return performance.now() - t0;
+  it('does not leak which step matched, because every candidate is evaluated', () => {
+    // This was once asserted with a stopwatch, which measured the machine's
+    // load rather than the algorithm and failed at random under a parallel
+    // test run. The property that actually makes verification constant-time is
+    // that NO candidate is skipped — so count the comparisons instead. A code
+    // matching at the first step, at the last step, and not at all must all
+    // cost exactly the same number of comparisons.
+    const comparisons = (submitted: string) => {
+      const spy = vi.spyOn(crypto, 'timingSafeEqual');
+      try {
+        verifyTotp(secret, submitted, at);
+        return spy.mock.calls.length;
+      } finally {
+        spy.mockRestore();
+      }
     };
-    const current = time(() => verifyTotp(secret, totp(secret, at), at));
-    const wrong = time(() => verifyTotp(secret, '000000', at));
-    // Every candidate is evaluated with no early return, so a wrong code costs
-    // the same as a right one.
-    expect(Math.abs(current - wrong) / Math.max(current, wrong)).toBeLessThan(0.6);
+
+    const step = 30_000;                       // one TOTP period, in ms
+    const previous = totp(secret, new Date(at.getTime() - step));
+    const next = totp(secret, new Date(at.getTime() + step));
+
+    const counts = [
+      comparisons(totp(secret, at)),           // matches at step 0
+      comparisons(previous),                   // matches at step -1
+      comparisons(next),                       // matches at step +1
+      comparisons('000000'),                   // matches nowhere
+    ];
+    // Default window is ±1, so three candidates, always.
+    expect(counts).toEqual([3, 3, 3, 3]);
+  });
+
+  it('accepts the adjacent steps that the window exists to tolerate', () => {
+    const step = 30_000;
+    expect(verifyTotp(secret, totp(secret, new Date(at.getTime() - step)), at)).toBe(true);
+    expect(verifyTotp(secret, totp(secret, new Date(at.getTime() + step)), at)).toBe(true);
+    // But not one beyond it — a clock that far out is a different problem.
+    expect(verifyTotp(secret, totp(secret, new Date(at.getTime() - 3 * step)), at)).toBe(false);
   });
 });
 

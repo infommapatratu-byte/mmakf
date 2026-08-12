@@ -4,6 +4,7 @@ import Icon from '@/components/Icon.astro';
 import PageHero from '@/components/PageHero.astro';
 import EnrollCTA from '@/components/EnrollCTA.astro';
 import { get } from '@/lib/storage';
+import { profileHref } from '@/lib/people';
 
 export const prerender = false;
 
@@ -122,12 +123,13 @@ const dojoKun = [
       </div>
       <div class="grid grid-3">
         {leadership.map((p: any) => (
-          <div class="card hoverable fade">
+          <a class="card hoverable fade" href={profileHref(p.name) || '/governance'} style="text-decoration:none;display:block">
             <div class="card-eyebrow">{p.role}</div>
             <div class="card-title">{p.name}</div>
             <div style="font-family:var(--font-display);font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--gold);margin-bottom:14px">{p.rank}</div>
             <div class="card-body">{p.note}</div>
-          </div>
+            <div class="text-gold" style="font-family:var(--font-display);font-size:.7rem;letter-spacing:.16em;text-transform:uppercase;margin-top:16px">Full profile &rarr;</div>
+          </a>
         ))}
       </div>
       <div class="mt-8">

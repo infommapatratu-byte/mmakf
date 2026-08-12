@@ -2,6 +2,7 @@
 import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import { get } from '@/lib/storage';
+import { profileHref } from '@/lib/people';
 
 export const prerender = false;
 
@@ -81,8 +82,8 @@ const orgLevels = [
       </div>
       <div class="ob-wrap tbl-scroll fade">
         <table class="ob-tbl">
-          <thead>
-            <tr><th style="width:52px">No.</th><th>Designation</th><th>Name</th><th>Grade / Credential</th><th>Serving since</th></tr>
+          <th scope="col"ead>
+            <tr><th scope="col" style="width:52px">No.</th><th scope="col">Designation</th><th scope="col">Name</th><th scope="col">Grade / Credential</th><th scope="col">Serving since</th></tr>
           </thead>
           <tbody>
             {leadership.map((p: any, i: number) => (
@@ -176,16 +177,23 @@ const orgLevels = [
               {featured.specialty && <span class="pill">{featured.specialty}</span>}
             </div>
             <p class="body-txt mt-6" style="font-size:.98rem;max-width:62ch">{featured.bio || featured.note}</p>
+            {profileHref(featured.name) && (
+              <div class="mt-6">
+                <a class="btn btn-ghost" href={profileHref(featured.name)}>
+                  Full profile — titles, honours and press record &rarr;
+                </a>
+              </div>
+            )}
           </div>
         </div>
 
         <div class="grid grid-2 mt-8">
           {faculty.map((p: any) => (
-            <div class="card fade">
+            <a class="card fade prof-card" href={profileHref(p.name) || '#'}>
               <div class="prof-head">
                 {p.img
-                  ? <img class="prof-avatar" src={p.img} alt={p.name} loading="lazy" />
-                  : <div class="prof-mono">{initials(p.name)}</div>}
+                  ? <img class="prof-avatar" src={p.img} alt="" loading="lazy" />
+                  : <div class="prof-mono" aria-hidden="true">{initials(p.name)}</div>}
                 <div>
                   <div style="font-family:var(--font-display);font-weight:600;font-size:1.05rem;color:var(--white)">{p.name}</div>
                   <div style="font-family:var(--font-display);font-size:.66rem;letter-spacing:.16em;text-transform:uppercase;color:var(--gold);margin-top:4px">{p.role}</div>
@@ -196,7 +204,8 @@ const orgLevels = [
                 {p.since && <span class="pill">Since {p.since}</span>}
               </div>
               <div class="card-body" style="font-size:.88rem">{p.bio || p.note}</div>
-            </div>
+              <div class="text-gold" style="font-family:var(--font-display);font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;margin-top:16px">Full profile &rarr;</div>
+            </a>
           ))}
         </div>
       </div>
@@ -214,8 +223,8 @@ const orgLevels = [
       </div>
       <div class="doc-wrap tbl-scroll fade">
         <table class="doc-tbl">
-          <thead>
-            <tr><th>Document</th><th>Category</th><th>Reference</th><th>Access</th></tr>
+          <th scope="col"ead>
+            <tr><th scope="col">Document</th><th scope="col">Category</th><th scope="col">Reference</th><th scope="col">Access</th></tr>
           </thead>
           <tbody>
             {documents.map((d: any) => (
@@ -377,6 +386,7 @@ const orgLevels = [
     filter: grayscale(0.5) !important;
   }
 
+  .prof-card { text-decoration: none; display: block; }
   .prof-head { display: flex; gap: 16px; align-items: center; }
   .prof-avatar {
     width: 64px; height: 64px;

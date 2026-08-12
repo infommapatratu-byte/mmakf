@@ -1,0 +1,502 @@
+---
+/**
+ * Individual profile.
+ *
+ * The rule this page exists to enforce: a TITLE and a GRADE are different kinds
+ * of credential, and a federation that prints them on one line reads as
+ * inflation to exactly the audience it most wants to convince. Dan is a grade,
+ * examined and awarded. Soke, Shihan, Renshi and Sensei are not grades at all.
+ * Stated apart, with what each one means, they are stronger than stated
+ * together — so this page never concatenates them.
+ *
+ * The second rule: nothing here is written by the page. Every line is a field
+ * the federation recorded, and an honour renders WITH the source it was
+ * recorded from. A field the federation has not recorded renders as absent —
+ * never as a placeholder, an approximation, or a stock photograph.
+ */
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import { get } from '@/lib/storage';
+import { slugify, initials } from '@/lib/people';
+
+export const prerender = false;
+
+const { slug } = Astro.params;
+
+const leadership = (await get<any[]>('leadership')) || [];
+const person = leadership.find((p: any) => p?.name && slugify(p.name) === slug);
+
+if (!person) {
+  return new Response(null, { status: 404, statusText: 'No such profile' });
+}
+
+const schedule = (await get<any[]>('schedule')) || [];
+const programs = (await get<any[]>('programs')) || [];
+const press = (await get<any[]>('press')) || [];
+const social = (await get<any[]>('social')) || [];
+const fed = await get<any>('federation');
+
+/**
+ * Devanagari forms of names, keyed on the EXACT recorded name. A press clipping
+ * printed in Hindi names the person in Hindi; matching only the Latin spelling
+ * would miss it. This is transliteration of a name the federation already
+ * recorded — not a new fact about anybody. An unlisted name simply matches on
+ * its Latin form alone.
+ */
+const DEVANAGARI: Record<string, string[]> = {
+  'Shihan Pramod Kumar Pathak': ['प्रमोद'],
+  'Sensei Vikas Pathak': ['विकास'],
+};
+
+/**
+ * A clipping belongs on a profile only when it NAMES the person. Nothing is
+ * inferred from a shared surname, a shared dojo or a shared date — three of the
+ * six people on this platform are called Pathak, and guessing would attribute
+ * one person's coverage to another.
+ */
+const mentions = (text: string, p: any): boolean => {
+  const hay = (text || '').toLowerCase();
+  const parts = (p.name || '').split(/\s+/).filter(Boolean);
+  // Drop the honorific: 'Shihan Pramod Kumar Pathak' matches on Pramod + Pathak.
+  const HONORIFICS = new Set(['shihan', 'sensei', 'senpai', 'soke', 'renshi', 'kyoshi', 'hanshi']);
+  const names = parts.filter((w: string) => !HONORIFICS.has(w.toLowerCase())).map((w: string) => w.toLowerCase());
+  if (names.length && names.every((n: string) => hay.includes(n))) return true;
+  return (DEVANAGARI[p.name] || []).some((d) => (text || '').includes(d));
+};
+
+const clippings = press.filter(
+  (c: any) => c && c.img && mentions(`${c.headline || ''} ${c.summary || ''}`, person)
+);
+
+/** Sessions this person teaches, taken from the published timetable. */
+const teaches = schedule.filter((s: any) => s?.ins === person.name);
+
+/** Programmes whose published description names this person as the authority. */
+const leads = programs.filter((pr: any) => mentions(`${pr?.name || ''} ${pr?.desc || ''}`, person));
+
+const titles: any[] = Array.isArray(person.titles) ? person.titles : [];
+const honours: any[] = Array.isArray(person.honours) ? person.honours : [];
+
+/** Only the federation's own channels, and only where an address is recorded. */
+const safeHref = (u: string): string | null => {
+  const v = (u || '').trim();
+  if (!v) return null;
+  if (v.startsWith('/') && !v.startsWith('//')) return v;
+  try {
+    const proto = new URL(v).protocol;
+    return proto === 'http:' || proto === 'https:' ? v : null;
+  } catch {
+    return null;
+  }
+};
+const channels = social.filter((a: any) => a && safeHref(a.url) && a.primary === 'Yes');
+
+const others = leadership.filter((p: any) => p?.name && p.name !== person.name);
+
+/**
+ * Structured data. Only fields the federation recorded are emitted — an empty
+ * `image` is omitted rather than pointed at a placeholder, because a search
+ * engine repeating a placeholder as this person's photograph is the same
+ * misattribution as printing it on the page.
+ */
+const jsonLd: Record<string, unknown> = {
+  '@context': 'https://schema.org',
+  '@type': 'Person',
+  name: person.name,
+  jobTitle: person.role,
+  url: `https://www.mmakf.in/people/${slug}`,
+  worksFor: { '@type': 'SportsOrganization', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
+};
+if (person.img) jsonLd.image = person.img;
+if (honours.length) jsonLd.award = honours.map((h: any) => (h.year ? `${h.title} (${h.year})` : h.title));
+if (person.bio) jsonLd.description = person.bio;
+---
+
+<Base
+  title={`${person.name} — ${person.role} · MMAKF`}
+  description={person.bio || `${person.name}, ${person.role} of the Modern Martial Arts Karate-Do Federation of India.`}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  {/* ═══════ IDENTITY ═══════ */}
+  <section class="prof-hero">
+    <div class="container">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/governance">Governance</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">{person.name}</span>
+      </nav>
+
+      <div class="prof-id">
+        <div class="prof-portrait">
+          {person.img
+            ? <img src={person.img} alt={`Portrait of ${person.name}`} loading="eager" />
+            : (
+              <div class="prof-mono-lg" role="img" aria-label={`No portrait of ${person.name} is on record`}>
+                {initials(person.name)}
+              </div>
+            )}
+          {!person.img && (
+            <p class="prof-nophoto">
+              No photograph of {person.name} is held on the federation record.
+            </p>
+          )}
+        </div>
+
+        <div>
+          <div class="eyebrow">{person.role}</div>
+          <h1 class="display-1 prof-name">{person.name}</h1>
+          {person.since && (
+            <p class="prof-since">In the federation since {person.since}</p>
+          )}
+          {person.specialty && <p class="lead" style="max-width:52ch">{person.specialty}</p>}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ GRADE, AND TITLES, HELD APART ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="grid grid-2 gap-6">
+        <div>
+          <div class="section-head" style="margin-bottom:20px">
+            <div class="eyebrow">Grade</div>
+            <h2 class="display-2" style="font-size:clamp(1.4rem,2.4vw,1.9rem)">Examined <em>rank</em>.</h2>
+            <div class="rule gold"></div>
+          </div>
+          <div class="card">
+            <div class="card-title" style="color:var(--gold)">{person.rank}</div>
+            <div class="card-body" style="font-size:.88rem">
+              A Dan grade is awarded on examination and is recorded against the person in the
+              federation's rank register, where every grade a person has ever held is retained —
+              a promotion supersedes the previous grade, it does not erase it.
+            </div>
+          </div>
+        </div>
+
+        {titles.length > 0 && (
+          <div>
+            <div class="section-head" style="margin-bottom:20px">
+              <div class="eyebrow">Titles</div>
+              <h2 class="display-2" style="font-size:clamp(1.4rem,2.4vw,1.9rem)">Held <em class="r">separately</em>.</h2>
+              <div class="rule"></div>
+            </div>
+            <dl class="title-list">
+              {titles.map((t: any) => (
+                <div class="title-row">
+                  <dt>{t.title}</dt>
+                  <dd>{t.meaning}</dd>
+                </div>
+              ))}
+            </dl>
+            <p class="text-muted" style="font-size:.8rem;margin-top:14px;max-width:56ch">
+              None of these is a grade. They are forms of address and standing within the system,
+              and the federation records them apart from rank for that reason.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ BIOGRAPHY ═══════ */}
+  {person.bio && (
+    <section>
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">Record</div>
+          <h2 class="display-2">The <em>account</em>.</h2>
+          <div class="rule"></div>
+        </div>
+        <p class="body-txt" style="font-size:1.02rem;max-width:68ch">{person.bio}</p>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ HONOURS, WITH THEIR SOURCES ═══════ */}
+  {honours.length > 0 && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">Honours</div>
+          <h2 class="display-2">Conferred, and <em class="r">where it is recorded</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            Each entry carries the publication it was recorded from. An honour the federation
+            cannot point to a source for is not listed here.
+          </p>
+        </div>
+        <div class="grid grid-2">
+          {honours.map((h: any) => (
+            <div class="card fade">
+              <div class="card-icon"><Icon name="medal" size={32} color="var(--gold)" /></div>
+              <div class="card-title">{h.title}</div>
+              {h.year && <div class="honour-year">{h.year}</div>}
+              {h.note && <div class="card-body" style="font-size:.88rem">{h.note}</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ CLIPPINGS THAT NAME THIS PERSON ═══════ */}
+  {clippings.length > 0 && (
+    <section>
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">Press archive</div>
+          <h2 class="display-2">Clippings that <em>name</em> {person.name.split(/\s+/).slice(-1)[0]}.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            Scans held by the federation office. A clipping appears on this page only where the
+            printed text names this person — nothing is attributed by shared surname or shared date.
+          </p>
+        </div>
+        <div class="grid grid-2">
+          {clippings.map((c: any) => (
+            <article class="card fade">
+              <img class="clip-img" src={c.img} alt={`Press clipping: ${c.headline}`} loading="lazy" />
+              <div class="card-eyebrow">{c.outlet} · {c.date}</div>
+              <div class="card-title" style="font-size:1rem">{c.headline}</div>
+              <div class="card-body" style="font-size:.86rem">{c.summary}</div>
+              {c.verified && <div style="margin-top:14px"><span class="pill">{c.verified}</span></div>}
+            </article>
+          ))}
+        </div>
+        <div class="mt-6">
+          <a href="/press" class="btn btn-ghost">The full press archive →</a>
+        </div>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ WHAT THEY TEACH ═══════ */}
+  {(teaches.length > 0 || leads.length > 0) && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">On the mat</div>
+          <h2 class="display-2">What {person.name.split(/\s+/).slice(-1)[0]} <em class="r">teaches</em>.</h2>
+          <div class="rule"></div>
+        </div>
+
+        {leads.length > 0 && (
+          <div class="grid grid-2" style="margin-bottom:32px">
+            {leads.map((pr: any) => (
+              <div class="card fade">
+                <div class="card-icon"><Icon name={pr.icon || 'star'} size={30} color="var(--gold)" /></div>
+                <div class="card-title" style="font-size:1rem">{pr.name}</div>
+                <div class="card-body" style="font-size:.86rem">{pr.desc}</div>
+                {pr.lvl && <div style="margin-top:14px"><span class="pill">{pr.lvl}</span></div>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {teaches.length > 0 && (
+          <div class="tbl-scroll fade">
+            <table class="doc-tbl">
+              <caption class="sr-only">Timetable sessions taught by {person.name}</caption>
+              <thead>
+                <tr><th scope="col">Day</th><th scope="col">Time</th><th scope="col">Session</th><th scope="col">Level</th><th scope="col">Mode</th></tr>
+              </thead>
+              <tbody>
+                {teaches.map((s: any) => (
+                  <tr>
+                    <td style="font-family:var(--font-display);font-weight:600">{s.day}</td>
+                    <td>{s.t}</td>
+                    <td>{s.d}</td>
+                    <td class="text-muted">{s.lvl}</td>
+                    <td><span class="pill">{s.mode === 'online' ? 'Online' : 'Dojo'}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div class="mt-6 flex flex-wrap gap-3">
+          <a href="/schedule" class="btn btn-ghost">Full timetable →</a>
+          <a href="/programs" class="btn btn-ghost">All programmes →</a>
+        </div>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ CHANNELS ═══════ */}
+  {channels.length > 0 && (
+    <section>
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">Official channels</div>
+          <h2 class="display-2">Where the federation <em>publishes</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            These are the federation's channels, not this person's personal accounts.
+          </p>
+        </div>
+        <div class="flex flex-wrap gap-3">
+          {channels.map((a: any) => (
+            <a class="btn btn-ghost" href={safeHref(a.url)} target="_blank" rel="noopener">
+              {a.platform} →
+            </a>
+          ))}
+        </div>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ THE REST OF THE FACULTY ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Faculty</div>
+        <h2 class="display-2">The rest of the <em class="r">senior faculty</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {others.map((p: any) => (
+          <a class="card hoverable fade" href={`/people/${slugify(p.name)}`}>
+            <div class="prof-head">
+              {p.img
+                ? <img class="prof-avatar" src={p.img} alt="" loading="lazy" />
+                : <div class="prof-mono" aria-hidden="true">{initials(p.name)}</div>}
+              <div>
+                <div style="font-family:var(--font-display);font-weight:600;font-size:.98rem;color:var(--white)">{p.name}</div>
+                <div style="font-family:var(--font-display);font-size:.64rem;letter-spacing:.16em;text-transform:uppercase;color:var(--gold);margin-top:4px">{p.role}</div>
+              </div>
+            </div>
+            <div style="margin:12px 0"><span class="pill">{p.rank}</span></div>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ PROVENANCE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="card" style="max-width:72ch">
+        <div class="card-eyebrow">Provenance</div>
+        <div class="card-body" style="font-size:.86rem">
+          Everything on this page is a field held in the federation's own record. Honours are shown
+          with the publication they were recorded from, and press clippings are scans held by the
+          federation office. Where a clipping's masthead is not legible, the archive says so rather
+          than naming an outlet. Certified copies of any record are issued by the office
+          {fed?.contact?.email && (
+            <> — <a class="text-gold" href={`mailto:${fed.contact.email}?subject=${encodeURIComponent(`Record request: ${person.name}`)}`}>{fed.contact.email}</a></>
+          )}.
+        </div>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .prof-hero { padding-top: clamp(90px, 12vw, 140px); }
+
+  .crumbs {
+    font-family: var(--font-display);
+    font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+    display: flex; gap: 10px; align-items: center; margin-bottom: 28px;
+  }
+  .crumbs a { color: var(--gold); text-decoration: none; }
+  .crumbs a:hover { text-decoration: underline; }
+  .crumbs span[aria-current] { color: var(--muted); }
+
+  .prof-id {
+    display: grid; grid-template-columns: minmax(0, 260px) 1fr;
+    gap: clamp(24px, 4vw, 48px); align-items: start;
+  }
+  @media (max-width: 780px) { .prof-id { grid-template-columns: 1fr; } }
+
+  .prof-portrait img {
+    width: 100%; aspect-ratio: 3 / 4; object-fit: cover;
+    border-radius: 4px; border: 1px solid var(--border-2);
+  }
+  .prof-mono-lg {
+    width: 100%; aspect-ratio: 3 / 4;
+    display: grid; place-items: center;
+    font-family: var(--font-display); font-weight: 700;
+    font-size: clamp(2.6rem, 7vw, 4rem); letter-spacing: .06em;
+    color: var(--gold);
+    border: 1px solid var(--border-2); border-radius: 4px;
+    background: linear-gradient(160deg, rgba(255,255,255,.04), rgba(0,0,0,.12));
+  }
+  .prof-nophoto {
+    font-size: .76rem; color: var(--muted); margin-top: 10px; line-height: 1.5;
+  }
+
+  .prof-name { font-size: clamp(2rem, 5vw, 3.2rem); margin: 6px 0 10px; }
+  .prof-since {
+    font-family: var(--font-display); font-size: .74rem;
+    letter-spacing: .16em; text-transform: uppercase;
+    color: var(--gold); margin-bottom: 18px;
+  }
+
+  .title-list { display: grid; gap: 2px; }
+  .title-row {
+    display: grid; grid-template-columns: minmax(0, 130px) 1fr;
+    gap: 18px; padding: 16px 0; border-bottom: 1px solid var(--border-2);
+  }
+  @media (max-width: 560px) { .title-row { grid-template-columns: 1fr; gap: 4px; } }
+  .title-row dt {
+    font-family: var(--font-display); font-weight: 600;
+    font-size: 1.02rem; color: var(--gold);
+  }
+  .title-row dd { margin: 0; font-size: .92rem; color: var(--muted); line-height: 1.6; }
+
+  .honour-year {
+    font-family: var(--font-display); font-size: .72rem;
+    letter-spacing: .16em; color: var(--gold); margin-bottom: 12px;
+  }
+
+  .clip-img {
+    width: 100%; aspect-ratio: 4 / 3; object-fit: cover;
+    border-radius: 3px; border: 1px solid var(--border-2); margin-bottom: 16px;
+  }
+
+  a.card { text-decoration: none; display: block; }
+
+  /* Shared faculty-card and table styles, scoped to this page. */
+  .prof-head { display: flex; gap: 16px; align-items: center; }
+  .prof-avatar {
+    width: 64px; height: 64px; object-fit: cover;
+    border: 1px solid var(--border-2);
+    filter: grayscale(0.2) brightness(0.9);
+    flex-shrink: 0;
+  }
+  .prof-mono {
+    width: 64px; height: 64px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg-2); border: 1px solid var(--border-2);
+    font-family: var(--font-display); font-weight: 600;
+    font-size: 1.2rem; color: var(--gold); flex-shrink: 0;
+  }
+  .doc-tbl {
+    width: 100%; border-collapse: collapse;
+    background: var(--card); border: 1px solid var(--border);
+    min-width: 640px;
+  }
+  .doc-tbl th, .doc-tbl td {
+    padding: 14px 18px; text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem; vertical-align: middle;
+  }
+  .doc-tbl th {
+    background: var(--bg-2); font-family: var(--font-display);
+    font-size: 0.64rem; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--gold); font-weight: 500;
+  }
+  .doc-tbl tr:last-child td { border-bottom: 0; }
+
+  /* Visually hidden, still read aloud. The table caption names what the table
+     is for; sighted users get that from the heading above it. */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+</style>
