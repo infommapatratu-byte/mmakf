@@ -1,0 +1,442 @@
+---
+/**
+ * THE ANNUAL REPORT — /admin/report (Q-22)
+ *
+ * The document a member, a sponsor or a regulator is most likely to challenge.
+ * The only defensible answer to a challenge is "here is the query", so every
+ * figure on this page is printed WITH the table, the column and the filter that
+ * produced it. That provenance is not a footnote a designer may trim: it is the
+ * reason the number is worth printing.
+ *
+ * THE RULE THAT GOVERNS THE WHOLE PAGE, inherited from db/analytics.ts and
+ * enforced again here in what it renders:
+ *
+ *   A SECTION WITH NO RECORDS PRINTS NO ZEROS.
+ *
+ * "0 gradings held" is read as a measurement — the federation examined nobody
+ * this year. What the system can honestly say is narrower: nobody entered a
+ * grading into it. Those are different claims, and only the second is true.
+ * So a section with nothing in it says "no records for this period" and prints
+ * no figures at all. Once ANY figure in a section is non-zero the section is a
+ * real measurement, and the zeros inside it are measurements too.
+ *
+ * A WITHHELD SECTION IS NOT AN EMPTY ONE. A reader without safeguarding
+ * authority sees that a safeguarding section exists and that it was withheld
+ * from them — not a report in which safeguarding silently does not appear.
+ * Silence there would be the more dangerous lie.
+ *
+ * COVERAGE. The federation was founded in 1983 and this system holds records
+ * from the day it was switched on. A report for an early year is not a report
+ * of a quiet year; it is a report of a year this system did not cover. The page
+ * says so rather than letting a reader draw the other conclusion.
+ */
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import { identify } from '@/lib/session';
+import { ForbiddenError } from '@/lib/rbac';
+import { isConfigured, db } from '@/db';
+import { annualReport, type AnnualReport, type ReportSection } from '@/db/analytics';
+
+export const prerender = false;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const configured = isConfigured();
+
+const now = new Date();
+const thisYear = now.getUTCFullYear();
+
+/** A malformed year is REPORTED, never silently replaced with the current one. */
+const rawYear = Astro.url.searchParams.get('year');
+let year = thisYear;
+let yearProblem: string | null = null;
+if (rawYear !== null) {
+  const n = Number(rawYear);
+  if (!/^\d{4}$/.test(rawYear) || !Number.isInteger(n)) {
+    yearProblem = `"${rawYear}" is not a four-digit year.`;
+  } else {
+    year = n;
+  }
+}
+
+let report: AnnualReport | null = null;
+let denied: string | null = null;
+let failure: string | null = null;
+
+if (identity && configured && !yearProblem) {
+  try {
+    report = await annualReport(db(), identity.principal, year, { now });
+  } catch (err: any) {
+    if (err instanceof ForbiddenError) {
+      denied =
+        `The annual report is the FEDERATION's report and is read at national scope. Your ` +
+        `credential does not hold "${err.action}" nationally. A scoped administrator's own ` +
+        `figures are on the dashboard, narrowed to their unit.`;
+    } else if (err?.name === 'AnalyticsError' && typeof err.message === 'string') {
+      failure = err.message;
+    } else {
+      console.error('[admin/report] failed', err);
+      failure =
+        'The report could not be assembled. Nothing is shown rather than partial figures that ' +
+        'would read as a complete year. The failure is in this deployment’s server log.';
+    }
+  }
+}
+
+/**
+ * The years worth offering. The system cannot report on a year before it held
+ * records, and offering 1983 would invite exactly the misreading described
+ * above — an empty report for a year the federation was very much active.
+ */
+const OFFERED_YEARS = Array.from({ length: 6 }, (_, i) => thisYear - i);
+
+const reported = (report?.sections ?? []).filter((s) => s.status === 'reported');
+const empty = (report?.sections ?? []).filter((s) => s.status === 'no_records');
+const withheld = (report?.sections ?? []).filter((s) => s.status === 'withheld');
+
+const fmt = (n: number) => n.toLocaleString('en-IN');
+
+/** Column headings for a section's rows, taken from the data rather than guessed. */
+const columnsOf = (s: ReportSection): string[] =>
+  s.rows.length ? Object.keys(s.rows[0]) : [];
+
+const humanise = (key: string) =>
+  key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+const cell = (v: unknown) =>
+  v === null || v === undefined ? '—' : typeof v === 'number' ? fmt(v) : String(v);
+
+const yearHref = (y: number) => `/admin/report?year=${y}`;
+---
+
+<Base title={`Annual report ${year} — MMAKF`} showFooter={false}>
+  <section class="rpt">
+    <div class="container">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/admin">Administration</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">Annual report</span>
+      </nav>
+
+      <div class="rpt-head">
+        <div>
+          <div class="eyebrow">Federation annual report</div>
+          <h1 class="display-1 rpt-title">{year}</h1>
+          {report && (
+            <p class="rpt-period">
+              {report.periodFrom} to {report.periodTo} · {report.scope.label} ·
+              assembled {report.generatedAt.slice(0, 19).replace('T', ' ')} UTC
+            </p>
+          )}
+        </div>
+        <div class="year-bar" role="group" aria-label="Report year">
+          {OFFERED_YEARS.map((y) => (
+            <a href={yearHref(y)} class:list={['year-chip', { on: y === year && !yearProblem }]}>{y}</a>
+          ))}
+        </div>
+      </div>
+
+      {!identity && (
+        <div class="notice">
+          <Icon name="shield" size={22} color="var(--gold)" />
+          <div>
+            <strong>Sign in to read the annual report.</strong>
+            <p>It is assembled from the federation register and is read at national scope.</p>
+            <p class="mt-4"><a class="btn btn-ghost" href="/admin">Go to administration &rarr;</a></p>
+          </div>
+        </div>
+      )}
+
+      {identity && !configured && (
+        <div class="notice">
+          <Icon name="shield" size={22} color="var(--gold)" />
+          <div>
+            <strong>The federation database is not configured for this environment.</strong>
+            <p>
+              Every figure in this report is a query against the register. With no database there
+              is nothing to query, which is said here rather than rendered as a year of zeros.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {yearProblem && (
+        <div class="notice bad" role="alert">
+          <Icon name="shield" size={22} color="var(--red)" />
+          <div>
+            <strong>That is not a year.</strong>
+            <p>{yearProblem} Pick one above rather than being shown a year you did not ask for.</p>
+          </div>
+        </div>
+      )}
+
+      {denied && (
+        <div class="notice bad" role="alert">
+          <Icon name="shield" size={22} color="var(--red)" />
+          <div><strong>Not yours to read.</strong><p>{denied}</p></div>
+        </div>
+      )}
+
+      {failure && (
+        <div class="notice bad" role="alert">
+          <Icon name="shield" size={22} color="var(--red)" />
+          <div><strong>The report could not be assembled.</strong><p>{failure}</p></div>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {report && (
+    <>
+      <section class="bg2">
+        <div class="container">
+          <div class="coverage">
+            <Icon name="book" size={26} color="var(--gold)" />
+            <div>
+              <strong>What this report covers.</strong>
+              <p>
+                Every figure below is a count of records held in this system, with the table, the
+                column and the filter that produced it printed beneath. The federation was founded
+                in 1983; records from before this system was in use are not in it, so a sparse year
+                here is a statement about the system's coverage and not about the federation's
+                activity. Sections with no records print no figures at all — a zero would read as a
+                measurement the register cannot support.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {reported.map((s) => (
+        <section>
+          <div class="container">
+            <div class="section-head">
+              <div class="eyebrow">Reported</div>
+              <h2 class="display-2" style="font-size:clamp(1.4rem,2.6vw,2rem)">{s.title}</h2>
+              <div class="rule gold"></div>
+            </div>
+
+            {s.figures.length > 0 && (
+              <div class="fig-grid">
+                {s.figures.map((f) => (
+                  <div class="fig">
+                    <div class="fig-value">{f.value === null ? '—' : fmt(f.value)}</div>
+                    <div class="fig-label">{f.label}</div>
+                    {/* The provenance IS the figure. A number without it is an
+                        assertion; with it, it is a claim anyone can re-run. */}
+                    <dl class="fig-src">
+                      <div><dt>Table</dt><dd>{f.source.table}</dd></div>
+                      <div><dt>Column</dt><dd>{f.source.column}</dd></div>
+                      <div><dt>Filter</dt><dd>{f.source.filter}</dd></div>
+                    </dl>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {s.rows.length > 0 && (
+              <div class="tbl-scroll" style="margin-top:32px">
+                <table class="rpt-tbl">
+                  <caption class="sr-only">{s.title} — breakdown</caption>
+                  <thead>
+                    <tr>{columnsOf(s).map((c) => <th scope="col">{humanise(c)}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {s.rows.map((r) => (
+                      <tr>{columnsOf(s).map((c) => <td>{cell((r as any)[c])}</td>)}</tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
+      ))}
+
+      {empty.length > 0 && (
+        <section class="bg2">
+          <div class="container">
+            <div class="section-head">
+              <div class="eyebrow">Nothing recorded</div>
+              <h2 class="display-2" style="font-size:clamp(1.4rem,2.6vw,2rem)">
+                No records in {year} for <em>these</em>.
+              </h2>
+              <div class="rule"></div>
+              <p class="lead">
+                Not "none happened" — nothing was entered into this system for the period. The
+                distinction is why no figure is printed here: a zero would be a measurement, and
+                the register cannot support one.
+              </p>
+            </div>
+            <ul class="plain-list">
+              {empty.map((s) => (
+                <li><span class="plain-title">{s.title}</span><span class="plain-note">{s.note}</span></li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
+
+      {withheld.length > 0 && (
+        <section>
+          <div class="container">
+            <div class="section-head">
+              <div class="eyebrow">Withheld from you</div>
+              <h2 class="display-2" style="font-size:clamp(1.4rem,2.6vw,2rem)">
+                Sections you may <em class="r">not</em> read.
+              </h2>
+              <div class="rule"></div>
+              <p class="lead">
+                These exist and were deliberately not shown. A report in which they silently did not
+                appear would be the more dangerous document — a reader would conclude the federation
+                keeps no such record.
+              </p>
+            </div>
+            <ul class="plain-list">
+              {withheld.map((s) => (
+                <li><span class="plain-title">{s.title}</span><span class="plain-note">{s.note}</span></li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
+
+      <section class="bg2">
+        <div class="container">
+          <div class="rpt-foot">
+            <p class="text-muted" style="font-size:.86rem;max-width:70ch">
+              This report is generated on request from the live register, so a figure will change if
+              a record for {year} is entered, corrected or withdrawn after today. It is a view of the
+              register, not a signed statement of account: a certified copy for a regulator or a
+              sponsor is issued by the federation office against the register as at a stated date.
+            </p>
+            <div class="mt-6 flex flex-wrap gap-3">
+              <a class="btn btn-ghost" href="/admin/dashboard">Scoped dashboards &rarr;</a>
+              <a class="btn btn-ghost" href="/admin/command">National command centre &rarr;</a>
+              <button class="btn btn-ghost" id="printReport" type="button">Print this report</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </>
+  )}
+</Base>
+
+<script>
+  document.getElementById('printReport')?.addEventListener('click', () => window.print());
+</script>
+
+<style>
+  .rpt { padding-top: clamp(80px, 10vw, 120px); }
+
+  .crumbs {
+    font-family: var(--font-display); font-size: .72rem;
+    letter-spacing: .14em; text-transform: uppercase;
+    display: flex; gap: 10px; align-items: center; margin-bottom: 26px;
+  }
+  .crumbs a { color: var(--gold); text-decoration: none; }
+  .crumbs a:hover { text-decoration: underline; }
+  .crumbs span[aria-current] { color: var(--muted); }
+
+  .rpt-head {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    gap: 24px; flex-wrap: wrap;
+  }
+  .rpt-title { font-size: clamp(2.6rem, 8vw, 4.4rem); line-height: 1; margin: 6px 0 10px; }
+  .rpt-period { font-size: .88rem; color: var(--muted); }
+
+  .year-bar { display: flex; flex-wrap: wrap; gap: 8px; }
+  .year-chip {
+    font-family: var(--font-display); font-size: .74rem; letter-spacing: .1em;
+    padding: 9px 15px; border: 1px solid var(--border-2); border-radius: 999px;
+    color: var(--muted); text-decoration: none; background: var(--card);
+  }
+  .year-chip:hover { color: var(--white); border-color: var(--gold-dim); }
+  .year-chip.on { color: var(--bg); background: var(--gold); border-color: var(--gold); }
+
+  .notice {
+    display: flex; gap: 16px; align-items: flex-start;
+    margin-top: 30px; padding: 20px 22px;
+    background: var(--card); border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold); border-radius: var(--radius);
+  }
+  .notice.bad { border-left-color: var(--red); }
+  .notice strong { font-family: var(--font-display); color: var(--white); display: block; margin-bottom: 6px; }
+  .notice p { margin: 0; font-size: .9rem; color: var(--muted); line-height: 1.6; }
+
+  .coverage {
+    display: flex; gap: 18px; align-items: flex-start;
+    padding: 26px 28px; background: var(--card);
+    border: 1px solid var(--border-2); border-left: 3px solid var(--gold);
+    border-radius: var(--radius);
+  }
+  .coverage strong { font-family: var(--font-display); color: var(--white); display: block; margin-bottom: 8px; }
+  .coverage p { margin: 0; font-size: .92rem; color: var(--muted); line-height: 1.65; max-width: 78ch; }
+
+  .fig-grid {
+    display: grid; gap: 18px;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  }
+  .fig {
+    padding: 22px 24px; background: var(--card);
+    border: 1px solid var(--border-2); border-radius: var(--radius);
+  }
+  .fig-value {
+    font-family: var(--font-display); font-weight: 700;
+    font-size: clamp(1.9rem, 4vw, 2.6rem); line-height: 1; color: var(--gold);
+  }
+  .fig-label {
+    font-family: var(--font-display); font-size: .72rem;
+    letter-spacing: .16em; text-transform: uppercase;
+    color: var(--white); margin: 12px 0 16px;
+  }
+  .fig-src { margin: 0; padding-top: 14px; border-top: 1px solid var(--border); display: grid; gap: 6px; }
+  .fig-src > div { display: grid; grid-template-columns: 56px 1fr; gap: 10px; }
+  .fig-src dt {
+    font-family: var(--font-display); font-size: .58rem;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+  }
+  .fig-src dd { margin: 0; font-size: .74rem; color: var(--muted); line-height: 1.45; word-break: break-word; }
+
+  .rpt-tbl {
+    width: 100%; border-collapse: collapse;
+    background: var(--card); border: 1px solid var(--border); min-width: 620px;
+  }
+  .rpt-tbl th, .rpt-tbl td {
+    padding: 13px 18px; text-align: left;
+    border-bottom: 1px solid var(--border); font-size: .88rem;
+  }
+  .rpt-tbl th {
+    background: var(--bg-2); font-family: var(--font-display);
+    font-size: .62rem; letter-spacing: .2em; text-transform: uppercase;
+    color: var(--gold); font-weight: 500;
+  }
+  .rpt-tbl tr:last-child td { border-bottom: 0; }
+
+  .plain-list { list-style: none; padding: 0; margin: 0; }
+  .plain-list li {
+    display: flex; gap: 20px; flex-wrap: wrap; align-items: baseline;
+    padding: 15px 0; border-bottom: 1px solid var(--border);
+  }
+  .plain-list li:last-child { border-bottom: 0; }
+  .plain-title {
+    font-family: var(--font-display); font-weight: 600; font-size: 1rem;
+    color: var(--white); flex: 0 0 260px;
+  }
+  .plain-note { font-size: .89rem; color: var(--muted); line-height: 1.55; }
+
+  .rpt-foot { padding-top: 8px; }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
+  /* A printed annual report is a real artefact — the office will print it for a
+     meeting. Provenance stays on the page when it does; the year picker and the
+     navigation do not. */
+  @media print {
+    .year-bar, .crumbs, .rpt-foot .btn, #printReport { display: none !important; }
+    .fig, .coverage, .rpt-tbl { break-inside: avoid; }
+    section { padding: 24px 0 !important; border: 0 !important; }
+  }
+</style>
