@@ -25,7 +25,7 @@ const programs = await get<any[]>('programs');
     eyebrow="Calendar"
     title={`Tournaments, gradings & <em>seminars</em>.`}
     lead="The federation calendar — championships from district to state level, quarterly grading camps, open seminars and free community workshops."
-    pills={['Registration by phone', `${fed.contact.phone}`]}
+    pills={['Registration by email', fed.contact.email]}
   />
 
   {/* ═══════ EVENTS ═══════ */}
@@ -205,7 +205,7 @@ const programs = await get<any[]>('programs');
     </div>
   </section>
 
-  <EnrollCTA programs={programs} phone={fed.contact.phone} />
+  <EnrollCTA programs={programs} />
 </Base>
 
 <script>

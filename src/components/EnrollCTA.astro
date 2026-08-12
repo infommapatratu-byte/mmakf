@@ -1,44 +1,69 @@
 ---
-// Reusable enrolment CTA with the free-trial form. Posts to /api/enroll —
-// the single conversion action of the site (MASTER-SPEC F15).
+// The federation's enquiry CTA. Posts to /api/enroll.
+//
+// TWO CORRECTIONS LIVE IN THIS FILE, BOTH FROM THE FEDERATION.
+//
+// The first was a crash. A personal mobile number stood here as a DEFAULT
+// PARAMETER — the worst possible place for one, because a default survives
+// every attempt to remove the value from the data: nothing passes the prop, so
+// nothing can override it. Removing the destructured `phone` without removing
+// its three remaining uses took the HOMEPAGE DOWN with "phone is not defined".
+// The lesson is in the change: a contact detail belongs in the federation
+// record, read through `fed.contact`, never as a literal in a component.
+//
+// The second was positioning. This block said "Step onto the mat", "Your first
+// class is on us", "Walk in", and "Book Free Trial" — the language of a single
+// dojo selling monthly classes. MMAKF is a national federation, and the
+// federation named these exact phrases as the thing to correct. The enquiry
+// stays, because an individual wanting to train is a real and welcome visitor;
+// it is now one pathway among several rather than the site's only door.
 
 interface Props {
   programs: any[];
-  phone?: string;
+  /** The federation's own contact address, from the record. Never a person's. */
+  email?: string;
 }
-// No telephone default. The number that stood here was a personal mobile, and a
-// DEFAULT is the worst place for one: it survives every attempt to remove it from
-// the data, because nothing passes the prop.
 const { programs, email = 'admin@mmakf.in' } = Astro.props;
-const tel = phone.replace(/\s/g, '');
 ---
 
 <section id="enroll" class="cta-section">
   <div class="container">
     <div class="cta-box fade">
-      <div class="eyebrow center">Begin</div>
-      <h2 class="display-2" style="margin-top:16px">Step onto the <em class="r">mat</em>.</h2>
+      <div class="eyebrow center">Train with MMAKF</div>
+      <h2 class="display-2" style="margin-top:16px">Begin your <em class="r">Karate-Do</em>.</h2>
       <p class="lead" style="margin:18px auto 32px">
-        Your first class is on us. Walk in. Try one session. Decide from there.
+        From an individual student to a school training hundreds, MMAKF delivers
+        structured Shotokan through a national network. Tell the federation what you
+        need and the right unit will answer.
       </p>
-      <form class="cta-form" data-enroll-form>
-        <input class="input" name="name" placeholder="Full name" aria-label="Full name" required />
-        <input class="input" name="phone" placeholder="Phone (+91)" aria-label="Phone number" required />
-        <select class="input" name="program" aria-label="Choose a program" required>
-          <option value="">Choose a program</option>
+      <form class="cta-form" data-enroll-form method="post" action="/api/enroll">
+        <label class="sr-only" for="enroll-name">Full name</label>
+        <input class="input" id="enroll-name" name="name" placeholder="Full name" required />
+        <label class="sr-only" for="enroll-email">Email address</label>
+        <input class="input" id="enroll-email" name="email" type="email" placeholder="Email address" required />
+        <label class="sr-only" for="enroll-program">What you are looking for</label>
+        <select class="input" id="enroll-program" name="program" required>
+          <option value="">What are you looking for?</option>
           {programs.map((p: any) => <option value={p.name}>{p.name}</option>)}
         </select>
-        <button type="submit" class="btn btn-gold">Book Free Trial</button>
+        <button type="submit" class="btn btn-gold">Send enquiry</button>
       </form>
       <div style="margin-top:12px;color:var(--muted);font-size:.74rem">
-        We use these details only to contact you about your trial class.
+        {/* No turnaround time is promised. The federation has not set one, and a
+            page that invents "we reply within 24 hours" makes a commitment
+            nobody in the office agreed to. */}
+        Used only to answer your enquiry. Fees depend on what you need — the
+        federation quotes against your own requirements rather than a price list.
       </div>
-      <div style="margin-top:8px;color:var(--muted);font-size:.78rem">
-        Or call <a href={`tel:${tel}`} class="text-gold">{phone}</a>
+      <div class="cta-paths">
+        <a href="/affiliation" class="btn btn-ghost">Affiliate a dojo &rarr;</a>
+        <a href="/registration" class="btn btn-ghost">Register as a member &rarr;</a>
+        <a href="/calendar" class="btn btn-ghost">Federation calendar &rarr;</a>
       </div>
       <noscript>
         <div style="margin-top:12px;color:var(--off-white);font-size:.82rem">
-          JavaScript is required to submit online — call <a href={`tel:${tel}`} class="text-gold">{phone}</a> instead.
+          This form works without JavaScript. If it does not reach us, email
+          <a href={`mailto:${email}`} class="text-gold">{email}</a>.
         </div>
       </noscript>
     </div>
@@ -60,6 +85,19 @@ const tel = phone.replace(/\s/g, '');
     margin-top: 32px;
   }
   @media (max-width: 700px) { .cta-form { grid-template-columns: 1fr; } }
+
+  .cta-paths {
+    display: flex; flex-wrap: wrap; gap: 12px;
+    justify-content: center; margin-top: 26px;
+  }
+
+  /* Labels for every field. The inputs carried aria-label only, which a label
+     element does better: it also makes the label clickable, and
+     tests/accessibility.test.ts requires the for/id association. */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
 </style>
 
 <script>
@@ -70,7 +108,7 @@ const tel = phone.replace(/\s/g, '');
       const btn = f.querySelector('button[type=submit]') as HTMLButtonElement | null;
       const fd = new FormData(f);
       const body = Object.fromEntries(fd.entries());
-      if (btn) { btn.disabled = true; btn.textContent = 'Booking…'; }
+      if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
       try {
         const res = await fetch('/api/enroll', {
           method: 'POST',
@@ -78,13 +116,16 @@ const tel = phone.replace(/\s/g, '');
           body: JSON.stringify(body),
         });
         if (!res.ok) throw new Error('bad status');
-        (window as any).showNotif('Oss. Free trial booked. We will call you shortly.');
+        // NOT "we will call you shortly". Nobody has committed to a turnaround
+        // time, and the federation's contact route is now email — promising a
+        // telephone call was a commitment the office never made.
+        (window as any).showNotif('Oss. Your enquiry has reached the federation.');
         f.reset();
       } catch {
         // Inputs are preserved so the visitor can retry (MASTER-SPEC F15).
         (window as any).showNotif('Could not submit. Please email admin@mmakf.in.');
       } finally {
-        if (btn) { btn.disabled = false; btn.textContent = 'Book Free Trial'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Send enquiry'; }
       }
     });
   });

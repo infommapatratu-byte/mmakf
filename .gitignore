@@ -12,7 +12,15 @@ dist/
 .env*.local
 
 # local development database
+# Local development databases.
+#
+# `.pgdata/` alone was not enough. Test runs and agents create SUFFIXED ones —
+# .pgdata-eng, .pgdata-audit, .pgdata-t1 — and one of them was committed once:
+# ~300 files of Postgres internals including a live postmaster.pid. The glob
+# covers every variant.
 .pgdata/
+.pgdata-*/
+.scratch/
 
 # database dumps — never committed
 backups/
