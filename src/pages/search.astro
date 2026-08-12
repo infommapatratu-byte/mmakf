@@ -1,0 +1,411 @@
+---
+/**
+ * FEDERATION SEARCH — /search
+ *
+ * The module behind this page (src/lib/search.ts) was written on the principle
+ * that an empty result is worthless unless it says WHY it is empty. There are
+ * three completely different answers hiding behind "no results":
+ *
+ *   · there is nothing here
+ *   · there is something here and you may not see it
+ *   · nobody has told this system what the rule is
+ *
+ * A member asking why their own record cannot be found needs to be told which
+ * one it is, and a page that renders only `hits` throws all three away. So this
+ * page renders `skipped` and `notices` as first-class content rather than
+ * swallowing them — the honest half of the answer is the half most search
+ * pages discard.
+ *
+ * WHAT THIS PAGE DOES NOT DO:
+ *
+ *  · It does not widen the search. Every narrowing is the module's, applied in
+ *    SQL against the caller's own scopes. This page passes the caller through
+ *    and formats what comes back.
+ *  · It does not resolve URLs the site cannot serve. DEFAULT_URL returns null
+ *    for a record with no surface, and a null URL renders as plain text — a
+ *    result you can click into a 404 is worse than one you cannot click.
+ *  · It does not audit. Search-as-you-type from the public web would fill the
+ *    audit table with keystrokes; staff-facing search inside /admin passes an
+ *    audit context, and that is the right place for it.
+ *
+ * It works with JavaScript off: the form is a GET, the results are rendered on
+ * the server, and the URL carries the query so a result set can be linked.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import Icon from '@/components/Icon.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import {
+  search, KIND_ORDER, PUBLIC_KINDS, MIN_QUERY_LENGTH, MAX_QUERY_LENGTH,
+  type SearchKind, type SearchResponse, type SkipReason,
+} from '@/lib/search';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const url = Astro.url;
+
+const rawQuery = (url.searchParams.get('q') || '').slice(0, MAX_QUERY_LENGTH + 1);
+const query = rawQuery.trim();
+
+/**
+ * A `kind` parameter narrows the search. An UNRECOGNISED value is dropped
+ * rather than passed through — the module refuses an unknown domain outright,
+ * and a 400 from a stale bookmark is a worse answer than searching everything.
+ */
+const rawKind = url.searchParams.get('kind') || '';
+const activeKind: SearchKind | null =
+  (KIND_ORDER as readonly string[]).includes(rawKind) ? (rawKind as SearchKind) : null;
+
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+const anonymous = !principal || principal.bindings.length === 0;
+
+let result: SearchResponse | null = null;
+let failure: string | null = null;
+
+if (configured && query.length >= MIN_QUERY_LENGTH) {
+  try {
+    result = await search(db(), principal, query, {
+      kinds: activeKind ? [activeKind] : undefined,
+      limit: 30,
+    });
+  } catch (err: any) {
+    // A search that fails is reported as a failed search. It is not rendered as
+    // "no results", which would tell the caller the opposite of the truth.
+    failure = err?.message || 'The search could not be completed.';
+  }
+}
+
+const tooShort = query.length > 0 && query.length < MIN_QUERY_LENGTH;
+
+const KIND_LABEL: Record<SearchKind, string> = {
+  person: 'People',
+  certificate: 'Certificates',
+  dojo: 'Dojos',
+  state_unit: 'State units',
+  district_unit: 'District units',
+  competition_event: 'Events',
+  course: 'Courses',
+  document: 'Documents',
+  technique: 'Techniques',
+  kata: 'Kata',
+  news: 'News',
+};
+
+/**
+ * Plain English for every reason a domain returned nothing. These are the whole
+ * point of the page, so none of them is allowed to fall through to a code
+ * string a member cannot act on.
+ */
+const SKIP_TEXT: Record<SkipReason, string> = {
+  not_requested: 'not included in this search',
+  not_public: 'sign in to search this',
+  not_authorised: 'your account does not have access to this',
+  no_visible_scope: 'you have no unit in scope for this',
+  not_a_certificate_number:
+    'certificates are found by their exact certificate number only — a name will not match one',
+  store_unavailable: 'this content store is not reachable right now',
+};
+
+/** Skips worth showing. "Not requested" is the caller's own filter, not news. */
+const shownSkips = (result?.skipped ?? []).filter((s) => s.reason !== 'not_requested');
+
+/** Hits grouped by domain, in the module's own ordering. */
+const grouped = KIND_ORDER
+  .map((kind) => ({ kind, hits: (result?.hits ?? []).filter((h) => h.kind === kind) }))
+  .filter((g) => g.hits.length > 0);
+
+const total = result?.hits.length ?? 0;
+
+const MATCH_TEXT: Record<string, string> = {
+  exact: 'exact match',
+  prefix: 'starts with',
+  substring: 'contains',
+};
+
+const keep = (k: string, v: string) => {
+  const p = new URLSearchParams();
+  if (query) p.set('q', query);
+  if (v) p.set(k, v);
+  return `/search?${p.toString()}`;
+};
+---
+
+<Base
+  title={query ? `Search: ${query} — MMAKF` : 'Search — MMAKF'}
+  description="Search the federation's dojos, units, events, courses, documents and certificate register."
+>
+  <PageHero
+    eyebrow="Federation search"
+    title="Search the <em>register</em>."
+    lead="Dojos, units, events, courses, published documents and the certificate register. What you can reach depends on who you are signed in as — and where something is withheld, this page says so rather than showing you an empty list."
+  />
+
+  <section>
+    <div class="container">
+      <form class="search-form" method="get" action="/search" role="search">
+        <label class="sr-only" for="q">Search the federation</label>
+        <input
+          id="q"
+          name="q"
+          type="search"
+          value={query}
+          placeholder="A dojo, a unit, an event, a certificate number…"
+          minlength={MIN_QUERY_LENGTH}
+          maxlength={MAX_QUERY_LENGTH}
+          autocomplete="off"
+          autofocus={!query}
+        />
+        {activeKind && <input type="hidden" name="kind" value={activeKind} />}
+        <button class="btn btn-primary" type="submit">Search</button>
+      </form>
+
+      {/* Domain filter. Every option keeps the query, so narrowing never
+          discards what was typed. */}
+      <div class="kind-bar" role="group" aria-label="Narrow by record type">
+        <a href={keep('kind', '')} class:list={['kind-chip', { on: !activeKind }]}>Everything</a>
+        {KIND_ORDER.map((k) => (
+          <a href={keep('kind', k)} class:list={['kind-chip', { on: activeKind === k }]}>
+            {KIND_LABEL[k]}
+            {anonymous && !PUBLIC_KINDS.includes(k) && <span class="chip-lock" title="Sign in required">·</span>}
+          </a>
+        ))}
+      </div>
+
+      {!configured && (
+        <div class="notice" role="status">
+          <Icon name="shield" size={22} color="var(--gold)" />
+          <div>
+            <strong>The federation database is not configured for this environment.</strong>
+            <p>
+              Search reads federation records from Postgres. Until <code>DATABASE_URL</code> is set,
+              this page has nothing to search — which is reported here rather than rendered as
+              an empty result set.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {tooShort && (
+        <p class="text-muted mt-6">
+          Type at least {MIN_QUERY_LENGTH} characters. A one-character query matches most of the
+          register and answers nothing.
+        </p>
+      )}
+
+      {failure && (
+        <div class="notice bad" role="alert">
+          <Icon name="shield" size={22} color="var(--red)" />
+          <div>
+            <strong>The search could not be completed.</strong>
+            <p>{failure}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {result && (
+    <section class="bg2">
+      <div class="container">
+        <div class="result-head">
+          <h2 class="display-2" style="font-size:clamp(1.4rem,2.6vw,2rem)">
+            {total === 0
+              ? <>No results for <em>{result.query}</em>.</>
+              : <>{total}{result.truncated ? '+' : ''} result{total === 1 ? '' : 's'} for <em>{result.query}</em>.</>}
+          </h2>
+          <div class="rule gold"></div>
+          {result.truncated && (
+            <p class="text-muted" style="font-size:.86rem">
+              More matched than are shown. Narrow the query or pick a record type — the list below
+              is not the complete set, and this page will not imply that it is.
+            </p>
+          )}
+        </div>
+
+        {grouped.map((g) => (
+          <div class="result-group">
+            <h3 class="group-title">{KIND_LABEL[g.kind]}</h3>
+            <ul class="hit-list">
+              {g.hits.map((h) => (
+                <li class="hit">
+                  <div class="hit-main">
+                    {h.url
+                      ? <a class="hit-title" href={h.url}>{h.title}</a>
+                      : <span class="hit-title plain">{h.title}</span>}
+                    {h.subtitle && <div class="hit-sub">{h.subtitle}</div>}
+                  </div>
+                  <div class="hit-meta">
+                    {h.ref && <span class="pill">{h.ref}</span>}
+                    <span class="hit-why">
+                      {h.matchedOn.field} &middot; {MATCH_TEXT[h.matchedOn.how] || h.matchedOn.how}
+                    </span>
+                    {!h.url && (
+                      <span class="hit-why muted" title="This record has no page on the site yet">
+                        no page yet
+                      </span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+
+        {/* The honest half of the answer. */}
+        {(shownSkips.length > 0 || result.notices.length > 0) && (
+          <div class="withheld">
+            <h3 class="group-title">What this search did not cover</h3>
+            <p class="text-muted" style="font-size:.86rem;max-width:64ch;margin-bottom:18px">
+              An empty result and a withheld result look identical unless a page says which it is.
+              These are the record types this search did not reach, and why.
+            </p>
+            <ul class="skip-list">
+              {shownSkips.map((s) => (
+                <li>
+                  <span class="skip-kind">{KIND_LABEL[s.kind]}</span>
+                  <span class="skip-why">{SKIP_TEXT[s.reason]}</span>
+                </li>
+              ))}
+              {result.notices.map((n) => (
+                <li>
+                  <span class="skip-kind">Rule not set</span>
+                  <span class="skip-why">{n.detail}</span>
+                </li>
+              ))}
+            </ul>
+            {anonymous && (
+              <div class="mt-6">
+                <a class="btn btn-ghost" href={`/my?next=${encodeURIComponent(url.pathname + url.search)}`}>
+                  Sign in to search your own records &rarr;
+                </a>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  )}
+
+  {!query && configured && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">What is searchable</div>
+          <h2 class="display-2">And what <em class="r">never is</em>.</h2>
+          <div class="rule"></div>
+        </div>
+        <div class="grid grid-2">
+          <div class="card">
+            <div class="card-icon"><Icon name="book" size={32} color="var(--gold)" /></div>
+            <div class="card-title">Certificates, by number only</div>
+            <div class="card-body">
+              A certificate is found by its exact certificate number. Holder name is not a match
+              field — a search that lists everyone called Kumar with their grades is a bulk export
+              of the grading register wearing a search box. To check a credential, use
+              <a class="text-gold" href="/verify"> the verification page</a>.
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-icon"><Icon name="shield" size={32} color="var(--red)" /></div>
+            <div class="card-title">Safeguarding and medical records, never</div>
+            <div class="card-body">
+              Safeguarding, medical and disciplinary casework is not reachable from search at any
+              permission level, including the federation's own administrators. There is no result
+              type for it, so a match is not representable — not merely blocked.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  )}
+</Base>
+
+<style>
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
+  .search-form { display: flex; gap: 12px; flex-wrap: wrap; }
+  .search-form input[type='search'] {
+    flex: 1 1 320px; min-width: 0;
+    padding: 16px 18px;
+    background: var(--card); color: var(--white);
+    border: 1px solid var(--border-2); border-radius: var(--radius);
+    font-family: var(--font-body); font-size: 1rem;
+  }
+  .search-form input[type='search']:focus-visible {
+    outline: 2px solid var(--gold); outline-offset: 2px; border-color: var(--gold);
+  }
+  .search-form input::placeholder { color: var(--muted-2); }
+
+  .kind-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .kind-chip {
+    font-family: var(--font-display); font-size: .7rem;
+    letter-spacing: .14em; text-transform: uppercase;
+    padding: 9px 15px; border: 1px solid var(--border-2); border-radius: 999px;
+    color: var(--muted); text-decoration: none; background: var(--card);
+  }
+  .kind-chip:hover { color: var(--white); border-color: var(--gold-dim); }
+  .kind-chip.on { color: var(--bg); background: var(--gold); border-color: var(--gold); }
+  .chip-lock { margin-left: 6px; opacity: .6; }
+
+  .notice {
+    display: flex; gap: 16px; align-items: flex-start;
+    margin-top: 26px; padding: 20px 22px;
+    background: var(--card); border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold); border-radius: var(--radius);
+  }
+  .notice.bad { border-left-color: var(--red); }
+  .notice strong { font-family: var(--font-display); color: var(--white); display: block; margin-bottom: 6px; }
+  .notice p { margin: 0; font-size: .9rem; color: var(--muted); line-height: 1.6; }
+
+  .result-head { margin-bottom: 34px; }
+  .result-group { margin-bottom: 40px; }
+  .group-title {
+    font-family: var(--font-display); font-size: .72rem;
+    letter-spacing: .22em; text-transform: uppercase;
+    color: var(--gold); margin-bottom: 16px;
+  }
+
+  .hit-list { list-style: none; padding: 0; margin: 0; }
+  .hit {
+    display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap;
+    padding: 18px 0; border-bottom: 1px solid var(--border);
+  }
+  .hit:last-child { border-bottom: 0; }
+  .hit-main { min-width: 0; flex: 1 1 320px; }
+  .hit-title {
+    font-family: var(--font-display); font-weight: 600; font-size: 1.02rem;
+    color: var(--gold); text-decoration: none;
+  }
+  .hit-title:hover { text-decoration: underline; }
+  .hit-title.plain { color: var(--white); }
+  .hit-sub { font-size: .88rem; color: var(--muted); margin-top: 5px; line-height: 1.5; }
+  .hit-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .hit-why {
+    font-family: var(--font-display); font-size: .64rem;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--muted-2);
+  }
+  .hit-why.muted { opacity: .7; }
+
+  .withheld {
+    margin-top: 20px; padding: 26px 28px;
+    background: var(--card); border: 1px solid var(--border-2); border-radius: var(--radius);
+  }
+  .skip-list { list-style: none; padding: 0; margin: 0; }
+  .skip-list li {
+    display: flex; gap: 16px; flex-wrap: wrap; align-items: baseline;
+    padding: 11px 0; border-bottom: 1px solid var(--border);
+  }
+  .skip-list li:last-child { border-bottom: 0; }
+  .skip-kind {
+    font-family: var(--font-display); font-size: .68rem;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--gold);
+    flex: 0 0 130px;
+  }
+  .skip-why { font-size: .89rem; color: var(--muted); line-height: 1.55; }
+</style>
