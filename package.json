@@ -1,8 +1,11 @@
 {
   "name": "mmakf",
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "version": "1.0.0",
-  "description": "Modern Martial Arts Karate-Do Federation of India (MMAKF) \u2014 Est. 1983, Patratu, Jharkhand",
+  "description": "Modern Martial Arts Karate-Do Federation of India (MMAKF) — Est. 1983, Patratu, Jharkhand",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
