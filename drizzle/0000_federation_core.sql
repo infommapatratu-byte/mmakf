@@ -227,6 +227,7 @@ CREATE INDEX "persons_dojo_idx" ON "persons" USING btree ("dojo_id");--> stateme
 CREATE INDEX "persons_name_idx" ON "persons" USING btree ("full_name");--> statement-breakpoint
 CREATE INDEX "rank_records_person_idx" ON "rank_records" USING btree ("person_id");--> statement-breakpoint
 CREATE INDEX "rank_records_active_idx" ON "rank_records" USING btree ("person_id","status");--> statement-breakpoint
+CREATE UNIQUE INDEX "rank_records_one_active_uk" ON "rank_records" USING btree ("person_id","kind") WHERE status = 'active';--> statement-breakpoint
 CREATE INDEX "role_bindings_user_idx" ON "role_bindings" USING btree ("user_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "role_bindings_uk" ON "role_bindings" USING btree ("user_id","role","scope_type","scope_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "state_units_code_uk" ON "state_units" USING btree ("code");--> statement-breakpoint

@@ -269,6 +269,22 @@ export async function publicRegisterEntry(db: DB, federationId: string) {
 
 // ─── Rank records (§31 append-only, §72 derived current rank) ───────────────
 
+/**
+ * Is this a Postgres unique-violation (SQLSTATE 23505)?
+ *
+ * Drivers and ORMs wrap the original error to differing depths — Drizzle's
+ * message is the failed query text, not the constraint — so we walk the cause
+ * chain rather than trusting the outermost shape.
+ */
+function isUniqueViolation(err: any): boolean {
+  for (let e = err, depth = 0; e && depth < 5; e = e.cause, depth++) {
+    if (e.code === '23505') return true;
+    const m = String(e.message ?? '');
+    if (/duplicate key value|unique constraint|_uk"/i.test(m)) return true;
+  }
+  return false;
+}
+
 export async function awardRank(
   db: DB,
   ctx: AuditContext,
@@ -294,22 +310,47 @@ export async function awardRank(
     dojoId: person.dojoId,
   });
 
-  // Supersede — never overwrite — any currently active rank of the same kind.
-  await db
-    .update(s.rankRecords)
-    .set({ status: 'superseded' })
-    .where(
-      and(
-        eq(s.rankRecords.personId, input.personId),
-        eq(s.rankRecords.kind, input.kind),
-        eq(s.rankRecords.status, 'active')
-      )
-    );
+  // Supersede — never overwrite — any currently active rank of the same kind,
+  // then insert the new one.
+  //
+  // Concurrent promotions can all observe "no active rank" and all insert. The
+  // partial unique index rank_records_one_active_uk makes every loser's insert
+  // fail rather than leaving several active ranks. A loser retries: the
+  // supersede now finds the winner's row and stands it down, so the award still
+  // lands and history keeps EVERY event — the correct append-only outcome.
+  //
+  // Retries are bounded. With N racers the losers can collide with each other
+  // again on the way back in, so a single retry is not sufficient; but each
+  // round strictly reduces the contenders, so a small bound converges. Passing
+  // the bound means something other than contention is wrong, and we raise it
+  // rather than loop.
+  const supersedeThenInsert = async () => {
+    await db
+      .update(s.rankRecords)
+      .set({ status: 'superseded' })
+      .where(
+        and(
+          eq(s.rankRecords.personId, input.personId),
+          eq(s.rankRecords.kind, input.kind),
+          eq(s.rankRecords.status, 'active')
+        )
+      );
+    return db
+      .insert(s.rankRecords)
+      .values({ ...input, status: 'active' })
+      .returning({ id: s.rankRecords.id });
+  };
 
-  const rows = await db
-    .insert(s.rankRecords)
-    .values({ ...input, status: 'active' })
-    .returning({ id: s.rankRecords.id });
+  let rows;
+  const MAX_ATTEMPTS = 8;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      rows = await supersedeThenInsert();
+      break;
+    } catch (err: any) {
+      if (attempt >= MAX_ATTEMPTS || !isUniqueViolation(err)) throw err;
+    }
+  }
 
   await writeAudit(db, ctx, {
     entityType: 'rank_record',

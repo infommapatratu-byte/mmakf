@@ -1,5 +1,5 @@
 {
-  "id": "858e2ca9-8f55-4e67-adfc-d8222656b3ee",
+  "id": "b6a1f26a-d66b-485d-93bc-cc58a02993fa",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -1352,6 +1352,28 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "rank_records_one_active_uk": {
+          "name": "rank_records_one_active_uk",
+          "columns": [
+            {
+              "expression": "person_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "kind",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "status = 'active'",
           "concurrently": false,
           "method": "btree",
           "with": {}

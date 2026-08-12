@@ -15,6 +15,7 @@ import {
   pgTable, serial, text, integer, timestamp, date,
   uniqueIndex, index, jsonb, pgEnum,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 // ─── Shared enums ───────────────────────────────────────────────────────────
 
@@ -167,6 +168,14 @@ export const rankRecords = pgTable('rank_records', {
 }, (t) => ({
   personIdx: index('rank_records_person_idx').on(t.personId),
   activeIdx: index('rank_records_active_idx').on(t.personId, t.status),
+  // At most ONE active rank per person per kind, enforced by the database.
+  // Application code supersedes the previous rank before inserting, but two
+  // concurrent promotions can both read "no active rank" and both insert —
+  // leaving two active rows and making current rank ambiguous. A partial unique
+  // index makes that state unrepresentable regardless of how the race lands.
+  oneActive: uniqueIndex('rank_records_one_active_uk')
+    .on(t.personId, t.kind)
+    .where(sql`status = 'active'`),
 }));
 
 export const instructorQuals = pgTable('instructor_quals', {
