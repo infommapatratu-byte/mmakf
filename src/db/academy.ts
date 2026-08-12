@@ -2499,3 +2499,8 @@ export async function liveClassResources(db: DB, ctx: AuditContext, liveClassId:
 //     record, so repeat voting cannot be prevented. A
 //     `live_class_question_votes` table with a unique (question_id, person_id)
 //     index would fix it.
+//  4. `enrolments.order_id` is a bare integer with no foreign key to `orders`.
+//     activateEnrolment() now proves payment through that column, so it checks
+//     the order exists, is captured, belongs to the same person and carries a
+//     line for the course — but the database would still accept an id pointing
+//     at nothing. A real reference belongs on the column.

@@ -151,12 +151,16 @@ const OUTCOMES = ['pass', 'fail', 'refer'] as const;
 
 export const POST: APIRoute = async ({ request, params }) => {
   const action = String(params.action ?? '').replace(/^\/+|\/+$/g, '');
+
+  // Rate limited BEFORE the action is recognised, so an unknown path cannot be
+  // hammered for free. Unknown actions share one bucket rather than minting a
+  // new counter per made-up name.
+  const rl = await rateLimit(request, `grading-${isAction(action) ? action : 'unknown'}`, 60, 60);
+  if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
+
   if (!isAction(action)) {
     return json({ error: 'Unknown grading action', code: 'unknown_action', actions: ACTIONS }, 404);
   }
-
-  const rl = await rateLimit(request, `grading-${action}`, 60, 60);
-  if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
 
   const identity = await identify(request.headers.get('cookie'));
   if (!identity) return json({ error: 'Sign in to work a grading' }, 401);

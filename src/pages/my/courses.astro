@@ -1,0 +1,858 @@
+---
+// /my/courses — the classroom for the person signed in.
+//
+// Every enrolment on this page belongs to the caller: the list is keyed on the
+// caller's own person id, and every action posts an enrolment id that
+// src/db/academy.ts re-checks against the caller's own person before it acts.
+//
+// THREE THINGS THIS PAGE REFUSES TO DO.
+//
+//  1. It never marks a lesson available when the thing it promises is missing.
+//     courseOutline() decides that, per lesson, with a reason — a dead player
+//     is worse than an honest "not available yet", so the reason is printed.
+//  2. It never presents progress as proficiency. The module says so on every
+//     read and the words are shown, not paraphrased away.
+//  3. It never states a pass mark, an attempt limit or a watch-time minimum of
+//     its own. Where MMAKF has configured none, the module's PolicyNote says
+//     none was applied and that sentence is what appears on screen.
+//
+// Correct answers do not reach this page. Questions are fetched at attempt time
+// from POST /api/academy/quiz-start, which returns academy.ts's student view —
+// a shape that has no `correctAnswer` and no `explanation` field to leak.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { asc, desc, eq } from 'drizzle-orm';
+import {
+  courseOutline,
+  courseProgress,
+  completionCheck,
+  type CourseOutline,
+  type CourseProgressReport,
+  type CompletionCheck,
+} from '@/db/academy';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+type Gate = 'no_database' | 'signed_out' | 'shared_credential' | 'no_person' | 'ok';
+
+interface LessonDetail {
+  body: string | null;
+  videoId: string | null;
+  videoUrl: string | null;
+  videoTitle: string | null;
+}
+
+interface EnrolledCourse {
+  enrolment: any;
+  course: any;
+  progress: CourseProgressReport | null;
+  outline: CourseOutline | null;
+  completion: CompletionCheck | null;
+  certificate: { certificateNo: string; title: string; issuedOn: string; status: string } | null;
+  error: string | null;
+  detail: Map<number, LessonDetail>;
+}
+
+let gate: Gate = 'ok';
+let person: any = null;
+let loadError: string | null = null;
+let enrolled: EnrolledCourse[] = [];
+let available: any[] = [];
+
+if (!configured) {
+  gate = 'no_database';
+} else if (!identity) {
+  gate = 'signed_out';
+} else if (identity.userId == null) {
+  gate = 'shared_credential';
+} else {
+  const user = (
+    await db().select({ personId: s.users.personId }).from(s.users).where(eq(s.users.id, identity.userId)).limit(1)
+  )[0];
+  if (!user?.personId) {
+    gate = 'no_person';
+  } else {
+    person = (await db().select().from(s.persons).where(eq(s.persons.id, user.personId)).limit(1))[0] ?? null;
+    if (!person) {
+      gate = 'no_person';
+    } else {
+      const ctx = { principal: identity.principal };
+      try {
+        const rows = await db()
+          .select({ enrolment: s.enrolments, course: s.courses })
+          .from(s.enrolments)
+          .innerJoin(s.courses, eq(s.enrolments.courseId, s.courses.id))
+          .where(eq(s.enrolments.personId, person.id))
+          .orderBy(desc(s.enrolments.enrolledAt))
+          .limit(25);
+
+        enrolled = await Promise.all(
+          rows.map(async (row: any): Promise<EnrolledCourse> => {
+            const base: EnrolledCourse = {
+              enrolment: row.enrolment,
+              course: row.course,
+              progress: null,
+              outline: null,
+              completion: null,
+              certificate: null,
+              detail: new Map(),
+              error: null,
+            };
+            try {
+              base.progress = await courseProgress(db(), ctx, row.enrolment.id);
+              // A course withdrawn after enrolment is no longer readable as an
+              // outline by a learner. That is the module's decision, and the
+              // reason is shown rather than an empty lesson list.
+              base.outline = await courseOutline(db(), ctx, row.course.id);
+              base.completion = await completionCheck(db(), row.enrolment.id);
+
+              // Lesson CONTENT, fetched only for a course this person is
+              // enrolled on. What may be OPENED is still decided by the
+              // outline's per-lesson availability, which this page honours
+              // below — the content is never rendered for an unavailable
+              // lesson.
+              const lessonRows = await db()
+                .select({
+                  id: s.lessons.id,
+                  body: s.lessons.body,
+                  videoId: s.mediaAssets.externalId,
+                  videoUrl: s.mediaAssets.url,
+                  videoTitle: s.mediaAssets.title,
+                })
+                .from(s.lessons)
+                .leftJoin(s.mediaAssets, eq(s.lessons.mediaAssetId, s.mediaAssets.id))
+                .where(eq(s.lessons.courseId, row.course.id))
+                .orderBy(asc(s.lessons.displayOrder), asc(s.lessons.id));
+              for (const l of lessonRows) {
+                base.detail.set(l.id, {
+                  body: l.body ?? null,
+                  videoId: l.videoId ?? null,
+                  videoUrl: l.videoUrl ?? null,
+                  videoTitle: l.videoTitle ?? null,
+                });
+              }
+
+              if (row.enrolment.certificateId) {
+                const cert = (
+                  await db()
+                    .select({
+                      certificateNo: s.certificates.certificateNo,
+                      title: s.certificates.title,
+                      issuedOn: s.certificates.issuedOn,
+                      status: s.certificates.status,
+                    })
+                    .from(s.certificates)
+                    .where(eq(s.certificates.id, row.enrolment.certificateId))
+                    .limit(1)
+                )[0];
+                base.certificate = cert ?? null;
+              }
+            } catch (err: any) {
+              base.error = String(err?.message ?? err);
+            }
+            return base;
+          })
+        );
+
+        const enrolledIds = enrolled.map((e) => e.course.id);
+        const published = await db()
+          .select()
+          .from(s.courses)
+          .where(eq(s.courses.status, 'published'))
+          .orderBy(asc(s.courses.title))
+          .limit(50);
+        available = published.filter((c: any) => !enrolledIds.includes(c.id));
+      } catch (err: any) {
+        loadError = String(err?.message ?? err);
+      }
+    }
+  }
+}
+
+const titleCase = (v: string | null | undefined) => (v ? v.replace(/_/g, ' ') : '—');
+
+const fmt = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? String(v)
+    : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+const KIND_LABEL: Record<string, string> = {
+  video: 'Video',
+  live_class: 'Live class',
+  reading: 'Reading',
+  quiz: 'Quiz',
+  assignment: 'Assignment',
+  practical: 'Practical',
+  assessment: 'Assessment',
+};
+
+/** Whether an enrolment may still have learning recorded against it. */
+const learnable = (e: any): boolean => {
+  if (e.status !== 'active') return false;
+  if (e.expiresAt == null) return true;
+  const d = e.expiresAt instanceof Date ? e.expiresAt : new Date(String(e.expiresAt));
+  return Number.isNaN(d.getTime()) ? true : d.getTime() > Date.now();
+};
+---
+
+<Base
+  title="My courses — MMAKF Academy"
+  description="Your MMAKF Academy enrolments: lessons, progress, quizzes and course certificates."
+>
+  <section>
+    <div class="container">
+      {gate === 'no_database' && (
+        <div class="card">
+          <div class="eyebrow">My courses</div>
+          <h1 class="display-2" style="margin-top:14px">Not available on this deployment.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            Enrolments, lesson progress and quiz attempts are federation records, and no federation database is
+            configured for this deployment. Nothing can be enrolled on and nothing recorded.
+          </p>
+        </div>
+      )}
+
+      {gate === 'signed_out' && (
+        <div class="card">
+          <div class="eyebrow">My courses</div>
+          <h1 class="display-2" style="margin-top:14px">Sign in to open your courses.</h1>
+          <div class="rule"></div>
+          <p class="lead">Your progress is recorded against your own member record, so this page needs to know who you are.</p>
+          <p style="margin-top:18px"><a class="btn btn-primary" href="/my">Go to the member area</a></p>
+        </div>
+      )}
+
+      {gate === 'shared_credential' && (
+        <div class="card">
+          <div class="eyebrow">My courses</div>
+          <h1 class="display-2" style="margin-top:14px">A shared credential cannot learn.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            You are signed in with a shared office credential. Progress and quiz attempts must be attributable to a
+            person, and a shared credential is attributable to none. Sign in with your own account.
+          </p>
+        </div>
+      )}
+
+      {gate === 'no_person' && (
+        <div class="card">
+          <div class="eyebrow">My courses</div>
+          <h1 class="display-2" style="margin-top:14px">Your account is not linked to a member record.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            Enrolment attaches a course to a person in the federation's register, and this account is not attached to
+            one yet. Write to <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a> with your member ID.
+          </p>
+        </div>
+      )}
+
+      {gate === 'ok' && (
+        <>
+          <div class="section-head" style="margin-bottom:32px">
+            <div class="eyebrow">Academy</div>
+            <h1 class="display-2" style="margin-top:14px">My <em class="r">courses</em>.</h1>
+            <div class="rule"></div>
+            <p class="lead">
+              Completing a lesson records that you marked it done. It is not an assessment, it is not a grade, and it
+              confers no rank — grades come from examinations, and from nowhere else.
+            </p>
+          </div>
+
+          {loadError && (
+            <div class="card" role="alert" style="border-left:3px solid var(--red);margin-bottom:24px">
+              <div class="card-title" style="font-size:.95rem">Your courses could not be read</div>
+              <div class="card-body">{loadError}</div>
+            </div>
+          )}
+
+          <div id="actionStatus" role="status" aria-live="polite" class="status-bar" hidden></div>
+
+          {enrolled.length === 0 && !loadError && (
+            <div class="card"><div class="card-body">You are not enrolled on any course.</div></div>
+          )}
+
+          {enrolled.map((c) => (
+            <article class="card course-card" data-enrolment={c.enrolment.id}>
+              <header>
+                <div class="card-eyebrow">
+                  {`${c.course.category ? titleCase(c.course.category) : 'Course'}${
+                    c.course.level ? ` · ${titleCase(c.course.level)}` : ''
+                  }`}
+                </div>
+                <h2 class="card-title" style="font-size:1.25rem">{c.course.title}</h2>
+                {c.course.summary && <p class="card-body" style="margin-bottom:12px">{c.course.summary}</p>}
+                <div>
+                  <span class="pill">{titleCase(c.enrolment.status)}</span>
+                  {c.course.status !== 'published' && (
+                    <span class="pill" style="margin-left:8px">Course {titleCase(c.course.status)}</span>
+                  )}
+                </div>
+              </header>
+
+              {c.enrolment.status === 'pending_payment' && (
+                <div class="note" role="note">
+                  This enrolment is awaiting payment
+                  {c.course.feeCode ? ` of the fee recorded as ${c.course.feeCode}` : ''}. It becomes active only when a
+                  captured payment for this course is recorded against it — the federation does not activate an
+                  enrolment on an assurance that money was sent.
+                </div>
+              )}
+
+              {c.error && (
+                <div class="note" role="alert">{c.error}</div>
+              )}
+
+              {c.progress && (
+                <div style="margin:18px 0">
+                  <div class="bar" aria-hidden="true"><div class="bar-fill" style={`width:${c.progress.progressPercent}%`}></div></div>
+                  <div class="text-muted" style="font-size:.82rem;margin-top:8px">
+                    {c.progress.completedLessons} of {c.progress.totalLessons} lessons complete
+                    {c.progress.totalLessons > 0 ? ` — ${c.progress.progressPercent}%` : ''}
+                  </div>
+                </div>
+              )}
+
+              {c.certificate && (
+                <div class="note" style="border-left-color:var(--gold)">
+                  <strong>{c.certificate.title}</strong> — certificate {c.certificate.certificateNo}, issued{' '}
+                  {fmt(c.certificate.issuedOn)}, {titleCase(c.certificate.status)}.{' '}
+                  <a class="text-gold" href={`/api/verify?id=${encodeURIComponent(c.certificate.certificateNo)}`} rel="nofollow">
+                    Verification record →
+                  </a>
+                  <div class="text-muted" style="font-size:.78rem;margin-top:6px">
+                    A course certificate records course completion. It confers no rank.
+                  </div>
+                </div>
+              )}
+
+              {c.completion && !c.completion.complete && c.completion.reasons.length > 0 && (
+                <details class="disclosure">
+                  <summary>What is still outstanding on this course</summary>
+                  <ul class="reasons">
+                    {c.completion.reasons.map((r) => <li>{r}</li>)}
+                  </ul>
+                </details>
+              )}
+
+              {c.completion && c.completion.complete && !c.certificate && (
+                <div class="note">
+                  Every requirement this system can check is met.
+                  {c.course.certificateOnCompletion
+                    ? ' The certificate is issued by the federation, not by this page — an office holder with the authority to issue certificates completes the enrolment.'
+                    : ' This course does not carry a certificate.'}
+                </div>
+              )}
+
+              {/* ── Lessons ─────────────────────────────────────────────── */}
+              {c.outline &&
+                c.outline.modules.map((m) => (
+                  <section class="module">
+                    <h3 class="module-title">{m.title}</h3>
+                    {m.lessons.length === 0 ? (
+                      <p class="text-muted" style="font-size:.85rem">No lesson has been published in this module.</p>
+                    ) : (
+                      <ol class="lessons">
+                        {m.lessons.map((l) => {
+                          const done = c.progress?.lessons.find((p) => p.lessonId === l.lessonId)?.completed ?? false;
+                          const d = c.detail.get(l.lessonId);
+                          return (
+                            <li class={`lesson ${l.available ? '' : 'is-unavailable'}`}>
+                              <div class="lesson-head">
+                                <div>
+                                  <span class="lesson-kind">{KIND_LABEL[l.kind] ?? titleCase(l.kind)}</span>
+                                  <span class="lesson-title">{l.title}</span>
+                                  {l.durationMinutes != null && (
+                                    <span class="text-muted" style="font-size:.76rem"> · {l.durationMinutes} min</span>
+                                  )}
+                                  {l.isPreview && <span class="pill" style="margin-left:8px">Free preview</span>}
+                                </div>
+                                <div class="lesson-state">
+                                  {done ? (
+                                    <span class="pill live"><span class="pill-dot"></span>Complete</span>
+                                  ) : l.available && learnable(c.enrolment) ? (
+                                    <button
+                                      type="button"
+                                      class="btn btn-ghost lesson-done"
+                                      data-enrolment={c.enrolment.id}
+                                      data-lesson={l.lessonId}
+                                    >
+                                      Mark complete
+                                    </button>
+                                  ) : (
+                                    <span class="pill">Not complete</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              {!l.available && <p class="lesson-reason">Not available: {l.reason}.</p>}
+
+                              {l.available && l.kind === 'reading' && d?.body && (
+                                <div class="reading">{d.body}</div>
+                              )}
+
+                              {l.available && l.kind === 'video' && d?.videoUrl && (
+                                <p style="margin-top:10px">
+                                  <a class="text-gold" href={d.videoUrl} target="_blank" rel="noopener noreferrer">
+                                    Watch {d.videoTitle ? `“${d.videoTitle}”` : 'this lesson'} on the federation's channel →
+                                  </a>
+                                </p>
+                              )}
+
+                              {l.available && l.kind === 'live_class' && (
+                                <p style="margin-top:10px">
+                                  <a class="text-gold" href="/live">Open the live classroom →</a>
+                                </p>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    )}
+                  </section>
+                ))}
+
+              {/* ── Quizzes ─────────────────────────────────────────────── */}
+              {c.progress && c.progress.quizzes.length > 0 && (
+                <section class="module">
+                  <h3 class="module-title">Assessments</h3>
+                  {c.progress.quizzes.map((q) => (
+                    <div class="quiz" data-quiz={q.quizId} data-enrolment={c.enrolment.id}>
+                      <div class="lesson-head">
+                        <div>
+                          <span class="lesson-title">{q.title}</span>
+                          <div class="text-muted" style="font-size:.78rem;margin-top:4px">{q.passMark.detail}</div>
+                          <div class="text-muted" style="font-size:.78rem">{q.attemptLimit.detail}</div>
+                          <div class="text-muted" style="font-size:.78rem">
+                            {q.attemptsUsed} attempt{q.attemptsUsed === 1 ? '' : 's'} used
+                            {q.bestScorePercent != null ? ` · best score ${q.bestScorePercent}%` : ''}
+                          </div>
+                        </div>
+                        <div class="lesson-state">
+                          {q.passed === true && <span class="pill live"><span class="pill-dot"></span>Passed</span>}
+                          {q.passed === false && <span class="pill">Not passed</span>}
+                          {q.passed === null && <span class="pill">Ungraded</span>}
+                          {learnable(c.enrolment) && (
+                            <button
+                              type="button"
+                              class="btn btn-ghost quiz-start"
+                              data-quiz={q.quizId}
+                              data-enrolment={c.enrolment.id}
+                              style="margin-left:10px"
+                            >
+                              {q.attemptsUsed > 0 ? 'Attempt again' : 'Start'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <div class="quiz-panel" id={`quiz-panel-${c.enrolment.id}-${q.quizId}`} hidden></div>
+                    </div>
+                  ))}
+                </section>
+              )}
+            </article>
+          ))}
+        </>
+      )}
+    </div>
+  </section>
+
+  {gate === 'ok' && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Catalogue</div>
+          <h2 class="display-2">Courses you can <em class="r">enrol on</em>.</h2>
+          <div class="rule"></div>
+        </div>
+
+        {available.length === 0 ? (
+          <div class="card">
+            <div class="card-body">
+              The federation has published no further course that you are not already enrolled on.
+            </div>
+          </div>
+        ) : (
+          <div class="grid grid-2">
+            {available.map((c: any) => (
+              <div class="card">
+                <div class="card-eyebrow">
+                  {`${c.category ? titleCase(c.category) : 'Course'}${c.level ? ` · ${titleCase(c.level)}` : ''}`}
+                </div>
+                <div class="card-title">{c.title}</div>
+                {c.summary && <div class="card-body">{c.summary}</div>}
+                <div class="card-body" style="margin-top:10px">
+                  {c.hasFreePreview && <span class="pill" style="margin-right:8px">Free preview</span>}
+                  {c.certificateOnCompletion && <span class="pill">Certificate on completion</span>}
+                </div>
+                {c.feeCode && (
+                  <div class="note" style="margin-top:14px">
+                    This course carries the fee recorded as <strong>{c.feeCode}</strong>. Enrolling records you as
+                    awaiting payment; the enrolment becomes active only when a captured payment for this course is
+                    recorded. The amount is set by the federation office, not by this page.
+                  </div>
+                )}
+                <div style="margin-top:16px">
+                  <button type="button" class="btn btn-primary course-enrol" data-course={c.id}>Enrol</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  )}
+</Base>
+
+<style>
+  .status-bar {
+    border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold);
+    background: var(--card);
+    padding: 14px 18px;
+    border-radius: var(--radius);
+    font-size: 0.88rem;
+    color: var(--off-white);
+    margin-bottom: 20px;
+  }
+  .status-bar.is-error { border-left-color: var(--red); }
+
+  .course-card { margin-bottom: 24px; }
+
+  .note {
+    border-left: 3px solid var(--border-2);
+    background: var(--card-2);
+    padding: 14px 16px;
+    border-radius: var(--radius);
+    font-size: 0.86rem;
+    color: var(--off-white);
+    margin-top: 16px;
+    line-height: 1.7;
+  }
+
+  .disclosure { margin-top: 16px; }
+  .disclosure summary {
+    cursor: pointer;
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+  .reasons { margin: 6px 0 0 18px; font-size: 0.86rem; color: var(--off-white); line-height: 1.8; }
+
+  .bar { height: 6px; background: var(--card-2); border: 1px solid var(--border); border-radius: 100px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--red); }
+
+  .module { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .module-title {
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+
+  .lessons { list-style: none; margin: 0; padding: 0; }
+  .lesson { padding: 14px 0; border-bottom: 1px solid var(--border); }
+  .lesson:last-child { border-bottom: 0; }
+  .lesson.is-unavailable { opacity: 0.72; }
+
+  .lesson-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .lesson-state { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .lesson-kind {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-right: 10px;
+  }
+  .lesson-title { font-size: 0.94rem; color: var(--white); font-weight: 500; overflow-wrap: anywhere; }
+  .lesson-reason { font-size: 0.82rem; color: var(--muted); margin-top: 8px; }
+  .reading {
+    font-size: 0.9rem;
+    color: var(--off-white);
+    line-height: 1.85;
+    margin-top: 12px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .quiz { padding: 14px 0; border-bottom: 1px solid var(--border); }
+  .quiz:last-child { border-bottom: 0; }
+  .quiz-panel { margin-top: 16px; }
+
+  .q-item { padding: 16px 0; border-bottom: 1px solid var(--border); }
+  .q-prompt { font-size: 0.94rem; color: var(--white); margin-bottom: 10px; font-weight: 500; }
+  .q-option { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; min-height: 44px; }
+  .q-option label { font-size: 0.9rem; color: var(--off-white); line-height: 1.6; }
+  .q-option input { width: 20px; height: 20px; margin-top: 2px; flex: 0 0 auto; }
+  .q-marks { font-size: 0.76rem; color: var(--muted); }
+
+  .lesson-done, .quiz-start, .course-enrol { min-height: 44px; }
+
+  @media (max-width: 640px) {
+    .lesson-head { align-items: flex-start; }
+    .btn { width: 100%; }
+    .lesson-state { width: 100%; }
+    .lesson-state .btn { margin-left: 0 !important; }
+  }
+</style>
+
+<script>
+  // Nothing here is optimistic. Every control asks the server, prints exactly
+  // what the server said, and — where the answer changes a derived number such
+  // as a progress percentage — reloads so the figure on screen is the one the
+  // server derived rather than one this script guessed at.
+
+  type Json = Record<string, any>;
+
+  const statusBar = document.getElementById('actionStatus') as HTMLElement | null;
+
+  function say(message: string, isError = false) {
+    if (!statusBar) return;
+    statusBar.textContent = message;
+    statusBar.classList.toggle('is-error', isError);
+    statusBar.hidden = false;
+    statusBar.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+
+  async function post(action: string, payload: Json): Promise<{ ok: boolean; status: number; data: Json }> {
+    try {
+      const response = await fetch(`/api/academy/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = (await response.json().catch(() => ({}))) as Json;
+      return { ok: response.ok, status: response.status, data };
+    } catch {
+      return { ok: false, status: 0, data: { error: 'The request could not be sent. Check your connection.' } };
+    }
+  }
+
+  function escapeHtml(value: unknown): string {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ── Mark a lesson complete ────────────────────────────────────────────────
+  document.querySelectorAll<HTMLButtonElement>('.lesson-done').forEach((button) => {
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      const original = button.textContent;
+      button.textContent = 'Recording…';
+
+      const result = await post('lesson-complete', {
+        enrolmentId: Number(button.dataset.enrolment),
+        lessonId: Number(button.dataset.lesson),
+      });
+
+      if (result.ok) {
+        // The module's own words about what a completion does and does not mean.
+        const minimum = result.data?.watchTime?.minimum?.detail ?? '';
+        say(`${result.data?.note ?? 'Recorded.'} ${minimum} Refreshing your progress…`);
+        window.setTimeout(() => window.location.reload(), 1200);
+        return;
+      }
+      say(result.data.error || 'The lesson could not be marked complete.', true);
+      button.disabled = false;
+      button.textContent = original;
+    });
+  });
+
+  // ── Enrol ─────────────────────────────────────────────────────────────────
+  document.querySelectorAll<HTMLButtonElement>('.course-enrol').forEach((button) => {
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      button.textContent = 'Enrolling…';
+
+      const result = await post('enrol', { courseId: Number(button.dataset.course) });
+      if (result.ok) {
+        const status = String(result.data?.enrolment?.status ?? '').replace(/_/g, ' ');
+        say(`Enrolled. The federation records this enrolment as ${status}. Refreshing…`);
+        window.setTimeout(() => window.location.reload(), 1200);
+        return;
+      }
+      say(result.data.error || 'You could not be enrolled on that course.', true);
+      button.disabled = false;
+      button.textContent = 'Enrol';
+    });
+  });
+
+  // ── Quizzes ───────────────────────────────────────────────────────────────
+  //
+  // The questions rendered here are the ones the server sent, and the server
+  // sends academy.ts's student view: an id, a prompt, a kind, plain option
+  // labels and a mark. There is no correct answer in the payload to render by
+  // accident.
+
+  function renderQuestions(panel: HTMLElement, data: Json) {
+    const questions: any[] = Array.isArray(data.questions) ? data.questions : [];
+    const attemptId = data.attempt?.id;
+    const quizTitle = data.quiz?.title ?? 'Quiz';
+    const limit = data.quiz?.timeLimitMinutes;
+
+    const parts: string[] = [];
+    parts.push(`<form class="quiz-form" data-attempt="${escapeHtml(attemptId)}">`);
+    parts.push(`<p class="q-marks">${escapeHtml(quizTitle)} — ${questions.length} question(s).`);
+    parts.push(
+      limit == null
+        ? ' The federation has set no time limit for this quiz.'
+        : ` A time limit of ${escapeHtml(limit)} minute(s) applies, measured from when this attempt was opened.`
+    );
+    if (data.resumed) parts.push(' You already had an attempt open, so it has been resumed rather than a new one used.');
+    parts.push('</p>');
+
+    questions.forEach((q: any, index: number) => {
+      const name = `q_${q.id}`;
+      parts.push('<div class="q-item">');
+      parts.push(`<div class="q-prompt">${index + 1}. ${escapeHtml(q.prompt)}</div>`);
+      parts.push(`<div class="q-marks">${escapeHtml(q.marks)} mark(s)</div>`);
+
+      const options: any[] = Array.isArray(q.options) ? q.options : [];
+      if (q.kind === 'text') {
+        parts.push(`<label class="input-label" for="${name}">Your answer</label>`);
+        parts.push(`<textarea class="input" id="${name}" name="${name}" rows="3"></textarea>`);
+      } else if (options.length > 0) {
+        const type = q.kind === 'multiple' ? 'checkbox' : 'radio';
+        options.forEach((option: any, oi: number) => {
+          const id = `${name}_${oi}`;
+          parts.push('<div class="q-option">');
+          parts.push(
+            `<input type="${type}" id="${id}" name="${name}" value="${escapeHtml(option.id)}" />`
+          );
+          parts.push(`<label for="${id}">${escapeHtml(option.text)}</label>`);
+          parts.push('</div>');
+        });
+      } else if (q.kind === 'true_false') {
+        ['true', 'false'].forEach((value) => {
+          const id = `${name}_${value}`;
+          parts.push('<div class="q-option">');
+          parts.push(`<input type="radio" id="${id}" name="${name}" value="${value}" />`);
+          parts.push(`<label for="${id}">${value === 'true' ? 'True' : 'False'}</label>`);
+          parts.push('</div>');
+        });
+      } else {
+        // No options were written for a question that needs them. Say so rather
+        // than rendering an empty control the candidate cannot answer.
+        parts.push(
+          '<p class="lesson-reason">This question has no answer options recorded, so it cannot be answered here. Tell the office before submitting.</p>'
+        );
+      }
+      parts.push('</div>');
+    });
+
+    parts.push('<div class="quiz-error" role="alert" style="display:none;color:var(--red-2);font-size:.86rem;margin-top:12px"></div>');
+    parts.push('<div style="margin-top:16px"><button type="submit" class="btn btn-primary">Submit answers</button></div>');
+    parts.push('</form>');
+
+    panel.innerHTML = parts.join('');
+    panel.hidden = false;
+
+    const form = panel.querySelector('form.quiz-form') as HTMLFormElement;
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const errorBox = form.querySelector('.quiz-error') as HTMLElement;
+      const submit = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+      errorBox.style.display = 'none';
+      submit.disabled = true;
+      submit.textContent = 'Submitting…';
+
+      const responses: Json = {};
+      questions.forEach((q: any) => {
+        const name = `q_${q.id}`;
+        if (q.kind === 'text') {
+          const field = form.querySelector<HTMLTextAreaElement>(`#${CSS.escape(name)}`);
+          if (field && field.value.trim() !== '') responses[String(q.id)] = field.value.trim();
+          return;
+        }
+        const checked = Array.from(
+          form.querySelectorAll<HTMLInputElement>(`input[name="${CSS.escape(name)}"]:checked`)
+        ).map((input) => input.value);
+        if (checked.length === 0) return;
+        responses[String(q.id)] = q.kind === 'multiple' ? checked : checked[0];
+      });
+
+      const result = await post('quiz-submit', { attemptId, responses });
+      if (!result.ok) {
+        errorBox.textContent = result.data.error || 'The attempt could not be submitted.';
+        errorBox.style.display = 'block';
+        submit.disabled = false;
+        submit.textContent = 'Submit answers';
+        return;
+      }
+      renderResult(panel, result.data);
+    });
+  }
+
+  function renderResult(panel: HTMLElement, data: Json) {
+    const lines: string[] = [];
+    const outcome =
+      data.result === 'passed' ? 'Passed' : data.result === 'failed' ? 'Not passed' : 'Ungraded';
+
+    lines.push('<div class="note">');
+    lines.push(`<div class="card-title" style="font-size:1rem">${outcome}</div>`);
+    lines.push(
+      `<p>${escapeHtml(data.marksAwarded)} of ${escapeHtml(data.marksAvailable)} mark(s) — ${escapeHtml(data.scorePercent)}%.</p>`
+    );
+    // The pass mark is the quiz's own, or the module's statement that MMAKF set
+    // none. Neither is invented here.
+    if (data.passMark?.detail) lines.push(`<p>${escapeHtml(data.passMark.detail)}</p>`);
+    if (data.ungradedReason) lines.push(`<p>${escapeHtml(data.ungradedReason)}</p>`);
+    if (data.withinTimeLimit === false) lines.push('<p>This attempt was submitted outside the time limit.</p>');
+    if (data.answerKey?.reason) lines.push(`<p class="q-marks">${escapeHtml(data.answerKey.reason)}</p>`);
+    lines.push('<p style="margin-top:12px"><button type="button" class="btn btn-ghost quiz-refresh">Refresh my standing</button></p>');
+    lines.push('</div>');
+
+    panel.innerHTML = lines.join('');
+    const refresh = panel.querySelector('.quiz-refresh') as HTMLButtonElement;
+    refresh.addEventListener('click', () => window.location.reload());
+  }
+
+  document.querySelectorAll<HTMLButtonElement>('.quiz-start').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const enrolmentId = Number(button.dataset.enrolment);
+      const quizId = Number(button.dataset.quiz);
+      const panel = document.getElementById(`quiz-panel-${enrolmentId}-${quizId}`) as HTMLElement | null;
+      if (!panel) return;
+
+      button.disabled = true;
+      const original = button.textContent;
+      button.textContent = 'Opening…';
+
+      const result = await post('quiz-start', { quizId, enrolmentId });
+      if (result.ok) {
+        renderQuestions(panel, result.data);
+        button.textContent = 'Attempt open';
+        return;
+      }
+      say(result.data.error || 'The quiz could not be opened.', true);
+      button.disabled = false;
+      button.textContent = original;
+    });
+  });
+</script>

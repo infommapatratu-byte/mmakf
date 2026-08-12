@@ -1,0 +1,402 @@
+---
+// The public competition record: what is open, who entered, the draw, and the
+// results that are official.
+//
+// This page reads through ONE public projection (publicEvents /
+// publicEventDetail), which is defined once in the competition API and applies
+// the same rule to every surface:
+//
+//   · an event appears only from publication onwards;
+//   · an entry list appears only once entries have closed;
+//   · a draw appears only once it has been published;
+//   · a result appears ONLY once it is locked — a provisional placing is never
+//     shown here, because a medal table that can quietly change is not a record.
+//
+// Where the federation has not yet published something, this page says so. It
+// never fills a gap with a plausible-looking figure.
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { isConfigured } from '@/db';
+import { publicEvents, publicEventDetail } from '@/pages/api/competition/[...action]';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const idParam = Number(Astro.url.searchParams.get('event') ?? '');
+const eventId = Number.isInteger(idParam) && idParam > 0 ? idParam : null;
+
+let events: any[] = [];
+let detail: any = null;
+let failed = false;
+
+if (configured) {
+  try {
+    if (eventId) detail = await publicEventDetail(eventId);
+    events = (await publicEvents(120)) as any[];
+  } catch (err) {
+    console.error('[competitions] read failed', err);
+    failed = true;
+  }
+}
+
+const words = (v: any) => String(v ?? '').replace(/_/g, ' ');
+function fmtDay(v: any): string {
+  if (!v) return 'date not published';
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return String(v);
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+function fmtWhen(v: any): string {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return String(v);
+  return d.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+const OPEN = events.filter((e) => e.status === 'registration_open');
+const LIVE = events.filter((e) => e.status === 'live' || e.status === 'check_in');
+const UPCOMING = events.filter((e) => ['published', 'registration_closed'].includes(e.status));
+const CONCLUDED = events.filter((e) => ['results_pending', 'results_final', 'archived'].includes(e.status));
+
+const medalWord = (m: string | null) => (m ? m : '');
+---
+
+<Base
+  title="Competitions — MMAKF"
+  description="MMAKF championships: what is open for entry, published entry lists and draws, and the results that are official."
+>
+  <PageHero
+    eyebrow="Competition"
+    title={`Championships, draws and <em>official results</em>.`}
+    lead="Every event here is a federation record. Entry lists appear once entries close, draws appear once they are published, and a result appears only once it is final — never while it is still provisional."
+  />
+
+  {!configured ? (
+    <section>
+      <div class="container">
+        <div class="card" style="padding:28px">
+          <h2 class="card-title">The competition register is not yet available</h2>
+          <p class="body-txt" style="margin-top:10px">
+            Competition records — events, entries, draws and results — are held in the federation
+            database, which is not configured on this deployment. Nothing is shown here rather than
+            a placeholder standing in for a record that does not exist. The federation's announced
+            calendar is on the <a class="btn-link" href="/events">events page</a>.
+          </p>
+        </div>
+      </div>
+    </section>
+  ) : failed ? (
+    <section>
+      <div class="container">
+        <div class="card" style="padding:28px">
+          <h2 class="card-title">The competition register could not be read</h2>
+          <p class="body-txt" style="margin-top:10px">
+            This is a fault on our side, not an empty calendar. Please try again shortly.
+          </p>
+        </div>
+      </div>
+    </section>
+  ) : eventId && !detail ? (
+    <section>
+      <div class="container">
+        <div class="card" style="padding:28px">
+          <h2 class="card-title">No published event with that reference</h2>
+          <p class="body-txt" style="margin-top:10px">
+            Either the reference is wrong, or the event has not been published yet. An event that
+            has not been sanctioned and published is not public.
+          </p>
+          <a class="btn btn-ghost" style="margin-top:16px" href="/competitions">All competitions</a>
+        </div>
+      </div>
+    </section>
+  ) : detail ? (
+    <>
+      <section>
+        <div class="container">
+          <a class="btn-link" href="/competitions">← All competitions</a>
+          <div class="cp-head">
+            <div>
+              <div class="cp-code">{detail.event.code}</div>
+              <h2 class="display-2" style="margin-top:6px">{detail.event.title}</h2>
+              <p class="lead" style="margin-top:10px">
+                {words(detail.event.kind)} · {fmtDay(detail.event.startsOn)}
+                {detail.event.endsOn && detail.event.endsOn !== detail.event.startsOn ? ` – ${fmtDay(detail.event.endsOn)}` : ''}
+              </p>
+            </div>
+            <span class="pill featured"><span class="pill-dot"></span>{words(detail.event.status)}</span>
+          </div>
+
+          <div class="grid grid-3 mt-6">
+            <div class="card" style="padding:18px">
+              <div class="cp-k">Venue</div>
+              <div class="cp-v">{detail.event.venue ?? 'not published'}{detail.event.city ? `, ${detail.event.city}` : ''}</div>
+            </div>
+            <div class="card" style="padding:18px">
+              <div class="cp-k">Entries</div>
+              <div class="cp-v">
+                {detail.event.status === 'registration_open'
+                  ? `open until ${fmtWhen(detail.event.registrationClosesAt)}`
+                  : detail.event.registrationOpensAt
+                    ? `open from ${fmtWhen(detail.event.registrationOpensAt)}`
+                    : 'window not published'}
+              </div>
+            </div>
+            <div class="card" style="padding:18px">
+              <div class="cp-k">Sanction</div>
+              <div class="cp-v">{detail.event.sanctionReference ?? 'not published'}</div>
+            </div>
+          </div>
+
+          {detail.event.description && (
+            <p class="body-txt mt-6">{detail.event.description}</p>
+          )}
+
+          <div class="flex flex-wrap gap-3 mt-6">
+            {(detail.event.status === 'live' || detail.event.status === 'check_in') && (
+              <a class="btn btn-primary" href={`/scoreboard?event=${detail.event.id}`}>Live scoreboard →</a>
+            )}
+            {detail.event.contactEmail && (
+              <a class="btn btn-ghost" href={`mailto:${detail.event.contactEmail}`}>Contact the organiser</a>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section style="padding-top:0">
+        <div class="container">
+          <div class="section-head">
+            <div class="eyebrow">Categories</div>
+            <h3 class="display-2">Entries, draws &amp; <em>results</em></h3>
+          </div>
+
+          {detail.categories.length === 0 ? (
+            <div class="card" style="padding:24px;color:var(--muted)">
+              No categories have been published for this event yet.
+            </div>
+          ) : (
+            detail.categories.map((c: any) => (
+              <details class="cp-cat">
+                <summary>
+                  <span class="cp-cat-code">{c.code}</span>
+                  <span class="cp-cat-label">{c.label}</span>
+                  <span class="cp-cat-meta">
+                    {words(c.discipline)}
+                    {c.entryCount > 0 ? ` · ${c.entryCount} ${c.entryCount === 1 ? 'entry' : 'entries'}` : ''}
+                    {c.results.length ? ' · results final' : c.bracket ? ' · draw published' : ''}
+                  </span>
+                </summary>
+
+                <div class="cp-cat-body">
+                  {c.results.length > 0 && (
+                    <div class="cp-block">
+                      <h4 class="cp-h">Official result</h4>
+                      <div class="tbl-scroll">
+                        <table class="cp-tbl">
+                          <thead><tr><th>Place</th><th>Medal</th><th>Competitor</th><th>Dojo</th><th>W–L</th></tr></thead>
+                          <tbody>
+                            {c.results.map((r: any) => (
+                              <tr>
+                                <td>{r.placing}</td>
+                                <td>{medalWord(r.medal)}</td>
+                                <td>{r.competitor?.name ?? r.competitor?.entryNo ?? '—'}</td>
+                                <td>{r.competitor?.dojo ?? '—'}</td>
+                                <td class="cp-mono">{r.matchesWon}–{r.matchesLost}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      {c.results.some((r: any) => r.corrected) && (
+                        <p class="cp-note">
+                          A placing in this category has been corrected. A correction supersedes the
+                          earlier result and records who authorised it; the earlier version stays on
+                          the record.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  <div class="cp-block">
+                    <h4 class="cp-h">Entry list</h4>
+                    {!detail.entriesPublic ? (
+                      <p class="cp-note">
+                        Entries for this event are still open, so the list is not published yet. It
+                        is published when entries close.
+                      </p>
+                    ) : c.entries.length === 0 ? (
+                      <p class="cp-note">No entries were recorded in this category.</p>
+                    ) : (
+                      <div class="tbl-scroll">
+                        <table class="cp-tbl">
+                          <thead><tr><th>Entry</th><th>Competitor</th><th>Dojo</th><th>Seed</th><th>Status</th></tr></thead>
+                          <tbody>
+                            {c.entries.map((e: any) => (
+                              <tr class={e.status === 'withdrawn' ? 'cp-out' : ''}>
+                                <td class="cp-mono">{e.entryNo}</td>
+                                <td>{e.name ?? '—'}</td>
+                                <td>{e.dojo ?? '—'}</td>
+                                <td>{e.seed ?? '—'}</td>
+                                <td>{words(e.status)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  <div class="cp-block">
+                    <h4 class="cp-h">Draw</h4>
+                    {!c.bracket ? (
+                      <p class="cp-note">
+                        No draw has been published for this category. A draw is public only once the
+                        federation publishes it — advance sight of an unpublished bracket is exactly
+                        what a rigging allegation is built on.
+                      </p>
+                    ) : (
+                      <>
+                        <p class="cp-note">
+                          Published {fmtWhen(c.bracket.draw.publishedAt)} · format
+                          {' '}{words(c.bracket.draw.format)} · {c.bracket.draw.entryCount} entries ·
+                          algorithm {c.bracket.draw.algorithmVersion}
+                          {c.bracket.draw.randomSeed ? ` · seed ${c.bracket.draw.randomSeed}` : ''}.
+                          The seed is published so the draw can be reproduced.
+                        </p>
+                        <div class="tbl-scroll">
+                          <table class="cp-tbl">
+                            <thead><tr><th>#</th><th>Round</th><th>Pool</th><th>Aka</th><th>Ao</th><th>Winner</th><th>State</th></tr></thead>
+                            <tbody>
+                              {c.bracket.matches.map((m: any) => (
+                                <tr>
+                                  <td class="cp-mono">{m.index}</td>
+                                  <td>{m.round}</td>
+                                  <td>{m.poolLabel ?? '—'}</td>
+                                  <td class="cp-mono">{m.red ?? '—'}</td>
+                                  <td class="cp-mono">{m.blue ?? '—'}</td>
+                                  <td class="cp-mono">{m.winner ?? '—'}</td>
+                                  <td>{words(m.status)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <p class="cp-note">
+                          Bracket positions are shown by entry number; the entry list above maps each
+                          number to a competitor.
+                        </p>
+                      </>
+                    )}
+                  </div>
+
+                  {c.results.length === 0 && (
+                    <p class="cp-note">
+                      No result is published for this category. A result appears here only when it has
+                      been finalised and locked — never while it is provisional.
+                    </p>
+                  )}
+                </div>
+              </details>
+            ))
+          )}
+        </div>
+      </section>
+    </>
+  ) : (
+    <>
+      {[
+        { key: 'live', label: 'Happening now', rows: LIVE, note: 'Check-in and competition are under way.' },
+        { key: 'open', label: 'Open for entry', rows: OPEN, note: 'Entries are open. Entry is made by the competitor’s dojo or unit through the federation office.' },
+        { key: 'upcoming', label: 'Published & upcoming', rows: UPCOMING, note: 'Sanctioned and published. Entries have either not opened or have closed.' },
+        { key: 'concluded', label: 'Concluded', rows: CONCLUDED, note: 'Results are published per category once they are final.' },
+      ].map((group) => (
+        <section style={group.key === 'live' ? '' : 'padding-top:0'}>
+          <div class="container">
+            <div class="section-head" style="margin-bottom:28px">
+              <div class="eyebrow">{group.label}</div>
+              <p class="body-txt" style="margin-top:8px">{group.note}</p>
+            </div>
+            {group.rows.length === 0 ? (
+              <div class="card" style="padding:22px;color:var(--muted)">
+                No events in this state are on the federation register.
+              </div>
+            ) : (
+              <div class="grid grid-2">
+                {group.rows.map((e: any) => (
+                  <a class="card hoverable cp-card" href={`/competitions?event=${e.id}`}>
+                    <div class="cp-code">{e.code}</div>
+                    <div class="card-title" style="margin-top:6px">{e.title}</div>
+                    <div class="cp-meta">
+                      {words(e.kind)} · {fmtDay(e.startsOn)}
+                      {e.city ? ` · ${e.city}` : ''}
+                    </div>
+                    <div class="cp-meta">
+                      {e.status === 'registration_open'
+                        ? `Entries close ${fmtWhen(e.registrationClosesAt)}`
+                        : words(e.status)}
+                    </div>
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      ))}
+
+      {events.length === 0 && (
+        <section style="padding-top:0">
+          <div class="container">
+            <div class="card" style="padding:24px">
+              <h2 class="card-title">No competitions are published yet</h2>
+              <p class="body-txt" style="margin-top:10px">
+                The competition register is live but empty: no event has been sanctioned and published
+                on it. This is the true state of the record, not a loading failure. The federation's
+                announced calendar is on the <a class="btn-link" href="/events">events page</a>.
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
+    </>
+  )}
+</Base>
+
+<style>
+  .cp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; flex-wrap: wrap; margin-top: 20px; }
+  .cp-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .74rem;
+    letter-spacing: .08em; color: var(--gold-2);
+  }
+  .cp-k { font-family: var(--font-display); font-size: .66rem; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
+  .cp-v { font-size: .94rem; margin-top: 4px; overflow-wrap: anywhere; }
+  .cp-meta { font-size: .82rem; color: var(--muted); margin-top: 6px; }
+  .cp-card { padding: 22px; display: block; }
+
+  .cp-cat { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); margin-bottom: 10px; }
+  .cp-cat > summary {
+    cursor: pointer; padding: 16px 18px; min-height: 44px;
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px;
+  }
+  .cp-cat-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .74rem; color: var(--gold-2); }
+  .cp-cat-label { font-family: var(--font-display); font-size: 1rem; letter-spacing: .02em; }
+  .cp-cat-meta { font-size: .76rem; color: var(--muted); }
+  .cp-cat-body { padding: 0 18px 18px; }
+  .cp-block { margin-top: 18px; }
+  .cp-h { font-family: var(--font-display); font-size: .72rem; letter-spacing: .16em; text-transform: uppercase; color: var(--gold-2); margin-bottom: 8px; }
+  .cp-note { font-size: .8rem; color: var(--muted); line-height: 1.7; margin-top: 8px; }
+
+  .cp-tbl { width: 100%; border-collapse: collapse; font-size: .84rem; min-width: 520px; }
+  .cp-tbl th {
+    text-align: left; font-family: var(--font-display); font-weight: 500; font-size: .66rem;
+    letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--border-2); padding: 8px 10px; white-space: nowrap;
+  }
+  .cp-tbl td { border-bottom: 1px solid var(--border); padding: 9px 10px; color: var(--off-white); }
+  .cp-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; font-size: .8rem; }
+  .cp-out td { color: var(--muted); text-decoration: line-through; }
+
+  @media (max-width: 600px) {
+    .cp-cat > summary { padding: 14px; }
+    .cp-cat-body { padding: 0 14px 14px; }
+  }
+</style>

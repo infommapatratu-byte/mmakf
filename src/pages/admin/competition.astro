@@ -1,0 +1,1278 @@
+---
+// The competition control centre — events, categories, entries, draws, mats,
+// matches and the mat-side scoring console.
+//
+// Four things are deliberate:
+//
+//  1. AUTHORITY IS ASKED, NEVER ASSUMED. Every control is rendered only when
+//     rbac says the caller holds the action in THIS event's scope, and the same
+//     check the endpoint will make is the one made here — so the page and the
+//     server cannot disagree. Where a control is withheld the reason is printed.
+//
+//  2. NOTHING IS OPTIMISTIC. The page never claims a change succeeded. It
+//     repeats what the server said — including "already published", "illegal
+//     transition" and "no scoring ruleset has been recorded" — and reloads from
+//     the record rather than re-rendering a state it guessed at.
+//
+//  3. A CORRECTION IS A REVERSAL. src/db/matches.ts is append-only: there is no
+//     delete. The console offers "reverse this action", which appends the exact
+//     negation with a reason, and shows the reversed row still standing in the
+//     log struck through — because that is what an appeal needs to see.
+//
+//  4. THE REFEREE IS ON A PHONE. The scoring console is a single column of
+//     44px+ targets, the score is legible at arm's length, and every control
+//     locks while its request is in flight so a double tap cannot double-score.
+//
+// The page holds no policy of its own: point values come from the ruleset the
+// federation recorded against the event, and where none exists scoring is
+// disabled with that stated as the reason rather than defaulted to a rulebook
+// nobody approved.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { can, canAnywhere, ForbiddenError } from '@/lib/rbac';
+import { isConfigured, db, schema as sch } from '@/db';
+import { redisHealthy } from '@/lib/storage';
+import { listEvents, categoryEntries } from '@/db/competition';
+import { explainMatch, allowedTransitions, type MatchState } from '@/db/matches';
+import { adminEventDetail } from '@/pages/api/competition/[...action]';
+
+export const prerender = false;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const configured = isConfigured();
+
+const params = Astro.url.searchParams;
+const eventIdParam = Number(params.get('event') ?? '');
+const categoryIdParam = Number(params.get('category') ?? '');
+const matchIdParam = Number(params.get('match') ?? '');
+const eventId = Number.isInteger(eventIdParam) && eventIdParam > 0 ? eventIdParam : null;
+const categoryId = Number.isInteger(categoryIdParam) && categoryIdParam > 0 ? categoryIdParam : null;
+const matchId = Number.isInteger(matchIdParam) && matchIdParam > 0 ? matchIdParam : null;
+
+let mayReadAnywhere = false;
+let events: any[] = [];
+let detail: any = null;
+let categoryView: any = null;
+let matchView: any = null;
+let loadError: string | null = null;
+// The ruleset is held in the shared store until a competition_rulesets table
+// exists. Without Redis that store is this server's memory, which on a
+// serverless host is per-instance and lost on restart — an operator recording
+// regulations has a right to know that before a championship depends on them.
+let rulesetStoreDurable = false;
+
+if (identity && configured) {
+  rulesetStoreDurable = await redisHealthy();
+  mayReadAnywhere = canAnywhere(identity.principal, 'competition:read');
+  if (mayReadAnywhere) {
+    try {
+      events = (await listEvents(db(), identity.principal, { limit: 200 })) as any[];
+    } catch (err: any) {
+      loadError = err instanceof ForbiddenError
+        ? 'You do not hold competition:read in any scope.'
+        : 'The event list could not be read.';
+    }
+  }
+  if (eventId && mayReadAnywhere) {
+    try {
+      detail = await adminEventDetail(identity.principal, eventId);
+    } catch (err: any) {
+      loadError = err instanceof ForbiddenError
+        ? 'This event is outside the scope your role covers, so it cannot be opened here.'
+        : (err?.message ?? 'That event could not be read.');
+    }
+  }
+  if (detail && categoryId) {
+    try {
+      categoryView = await categoryEntries(db(), identity.principal, categoryId);
+    } catch (err: any) {
+      loadError = err?.message ?? 'That category could not be read.';
+    }
+  }
+  if (detail && matchId) {
+    const row = (detail.matches as any[]).find((m) => m.id === matchId) ?? null;
+    if (!row) {
+      loadError = 'That bout does not belong to this event.';
+    } else {
+      try {
+        matchView = { row, log: await explainMatch(db(), matchId) };
+      } catch (err: any) {
+        loadError = err?.message ?? 'That bout could not be read.';
+      }
+    }
+  }
+}
+
+// Placement of the open event, used for every authority question below. It is
+// the same resource shape src/db/competition.ts builds, so the answers match.
+const placement = detail
+  ? {
+      stateUnitId: detail.event.stateUnitId,
+      districtUnitId: detail.event.districtUnitId,
+      dojoId: detail.event.organiserDojoId,
+    }
+  : {};
+
+const mayWrite = !!(identity && detail && can(identity.principal, 'competition:write', placement));
+const maySanction = !!(identity && detail && can(identity.principal, 'competition:sanction', placement));
+const mayEnterResults = !!(identity && detail && can(identity.principal, 'result:enter', placement));
+const mayFinalise = !!(identity && detail && can(identity.principal, 'result:finalize', placement));
+const mayCreate = !!(identity && canAnywhere(identity.principal, 'competition:write'));
+
+const EVENT_KINDS = sch.eventKind.enumValues;
+const DISCIPLINES = sch.disciplineKind.enumValues;
+const DRAW_FORMATS = sch.drawFormat.enumValues;
+
+const rulesetOk = !!detail?.ruleset?.ok;
+const ruleset = rulesetOk ? detail.ruleset.stored.ruleset : null;
+const rulesetReason = rulesetOk ? null : detail?.ruleset?.reason ?? null;
+const scoringActions = ruleset
+  ? Object.entries(ruleset.actions as Record<string, any>).map(([name, rule]) => ({ name, ...rule }))
+  : [];
+
+const matchTransitions: MatchState[] = matchView
+  ? allowedTransitions(matchView.row.status as MatchState).filter((t) => t !== 'completed' && t !== 'under_protest')
+  : [];
+
+function fmtDate(v: any): string {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return String(v);
+  return d.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+}
+function fmtDay(v: any): string {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return String(v);
+  return d.toLocaleDateString('en-IN', { dateStyle: 'medium' });
+}
+const words = (v: any) => String(v ?? '').replace(/_/g, ' ');
+const countsLine = (counts: Record<string, number>) => {
+  const parts = Object.entries(counts).map(([k, n]) => `${n} ${words(k)}`);
+  return parts.length ? parts.join(' · ') : 'no entries';
+};
+
+const byStatus = new Map<string, any[]>();
+for (const e of events) {
+  const list = byStatus.get(e.status) ?? [];
+  list.push(e);
+  byStatus.set(e.status, list);
+}
+const statusOrder = [
+  'live', 'check_in', 'registration_open', 'registration_closed', 'published',
+  'approved', 'sanction_review', 'technical_review', 'draft', 'results_pending',
+  'results_final', 'postponed', 'archived', 'cancelled',
+];
+const groupedEvents = statusOrder
+  .filter((st) => byStatus.has(st))
+  .map((st) => ({ status: st, rows: byStatus.get(st)! }));
+
+const signedInAs = identity
+  ? identity.shared
+    ? `${identity.principal.label} — shared credential (${identity.via}), not attributable to a person`
+    : `${identity.principal.label} — personal account #${identity.userId}`
+  : '';
+
+// Matches grouped by mat for the mat board.
+const matBoard = detail
+  ? [...new Set((detail.matches as any[]).map((m) => m.mat ?? ''))]
+      .sort()
+      .map((mat) => ({
+        mat,
+        rows: (detail.matches as any[]).filter((m) => (m.mat ?? '') === mat),
+      }))
+  : [];
+---
+
+<Base title="MMAKF Admin — Competition" showNav={false} showFooter={false}>
+  {!identity ? (
+    <section style="min-height:90vh;display:flex;align-items:center;justify-content:center;padding:64px 24px">
+      <div style="width:100%;max-width:420px">
+        <div style="text-align:center;margin-bottom:36px">
+          <div style="font-family:var(--font-display);font-size:1.8rem;font-weight:700;letter-spacing:.06em">MMAKF</div>
+          <div style="font-family:var(--font-display);font-size:.7rem;letter-spacing:.22em;text-transform:uppercase;color:var(--gold);margin-top:6px">Competition Control</div>
+        </div>
+        <form id="loginForm" class="card" style="padding:32px">
+          <h1 class="card-title" style="font-size:1.2rem;margin-bottom:24px">Sign in</h1>
+          <label class="input-label" for="login-email">Email address</label>
+          <input class="input" type="email" id="login-email" name="email" autocomplete="username"
+                 autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="you@mmakf.in" />
+          <label class="input-label" for="login-password" style="margin-top:14px">Password</label>
+          <input class="input" type="password" id="login-password" name="password" autocomplete="current-password" required />
+          <div id="loginErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
+          <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;justify-content:center;min-height:44px">Sign in</button>
+          <p style="margin-top:20px;font-size:.75rem;color:var(--muted);text-align:center;line-height:1.6">
+            Authorised personnel only. Every entry, point and result is recorded against the credential used to record it.
+          </p>
+        </form>
+      </div>
+    </section>
+  ) : (
+    <div class="admin-wrap">
+      <aside class="admin-side">
+        <div class="admin-brand">
+          <div class="admin-brand-1">MMAKF</div>
+          <div class="admin-brand-2">Competition Control</div>
+        </div>
+        <nav class="admin-nav" aria-label="Sections">
+          <a href="/admin/competition" class={eventId ? '' : 'active'}>All events</a>
+          {detail && <a href={`/admin/competition?event=${detail.event.id}`} class={eventId && !categoryId && !matchId ? 'active' : ''}>{detail.event.code}</a>}
+          {detail && <a href={`/admin/competition?event=${detail.event.id}#categories`}>Categories &amp; draws</a>}
+          {detail && <a href={`/admin/competition?event=${detail.event.id}#mats`}>Mats &amp; matches</a>}
+          {detail && <a href={`/admin/competition?event=${detail.event.id}#ruleset`}>Scoring ruleset</a>}
+          <a href="/admin/queue" style="margin-top:12px">← Approval queue</a>
+          <a href="/admin">← Content admin</a>
+        </nav>
+        <div style="padding:16px;border-top:1px solid var(--border)">
+          <button class="btn btn-ghost" style="width:100%;justify-content:center;min-height:44px" id="logoutBtn">Logout</button>
+          <a href="/competitions" target="_blank" rel="noopener" class="btn-link" style="display:flex;align-items:center;justify-content:center;min-height:44px;margin-top:6px">Public page →</a>
+        </div>
+      </aside>
+
+      <main class="admin-main">
+        <header class="admin-panel" style="padding-top:0">
+          <h1 class="admin-h">Competition</h1>
+          <p class="admin-sub">
+            Events, categories, entries, draws, mats and results. Every act on this screen is written
+            through the competition modules, which hold the lifecycle rules — an event cannot open for
+            entry before it is sanctioned, a result cannot be finalised twice, and a recorded point is
+            never deleted, only reversed.
+          </p>
+          <p class="q-signed">Signed in as {signedInAs}</p>
+
+          {!configured && (
+            <div class="q-warn" role="alert">
+              <strong>The federation database is not configured on this deployment.</strong>
+              Competition records live in Postgres, so nothing can be listed, entered or scored until
+              <code> DATABASE_URL</code> is set. No control on this page is shown, because none of them
+              could work.
+            </div>
+          )}
+          {configured && !mayReadAnywhere && (
+            <div class="q-warn" role="alert">
+              <strong>Your account does not hold competition:read in any scope.</strong>
+              Competition records are not shown. If you administer a state or a dojo, ask the
+              federation office to bind the role to your account.
+            </div>
+          )}
+          {loadError && <div class="q-warn" role="alert"><strong>{loadError}</strong></div>}
+          <div id="banner" class="c-banner" role="alert" aria-live="polite" hidden></div>
+        </header>
+
+        {configured && mayReadAnywhere && !detail && (
+          <>
+            <section class="admin-panel" id="events">
+              <h2 class="admin-h" style="font-size:1.15rem">Events by status</h2>
+              <p class="admin-sub">
+                {events.length === 0
+                  ? 'No competition events are on the register within the scopes your roles cover.'
+                  : `${events.length} event${events.length === 1 ? '' : 's'} within your scopes.`}
+              </p>
+              {groupedEvents.map((g) => (
+                <div class="c-group">
+                  <div class="c-group-h">{words(g.status)} <span class="c-count">{g.rows.length}</span></div>
+                  <div class="tbl-scroll">
+                    <table class="c-tbl">
+                      <thead><tr><th>Reference</th><th>Title</th><th>Kind</th><th>Dates</th><th>Place</th><th>Sanction</th><th></th></tr></thead>
+                      <tbody>
+                        {g.rows.map((e: any) => (
+                          <tr>
+                            <td class="c-mono">{e.code}</td>
+                            <td>{e.title}</td>
+                            <td>{words(e.kind)}</td>
+                            <td>{fmtDay(e.startsOn)}{e.endsOn && e.endsOn !== e.startsOn ? ` – ${fmtDay(e.endsOn)}` : ''}</td>
+                            <td>{e.city ?? '—'}{e.venue ? `, ${e.venue}` : ''}</td>
+                            <td>{e.sanctionReference ?? <span class="c-dim">not sanctioned</span>}</td>
+                            <td><a class="btn btn-ghost c-sm" href={`/admin/competition?event=${e.id}`}>Open</a></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
+            </section>
+
+            <section class="admin-panel" id="new-event">
+              <h2 class="admin-h" style="font-size:1.15rem">Create an event</h2>
+              <p class="admin-sub">
+                A new event always starts in <em>draft</em>. It becomes approved only through a
+                sanction, which records the authority and the federation reference it was issued
+                under — this form cannot set a status.
+              </p>
+              {!mayCreate ? (
+                <div class="q-warn q-warn-soft">
+                  <strong>You do not hold competition:write.</strong> Creating an event is withheld
+                  rather than offered and refused.
+                </div>
+              ) : (
+                <form class="c-form c-grid" data-action="create-event">
+                  <div><label class="input-label" for="ev-title">Title</label>
+                    <input class="input" id="ev-title" name="title" required maxlength="200" /></div>
+                  <div><label class="input-label" for="ev-kind">Kind</label>
+                    <select class="input" id="ev-kind" name="kind" required>
+                      {EVENT_KINDS.map((k) => <option value={k}>{words(k)}</option>)}
+                    </select></div>
+                  <div><label class="input-label" for="ev-starts">Starts on</label>
+                    <input class="input" id="ev-starts" name="startsOn" type="date" /></div>
+                  <div><label class="input-label" for="ev-ends">Ends on</label>
+                    <input class="input" id="ev-ends" name="endsOn" type="date" /></div>
+                  <div><label class="input-label" for="ev-venue">Venue</label>
+                    <input class="input" id="ev-venue" name="venue" maxlength="200" /></div>
+                  <div><label class="input-label" for="ev-city">City</label>
+                    <input class="input" id="ev-city" name="city" maxlength="120" /></div>
+                  <div><label class="input-label" for="ev-state">State unit id</label>
+                    <input class="input" id="ev-state" name="stateUnitId" inputmode="numeric" />
+                    <span class="c-help">Leave blank for a national event.</span></div>
+                  <div><label class="input-label" for="ev-district">District unit id</label>
+                    <input class="input" id="ev-district" name="districtUnitId" inputmode="numeric" /></div>
+                  <div><label class="input-label" for="ev-dojo">Organiser dojo id</label>
+                    <input class="input" id="ev-dojo" name="organiserDojoId" inputmode="numeric" /></div>
+                  <div><label class="input-label" for="ev-email">Contact email</label>
+                    <input class="input" id="ev-email" name="contactEmail" type="email" /></div>
+                  <div><label class="input-label" for="ev-phone">Contact phone</label>
+                    <input class="input" id="ev-phone" name="contactPhone" /></div>
+                  <div><label class="input-label" for="ev-rules">Ruleset version</label>
+                    <input class="input" id="ev-rules" name="rulesetVersion" maxlength="120" />
+                    <span class="c-help">The federation's own reference for the regulations in force.</span></div>
+                  <div class="c-wide"><label class="input-label" for="ev-desc">Description</label>
+                    <textarea class="input" id="ev-desc" name="description" rows="3" maxlength="4000"></textarea></div>
+                  <div class="c-wide"><button type="submit" class="btn btn-primary c-btn">Create event</button></div>
+                </form>
+              )}
+            </section>
+          </>
+        )}
+
+        {detail && !matchView && (
+          <>
+            <section class="admin-panel" id="event">
+              <div class="c-head">
+                <div>
+                  <div class="c-mono c-dim">{detail.event.code}</div>
+                  <h2 class="admin-h" style="font-size:1.3rem">{detail.event.title}</h2>
+                  <p class="admin-sub">
+                    {words(detail.event.kind)} · {fmtDay(detail.event.startsOn)}
+                    {detail.event.endsOn && detail.event.endsOn !== detail.event.startsOn ? ` – ${fmtDay(detail.event.endsOn)}` : ''}
+                    {detail.event.venue ? ` · ${detail.event.venue}` : ''}{detail.event.city ? `, ${detail.event.city}` : ''}
+                  </p>
+                </div>
+                <span class={`c-status c-status-${detail.event.status}`}>{words(detail.event.status)}</span>
+              </div>
+
+              <dl class="c-facts">
+                <div><dt>Sanction</dt><dd>{detail.event.sanctionReference ?? 'not sanctioned'}</dd></div>
+                <div><dt>Sanctioned at</dt><dd>{fmtDate(detail.event.sanctionedAt)}</dd></div>
+                <div><dt>Registration opens</dt><dd>{fmtDate(detail.event.registrationOpensAt)}</dd></div>
+                <div><dt>Registration closes</dt><dd>{fmtDate(detail.event.registrationClosesAt)}</dd></div>
+                <div><dt>Ruleset version</dt><dd>{detail.event.rulesetVersion ?? 'not stated'}</dd></div>
+                <div><dt>Results locked</dt><dd>{detail.event.resultsFinalisedAt ? fmtDate(detail.event.resultsFinalisedAt) : 'no'}</dd></div>
+              </dl>
+
+              <div class="c-two">
+                <div class="c-box">
+                  <h3 class="c-box-h">Move this event</h3>
+                  {!mayWrite ? (
+                    <p class="c-dim">You do not hold competition:write in this event's scope.</p>
+                  ) : detail.legalNextStatuses.length === 0 ? (
+                    <p class="c-dim">
+                      An event that is {words(detail.event.status)} is final — the lifecycle offers no
+                      further move.
+                    </p>
+                  ) : (
+                    <form class="c-form" data-action="transition-event" data-confirm="Record this status change?">
+                      <input type="hidden" name="eventId" value={detail.event.id} />
+                      <label class="input-label" for="tr-to">Next status</label>
+                      <select class="input" id="tr-to" name="to" required>
+                        {detail.legalNextStatuses.map((st: string) => <option value={st}>{words(st)}</option>)}
+                      </select>
+                      <label class="input-label" for="tr-reason" style="margin-top:12px">Reason (recorded)</label>
+                      <input class="input" id="tr-reason" name="reason" required maxlength="1000" />
+                      <span class="c-help">Every move records why it was made; the audit row is the only place that answer survives.</span>
+                      <button type="submit" class="btn btn-primary c-btn" style="margin-top:12px">Record move</button>
+                    </form>
+                  )}
+                </div>
+
+                <div class="c-box">
+                  <h3 class="c-box-h">Sanction</h3>
+                  {detail.event.sanctionedAt ? (
+                    <p class="c-dim">
+                      Sanctioned on {fmtDate(detail.event.sanctionedAt)} under
+                      <strong> {detail.event.sanctionReference ?? 'an unrecorded reference'}</strong>.
+                      Re-sanctioning is refused — a second reference would erase the record of who
+                      approved the championship.
+                    </p>
+                  ) : !maySanction ? (
+                    <p class="c-dim">You do not hold competition:sanction in this event's scope.</p>
+                  ) : detail.event.status !== 'sanction_review' ? (
+                    <p class="c-dim">
+                      Only an event in sanction review can be sanctioned; this one is
+                      {' '}{words(detail.event.status)}.
+                    </p>
+                  ) : (
+                    <form class="c-form" data-action="sanction-event" data-confirm="Sanction this event? This cannot be undone or re-issued.">
+                      <input type="hidden" name="eventId" value={detail.event.id} />
+                      <label class="input-label" for="sa-person">Sanctioning person id</label>
+                      <input class="input" id="sa-person" name="sanctionedByPersonId" inputmode="numeric" required />
+                      <label class="input-label" for="sa-ref" style="margin-top:12px">Federation reference</label>
+                      <input class="input" id="sa-ref" name="sanctionReference" required maxlength="200" />
+                      <label class="input-label" for="sa-rules" style="margin-top:12px">Ruleset version</label>
+                      <input class="input" id="sa-rules" name="rulesetVersion" maxlength="120" />
+                      <button type="submit" class="btn btn-primary c-btn" style="margin-top:12px">Record sanction</button>
+                    </form>
+                  )}
+                </div>
+              </div>
+            </section>
+
+            <section class="admin-panel" id="ruleset">
+              <h2 class="admin-h" style="font-size:1.15rem">Scoring ruleset</h2>
+              <p class="admin-sub">
+                What a point is worth, which action ends a bout, how a tie is broken and what placing a
+                beaten competitor receives are <strong>MMAKF competition regulations</strong>. None of
+                them is assumed anywhere in this system. Until the federation records them against this
+                event, no point can be entered and no result can be finalised — and that is stated
+                rather than defaulted.
+              </p>
+              {!rulesetStoreDurable && (
+                <div class="q-warn" role="alert">
+                  <strong>The shared store is not configured on this deployment.</strong>
+                  A ruleset recorded now is held in this server's memory only: it is lost on restart
+                  and is not visible to another instance. Configure Upstash Redis before a
+                  championship is scored against it.
+                </div>
+              )}
+              {rulesetOk ? (
+                <div class="c-box">
+                  <p><strong>{ruleset.code}</strong> — recorded {fmtDate(detail.ruleset.stored.recordedAt)} by {detail.ruleset.stored.recordedBy}
+                    {detail.ruleset.stored.authority ? ` under ${detail.ruleset.stored.authority}` : ''}.</p>
+                  <div class="tbl-scroll" style="margin-top:12px">
+                    <table class="c-tbl">
+                      <thead><tr><th>Action</th><th>Points</th><th>Awarded to</th><th>Penalty</th><th>Ends bout</th></tr></thead>
+                      <tbody>
+                        {scoringActions.map((a: any) => (
+                          <tr>
+                            <td class="c-mono">{a.name}</td>
+                            <td>{a.points}</td>
+                            <td>{a.awardTo ?? '—'}</td>
+                            <td>{a.penalty ? 'yes' : '—'}</td>
+                            <td>{a.endsMatch ? `yes (${a.winMethod ?? 'method not stated'})` : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p class="c-help" style="margin-top:10px">
+                    Tie-breaks: {ruleset.tieBreak?.length ? ruleset.tieBreak.join(', ') : 'none set — a tied bout is refused completion rather than decided'}.
+                    Placing rules: {ruleset.placings ? 'set' : 'not set — results cannot be finalised'}.
+                  </p>
+                </div>
+              ) : (
+                <div class="q-warn" role="alert"><strong>No usable ruleset.</strong> {rulesetReason}</div>
+              )}
+
+              {mayWrite && (
+                <details class="c-details">
+                  <summary>Record the regulations in force for this event</summary>
+                  <form class="c-form" data-action="set-ruleset" data-confirm="Record this ruleset against the event?">
+                    <input type="hidden" name="eventId" value={detail.event.id} />
+                    <label class="input-label" for="rs-auth">Authority (the federation's own reference for these regulations)</label>
+                    <input class="input" id="rs-auth" name="authority" maxlength="200" />
+                    <label class="input-label" for="rs-json" style="margin-top:12px">Ruleset (JSON)</label>
+                    <textarea class="input c-code" id="rs-json" name="ruleset" rows="12" required
+                      placeholder='Paste the approved ruleset. It is validated before it is stored: every action that carries points must say which competitor they are awarded to, a penalty may never credit the competitor who committed it, and an action that ends the bout must name the side it is awarded to.'></textarea>
+                    <span class="c-help">
+                      Nothing is pre-filled. A default here would be an invented regulation, and a
+                      championship scored under one would be indefensible.
+                    </span>
+                    <button type="submit" class="btn btn-primary c-btn" style="margin-top:12px">Record ruleset</button>
+                  </form>
+                </details>
+              )}
+            </section>
+
+            <section class="admin-panel" id="categories">
+              <h2 class="admin-h" style="font-size:1.15rem">Categories, entries and draws</h2>
+              {detail.categories.length === 0 ? (
+                <p class="admin-sub">No categories yet. Registration cannot open on an event with nothing to enter.</p>
+              ) : (
+                <div class="tbl-scroll">
+                  <table class="c-tbl">
+                    <thead><tr><th>Code</th><th>Category</th><th>Discipline</th><th>Entries</th><th>Draw</th><th>Actions</th></tr></thead>
+                    <tbody>
+                      {detail.categories.map((c: any) => {
+                        const live = c.draws.filter((d: any) => !d.superseded);
+                        const published = live.find((d: any) => d.publishedAt);
+                        const unpublished = live.find((d: any) => !d.publishedAt);
+                        return (
+                          <tr>
+                            <td class="c-mono">{c.code}</td>
+                            <td><a href={`/admin/competition?event=${detail.event.id}&category=${c.id}`}>{c.label}</a></td>
+                            <td>{words(c.discipline)}</td>
+                            <td>{countsLine(c.counts)}</td>
+                            <td>
+                              {published
+                                ? <span class="c-ok">published {fmtDate(published.publishedAt)}</span>
+                                : unpublished
+                                  ? <span class="c-dim">generated, not published</span>
+                                  : <span class="c-dim">none</span>}
+                            </td>
+                            <td class="c-actions">
+                              {mayWrite && (
+                                <form class="c-form c-inline" data-action="generate-draw"
+                                      data-confirm={published ? 'A published draw exists. Generating again supersedes it — the original and its matches stay on the record. Continue?' : 'Generate the draw for this category?'}>
+                                  <input type="hidden" name="categoryId" value={c.id} />
+                                  {!c.drawFormat && (
+                                    <select class="input c-mini" name="format" required aria-label={`Draw format for ${c.label}`}>
+                                      <option value="">format…</option>
+                                      {DRAW_FORMATS.map((f) => <option value={f}>{words(f)}</option>)}
+                                    </select>
+                                  )}
+                                  {published && <input class="input c-mini" name="reason" placeholder="reason" required maxlength="500" aria-label="Reason for regenerating" />}
+                                  <button type="submit" class="btn btn-ghost c-sm">Generate</button>
+                                </form>
+                              )}
+                              {mayWrite && unpublished && (
+                                <form class="c-form c-inline" data-action="publish-draw" data-confirm="Publish this draw? After publication it is the bracket the competition runs to.">
+                                  <input type="hidden" name="drawId" value={unpublished.id} />
+                                  <button type="submit" class="btn btn-gold c-sm">Publish draw</button>
+                                </form>
+                              )}
+                              {mayFinalise && (
+                                <form class="c-form c-inline" data-action="finalise-results"
+                                      data-confirm="Finalise the results for this category? Placings lock: a change afterwards must supersede them and record who authorised it.">
+                                  <input type="hidden" name="categoryId" value={c.id} />
+                                  <button type="submit" class="btn btn-ghost c-sm">Finalise results</button>
+                                </form>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {mayWrite && (
+                <details class="c-details">
+                  <summary>Add a category</summary>
+                  <form class="c-form c-grid" data-action="add-category">
+                    <input type="hidden" name="eventId" value={detail.event.id} />
+                    <div><label class="input-label" for="ct-code">Code</label>
+                      <input class="input" id="ct-code" name="code" required maxlength="40" /></div>
+                    <div><label class="input-label" for="ct-label">Label</label>
+                      <input class="input" id="ct-label" name="label" required maxlength="160" /></div>
+                    <div><label class="input-label" for="ct-disc">Discipline</label>
+                      <select class="input" id="ct-disc" name="discipline" required>
+                        {DISCIPLINES.map((d) => <option value={d}>{words(d)}</option>)}
+                      </select></div>
+                    <div><label class="input-label" for="ct-format">Draw format</label>
+                      <select class="input" id="ct-format" name="drawFormat">
+                        <option value="">not set</option>
+                        {DRAW_FORMATS.map((f) => <option value={f}>{words(f)}</option>)}
+                      </select></div>
+                    <div><label class="input-label" for="ct-gender">Gender</label>
+                      <input class="input" id="ct-gender" name="gender" maxlength="40" />
+                      <span class="c-help">As the regulations spell it. "mixed" means no restriction.</span></div>
+                    <div><label class="input-label" for="ct-age">Age group</label>
+                      <input class="input" id="ct-age" name="ageGroup" maxlength="60" /></div>
+                    <div><label class="input-label" for="ct-minage">Minimum age (years)</label>
+                      <input class="input" id="ct-minage" name="minAgeYears" inputmode="numeric" /></div>
+                    <div><label class="input-label" for="ct-maxage">Maximum age (years)</label>
+                      <input class="input" id="ct-maxage" name="maxAgeYears" inputmode="numeric" /></div>
+                    <div><label class="input-label" for="ct-minw">Minimum weight (grams)</label>
+                      <input class="input" id="ct-minw" name="minWeightGrams" inputmode="numeric" />
+                      <span class="c-help">Grams, as whole numbers — never kilograms as a decimal.</span></div>
+                    <div><label class="input-label" for="ct-maxw">Maximum weight (grams)</label>
+                      <input class="input" id="ct-maxw" name="maxWeightGrams" inputmode="numeric" /></div>
+                    <div><label class="input-label" for="ct-team">Team size</label>
+                      <input class="input" id="ct-team" name="teamSize" inputmode="numeric" /></div>
+                    <div><label class="input-label" for="ct-max">Maximum entries</label>
+                      <input class="input" id="ct-max" name="maxEntries" inputmode="numeric" /></div>
+                    <div class="c-wide"><button type="submit" class="btn btn-primary c-btn">Add category</button></div>
+                  </form>
+                </details>
+              )}
+            </section>
+
+            {categoryView && (
+              <section class="admin-panel" id="entries">
+                <h2 class="admin-h" style="font-size:1.15rem">{categoryView.category.label} — entries</h2>
+                <p class="admin-sub">
+                  An entry carries its own eligibility decision and the evidence behind it. A refusal
+                  stays on the record; it is never deleted.
+                </p>
+                {categoryView.entries.length === 0 ? (
+                  <p class="c-dim">No entries in this category.</p>
+                ) : (
+                  <div class="tbl-scroll">
+                    <table class="c-tbl">
+                      <thead><tr><th>Entry</th><th>Competitor</th><th>Status</th><th>Seed</th><th>Weigh-in</th><th>Notes</th><th>Actions</th></tr></thead>
+                      <tbody>
+                        {categoryView.entries.map((e: any) => (
+                          <tr>
+                            <td class="c-mono">{e.entryNo}</td>
+                            <td>{e.fullName ?? <span class="c-dim">team entry</span>}</td>
+                            <td>{words(e.status)}</td>
+                            <td>{e.seed ?? '—'}</td>
+                            <td>{e.weighInGrams == null ? '—' : `${e.weighInGrams} g`}</td>
+                            <td class="c-note">
+                              {e.ineligibleReason ?? ''}{e.withdrawnReason ?? ''}
+                              {e.reasonsWithheld && <span class="c-dim">a reason is recorded but withheld from your scope</span>}
+                            </td>
+                            <td class="c-actions">
+                              {mayWrite && e.status === 'confirmed' && (
+                                <form class="c-form c-inline" data-action="check-in">
+                                  <input type="hidden" name="entryId" value={e.entryId} />
+                                  <button type="submit" class="btn btn-ghost c-sm">Check in</button>
+                                </form>
+                              )}
+                              {mayWrite && (e.status === 'checked_in' || e.status === 'weighed_in') && (
+                                <form class="c-form c-inline" data-action="weigh-in">
+                                  <input type="hidden" name="entryId" value={e.entryId} />
+                                  <input class="input c-mini" name="grams" inputmode="numeric" placeholder="grams" required aria-label={`Weight in grams for ${e.entryNo}`} />
+                                  <input class="input c-mini" name="officialPersonId" inputmode="numeric" placeholder="official id" required aria-label="Recording official person id" />
+                                  <button type="submit" class="btn btn-ghost c-sm">Record weight</button>
+                                </form>
+                              )}
+                              {mayWrite && e.status !== 'withdrawn' && (
+                                <form class="c-form c-inline" data-action="withdraw" data-confirm="Withdraw this entry? The reason stays on the record.">
+                                  <input type="hidden" name="entryId" value={e.entryId} />
+                                  <input class="input c-mini" name="reason" placeholder="reason" required maxlength="500" aria-label={`Reason for withdrawing ${e.entryNo}`} />
+                                  <button type="submit" class="btn btn-ghost c-sm">Withdraw</button>
+                                </form>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {mayWrite && (
+                  <details class="c-details">
+                    <summary>Enter a competitor</summary>
+                    <form class="c-form c-grid" data-action="enter">
+                      <input type="hidden" name="categoryId" value={categoryView.category.id} />
+                      <div><label class="input-label" for="en-person">Person id</label>
+                        <input class="input" id="en-person" name="personId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="en-dojo">Dojo id</label>
+                        <input class="input" id="en-dojo" name="dojoId" inputmode="numeric" /></div>
+                      <div class="c-wide">
+                        <span class="c-help">
+                          Eligibility is decided by the module against this category's own bounds, and
+                          the decision is stored with its evidence. An ineligible entry is still
+                          recorded, with the reason.
+                        </span>
+                        <button type="submit" class="btn btn-primary c-btn" style="margin-top:10px">Enter competitor</button>
+                      </div>
+                    </form>
+                  </details>
+                )}
+              </section>
+            )}
+
+            <section class="admin-panel" id="mats">
+              <h2 class="admin-h" style="font-size:1.15rem">Mats and matches</h2>
+              {detail.matches.length === 0 ? (
+                <p class="admin-sub">No matches yet — a draw produces them.</p>
+              ) : (
+                matBoard.map((m: any) => (
+                  <div class="c-group">
+                    <div class="c-group-h">{m.mat ? `Mat ${m.mat}` : 'No mat assigned'} <span class="c-count">{m.rows.length}</span></div>
+                    <div class="tbl-scroll">
+                      <table class="c-tbl">
+                        <thead><tr><th>Bout</th><th>Category</th><th>Round</th><th>Red (aka)</th><th>Blue (ao)</th><th>Score</th><th>State</th><th>Mat / time</th><th></th></tr></thead>
+                        <tbody>
+                          {m.rows.map((mt: any) => (
+                            <tr>
+                              <td class="c-mono">{mt.matchNo}</td>
+                              <td>{mt.categoryLabel}</td>
+                              <td>{mt.round}{mt.poolLabel ? ` ${mt.poolLabel}` : ''}</td>
+                              <td>{mt.red?.name ?? mt.red?.entryNo ?? <span class="c-dim">—</span>}</td>
+                              <td>{mt.blue?.name ?? mt.blue?.entryNo ?? <span class="c-dim">—</span>}</td>
+                              <td class="c-mono">{mt.redScore}–{mt.blueScore}</td>
+                              <td>{words(mt.status)}{mt.winner ? ` · ${mt.winner.name ?? mt.winner.entryNo} by ${mt.winMethod ?? 'method not stated'}` : ''}</td>
+                              <td>
+                                {mayWrite && !['completed', 'walkover', 'disqualification', 'cancelled', 'under_protest'].includes(mt.status) ? (
+                                  <form class="c-form c-inline" data-action="assign-mat">
+                                    <input type="hidden" name="matchId" value={mt.id} />
+                                    <input class="input c-mini" name="mat" value={mt.mat ?? ''} placeholder="mat" maxlength="40" aria-label={`Mat for bout ${mt.matchNo}`} />
+                                    <input class="input c-mini" name="scheduledAt" type="datetime-local" aria-label={`Scheduled time for bout ${mt.matchNo}`} />
+                                    <button type="submit" class="btn btn-ghost c-sm">Set</button>
+                                  </form>
+                                ) : (
+                                  <span class="c-dim">{mt.mat ?? '—'} {mt.scheduledAt ? fmtDate(mt.scheduledAt) : ''}</span>
+                                )}
+                              </td>
+                              <td><a class="btn btn-ghost c-sm" href={`/admin/competition?event=${detail.event.id}&match=${mt.id}`}>Score</a></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))
+              )}
+            </section>
+
+            <section class="admin-panel" id="officials">
+              <h2 class="admin-h" style="font-size:1.15rem">Appointed officials</h2>
+              <p class="admin-sub">
+                Only a person appointed to this event may signal a scoring action — an unappointed
+                person putting points on a national scoreboard is refused by the module, not by this
+                screen. Appointments are made in the officials surface.
+              </p>
+              {detail.officials.length === 0 ? (
+                <p class="c-dim">No officials are appointed to this event, so no point can be recorded.</p>
+              ) : (
+                <div class="tbl-scroll">
+                  <table class="c-tbl">
+                    <thead><tr><th>Person</th><th>Federation id</th><th>Role</th><th>Mat</th></tr></thead>
+                    <tbody>
+                      {detail.officials.map((o: any) => (
+                        <tr>
+                          <td>{o.fullName ?? `person #${o.personId}`}</td>
+                          <td class="c-mono">{o.federationId ?? '—'}</td>
+                          <td>{words(o.role)}</td>
+                          <td>{o.mat ?? '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </>
+        )}
+
+        {matchView && (
+          <section class="admin-panel" id="console">
+            <a class="btn-link" href={`/admin/competition?event=${detail.event.id}`}>← back to {detail.event.code}</a>
+            <h2 class="admin-h" style="font-size:1.2rem;margin-top:8px">
+              {matchView.row.categoryLabel} · {matchView.row.round} · bout {matchView.row.matchNo}
+            </h2>
+            <p class="admin-sub">
+              {matchView.row.mat ? `Mat ${matchView.row.mat}` : 'No mat assigned'} ·
+              state <strong>{words(matchView.row.status)}</strong>
+            </p>
+
+            <div class="c-score-board">
+              <div class="c-side c-red">
+                <div class="c-side-l">Aka (red)</div>
+                <div class="c-side-n">{matchView.row.red?.name ?? matchView.row.red?.entryNo ?? 'empty'}</div>
+                <div class="c-side-s" id="scoreRed">{matchView.row.redScore}</div>
+                <div class="c-side-p" id="penRed">{Object.entries(matchView.row.redPenalties ?? {}).map(([k, n]) => `${k}×${n}`).join(' ') || 'no penalties'}</div>
+              </div>
+              <div class="c-side c-blue">
+                <div class="c-side-l">Ao (blue)</div>
+                <div class="c-side-n">{matchView.row.blue?.name ?? matchView.row.blue?.entryNo ?? 'empty'}</div>
+                <div class="c-side-s" id="scoreBlue">{matchView.row.blueScore}</div>
+                <div class="c-side-p" id="penBlue">{Object.entries(matchView.row.bluePenalties ?? {}).map(([k, n]) => `${k}×${n}`).join(' ') || 'no penalties'}</div>
+              </div>
+            </div>
+
+            {!matchView.log.consistent && (
+              <div class="q-warn" role="alert">
+                <strong>This bout's event log does not reconcile.</strong> {matchView.log.problem}
+                Every row is still listed below, because this is exactly the moment an official needs
+                to see them.
+              </div>
+            )}
+            {matchView.log.score && !matchView.log.cacheAgrees && (
+              <div class="q-warn" role="alert">
+                <strong>The stored score disagrees with the event log.</strong> The log replays to
+                {' '}{matchView.log.score.red}–{matchView.log.score.blue}; the match row carries
+                {' '}{matchView.log.cachedScore.red}–{matchView.log.cachedScore.blue}. The log is the record of truth.
+              </div>
+            )}
+
+            {!mayEnterResults ? (
+              <div class="q-warn q-warn-soft"><strong>You do not hold result:enter in this event's scope.</strong> The scoring controls are withheld.</div>
+            ) : !rulesetOk ? (
+              <div class="q-warn" role="alert"><strong>Scoring is unavailable.</strong> {rulesetReason}</div>
+            ) : detail.officials.length === 0 ? (
+              <div class="q-warn" role="alert"><strong>No official is appointed to this event.</strong> A scoring action must record the official who signalled it, and only an appointed person may.</div>
+            ) : (
+              <div class="c-console" data-match={matchView.row.id}>
+                <div class="c-console-top">
+                  <div>
+                    <label class="input-label" for="sc-official">Signalling official</label>
+                    <select class="input" id="sc-official">
+                      {detail.officials.map((o: any) => (
+                        <option value={o.personId}>{o.fullName ?? `person #${o.personId}`} — {words(o.role)}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label class="input-label" for="sc-clock">Bout clock (whole seconds)</label>
+                    <input class="input" id="sc-clock" inputmode="numeric" placeholder="optional" />
+                  </div>
+                </div>
+
+                {matchView.row.status !== 'in_progress' ? (
+                  <p class="c-help" style="margin-top:12px">
+                    Points can only be recorded while the bout is in progress. It is
+                    {' '}{words(matchView.row.status)} — move it with the controls below.
+                  </p>
+                ) : (
+                  <>
+                    {(['red', 'blue'] as const).map((side) => (
+                      <div class={`c-pad c-pad-${side}`}>
+                        <div class="c-pad-h">{side === 'red' ? 'Aka (red)' : 'Ao (blue)'}</div>
+                        <div class="c-pad-grid">
+                          {scoringActions.map((a: any) => (
+                            <button type="button" class="c-tap"
+                              data-side={side}
+                              data-scoring-action={a.name}
+                              data-penalty={a.penalty ? a.name : ''}
+                              data-ends={a.endsMatch ? '1' : ''}>
+                              <span class="c-tap-n">{a.name.replace(/_/g, ' ')}</span>
+                              <span class="c-tap-p">
+                                {a.points > 0 ? `+${a.points} ${a.awardTo === 'opponent' ? 'to opponent' : ''}` : a.penalty ? 'penalty' : '0'}
+                                {a.endsMatch ? ' · ends bout' : ''}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                )}
+
+                <div class="c-console-actions">
+                  {matchTransitions.map((t) => (
+                    <button type="button" class="btn btn-ghost c-btn c-move" data-to={t}
+                      data-needs-winner={t === 'walkover' || t === 'disqualification' ? '1' : ''}>
+                      {t === 'called' ? 'Call the bout' : t === 'in_progress' ? 'Start / resume' : t === 'paused' ? 'Pause' : `Move to ${words(t)}`}
+                    </button>
+                  ))}
+                  {matchView.row.status === 'in_progress' || matchView.row.status === 'paused' ? (
+                    <button type="button" class="btn btn-primary c-btn" id="completeBtn">Complete the bout</button>
+                  ) : null}
+                </div>
+                <p class="c-help">
+                  Completion determines the winner from the event log. If the regulations in force list
+                  no tie-break and the bout is level, the module refuses to complete it and says so —
+                  it will not declare a winner under a rule nobody approved.
+                </p>
+              </div>
+            )}
+
+            <h3 class="c-box-h" style="margin-top:28px">Event log</h3>
+            <p class="c-help">
+              Append-only. A correction appends the exact negation and points at what it reverses, so
+              the log still shows that the point was signalled and then withdrawn.
+            </p>
+            <div class="tbl-scroll">
+              <table class="c-tbl" id="logTable">
+                <thead><tr><th>#</th><th>Side</th><th>Action</th><th>Points</th><th>Clock</th><th>Official</th><th>Note</th><th></th></tr></thead>
+                <tbody id="logBody">
+                  {matchView.log.events.length === 0 && (
+                    <tr><td colspan="8" class="c-dim">No action has been recorded in this bout.</td></tr>
+                  )}
+                  {matchView.log.events.map((e: any) => (
+                    <tr class={e.standing ? '' : 'c-reversed'}>
+                      <td class="c-mono">{e.sequence}</td>
+                      <td>{e.side}</td>
+                      <td>{words(e.action)}{e.reversesEventId ? ' (reversal)' : ''}</td>
+                      <td class="c-mono">{e.points}</td>
+                      <td>{e.clockSeconds ?? '—'}</td>
+                      <td>{e.officialPersonId ?? '—'}</td>
+                      <td class="c-note">{e.note ?? ''}</td>
+                      <td></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {mayEnterResults && (matchView.row.status === 'in_progress' || matchView.row.status === 'paused') && matchView.log.events.length > 0 && (
+              <details class="c-details">
+                <summary>Reverse a recorded action</summary>
+                <form class="c-form c-grid" data-action="reverse-score" data-confirm="Append the reversal of this action? The original row stays on the log.">
+                  <div><label class="input-label" for="rv-id">Match event row id</label>
+                    <input class="input" id="rv-id" name="matchEventId" inputmode="numeric" required />
+                    <span class="c-help">Row ids are shown by the API; the sequence number is listed above.</span></div>
+                  <div><label class="input-label" for="rv-off">Official person id</label>
+                    <input class="input" id="rv-off" name="officialPersonId" inputmode="numeric" required /></div>
+                  <div class="c-wide"><label class="input-label" for="rv-reason">Reason</label>
+                    <input class="input" id="rv-reason" name="reason" required maxlength="500" /></div>
+                  <div class="c-wide"><button type="submit" class="btn btn-ghost c-btn">Append reversal</button></div>
+                </form>
+              </details>
+            )}
+          </section>
+        )}
+      </main>
+    </div>
+  )}
+</Base>
+
+<script>
+  // Sign-in — only present when the caller is unauthenticated.
+  const loginForm = document.getElementById('loginForm');
+  if (loginForm instanceof HTMLFormElement) {
+    const loginErr = document.getElementById('loginErr');
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (loginErr) loginErr.style.display = 'none';
+      const btn = loginForm.querySelector('button[type=submit]');
+      const fd = new FormData(loginForm);
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      if (btn instanceof HTMLButtonElement) { btn.disabled = true; btn.textContent = 'Signing in…'; }
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(email ? { email, password } : { password }),
+      }).catch(() => null);
+      if (btn instanceof HTMLButtonElement) { btn.disabled = false; btn.textContent = 'Sign in'; }
+      if (r && r.ok) { location.reload(); return; }
+      let message = 'Sign-in failed. Check your details and try again.';
+      if (r) {
+        const body = await r.json().catch(() => null);
+        if (body && body.error) message = String(body.error);
+        else if (r.status === 429) message = 'Too many attempts. Wait a minute and try again.';
+      } else {
+        message = 'Could not reach the server. Check your connection.';
+      }
+      if (loginErr) { loginErr.textContent = message; loginErr.style.display = 'block'; }
+    });
+  }
+
+  document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
+    location.reload();
+  });
+
+  const banner = document.getElementById('banner');
+  function say(message: string, kind: 'ok' | 'bad') {
+    if (!(banner instanceof HTMLElement)) return;
+    banner.textContent = message;
+    banner.className = 'c-banner ' + (kind === 'ok' ? 'c-banner-ok' : 'c-banner-bad');
+    banner.hidden = false;
+    banner.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+
+  /** One place that talks to the server. It never interprets — it repeats. */
+  async function post(action: string, payload: Record<string, unknown>) {
+    let response: Response | null = null;
+    try {
+      response = await fetch('/api/competition/' + action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      return { ok: false, body: { error: 'Could not reach the server. Nothing was recorded.' } as any };
+    }
+    const body = await response.json().catch(() => ({ error: 'The server returned a response this page could not read.' }));
+    return { ok: response.ok, body };
+  }
+
+  // ─── Forms ────────────────────────────────────────────────────────────────
+  document.addEventListener('submit', async (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.classList.contains('c-form')) return;
+    event.preventDefault();
+
+    const action = form.getAttribute('data-action') || '';
+    const confirmText = form.getAttribute('data-confirm');
+    if (confirmText && !window.confirm(confirmText)) return;
+
+    const payload: Record<string, unknown> = {};
+    for (const [k, v] of new FormData(form).entries()) {
+      const value = String(v).trim();
+      if (value === '') continue;
+      // A datetime-local field carries no offset. The browser is at the venue,
+      // so its zone is the right one to resolve it in — and the server refuses
+      // a time with no offset rather than reading it in its own zone.
+      const field = form.querySelector('[name="' + k + '"]');
+      if (field instanceof HTMLInputElement && field.type === 'datetime-local') {
+        const when = new Date(value);
+        if (Number.isNaN(when.getTime())) { say('That date and time could not be read.', 'bad'); return; }
+        payload[k] = when.toISOString();
+        continue;
+      }
+      payload[k] = value;
+    }
+
+    const buttons = Array.from(form.querySelectorAll('button'));
+    for (const b of buttons) if (b instanceof HTMLButtonElement) b.disabled = true;
+
+    const { ok, body } = await post(action, payload);
+
+    if (ok) {
+      say('Recorded. Reloading from the record…', 'ok');
+      location.reload();
+      return;
+    }
+    for (const b of buttons) if (b instanceof HTMLButtonElement) b.disabled = false;
+    say(String(body?.error || 'The server refused the request.'), 'bad');
+  });
+
+  // ─── The scoring console ──────────────────────────────────────────────────
+  const consoleEl = document.querySelector('.c-console');
+  if (consoleEl instanceof HTMLElement) {
+    const matchId = Number(consoleEl.getAttribute('data-match'));
+    const officialSel = document.getElementById('sc-official');
+    const clockEl = document.getElementById('sc-clock');
+    const scoreRed = document.getElementById('scoreRed');
+    const scoreBlue = document.getElementById('scoreBlue');
+    const penRed = document.getElementById('penRed');
+    const penBlue = document.getElementById('penBlue');
+    const logBody = document.getElementById('logBody');
+
+    // A referee taps at speed on a phone. Two guards: the control is disabled
+    // while its request is in flight, and a repeat of the SAME action inside
+    // 800ms is ignored outright — a double tap must never become two points.
+    let inFlight = false;
+    let lastKey = '';
+    let lastAt = 0;
+
+    function official(): number | null {
+      if (!(officialSel instanceof HTMLSelectElement)) return null;
+      const n = Number(officialSel.value);
+      return Number.isInteger(n) ? n : null;
+    }
+    function clockSeconds(): number | null {
+      if (!(clockEl instanceof HTMLInputElement)) return null;
+      const raw = clockEl.value.trim();
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isInteger(n) && n >= 0 ? n : null;
+    }
+    function paint(score: any) {
+      if (!score) return;
+      if (scoreRed) scoreRed.textContent = String(score.red);
+      if (scoreBlue) scoreBlue.textContent = String(score.blue);
+      const fmt = (p: any) => Object.entries(p || {}).map(([k, n]) => k + '×' + n).join(' ') || 'no penalties';
+      if (penRed) penRed.textContent = fmt(score.penalties?.red);
+      if (penBlue) penBlue.textContent = fmt(score.penalties?.blue);
+    }
+
+    document.querySelectorAll('.c-tap').forEach((el) => {
+      el.addEventListener('click', async () => {
+        if (!(el instanceof HTMLButtonElement)) return;
+        const side = el.getAttribute('data-side') || '';
+        const scoringAction = el.getAttribute('data-scoring-action') || '';
+        const key = side + ':' + scoringAction;
+        const now = Date.now();
+        if (inFlight) return;
+        if (key === lastKey && now - lastAt < 800) {
+          say('Ignored — the same action was tapped twice within a second. Tap again if it really happened twice.', 'bad');
+          return;
+        }
+        const officialPersonId = official();
+        if (officialPersonId == null) { say('Choose the official who signalled the action.', 'bad'); return; }
+
+        const ends = el.getAttribute('data-ends') === '1';
+        if (ends && !window.confirm('This action ends the bout under the recorded ruleset. Record it?')) return;
+
+        inFlight = true;
+        lastKey = key; lastAt = now;
+        el.disabled = true;
+        const payload: Record<string, unknown> = { matchId, side, scoringAction, officialPersonId };
+        const penalty = el.getAttribute('data-penalty');
+        if (penalty) payload.penaltyCode = penalty;
+        const cs = clockSeconds();
+        if (cs != null) payload.clockSeconds = cs;
+
+        const { ok, body } = await post('score', payload);
+        inFlight = false;
+        el.disabled = false;
+
+        if (!ok) { say(String(body?.error || 'The point was not recorded.'), 'bad'); return; }
+        paint(body.score);
+        if (logBody instanceof HTMLElement && body.event) {
+          const row = document.createElement('tr');
+          const cells = [
+            String(body.event.sequence ?? ''), String(body.event.side ?? ''),
+            String(body.event.action ?? '').replace(/_/g, ' '), String(body.event.points ?? ''),
+            body.event.clockSeconds == null ? '—' : String(body.event.clockSeconds),
+            String(body.event.officialPersonId ?? ''), 'row id ' + String(body.event.id ?? ''),
+          ];
+          for (const c of cells) { const td = document.createElement('td'); td.textContent = c; row.appendChild(td); }
+          row.appendChild(document.createElement('td'));
+          logBody.appendChild(row);
+        }
+        say('Recorded: ' + scoringAction.replace(/_/g, ' ') + ' for ' + side + '. Row id ' + String(body?.event?.id ?? '—') + ' — use it to reverse this action.', 'ok');
+      });
+    });
+
+    document.querySelectorAll('.c-move').forEach((el) => {
+      el.addEventListener('click', async () => {
+        if (!(el instanceof HTMLButtonElement) || inFlight) return;
+        const to = el.getAttribute('data-to') || '';
+        const needsWinner = el.getAttribute('data-needs-winner') === '1';
+        const payload: Record<string, unknown> = { matchId, to };
+        if (to === 'cancelled' || needsWinner) {
+          const reason = window.prompt('Reason for moving this bout to ' + to.replace(/_/g, ' ') + ':');
+          if (!reason) return;
+          payload.reason = reason;
+        }
+        if (needsWinner) {
+          const winner = window.prompt('Entry id of the competitor who goes through:');
+          if (!winner) return;
+          payload.winnerEntryId = winner;
+          const method = window.prompt('Win method, as the referee stated it:');
+          if (!method) return;
+          payload.winMethod = method;
+        }
+        inFlight = true; el.disabled = true;
+        const { ok, body } = await post('transition-match', payload);
+        inFlight = false; el.disabled = false;
+        if (!ok) { say(String(body?.error || 'The bout was not moved.'), 'bad'); return; }
+        location.reload();
+      });
+    });
+
+    document.getElementById('completeBtn')?.addEventListener('click', async () => {
+      if (inFlight) return;
+      if (!window.confirm('Complete this bout? The winner is determined from the event log and the bout log closes.')) return;
+      inFlight = true;
+      const { ok, body } = await post('complete-match', { matchId });
+      inFlight = false;
+      if (!ok) { say(String(body?.error || 'The bout was not completed.'), 'bad'); return; }
+      location.reload();
+    });
+  }
+</script>
+
+<style is:global>
+  body { background: var(--bg); }
+  .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  @media (max-width: 900px) { .admin-wrap { grid-template-columns: 1fr; } }
+
+  .admin-side {
+    background: var(--bg-2); border-right: 1px solid var(--border);
+    padding: 24px 0; display: flex; flex-direction: column;
+    position: sticky; top: 0; align-self: start; height: 100vh;
+  }
+  @media (max-width: 900px) { .admin-side { position: static; height: auto; } }
+  .admin-brand { padding: 0 24px 24px; border-bottom: 1px solid var(--border); }
+  .admin-brand-1 { font-family: var(--font-display); font-size: 1.4rem; font-weight: 700; letter-spacing: .06em; }
+  .admin-brand-2 { font-family: var(--font-display); font-size: .66rem; letter-spacing: .22em; text-transform: uppercase; color: var(--gold); margin-top: 4px; }
+  .admin-nav { flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .admin-nav a {
+    padding: 12px 14px; min-height: 44px; display: flex; align-items: center;
+    font-family: var(--font-display); font-size: .78rem; letter-spacing: .08em;
+    color: var(--off-white); border-radius: var(--radius); transition: all .18s;
+  }
+  .admin-nav a:hover, .admin-nav a.active { background: var(--card); color: var(--gold); }
+
+  .admin-main { padding: 32px 36px 64px; max-width: 1180px; }
+  @media (max-width: 640px) { .admin-main { padding: 22px 16px 48px; } }
+  .admin-panel { padding: 32px 0; border-bottom: 1px solid var(--border); scroll-margin-top: 20px; }
+  .admin-panel:first-of-type { padding-top: 0; }
+  .admin-h { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; letter-spacing: .02em; }
+  .admin-sub { color: var(--muted); font-size: .88rem; margin-top: 6px; line-height: 1.7; }
+  .q-signed { margin-top: 14px; font-size: .76rem; letter-spacing: .04em; color: var(--off-white); overflow-wrap: anywhere; }
+  .q-warn {
+    margin-top: 16px; background: rgba(142,18,18,.05); border: 1px solid var(--red-3);
+    border-left: 3px solid var(--red); border-radius: var(--radius);
+    padding: 14px 16px; font-size: .85rem; line-height: 1.65; color: var(--off-white);
+  }
+  .q-warn strong { color: var(--red-2); }
+  .q-warn-soft { background: var(--card-2); border: 1px solid var(--border); border-left: 3px solid var(--gold-dim); }
+  .q-warn-soft strong { color: var(--gold-3); }
+
+  .c-banner { margin-top: 16px; padding: 12px 14px; border-radius: var(--radius); font-size: .85rem; line-height: 1.6; }
+  .c-banner-ok { background: var(--card-2); border: 1px solid var(--border); border-left: 3px solid var(--gold-dim); color: var(--off-white); }
+  .c-banner-bad { background: rgba(142,18,18,.06); border: 1px solid var(--red-3); border-left: 3px solid var(--red); color: var(--red-2); }
+
+  .c-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+  .c-status {
+    font-family: var(--font-display); font-size: .7rem; letter-spacing: .14em; text-transform: uppercase;
+    border: 1px solid var(--border-2); border-radius: 999px; padding: 6px 14px; color: var(--off-white); white-space: nowrap;
+  }
+  .c-status-live, .c-status-check_in { color: var(--red-2); border-color: var(--red-3); }
+  .c-status-registration_open { color: var(--gold-2); border-color: var(--gold-dim); }
+  .c-status-cancelled { color: var(--muted); text-decoration: line-through; }
+
+  .c-facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 24px; margin-top: 20px; }
+  @media (max-width: 760px) { .c-facts { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 460px) { .c-facts { grid-template-columns: 1fr; } }
+  .c-facts dt { font-size: .68rem; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .c-facts dd { font-size: .9rem; color: var(--white); margin-top: 2px; overflow-wrap: anywhere; }
+
+  .c-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 24px; }
+  @media (max-width: 860px) { .c-two { grid-template-columns: 1fr; } }
+  .c-box { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+  .c-box-h { font-family: var(--font-display); font-size: .95rem; letter-spacing: .04em; margin-bottom: 10px; }
+
+  .c-group { margin-top: 20px; }
+  .c-group-h {
+    font-family: var(--font-display); font-size: .78rem; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--gold-2); margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+  }
+  .c-count { background: var(--card-2); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; font-size: .7rem; color: var(--off-white); }
+
+  .c-tbl { width: 100%; border-collapse: collapse; font-size: .84rem; min-width: 640px; }
+  .c-tbl th {
+    text-align: left; font-family: var(--font-display); font-weight: 500; font-size: .68rem;
+    letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--border-2); padding: 8px 10px; white-space: nowrap;
+  }
+  .c-tbl td { border-bottom: 1px solid var(--border); padding: 10px; vertical-align: top; color: var(--off-white); }
+  .c-tbl tr:hover td { background: var(--card-2); }
+  .c-mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; }
+  .c-dim { color: var(--muted); }
+  .c-ok { color: var(--gold-2); }
+  .c-note { max-width: 280px; overflow-wrap: anywhere; }
+  .c-reversed td { text-decoration: line-through; color: var(--muted); }
+  .c-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .c-inline { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .c-mini { padding: 8px 10px; font-size: .8rem; min-height: 44px; width: 118px; }
+  .c-sm { padding: 10px 14px; font-size: .72rem; min-height: 44px; }
+  .c-btn { min-height: 44px; }
+  .c-help { display: block; font-size: .74rem; color: var(--muted); line-height: 1.6; margin-top: 4px; }
+  .c-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; }
+
+  .c-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 14px; }
+  @media (max-width: 860px) { .c-grid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 520px) { .c-grid { grid-template-columns: 1fr; } }
+  .c-wide { grid-column: 1 / -1; }
+  .c-details { margin-top: 20px; border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; background: var(--card); }
+  .c-details summary { cursor: pointer; font-family: var(--font-display); font-size: .82rem; letter-spacing: .06em; min-height: 44px; display: flex; align-items: center; }
+
+  /* ─── The mat-side console ─── */
+  .c-score-board { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 20px; }
+  .c-side { border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; background: var(--card); }
+  .c-side.c-red { border-top: 4px solid var(--red); }
+  .c-side.c-blue { border-top: 4px solid #1D4E89; }
+  .c-side-l { font-family: var(--font-display); font-size: .68rem; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
+  .c-side-n { font-size: 1rem; font-weight: 600; margin-top: 4px; overflow-wrap: anywhere; }
+  .c-side-s { font-family: var(--font-display); font-size: 3.4rem; line-height: 1; font-variant-numeric: tabular-nums; margin-top: 8px; }
+  .c-side-p { font-size: .74rem; color: var(--muted); margin-top: 6px; }
+
+  .c-console { margin-top: 20px; }
+  .c-console-top { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 560px) { .c-console-top { grid-template-columns: 1fr; } }
+  .c-pad { margin-top: 16px; border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; background: var(--card); }
+  .c-pad-red { border-left: 4px solid var(--red); }
+  .c-pad-blue { border-left: 4px solid #1D4E89; }
+  .c-pad-h { font-family: var(--font-display); font-size: .74rem; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+  .c-pad-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .c-tap {
+    min-height: 68px; border: 1px solid var(--border-2); border-radius: var(--radius);
+    background: var(--bg-2); color: var(--white); padding: 10px 12px; cursor: pointer;
+    display: flex; flex-direction: column; justify-content: center; gap: 4px; text-align: left;
+    font-family: var(--font-display); letter-spacing: .04em; transition: border-color .15s, background .15s;
+  }
+  .c-tap:hover { border-color: var(--gold-dim); }
+  .c-tap:active { background: var(--card-2); }
+  .c-tap[disabled] { opacity: .5; cursor: progress; }
+  .c-tap-n { font-size: 1rem; text-transform: capitalize; }
+  .c-tap-p { font-size: .7rem; color: var(--muted); font-family: var(--font-body); letter-spacing: 0; }
+  .c-console-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+
+  @media (max-width: 640px) {
+    .c-tbl { min-width: 560px; }
+    .c-side-s { font-size: 2.8rem; }
+  }
+</style>

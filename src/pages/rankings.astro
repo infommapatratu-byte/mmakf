@@ -1,0 +1,1051 @@
+---
+/**
+ * PUBLISHED RANKING TABLES — /rankings
+ *
+ * The ranking engine was built around one requirement: **every ranking must be
+ * explainable.** `ranking_entries.contributions` does not hold a summary, it
+ * holds the whole working — every result the engine looked at, the rule that
+ * priced it, the points it was worth, and, for anything that did not count, the
+ * reason, named. This page is where that working is finally readable by the
+ * person it is about.
+ *
+ * FOUR RULES THIS PAGE KEEPS:
+ *
+ *  1. ONLY PUBLISHED TABLES. A computed-but-unpublished table is a working
+ *     document. Computing is arithmetic; publishing is a statement, and the two
+ *     are separately authorised in the module for that reason. The query below
+ *     filters on `published_at IS NOT NULL` and nothing else reaches this page.
+ *
+ *  2. NO ARITHMETIC HAPPENS HERE. Ranks, points, the points table, the window,
+ *     the best-N cut and the tie-break are all read back exactly as they were
+ *     stored at computation. `explainRanking()` reconstructs rather than
+ *     recomputes, deliberately: recomputing to explain would show today's rules
+ *     against a table published under yesterday's.
+ *
+ *  3. NO POINTS VALUE IS EVER INVENTED OR INTERPOLATED. The engine refuses to
+ *     guess, and so does this page. Where a result was priced by nothing, the
+ *     row says "not covered by ruleset" and shows zero — it does not hide the
+ *     result and it does not fill the gap.
+ *
+ *  4. THE WORKING IS AUTHORISED, THE TABLE IS NOT. `explainRanking()` requires
+ *     `result:read` even for a published period, so the "why" panel is offered
+ *     only to callers who hold it. It is not faked for anyone else: an
+ *     unauthorised visitor is told what the panel contains and how to get it,
+ *     rather than being given a link that errors.
+ *
+ * WHY THERE IS A DIRECT QUERY BELOW: src/db/rankings.ts exposes compute,
+ * publish and explain, but nothing that LISTS published periods or reads a
+ * published table. Those two reads are done here against the published rows
+ * only. They are plain selects — no scoping, no policy, no arithmetic — and the
+ * moment the module grows `publishedRankings()` this page should call it
+ * instead. See sharedFileEdits.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { isConfigured, db, schema as s } from '@/db';
+import { explainRanking, type RankingExplanation } from '@/db/rankings';
+import { identify } from '@/lib/session';
+import { canAnywhere } from '@/lib/rbac';
+import { and, asc, desc, eq, isNotNull } from 'drizzle-orm';
+
+export const prerender = false;
+
+// Identity decides whether the working is offered, so this must not be cached
+// by a shared cache.
+Astro.response.headers.set('Cache-Control', 'no-store');
+
+const params = Astro.url.searchParams;
+const wantPeriod = Number(params.get('period'));
+const wantWhy = Number(params.get('why'));
+const periodParam = Number.isInteger(wantPeriod) && wantPeriod > 0 ? wantPeriod : null;
+const whyPersonId = Number.isInteger(wantWhy) && wantWhy > 0 ? wantWhy : null;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const mayExplain = canAnywhere(principal, 'result:read');
+
+type PageState = 'ready' | 'not_configured' | 'unavailable';
+
+interface PeriodRow {
+  id: number;
+  label: string;
+  categoryKey: string;
+  publishedAt: Date | string | null;
+  computedAt: Date | string;
+  athleteCount: number | null;
+  eventCount: number | null;
+  rulesetCode: string;
+  rulesetTitle: string;
+}
+
+interface EntryRow {
+  personId: number;
+  rank: number;
+  points: number;
+  previousRank: number | null;
+  fullName: string;
+  federationId: string;
+}
+
+let state: PageState = 'not_configured';
+let periods: PeriodRow[] = [];
+let period: PeriodRow | null = null;
+let entries: EntryRow[] = [];
+let explanation: RankingExplanation | null = null;
+let explainError: string | null = null;
+let whoIsExplained: EntryRow | null = null;
+
+if (isConfigured()) {
+  try {
+    const database = db();
+
+    // ── Published periods only ──
+    periods = await database
+      .select({
+        id: s.rankingPeriods.id,
+        label: s.rankingPeriods.label,
+        categoryKey: s.rankingPeriods.categoryKey,
+        publishedAt: s.rankingPeriods.publishedAt,
+        computedAt: s.rankingPeriods.computedAt,
+        athleteCount: s.rankingPeriods.athleteCount,
+        eventCount: s.rankingPeriods.eventCount,
+        rulesetCode: s.rankingRulesets.code,
+        rulesetTitle: s.rankingRulesets.title,
+      })
+      .from(s.rankingPeriods)
+      .innerJoin(s.rankingRulesets, eq(s.rankingPeriods.rulesetId, s.rankingRulesets.id))
+      .where(isNotNull(s.rankingPeriods.publishedAt))
+      .orderBy(desc(s.rankingPeriods.publishedAt))
+      .limit(200);
+
+    // An unknown or unpublished id falls back to the most recent published
+    // table rather than 404ing — but it must never resolve to an unpublished
+    // one, which is why the candidate is taken from this list and not fetched.
+    period = (periodParam ? periods.find((p) => p.id === periodParam) : undefined) ?? periods[0] ?? null;
+
+    if (period) {
+      entries = await database
+        .select({
+          personId: s.rankingEntries.personId,
+          rank: s.rankingEntries.rank,
+          points: s.rankingEntries.points,
+          previousRank: s.rankingEntries.previousRank,
+          fullName: s.persons.fullName,
+          federationId: s.persons.federationId,
+        })
+        .from(s.rankingEntries)
+        .innerJoin(s.persons, eq(s.rankingEntries.personId, s.persons.id))
+        .where(eq(s.rankingEntries.periodId, period.id))
+        .orderBy(asc(s.rankingEntries.rank), asc(s.persons.fullName));
+
+      // ── The working, for one athlete ──
+      if (whyPersonId != null) {
+        whoIsExplained = entries.find((e) => e.personId === whyPersonId) ?? null;
+        if (mayExplain && principal && whoIsExplained) {
+          try {
+            explanation = await explainRanking(database, { principal }, {
+              personId: whyPersonId,
+              periodId: period.id,
+            });
+          } catch (err) {
+            // The module's own message was written to be read by a human.
+            explainError = err instanceof Error ? err.message : 'The working could not be read.';
+          }
+          // Defensive rendering. `contributions` is a jsonb column: a blob
+          // written by an older engine, or hand-repaired in the database, would
+          // otherwise throw inside the panel below and 500 the whole ranking
+          // page — taking the published table down with it. A working we cannot
+          // read is reported as one we cannot read.
+          const w: any = explanation?.working;
+          if (explanation && (!w || typeof w !== 'object' || !Array.isArray(w.contributions) || !w.options)) {
+            explanation = null;
+            explainError =
+              'The stored working for this entry is not in a shape this page can display. The federation office holds it as computed and can produce it — please report this entry.';
+          }
+        }
+      }
+    }
+
+    state = 'ready';
+  } catch (err) {
+    console.error('[rankings] read failed', err);
+    state = 'unavailable';
+  }
+}
+
+// ─── Presentation helpers (formatting only — nothing is derived) ─────────────
+
+const fmtDateTime = (v: Date | string | null): string => {
+  if (!v) return 'Not recorded';
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) return String(v);
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+};
+
+const fmtDay = (iso: string | null): string => {
+  if (!iso) return 'No date';
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+};
+
+const cap = (v: string) => v.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+
+/**
+ * A category key is `discipline|gender|ageGroup|weight`, with `*` for "any" and
+ * weight held in GRAMS because grams are what the category record stores. This
+ * renders it readably and the raw key is always printed beside it, so nothing
+ * here can quietly change what a table is a ranking OF.
+ */
+function humanCategory(key: string): string {
+  const [discipline = '', gender = '', ageGroup = '', weight = ''] = key.split('|');
+  const parts: string[] = [];
+  if (discipline && discipline !== '*') parts.push(cap(discipline));
+  if (gender && gender !== '*') parts.push(cap(gender));
+  if (ageGroup && ageGroup !== '*') parts.push(cap(ageGroup));
+  if (weight === 'open') parts.push('Open weight');
+  else if (/^max\d+$/.test(weight)) parts.push(`Up to ${Number(weight.slice(3)) / 1000} kg`);
+  else if (/^min\d+$/.test(weight)) parts.push(`Over ${Number(weight.slice(3)) / 1000} kg`);
+  return parts.join(' · ') || key;
+}
+
+const movement = (rank: number, previous: number | null): { text: string; dir: 'up' | 'down' | 'same' | 'new' } => {
+  if (previous == null) return { text: 'New entry', dir: 'new' };
+  if (previous === rank) return { text: 'Unchanged', dir: 'same' };
+  const diff = previous - rank;
+  return diff > 0
+    ? { text: `Up ${diff}`, dir: 'up' }
+    : { text: `Down ${-diff}`, dir: 'down' };
+};
+
+const linkTo = (periodId: number, why?: number) =>
+  `/rankings?period=${periodId}${why != null ? `&why=${why}` : ''}`;
+
+const pills: string[] =
+  state === 'ready'
+    ? periods.length
+      ? [`${periods.length} published ${periods.length === 1 ? 'table' : 'tables'}`, 'Every position auditable']
+      : ['No ranking published yet']
+    : ['Rankings not available'];
+---
+
+<Base
+  title="Rankings — MMAKF"
+  description="Published MMAKF ranking tables. Every position can be audited: which events contributed, which placings, how many points, under which ruleset, and what was excluded and why."
+>
+  <PageHero
+    eyebrow="Published rankings"
+    title={`Rankings you can <em class="r">audit</em>.`}
+    lead="A ranking nobody can audit is a ranking nobody should trust. Every position in every table below was computed from finalised results only, under a ruleset the federation approved, and the whole working behind each position is kept — which events counted, what each was worth, and what was left out and why."
+    pills={pills}
+  />
+
+  {state === 'not_configured' && (
+    <section>
+      <div class="container">
+        <div class="rk-state fade" role="note">
+          <h2 class="rk-state-h">Rankings are not available in this environment</h2>
+          <p class="body-txt">
+            The federation records database is not configured for this deployment, so no ranking table
+            can be read. <strong>This is a deployment state, not an empty ranking</strong> — nothing
+            here should be read as a statement about any athlete’s standing.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href="/contact" class="btn btn-gold">Ask the federation office</a>
+            <a href="/events" class="btn btn-ghost">Competition calendar</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  )}
+
+  {state === 'unavailable' && (
+    <section>
+      <div class="container">
+        <div class="rk-state rk-state-err fade" role="alert">
+          <h2 class="rk-state-h">The rankings could not be read just now</h2>
+          <p class="body-txt">
+            The federation records service did not answer this request.
+            <strong> This is not a result about any ranking</strong> — it is a fault on our side.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href="/rankings" class="btn btn-primary">Try again</a>
+            <a href="/contact" class="btn btn-ghost">Ask the federation office</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  )}
+
+  {state === 'ready' && periods.length === 0 && (
+    <section>
+      <div class="container">
+        <div class="rk-state fade" role="note">
+          <h2 class="rk-state-h">The federation has not published a ranking table yet</h2>
+          <p class="body-txt">
+            No ranking has been published. That is the honest state of the register and not a display
+            problem: a ranking table requires an approved ruleset, finalised results to feed it, and a
+            separate act of publication by the federation. Until all three exist there is nothing to
+            show, and <strong>an empty table with names in rank order would be a fabrication</strong>.
+          </p>
+          <p class="body-txt mt-4">
+            When a table is published it will appear here in full, with the working behind every
+            position — including the results that were considered and did not count.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href="/events" class="btn btn-gold">Competition calendar</a>
+            <a href="/contact" class="btn btn-ghost">Ask the federation office</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  )}
+
+  {state === 'ready' && period && (
+    <Fragment>
+      {/* ═══════ CHOOSE A TABLE ═══════ */}
+      <section>
+        <div class="container">
+          <div class="section-head fade">
+            <div class="eyebrow">Published tables</div>
+            <h2 class="display-2">Choose a <em class="r">table</em>.</h2>
+            <div class="rule"></div>
+            <p class="lead">
+              Each table is a ranking of one category, computed to a date under one approved ruleset,
+              and published as it stood. A published table is fixed — a later recomputation becomes a
+              new table rather than quietly rewriting this one.
+            </p>
+          </div>
+
+          {periods.length > 1 && (
+            <form class="rk-picker fade" method="get" action="/rankings">
+              <div class="rk-picker-field">
+                <label class="input-label" for="rk-period">Ranking table</label>
+                <select id="rk-period" name="period" class="input">
+                  {periods.map((p) => (
+                    <option value={String(p.id)} selected={p.id === period!.id}>
+                      {humanCategory(p.categoryKey)} — {p.label} ({p.rulesetCode})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button type="submit" class="btn btn-primary rk-picker-go">Show this table</button>
+            </form>
+          )}
+
+          <div class="rk-header fade">
+            <div class="rk-header-main">
+              <div class="card-eyebrow">Ranking table</div>
+              <h3 class="rk-title">{humanCategory(period.categoryKey)}</h3>
+              <div class="rk-key">{period.categoryKey}</div>
+            </div>
+            <dl class="rk-header-meta">
+              <div class="rk-meta-row">
+                <dt>Table</dt>
+                <dd>{period.label}</dd>
+              </div>
+              <div class="rk-meta-row">
+                <dt>Ruleset</dt>
+                <dd>{period.rulesetTitle} <span class="rk-code">{period.rulesetCode}</span></dd>
+              </div>
+              <div class="rk-meta-row">
+                <dt>Computed</dt>
+                <dd>{fmtDateTime(period.computedAt)}</dd>
+              </div>
+              <div class="rk-meta-row">
+                <dt>Published</dt>
+                <dd>{fmtDateTime(period.publishedAt)}</dd>
+              </div>
+              <div class="rk-meta-row">
+                <dt>Athletes</dt>
+                <dd>{entries.length}</dd>
+              </div>
+              <div class="rk-meta-row">
+                <dt>Events counted</dt>
+                <dd>{period.eventCount ?? 'Not recorded'}</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      {/* ═══════ THE TABLE ═══════ */}
+      <section class="bg2">
+        <div class="container">
+          <div class="section-head fade">
+            <div class="eyebrow">Standings</div>
+            <h2 class="display-2">{period.label}.</h2>
+            <div class="rule"></div>
+          </div>
+
+          {entries.length === 0 ? (
+            <div class="rk-state fade" role="note">
+              <h3 class="rk-state-h">This published table holds no entries</h3>
+              <p class="body-txt">
+                The federation published this period but the register returns no entry against it.
+                That is a discrepancy in the records rather than a ranking of nobody, and it should be
+                reported to the office.
+              </p>
+            </div>
+          ) : (
+            <Fragment>
+              <div
+                class="tbl-scroll fade"
+                tabindex="0"
+                role="region"
+                aria-label={`Standings for ${period.label}`}
+              >
+                <table class="rk-tbl">
+                  <caption class="sr-only">
+                    Published standings for {humanCategory(period.categoryKey)}, table {period.label},
+                    computed under ruleset {period.rulesetCode}.
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Rank</th>
+                      <th scope="col">Athlete</th>
+                      <th scope="col">Federation ID</th>
+                      <th scope="col">Points</th>
+                      <th scope="col">Movement</th>
+                      <th scope="col">Working</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {entries.map((e) => {
+                      const mv = movement(e.rank, e.previousRank);
+                      const open = explanation != null && explanation.personId === e.personId;
+                      return (
+                        <tr class:list={[{ 'rk-open': open }]}>
+                          <td class="rk-rank">{e.rank}</td>
+                          <th scope="row" class="rk-athlete">
+                            <a href={`/athlete/${encodeURIComponent(e.federationId)}`}>{e.fullName}</a>
+                          </th>
+                          <td class="rk-fid">{e.federationId}</td>
+                          <td class="rk-points">{e.points}</td>
+                          <td class="nowrap">
+                            <span class="rk-move" class:list={[`mv-${mv.dir}`]}>{mv.text}</span>
+                          </td>
+                          <td class="nowrap">
+                            {open ? (
+                              <a href={linkTo(period!.id)} class="rk-why rk-why-open">Hide working</a>
+                            ) : (
+                              <a href={`${linkTo(period!.id, e.personId)}#working`} class="rk-why">
+                                Why?<span class="sr-only"> — show the working behind {e.fullName}’s position</span>
+                              </a>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div class="tbl-hint">Scroll the table sideways to see every column</div>
+            </Fragment>
+          )}
+        </div>
+      </section>
+
+      {/* ═══════ THE WORKING ═══════ */}
+      {whyPersonId != null && (
+        <section id="working">
+          <div class="container">
+            <div class="section-head fade">
+              <div class="eyebrow">The working</div>
+              <h2 class="display-2">Why this <em class="r">position</em>.</h2>
+              <div class="rule"></div>
+            </div>
+
+            {whoIsExplained == null && (
+              <div class="rk-state fade" role="alert">
+                <h3 class="rk-state-h">That athlete is not in this table</h3>
+                <p class="body-txt">
+                  No entry in this ranking period matches that athlete. If you followed a link from
+                  another table, choose the table that contains them first.
+                </p>
+                <div class="flex flex-wrap gap-3 mt-6">
+                  <a href={linkTo(period.id)} class="btn btn-ghost">Back to the table</a>
+                </div>
+              </div>
+            )}
+
+            {whoIsExplained != null && !mayExplain && (
+              <div class="rk-state fade" role="note">
+                <h3 class="rk-state-h">The full working is shown to signed-in members and officials</h3>
+                <p class="body-txt">
+                  The table above is published, and so are the rank and the points beside every name.
+                  The line-by-line working — every result the engine examined for
+                  {' '}<strong>{whoIsExplained.fullName}</strong>, what each was worth, the rule that
+                  priced it, and the named reason anything did not count — is released to the athlete
+                  themselves and to federation officers, and this browser is not signed in as either.
+                </p>
+                <p class="body-txt mt-4">
+                  It is <strong>not withheld and not summarised</strong>: it exists, in full, stored
+                  against this entry exactly as it was computed. An athlete disputing a position is
+                  entitled to it, and the office will produce it.
+                </p>
+                <div class="flex flex-wrap gap-3 mt-6">
+                  <a href="/admin" class="btn btn-gold">Sign in</a>
+                  <a href="/contact" class="btn btn-ghost">Ask the federation office</a>
+                  <a href={linkTo(period.id)} class="btn btn-ghost">Back to the table</a>
+                </div>
+              </div>
+            )}
+
+            {whoIsExplained != null && mayExplain && explainError && (
+              <div class="rk-state rk-state-err fade" role="alert">
+                <h3 class="rk-state-h">The working could not be shown</h3>
+                <p class="body-txt">{explainError}</p>
+                <div class="flex flex-wrap gap-3 mt-6">
+                  <a href={linkTo(period.id)} class="btn btn-ghost">Back to the table</a>
+                </div>
+              </div>
+            )}
+
+            {explanation && (
+              <div class="fade">
+                {/* ── Position ── */}
+                <div class="rk-work-head">
+                  <div>
+                    <div class="card-eyebrow">Position</div>
+                    <h3 class="rk-work-name">{whoIsExplained!.fullName}</h3>
+                    <div class="rk-fid">{whoIsExplained!.federationId}</div>
+                  </div>
+                  <dl class="rk-work-nums">
+                    <div class="rk-num">
+                      <dt>Rank</dt>
+                      <dd>{explanation.rank}</dd>
+                    </div>
+                    <div class="rk-num">
+                      <dt>Points</dt>
+                      <dd>{explanation.points}</dd>
+                    </div>
+                    <div class="rk-num">
+                      <dt>Previous rank</dt>
+                      <dd>{explanation.previousRank ?? '—'}</dd>
+                    </div>
+                  </dl>
+                </div>
+
+                {/* ── Under which ruleset ── */}
+                <div class="rk-block">
+                  <h4 class="rk-block-h">Computed under</h4>
+                  <dl class="rk-defs">
+                    <div class="rk-def">
+                      <dt>Ruleset</dt>
+                      <dd>{explanation.ruleset.title} <span class="rk-code">{explanation.ruleset.code}</span></dd>
+                    </div>
+                    <div class="rk-def">
+                      <dt>Category</dt>
+                      <dd>{humanCategory(explanation.categoryKey)} <span class="rk-code">{explanation.categoryKey}</span></dd>
+                    </div>
+                    <div class="rk-def">
+                      <dt>Results counted as at</dt>
+                      <dd>{fmtDay(explanation.working.asOf)}</dd>
+                    </div>
+                    <div class="rk-def">
+                      <dt>Computed</dt>
+                      <dd>{fmtDateTime(explanation.computedAt)}</dd>
+                    </div>
+                    <div class="rk-def">
+                      <dt>Published</dt>
+                      <dd>{explanation.publishedAt ? fmtDateTime(explanation.publishedAt) : 'Not published'}</dd>
+                    </div>
+                  </dl>
+                </div>
+
+                {/* ── Options actually applied ── */}
+                <div class="rk-block">
+                  <h4 class="rk-block-h">Which rules were applied</h4>
+                  <p class="rk-block-note">
+                    An option the federation has not set is <strong>not applied</strong> and is not
+                    guessed at. Each row states whether the ruleset set it, and where the value came
+                    from.
+                  </p>
+                  <div class="tbl-scroll" tabindex="0" role="region" aria-label="Ruleset options applied">
+                    <table class="rk-tbl rk-tbl-sm">
+                      <thead>
+                        <tr>
+                          <th scope="col">Option</th>
+                          <th scope="col">Applied</th>
+                          <th scope="col">Value</th>
+                          <th scope="col">Source</th>
+                          <th scope="col">Detail</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(['window', 'bestN', 'tieBreak'] as const).map((k) => {
+                          const o = explanation!.working.options[k];
+                          const label =
+                            k === 'window' ? 'Results window'
+                              : k === 'bestN' ? 'Best N results'
+                                : 'Tie-break';
+                          return (
+                            <tr>
+                              <th scope="row">{label}</th>
+                              <td class="nowrap">
+                                <span class="pill rk-flag" class:list={[o?.applied ? 'yes' : 'no']}>
+                                  <span class="pill-dot"></span>{o?.applied ? 'Applied' : 'Not set'}
+                                </span>
+                              </td>
+                              <td class="rk-code">{o?.value != null ? JSON.stringify(o.value) : '—'}</td>
+                              <td>{o?.source ?? '—'}</td>
+                              <td class="rk-detail">{o?.detail ?? '—'}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* ── Every result considered ── */}
+                <div class="rk-block">
+                  <h4 class="rk-block-h">Every result the engine examined</h4>
+                  <p class="rk-block-note">
+                    Not only the results that counted. Anything the engine looked at and set aside is
+                    listed with the named reason it was set aside — that is the part of a ranking an
+                    athlete most needs and is least often given.
+                  </p>
+
+                  {explanation.working.contributions.length === 0 ? (
+                    <p class="rk-block-note">
+                      The engine found no result at all to examine for this athlete in this category.
+                      Their position therefore rests on no counted result.
+                    </p>
+                  ) : (
+                    <Fragment>
+                      <div class="tbl-scroll" tabindex="0" role="region" aria-label="Results examined">
+                        <table class="rk-tbl rk-tbl-sm">
+                          <thead>
+                            <tr>
+                              <th scope="col">Event</th>
+                              <th scope="col">Date</th>
+                              <th scope="col">Placing</th>
+                              <th scope="col">Points</th>
+                              <th scope="col">Counted</th>
+                              <th scope="col">Reason</th>
+                              <th scope="col">Priced by rule</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {explanation.working.contributions.map((c) => (
+                              <tr class:list={[{ 'rk-excluded': !c.counted }]}>
+                                <th scope="row" class="rk-ev">
+                                  {c.eventTitle}
+                                  <span class="rk-sub">{c.eventCode} · {cap(c.eventKind)}</span>
+                                </th>
+                                <td class="nowrap">{fmtDay(c.eventDate)}</td>
+                                <td class="nowrap">
+                                  {c.placing}
+                                  {c.medal && <span class="rk-sub">{c.medal}</span>}
+                                </td>
+                                <td class="rk-points">{c.points}</td>
+                                <td class="nowrap">
+                                  <span class="pill rk-flag" class:list={[c.counted ? 'yes' : 'no']}>
+                                    <span class="pill-dot"></span>{c.counted ? 'Counted' : 'Not counted'}
+                                  </span>
+                                </td>
+                                <td class="rk-detail">
+                                  <span class="rk-reason">{cap(c.reason)}</span>
+                                  {c.detail && <span class="rk-sub">{c.detail}</span>}
+                                </td>
+                                <td class="rk-code">
+                                  {c.priced ? (c.rule ?? '—') : <span class="rk-unpriced">Priced by nothing</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div class="tbl-hint">Scroll the table sideways to see every column</div>
+                      <p class="rk-total">
+                        Total: <strong>{explanation.working.totalPoints}</strong> points, from
+                        {' '}{explanation.working.contributions.filter((c) => c.counted).length} counted
+                        {' '}of {explanation.working.contributions.length} results examined.
+                      </p>
+                    </Fragment>
+                  )}
+                </div>
+
+                {/* ── Tie-break ── */}
+                <div class="rk-block">
+                  <h4 class="rk-block-h">Tie-break</h4>
+                  <p class="rk-block-note">{explanation.working.tieBreakNote}</p>
+                  {Object.keys(explanation.working.tieBreakValues ?? {}).length > 0 && (
+                    <dl class="rk-defs">
+                      {Object.entries(explanation.working.tieBreakValues).map(([k, v]) => (
+                        <div class="rk-def">
+                          <dt>{cap(k.replace(/([A-Z])/g, ' $1').trim())}</dt>
+                          <dd>{String(v)}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )}
+                  {explanation.working.sharedRankWithPersonIds?.length > 0 && (
+                    <p class="rk-block-note mt-4">
+                      {explanation.working.sharedRankWithPersonIds.length === 1
+                        ? 'One other athlete holds this same rank number, because nothing in the ruleset separated them.'
+                        : `${explanation.working.sharedRankWithPersonIds.length} other athletes hold this same rank number, because nothing in the ruleset separated them.`}
+                    </p>
+                  )}
+                </div>
+
+                {/* ── The approved points table ── */}
+                <details class="rk-details">
+                  <summary class="rk-summary">
+                    The approved points table this computation read
+                  </summary>
+                  <div class="rk-details-body">
+                    <p class="rk-block-note">
+                      Snapshotted at computation, because the ruleset row is live and can be edited or
+                      retired afterwards. With this, the arithmetic above can be re-derived from the
+                      entry alone. Points are federation policy — no value here was produced by this
+                      website.
+                    </p>
+                    {Object.keys(explanation.working.pointsTable ?? {}).length === 0 ? (
+                      <p class="rk-block-note">
+                        This ruleset priced nothing that applied to this athlete, so no points table was
+                        recorded against the entry.
+                      </p>
+                    ) : (
+                      <div class="tbl-scroll" tabindex="0" role="region" aria-label="Approved points table">
+                        <table class="rk-tbl rk-tbl-sm">
+                          <thead>
+                            <tr>
+                              <th scope="col">Rule</th>
+                              <th scope="col">Placing → points</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Object.entries(explanation.working.pointsTable).map(([path, placings]) => (
+                              <tr>
+                                <th scope="row" class="rk-code">{path}</th>
+                                <td>
+                                  {Object.entries(placings)
+                                    .map(([placing, pts]) => `${placing} → ${pts}`)
+                                    .join(' · ')}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </details>
+
+                <div class="flex flex-wrap gap-3 mt-8">
+                  <a href={linkTo(period.id)} class="btn btn-ghost">Close the working</a>
+                  <a href={`/athlete/${encodeURIComponent(whoIsExplained!.federationId)}`} class="btn btn-ghost">
+                    Public register entry
+                  </a>
+                  <a href="/contact" class="btn btn-gold">Dispute this position</a>
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* ═══════ HOW TO READ A TABLE ═══════ */}
+      <section class="bg2">
+        <div class="container">
+          <div class="section-head fade">
+            <div class="eyebrow">How a ranking is built</div>
+            <h2 class="display-2">What can and cannot move a <em class="r">position</em>.</h2>
+            <div class="rule"></div>
+          </div>
+
+          <div class="rk-key-grid fade">
+            <div class="card rk-key-card">
+              <div class="card-eyebrow">Only final results</div>
+              <h3 class="card-title">A provisional result never moves a ranking</h3>
+              <p class="card-body">
+                That is the whole reason a result has a status. A result from last weekend that has not
+                been finalised still appears in the working, marked “result not final”, so the question
+                “why isn’t it in there yet?” has an answer rather than a shrug.
+              </p>
+            </div>
+            <div class="card rk-key-card">
+              <div class="card-eyebrow">Only approved rules</div>
+              <h3 class="card-title">Nothing is priced by guesswork</h3>
+              <p class="card-body">
+                Points live in the federation’s approved ruleset. An event kind or a placing the
+                ruleset does not cover contributes <strong>zero</strong> and is recorded as “not covered
+                by ruleset” — never interpolated from a neighbouring placing, never defaulted.
+              </p>
+            </div>
+            <div class="card rk-key-card">
+              <div class="card-eyebrow">Published is fixed</div>
+              <h3 class="card-title">A published table is not edited</h3>
+              <p class="card-body">
+                Computing a ranking is arithmetic; publishing one is a statement, and they are
+                separately authorised. Once published, a table stands as published — a recomputation
+                becomes a new table so an old position keeps the meaning it had at the time.
+              </p>
+            </div>
+            <div class="card rk-key-card">
+              <div class="card-eyebrow">Team results</div>
+              <h3 class="card-title">A team medal is not split silently</h3>
+              <p class="card-body">
+                Results that cannot be attributed to an individual are not divided among team members:
+                how a team medal is shared is federation policy, and no approved ruleset declares it.
+                They are left out rather than allocated by an assumption.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </Fragment>
+  )}
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .nowrap { white-space: nowrap; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
+  /* ── State panels ── */
+  .rk-state {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    padding: 30px 32px;
+    max-width: 80ch;
+  }
+  .rk-state-err { border-left-color: var(--red); }
+  @media (max-width: 520px) { .rk-state { padding: 22px 18px; } }
+  .rk-state-h {
+    font-family: var(--font-display);
+    font-size: 1.14rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-bottom: 12px;
+  }
+
+  /* ── Table picker ── */
+  .rk-picker {
+    display: grid;
+    grid-template-columns: minmax(0, 520px) auto;
+    gap: 14px 18px;
+    align-items: end;
+    margin-bottom: 28px;
+  }
+  @media (max-width: 640px) { .rk-picker { grid-template-columns: 1fr; } }
+  .rk-picker-go { min-height: 46px; }
+
+  /* ── Table header card ── */
+  .rk-header {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    padding: 28px 30px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+    gap: 20px 36px;
+  }
+  @media (max-width: 800px) { .rk-header { grid-template-columns: 1fr; padding: 22px 18px; } }
+  .rk-title {
+    font-family: var(--font-display);
+    font-size: clamp(1.4rem, 3.6vw, 2rem);
+    font-weight: 600;
+    color: var(--white);
+    line-height: 1.15;
+  }
+  .rk-key, .rk-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.76rem;
+    color: var(--gold-2);
+    overflow-wrap: anywhere;
+  }
+  .rk-key { margin-top: 8px; }
+  .rk-header-meta { margin: 0; display: grid; gap: 8px; align-content: start; }
+  .rk-meta-row { display: grid; grid-template-columns: 15ch minmax(0, 1fr); gap: 12px; align-items: baseline; }
+  @media (max-width: 480px) { .rk-meta-row { grid-template-columns: 1fr; gap: 2px; } }
+  .rk-meta-row dt {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .rk-meta-row dd { margin: 0; font-size: 0.86rem; color: var(--off-white); }
+
+  /* ── Standings table ── */
+  .rk-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    min-width: 760px;
+  }
+  .rk-tbl-sm { min-width: 720px; }
+  .rk-tbl th, .rk-tbl td {
+    padding: 13px 16px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.86rem;
+    color: var(--off-white);
+  }
+  .rk-tbl thead th {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    background: var(--card-2);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .rk-tbl tbody tr:last-child th, .rk-tbl tbody tr:last-child td { border-bottom: 0; }
+  .rk-tbl tbody tr.rk-open { background: var(--card-2); }
+  .rk-tbl tbody tr.rk-excluded th, .rk-tbl tbody tr.rk-excluded td { color: var(--muted); }
+
+  .rk-rank {
+    font-family: var(--font-display);
+    font-size: 1.24rem;
+    font-weight: 600;
+    color: var(--white);
+    width: 1%;
+    white-space: nowrap;
+  }
+  .rk-athlete { font-family: var(--font-display); font-weight: 600; font-size: 0.95rem; color: var(--white); }
+  .rk-athlete a { display: inline-flex; align-items: center; min-height: 44px; }
+  .rk-athlete a:hover, .rk-athlete a:focus-visible { color: var(--gold-2); }
+  .rk-fid {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    color: var(--gold-2);
+    white-space: nowrap;
+  }
+  .rk-points { font-family: var(--font-display); font-weight: 600; color: var(--white); }
+  .rk-move { font-size: 0.78rem; }
+  .rk-move.mv-up { color: var(--gold-2); }
+  .rk-move.mv-down { color: var(--red-2); }
+  .rk-move.mv-new { color: var(--off-white); }
+  .rk-move.mv-same { color: var(--muted); }
+  .rk-why {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--off-white);
+  }
+  .rk-why:hover, .rk-why:focus-visible { border-color: var(--gold-dim); color: var(--gold-2); }
+  .rk-why-open { background: var(--red); border-color: var(--red); color: #fff; }
+
+  /* ── Working ── */
+  .rk-work-head {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--red);
+    padding: 26px 28px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 20px 32px;
+    align-items: center;
+  }
+  @media (max-width: 700px) { .rk-work-head { grid-template-columns: 1fr; padding: 20px 18px; } }
+  .rk-work-name {
+    font-family: var(--font-display);
+    font-size: clamp(1.3rem, 3.4vw, 1.8rem);
+    font-weight: 600;
+    color: var(--white);
+  }
+  .rk-work-nums { margin: 0; display: flex; flex-wrap: wrap; gap: 26px; }
+  .rk-num dt {
+    font-family: var(--font-display);
+    font-size: 0.58rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .rk-num dd {
+    margin: 4px 0 0;
+    font-family: var(--font-display);
+    font-size: 1.8rem;
+    font-weight: 600;
+    color: var(--white);
+    line-height: 1;
+  }
+
+  .rk-block { margin-top: 32px; }
+  .rk-block-h {
+    font-family: var(--font-display);
+    font-size: 1.06rem;
+    font-weight: 600;
+    color: var(--white);
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--gold-dim);
+    margin-bottom: 14px;
+  }
+  .rk-block-note {
+    font-size: 0.86rem;
+    line-height: 1.75;
+    color: var(--off-white);
+    max-width: 78ch;
+    margin-bottom: 14px;
+  }
+  .rk-defs { margin: 0; display: grid; gap: 8px; max-width: 80ch; }
+  .rk-def { display: grid; grid-template-columns: 22ch minmax(0, 1fr); gap: 14px; align-items: baseline; }
+  @media (max-width: 560px) { .rk-def { grid-template-columns: 1fr; gap: 2px; } }
+  .rk-def dt {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .rk-def dd { margin: 0; font-size: 0.86rem; color: var(--off-white); overflow-wrap: anywhere; }
+
+  .rk-ev { font-family: var(--font-display); font-weight: 600; font-size: 0.9rem; color: var(--white); max-width: 30ch; }
+  .rk-sub { display: block; font-size: 0.74rem; color: var(--muted); margin-top: 4px; font-family: var(--font-body); font-weight: 400; }
+  .rk-reason { font-weight: 600; }
+  .rk-detail { max-width: 42ch; line-height: 1.6; }
+  .rk-unpriced { color: var(--red-2); font-family: var(--font-body); font-size: 0.8rem; }
+  .rk-flag { white-space: nowrap; }
+  .rk-flag.yes { color: var(--gold-2); border-color: var(--gold-dim); }
+  .rk-flag.no { color: var(--red-2); border-color: rgba(142, 18, 18, 0.32); }
+  .rk-total { font-size: 0.9rem; color: var(--off-white); margin-top: 14px; }
+  .rk-total strong { font-family: var(--font-display); font-size: 1.1rem; color: var(--white); }
+
+  .rk-details {
+    margin-top: 32px;
+    background: var(--card);
+    border: 1px solid var(--border);
+  }
+  .rk-summary {
+    cursor: pointer;
+    padding: 16px 22px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+  }
+  .rk-details-body { padding: 4px 22px 24px; }
+  @media (max-width: 520px) { .rk-summary, .rk-details-body { padding-left: 16px; padding-right: 16px; } }
+
+  /* ── How a ranking is built ── */
+  .rk-key-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  @media (max-width: 780px) { .rk-key-grid { grid-template-columns: 1fr; } }
+  .rk-key-card { border-top: 3px solid var(--gold-dim); }
+</style>

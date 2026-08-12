@@ -1,0 +1,622 @@
+---
+// Two-person control — the queue where the second person agrees, or refuses.
+//
+// THE RULE THE WHOLE SCREEN SERVES: the approver must not be the requester.
+//
+// It is enforced in src/lib/approvals.ts, against identity, under a row lock,
+// for every role including SUPER_ADMIN. This page never re-checks it and could
+// not weaken it. What this page does is refuse to OFFER the button that would
+// always fail:
+//
+//  · `pendingApprovals()` already excludes requests you raised, so the queue
+//    below cannot contain one of yours. The per-item render still asks the
+//    question again before drawing an Approve button — two independent reasons
+//    the control cannot appear, because a button that always errors is a defect
+//    you can see coming.
+//  · The single-request view CAN show a request you raised — you are entitled
+//    to see where your own request stands. There it renders a WITHDRAW control
+//    and no Approve control, and says why.
+//
+// WHY THERE IS NO "RAISE A REQUEST" FORM: `requestApproval()` freezes a payload
+// that `executeIfApproved()` later hands to a handler owned by the subsystem
+// performing the act. A generic form here would mint requests that no handler is
+// wired to run — approved, and then nothing happens. That is a control that
+// cannot work, so it is not offered, and the screen says so rather than leaving
+// an operator to wonder where the button is.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  pendingApprovals, approvalState, ApprovalError,
+  APPROVAL_ACTIONS, APPROVAL_ACTION_NAMES,
+  type PendingApprovalQueue, type ApprovalRequestState,
+} from '@/lib/approvals';
+
+export const prerender = false;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const configured = isConfigured();
+
+const lookupId = (Astro.url.searchParams.get('requestId') ?? '').trim().slice(0, 64);
+
+let queue: PendingApprovalQueue | null = null;
+let queueError: string | null = null;
+
+let looked: ApprovalRequestState | null = null;
+let lookupError: string | null = null;
+
+// A shared or legacy credential cannot be told apart from any other operator
+// using it, so it can be neither of the two people. The module returns an empty
+// queue with that reason; this page repeats the reason rather than an empty list.
+const identified = Boolean(identity && identity.userId != null && !identity.shared);
+
+if (identity && configured) {
+  const ctx: AuditContext = {
+    principal: identity.principal,
+    authority: identity.shared ? `shared:${identity.via}` : 'user',
+  };
+  try {
+    queue = await pendingApprovals(db(), identity.principal);
+  } catch (err: any) {
+    queueError = err?.message ?? 'The approval queue could not be read.';
+  }
+
+  if (lookupId) {
+    try {
+      looked = await approvalState(db(), ctx, lookupId);
+    } catch (err: any) {
+      lookupError = err instanceof ForbiddenError
+        ? 'Your credential does not hold the authority this request requires, in its scope. A request you could not approve is a request you cannot read.'
+        : err instanceof ApprovalError
+          ? err.message
+          : 'That request could not be read.';
+    }
+  }
+}
+
+const myUserId = identity?.userId ?? null;
+
+/** Would an Approve control be honest for this request, for this viewer? */
+function mayApprove(state: ApprovalRequestState): boolean {
+  if (!identified || myUserId == null) return false;
+  if (state.status !== 'pending') return false;
+  if (state.requester?.userId === myUserId) return false;               // the rule
+  if (state.approvals.some((a) => a.by?.userId === myUserId)) return false;
+  return true;
+}
+
+const isMine = looked ? looked.requester?.userId === myUserId : false;
+
+const signedInAs = identity
+  ? identity.shared
+    ? `${identity.principal.label} — shared credential (${identity.via}), not attributable to a person`
+    : `${identity.principal.label} — personal account #${identity.userId}`
+  : '';
+
+function scopeText(scope: Record<string, any>): string {
+  const bits: string[] = [];
+  if (scope?.stateUnitId != null) bits.push(`state unit #${scope.stateUnitId}`);
+  if (scope?.districtUnitId != null) bits.push(`district unit #${scope.districtUnitId}`);
+  if (scope?.dojoId != null) bits.push(`dojo #${scope.dojoId}`);
+  if (scope?.personId != null) bits.push(`person #${scope.personId}`);
+  return bits.length ? bits.join(', ') : 'National — reachable only from a national binding';
+}
+---
+
+<Base title="MMAKF Admin — Two-person control" showNav={false} showFooter={false}>
+  {!identity ? (
+    <section class="signin-wrap">
+      <div class="signin-box">
+        <div class="signin-brand">
+          <div class="signin-brand-1">MMAKF</div>
+          <div class="signin-brand-2">Two-person control</div>
+        </div>
+        <form id="loginForm" class="card signin-card">
+          <h1 class="card-title signin-h">Sign in</h1>
+          <label class="input-label" for="login-email">Email address</label>
+          <input class="input" type="email" id="login-email" name="email" autocomplete="username"
+                 autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="you@mmakf.in" />
+          <label class="input-label" for="login-password" style="margin-top:14px">Password</label>
+          <input class="input" type="password" id="login-password" name="password" autocomplete="current-password" required />
+          <div id="loginErr" role="alert" class="signin-err" hidden></div>
+          <button type="submit" class="btn btn-primary signin-btn">Sign in</button>
+          <p class="signin-note">
+            Two-person control requires an identified personal account. A shared office credential cannot
+            be either of the two people, and the server refuses it.
+          </p>
+        </form>
+      </div>
+    </section>
+  ) : (
+    <div class="admin-wrap">
+      <aside class="admin-side">
+        <div class="admin-brand">
+          <div class="admin-brand-1">MMAKF</div>
+          <div class="admin-brand-2">Two-person control</div>
+        </div>
+        <nav class="admin-nav" aria-label="Sections">
+          <a href="#queue">Waiting on you</a>
+          <a href="#lookup">Look up a request</a>
+          <a href="#acts">Acts under dual control</a>
+          <a href="/admin/governance" class="nav-sep">Governance →</a>
+          <a href="/admin/cases">Cases →</a>
+          <a href="/admin/queue">Approval queue →</a>
+          <a href="/admin">← Content admin</a>
+        </nav>
+        <div class="admin-foot">
+          <button class="btn btn-ghost admin-foot-btn" id="logoutBtn">Logout</button>
+        </div>
+      </aside>
+
+      <main class="admin-main">
+        <header class="admin-panel admin-panel-first">
+          <h1 class="admin-h">Two-person control</h1>
+          <p class="admin-sub">
+            Some acts are too consequential for one person. Each request below was raised by somebody
+            who already holds the authority for the act; it happens only when a second person who also
+            holds that authority agrees. The approver must not be the requester — refused for every
+            role, including SUPER_ADMIN, and refused against identity rather than against a flag.
+          </p>
+          <p class="a-signed">Signed in as {signedInAs}</p>
+
+          {!configured && (
+            <div class="a-warn" role="alert">
+              <strong>The federation database is not configured on this deployment.</strong>
+              Two-person control is stored as an append-only event log in Postgres — there is no log to
+              read and none to append to until <code>DATABASE_URL</code> is set. No control is offered
+              below, because none could work.
+            </div>
+          )}
+          {configured && !identified && (
+            <div class="a-warn" role="alert">
+              <strong>This credential cannot be either of the two people.</strong>
+              You are signed in with a shared or legacy credential, which cannot be told apart from any
+              other operator using it. One person holding one shared login could otherwise satisfy both
+              halves of the rule and the whole mechanism would be decorative. Sign in with a personal
+              account to work this queue.
+            </div>
+          )}
+          {queueError && <div class="a-warn" role="alert"><strong>The queue could not be read.</strong> {queueError}</div>}
+        </header>
+
+        {configured && (
+          <>
+          <!-- ─── The queue ──────────────────────────────────────────── -->
+          <section class="admin-panel" id="queue">
+            <h2 class="admin-h2">Waiting on you</h2>
+            {queue && <p class="admin-sub">{queue.note}</p>}
+            {queue && !queue.complete && (
+              <div class="a-warn" role="alert">
+                <strong>This list is INCOMPLETE.</strong> More requests match than could be examined, so a
+                pending request may be missing from it. Look one up by its identifier below if you are
+                expecting a request that is not here.
+              </div>
+            )}
+
+            {!queue || queue.items.length === 0 ? (
+              <p class="a-empty">
+                Nothing is waiting on you. This list shows only requests you may actually act on —
+                raised by someone else, inside a scope where you hold the act's authority, and not
+                already approved by you. It is not a count of everything outstanding in the federation.
+              </p>
+            ) : (
+              <div class="a-items">
+                {queue.items.map((item) => (
+                  <article class="a-item" id={`r-${item.requestId}`}>
+                    <header class="a-item-head">
+                      <div>
+                        <h3 class="a-item-title">{item.label}</h3>
+                        <p class="a-mono">{item.requestId}</p>
+                      </div>
+                      <span class={`a-tag a-tag-${item.status}`}>{item.status}</span>
+                    </header>
+
+                    <dl class="a-dl">
+                      <div><dt>What it would do</dt><dd>{item.target.entityType} <span class="a-mono">{item.target.entityId}</span></dd></div>
+                      <div><dt>Raised by</dt><dd>{item.requester?.label ?? 'unattributed'} <span class="a-mono">#{item.requester?.userId}</span>{item.requester?.role ? ` — as ${item.requester.role}` : ' — authorising role not attributable'}</dd></div>
+                      <div><dt>Raised at</dt><dd>{item.requestedAt}</dd></div>
+                      <div><dt>Stated reason</dt><dd class="a-reason">{item.reason}</dd></div>
+                      <div><dt>Authority required</dt><dd><code>{item.requires}</code></dd></div>
+                      <div><dt>Scope</dt><dd>{scopeText(item.scope as any)}</dd></div>
+                      <div><dt>Approvals</dt><dd>{item.approvals.length} of {item.approvalsRequired} required{item.approvals.length ? ` — ${item.approvals.map((a) => a.by?.label).join(', ')}` : ''}</dd></div>
+                      <div><dt>Expiry</dt><dd>{item.expiry.note}</dd></div>
+                      <div><dt>Classification</dt><dd>{item.classification}</dd></div>
+                    </dl>
+
+                    <details class="a-details">
+                      <summary>The exact payload that would be executed</summary>
+                      <pre class="a-pre">{JSON.stringify(item.payload, null, 2)}</pre>
+                    </details>
+
+                    {mayApprove(item) ? (
+                      <div class="a-controls">
+                        <form class="a-form" data-decide="approve" data-request={item.requestId}>
+                          <p class="a-hint">
+                            Approving records your identity as the second person. It does not, by itself,
+                            carry the act out — the subsystem that raised the request executes it once,
+                            and records that it ran.
+                          </p>
+                          <div class="a-ok" hidden></div><div class="a-err" role="alert" hidden></div>
+                          <button type="submit" class="btn btn-primary a-submit">Approve as the second person</button>
+                        </form>
+                        <form class="a-form" data-decide="reject" data-request={item.requestId}>
+                          <label class="input-label" for={`why-${item.requestId}`}>Reason for refusing</label>
+                          <textarea class="input" id={`why-${item.requestId}`} name="reason" rows="2" required></textarea>
+                          <div class="a-ok" hidden></div><div class="a-err" role="alert" hidden></div>
+                          <button type="submit" class="btn btn-ghost a-submit">Refuse this request</button>
+                        </form>
+                      </div>
+                    ) : (
+                      <p class="a-hint" role="note">
+                        No decision control is offered for this request from this account. That is the
+                        rule holding, not a fault.
+                      </p>
+                    )}
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <!-- ─── Look up one request ────────────────────────────────── -->
+          <section class="admin-panel" id="lookup">
+            <h2 class="admin-h2">Look up a request</h2>
+            <p class="admin-sub">
+              Including one you raised yourself. Reading is gated on exactly the authority the act
+              requires, in the request's own scope: if you could not approve it, you cannot read it.
+            </p>
+            <form class="a-lookup" method="get" action="/admin/approvals#lookup">
+              <label class="input-label" for="requestId">Request identifier</label>
+              <div class="a-lookup-row">
+                <input class="input" id="requestId" name="requestId" value={lookupId} placeholder="MMAKF-APR-2026-000001" />
+                <button type="submit" class="btn btn-ghost a-lookup-btn">Open</button>
+              </div>
+            </form>
+
+            {lookupError && <div class="a-warn" role="alert">{lookupError}</div>}
+
+            {looked && (
+              <article class="a-item a-item-solo">
+                <header class="a-item-head">
+                  <div>
+                    <h3 class="a-item-title">{looked.label}</h3>
+                    <p class="a-mono">{looked.requestId}</p>
+                  </div>
+                  <span class={`a-tag a-tag-${looked.status}`}>{looked.status}</span>
+                </header>
+
+                {isMine && (
+                  <div class="a-warn a-warn-soft">
+                    <strong>You raised this request.</strong> Two-person control means you cannot also
+                    approve it — the server refuses self-approval for every role, including SUPER_ADMIN,
+                    so no approve control is shown here. You may withdraw it: a withdrawal can never
+                    cause the act to happen, so it needs no second person.
+                  </div>
+                )}
+
+                <dl class="a-dl">
+                  <div><dt>What it would do</dt><dd>{looked.target.entityType} <span class="a-mono">{looked.target.entityId}</span></dd></div>
+                  <div><dt>Raised by</dt><dd>{looked.requester?.label ?? 'unattributed'} <span class="a-mono">#{looked.requester?.userId}</span>{looked.requester?.role ? ` — as ${looked.requester.role}` : ''}</dd></div>
+                  <div><dt>Raised at</dt><dd>{looked.requestedAt}</dd></div>
+                  <div><dt>Stated reason</dt><dd class="a-reason">{looked.reason}</dd></div>
+                  <div><dt>Authority required</dt><dd><code>{looked.requires}</code></dd></div>
+                  <div><dt>Scope</dt><dd>{scopeText(looked.scope as any)}</dd></div>
+                  <div><dt>Approvals</dt><dd>{looked.approvals.length} of {looked.approvalsRequired} required</dd></div>
+                  <div><dt>Expiry</dt><dd>{looked.expiry.note}</dd></div>
+                </dl>
+
+                {looked.rejection && (
+                  <p class="a-note">
+                    {looked.rejection.selfWithdrawn ? 'Withdrawn by the requester' : 'Refused'} by
+                    {' '}{looked.rejection.by?.label} at {looked.rejection.at} — “{looked.rejection.reason}”
+                  </p>
+                )}
+                {looked.execution && (
+                  <p class="a-note">
+                    Executed once at {looked.execution.at} by {looked.execution.by?.label}. Nothing re-runs.
+                  </p>
+                )}
+                {looked.failures.length > 0 && (
+                  <div class="a-warn" role="alert">
+                    <strong>{looked.failures.length} execution attempt(s) failed and were recorded, not swallowed.</strong>
+                    <ul class="a-list">{looked.failures.map((f) => (<li>{f.at} — {f.error}</li>))}</ul>
+                  </div>
+                )}
+
+                <details class="a-details">
+                  <summary>The exact payload that would be executed</summary>
+                  <pre class="a-pre">{JSON.stringify(looked.payload, null, 2)}</pre>
+                </details>
+
+                <details class="a-details">
+                  <summary>Event history ({looked.history.length}) — the whole record, replayed</summary>
+                  <div class="tbl-scroll">
+                    <table class="a-tbl">
+                      <thead><tr><th scope="col">At</th><th scope="col">Event</th><th scope="col">Actor</th></tr></thead>
+                      <tbody>
+                        {looked.history.map((h) => (
+                          <tr>
+                            <td>{h.at}</td>
+                            <td>{h.eventType}</td>
+                            <td>{h.actorLabel ?? '—'} <span class="a-mono">{h.actorUserId != null ? `#${h.actorUserId}` : ''}</span></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p class="a-hint">
+                    Nothing here is a mutable status. The state above is a replay of these events, and
+                    the event log has no update path and no delete path — an approval cannot be silently
+                    withdrawn and a rejection cannot be edited into an approval.
+                  </p>
+                </details>
+
+                <div class="a-controls">
+                  {mayApprove(looked) && (
+                    <form class="a-form" data-decide="approve" data-request={looked.requestId}>
+                      <div class="a-ok" hidden></div><div class="a-err" role="alert" hidden></div>
+                      <button type="submit" class="btn btn-primary a-submit">Approve as the second person</button>
+                    </form>
+                  )}
+                  {looked.status === 'pending' && identified ? (
+                    <form class="a-form" data-decide="reject" data-request={looked.requestId}>
+                      <label class="input-label" for="solo-why">{isMine ? 'Reason for withdrawing' : 'Reason for refusing'}</label>
+                      <textarea class="input" id="solo-why" name="reason" rows="2" required></textarea>
+                      <div class="a-ok" hidden></div><div class="a-err" role="alert" hidden></div>
+                      <button type="submit" class="btn btn-ghost a-submit">{isMine ? 'Withdraw my request' : 'Refuse this request'}</button>
+                    </form>
+                  ) : (
+                    <p class="a-hint">
+                      This request is {looked.status}. No decision control is offered — a decision on it
+                      has already been taken, or it can no longer be taken.
+                    </p>
+                  )}
+                </div>
+              </article>
+            )}
+          </section>
+
+          <!-- ─── The registry ───────────────────────────────────────── -->
+          <section class="admin-panel" id="acts">
+            <h2 class="admin-h2">Acts under dual control</h2>
+            <p class="admin-sub">
+              These seven, and no others. An act that is not in this registry is refused: there is no
+              "other" bucket, because a caller who could name an arbitrary action could name one nobody
+              holds and collect a rubber-stamp approval that means nothing.
+            </p>
+            <div class="tbl-scroll">
+              <table class="a-tbl">
+                <thead><tr><th scope="col">Act</th><th scope="col">Authority each person must independently hold</th></tr></thead>
+                <tbody>
+                  {APPROVAL_ACTION_NAMES.map((name) => (
+                    <tr>
+                      <td>{APPROVAL_ACTIONS[name].label}<br /><span class="a-mono">{name}</span></td>
+                      <td><code>{APPROVAL_ACTIONS[name].requires}</code></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p class="a-hint">
+              Requests are raised by the subsystem that will carry the act out, and executed there once
+              approved — so there is no "raise a request" form on this page. A form here would produce
+              requests that nothing is wired to execute: approved, and then nothing happens.
+            </p>
+          </section>
+          </>
+        )}
+      </main>
+    </div>
+  )}
+</Base>
+
+<script>
+  const loginForm = document.getElementById('loginForm');
+  if (loginForm instanceof HTMLFormElement) {
+    const loginErr = document.getElementById('loginErr');
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (loginErr) loginErr.hidden = true;
+      const fd = new FormData(loginForm);
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(email ? { email, password } : { password }),
+      }).catch(() => null);
+      if (r && r.ok) { location.reload(); return; }
+      const body = r ? await r.json().catch(() => null) : null;
+      if (loginErr) {
+        loginErr.hidden = false;
+        loginErr.textContent = (body && body.error) ? String(body.error) : 'Sign-in failed. Check your details and try again.';
+      }
+    });
+  }
+
+  document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
+    location.reload();
+  });
+
+  document.addEventListener('submit', async (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    const decide = form.getAttribute('data-decide');
+    if (!decide) return;
+    event.preventDefault();
+
+    const requestId = form.getAttribute('data-request') || '';
+    const ok = form.querySelector('.a-ok');
+    const err = form.querySelector('.a-err');
+    const button = form.querySelector('.a-submit');
+    const reasonEl = form.querySelector('textarea[name=reason]');
+    if (ok instanceof HTMLElement) { ok.hidden = true; ok.textContent = ''; }
+    if (err instanceof HTMLElement) { err.hidden = true; err.textContent = ''; }
+
+    const fail = (message, focus) => {
+      if (err instanceof HTMLElement) { err.hidden = false; err.textContent = message; }
+      if (focus instanceof HTMLElement) focus.focus();
+    };
+
+    const reason = reasonEl instanceof HTMLTextAreaElement ? reasonEl.value.trim() : '';
+    // Convenience only. The server refuses a reasonless rejection with
+    // `reason_required`, and that refusal is the gate that actually holds.
+    if (decide === 'reject' && !reason) {
+      fail('A refusal must state its reason — the federation has to be able to explain it afterwards. Nothing has been sent to the server.', reasonEl);
+      return;
+    }
+
+    const label = button instanceof HTMLButtonElement ? button.textContent : '';
+    if (button instanceof HTMLButtonElement) { button.disabled = true; button.textContent = 'Recording…'; }
+
+    const response = await fetch('/api/approvals/' + decide, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId, reason }),
+    }).catch(() => null);
+
+    if (button instanceof HTMLButtonElement) { button.disabled = false; button.textContent = label; }
+
+    if (!response) { fail('Could not reach the server. NOTHING was recorded. Check your connection and try again.'); return; }
+
+    const body = await response.json().catch(() => null);
+
+    if (response.ok && body && body.ok) {
+      const state = body.result || {};
+      if (ok instanceof HTMLElement) {
+        ok.hidden = false;
+        ok.textContent =
+          'Recorded by the server. This request is now "' + String(state.status) + '" with ' +
+          String((state.approvals || []).length) + ' of ' + String(state.approvalsRequired) +
+          ' required approvals. Reload to see it as it now stands.';
+      }
+      const fs = form.querySelectorAll('button, textarea');
+      fs.forEach((el) => { if (el instanceof HTMLButtonElement || el instanceof HTMLTextAreaElement) el.disabled = true; });
+      return;
+    }
+
+    let message = (body && body.error) ? String(body.error) : '';
+    if (!message) {
+      if (response.status === 401) message = 'Your session has ended.';
+      else if (response.status === 429) message = 'Too many decisions in a short time. Wait a minute and try again.';
+      else message = 'The server refused this (HTTP ' + response.status + ').';
+    }
+    if (response.status === 403 && !(body && body.code)) {
+      message += ' The request was refused before it reached the approvals module — usually a blocked or rewritten request rather than a permissions problem. Reload and try once more.';
+    }
+    fail(message + ' NOTHING was changed.');
+  });
+</script>
+
+<style is:global>
+  body { background: var(--bg); }
+
+  .signin-wrap { min-height: 90vh; display: flex; align-items: center; justify-content: center; padding: 64px 24px; }
+  .signin-box { width: 100%; max-width: 420px; }
+  .signin-brand { text-align: center; margin-bottom: 36px; }
+  .signin-brand-1 { font-family: var(--font-display); font-size: 1.8rem; font-weight: 700; letter-spacing: .06em; }
+  .signin-brand-2 { font-family: var(--font-display); font-size: .7rem; letter-spacing: .22em; text-transform: uppercase; color: var(--gold); margin-top: 6px; }
+  .signin-card { padding: 32px; }
+  .signin-h { font-size: 1.2rem; margin-bottom: 24px; }
+  .signin-err { color: var(--red-2); font-size: .85rem; margin-top: 12px; }
+  .signin-btn { width: 100%; margin-top: 20px; justify-content: center; min-height: 44px; }
+  .signin-note { margin-top: 20px; font-size: .75rem; color: var(--muted); text-align: center; line-height: 1.6; }
+
+  .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  @media (max-width: 800px) { .admin-wrap { grid-template-columns: 1fr; } }
+  .admin-side {
+    background: var(--bg-2); border-right: 1px solid var(--border); padding: 24px 0;
+    display: flex; flex-direction: column; position: sticky; top: 0; align-self: start; height: 100vh;
+  }
+  @media (max-width: 800px) { .admin-side { position: static; height: auto; } }
+  .admin-brand { padding: 0 24px 24px; border-bottom: 1px solid var(--border); }
+  .admin-brand-1 { font-family: var(--font-display); font-size: 1.4rem; font-weight: 700; letter-spacing: .06em; }
+  .admin-brand-2 { font-family: var(--font-display); font-size: .66rem; letter-spacing: .22em; text-transform: uppercase; color: var(--gold); margin-top: 4px; }
+  .admin-nav { flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .admin-nav a {
+    padding: 12px 14px; min-height: 44px; display: flex; align-items: center;
+    font-family: var(--font-display); font-size: .78rem; letter-spacing: .08em;
+    color: var(--off-white); border-radius: var(--radius); transition: all .18s;
+  }
+  .admin-nav a:hover { background: var(--card); color: var(--gold); }
+  .admin-nav .nav-sep { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .admin-foot { padding: 16px; border-top: 1px solid var(--border); }
+  .admin-foot-btn { width: 100%; justify-content: center; min-height: 44px; }
+
+  .admin-main { padding: 32px 36px 64px; max-width: 1100px; }
+  @media (max-width: 600px) { .admin-main { padding: 24px 16px 48px; } }
+  .admin-panel { padding: 36px 0; border-bottom: 1px solid var(--border); scroll-margin-top: 20px; }
+  .admin-panel-first { padding-top: 0; }
+  .admin-h { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; letter-spacing: .02em; }
+  .admin-h2 { font-family: var(--font-display); font-size: 1.2rem; font-weight: 600; letter-spacing: .02em; }
+  .admin-sub { color: var(--muted); font-size: .88rem; margin-top: 6px; line-height: 1.7; }
+
+  .a-signed { margin-top: 14px; font-size: .76rem; letter-spacing: .04em; color: var(--off-white); overflow-wrap: anywhere; }
+  .a-empty { font-size: .86rem; color: var(--muted); margin-top: 14px; line-height: 1.75; max-width: 62ch; }
+  .a-hint { font-size: .78rem; color: var(--muted); line-height: 1.7; margin-top: 10px; max-width: 68ch; }
+  .a-note { font-size: .85rem; color: var(--off-white); line-height: 1.7; margin-top: 12px; }
+  .a-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .74rem; color: var(--muted); overflow-wrap: anywhere; }
+  .a-list { margin: 8px 0 0 18px; font-size: .82rem; line-height: 1.8; }
+
+  .a-warn {
+    margin-top: 16px; background: rgba(142,18,18,.05); border: 1px solid var(--red-3);
+    border-left: 3px solid var(--red); border-radius: var(--radius);
+    padding: 14px 16px; font-size: .85rem; line-height: 1.7; color: var(--off-white);
+  }
+  .a-warn strong { color: var(--red-2); }
+  .a-warn-soft { background: var(--card-2); border: 1px solid var(--border); border-left: 3px solid var(--gold-dim); }
+  .a-warn-soft strong { color: var(--gold-3); }
+
+  .a-items { display: grid; gap: 16px; margin-top: 18px; }
+  .a-item { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--gold-dim); border-radius: var(--radius); padding: 20px; }
+  .a-item-solo { margin-top: 18px; }
+  .a-item-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  .a-item-title { font-family: var(--font-display); font-size: 1.02rem; font-weight: 600; }
+  .a-tag {
+    font-family: var(--font-display); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase;
+    padding: 4px 9px; border: 1px solid var(--border-2); border-radius: var(--radius); white-space: nowrap;
+  }
+  .a-tag-pending { color: var(--gold-3); border-color: var(--gold-dim); }
+  .a-tag-approved { color: var(--gold-3); border-color: var(--gold-dim); }
+  .a-tag-executed { color: var(--off-white); }
+  .a-tag-rejected, .a-tag-lapsed { color: #fff; background: var(--red); border-color: var(--red); }
+
+  .a-dl { margin-top: 16px; display: grid; gap: 8px; }
+  .a-dl div { display: grid; grid-template-columns: 190px 1fr; gap: 10px; font-size: .84rem; line-height: 1.65; }
+  @media (max-width: 620px) { .a-dl div { grid-template-columns: 1fr; gap: 2px; } }
+  .a-dl dt { font-family: var(--font-display); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .a-dl dd { overflow-wrap: anywhere; }
+  .a-reason { white-space: pre-wrap; }
+
+  .a-details { margin-top: 16px; border: 1px solid var(--border); border-radius: var(--radius); }
+  .a-details > summary {
+    cursor: pointer; padding: 12px 14px; min-height: 44px; display: flex; align-items: center;
+    font-family: var(--font-display); font-size: .76rem; letter-spacing: .06em; color: var(--off-white);
+  }
+  .a-details > summary:hover { color: var(--gold-2); }
+  .a-details > *:not(summary) { padding: 0 14px 14px; }
+  .a-pre {
+    background: var(--card-2); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 12px; font-size: .74rem; line-height: 1.6; overflow-x: auto; white-space: pre;
+  }
+
+  .a-controls { margin-top: 18px; display: grid; gap: 14px; }
+  .a-form { padding-top: 4px; }
+  .a-form + .a-form { border-top: 1px solid var(--border); padding-top: 16px; }
+  .a-submit { margin-top: 12px; min-height: 44px; }
+  .a-ok { margin-top: 12px; font-size: .84rem; color: var(--gold-3); line-height: 1.65; }
+  .a-err { margin-top: 12px; font-size: .84rem; color: var(--red-2); line-height: 1.65; }
+
+  .a-lookup { margin-top: 16px; }
+  .a-lookup-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .a-lookup-row .input { max-width: 320px; }
+  .a-lookup-btn { min-height: 44px; }
+
+  .a-tbl { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: .84rem; }
+  .a-tbl th, .a-tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .a-tbl th { font-family: var(--font-display); font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+</style>

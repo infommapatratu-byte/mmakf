@@ -1,0 +1,507 @@
+---
+// PUBLIC CREDENTIAL VERIFICATION.
+//
+// A parent, an employer or a tournament organiser is being asked to trust what
+// this page says. So it reports the answer AND how the federation knows it,
+// because a verification service that cannot say how it knows is not a
+// verification service.
+//
+// Three provenances, rendered so they cannot be mistaken for one another:
+//
+//   EXAMINED           traced to a grading with examiner scores behind it
+//   LEGACY RECORD      a real grade predating digital records; the federation
+//                      holds evidence, but no examination record exists here
+//   LEGACY REGISTER    the old hand-maintained list, used only while no
+//                      database is configured — the weakest claim possible
+//
+// Reporting those three identically is exactly what made the previous check
+// misleading. They are given different colour, different wording and a
+// different explanatory paragraph here.
+//
+// Four other rules this page holds to:
+//   · A REVOKED credential reports as REVOKED with the reason. A revoked
+//     certificate that simply vanished would be indistinguishable from one that
+//     never existed — which is what the person presenting it would prefer.
+//   · A 503 says the SERVICE is unavailable and that this is not a result about
+//     the identifier. A fault must never read as "no such member".
+//   · "Not found" is stated as what it is: the federation's records hold
+//     nothing under that identifier. It is not a statement about a person.
+//   · Nothing private is displayed. No contact details, no date of birth, no
+//     scores, no examiner names — the API does not return them and this page
+//     asks for nothing else.
+//
+// The lookup is done by the browser against /api/verify so the rate limit and
+// the hashed-IP verification log see the enquirer, not this server.
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+
+export const prerender = false;
+
+// Prefill only. This is the enquiry as typed, never a result — the check itself
+// still runs against the API, and until it answers nothing is asserted.
+const prefill = (Astro.url.searchParams.get('id') || '').slice(0, 60);
+---
+
+<Base
+  title="Verify a credential — MMAKF"
+  description="Check an MMAKF member ID or certificate number against the federation's records, and see how the federation knows what it reports."
+>
+  <PageHero
+    eyebrow="Credential verification"
+    title="Verify a <em>credential</em>"
+    lead="Check a member ID or a certificate number against the federation's records. Every result states how the federation knows what it reports — whether it is traced to a recorded examination, held as a legacy record, or read from the old hand-maintained register."
+  />
+
+  <section id="check">
+    <div class="container">
+      <form id="verifyForm" class="v-bar">
+        <div class="v-field">
+          <label class="input-label" for="verify-id">Member ID or certificate number</label>
+          <input
+            class="input"
+            id="verify-id"
+            name="id"
+            type="text"
+            required
+            maxlength="60"
+            autocomplete="off"
+            autocapitalize="characters"
+            autocorrect="off"
+            spellcheck="false"
+            value={prefill}
+            placeholder="MMAKF-…"
+            aria-describedby="verify-help"
+          />
+          <p id="verify-help" class="v-help">
+            Enter it exactly as printed. A certificate number begins
+            <code>MMAKF-CERT-</code>; a member ID is the identifier on the membership record.
+          </p>
+        </div>
+        <button type="submit" class="btn btn-primary v-go">Check</button>
+      </form>
+
+      <noscript>
+        <div class="v-card v-card-note">
+          This check runs in your browser, so JavaScript must be enabled. If you cannot enable it,
+          write to <a class="v-link" href="mailto:admin@mmakf.in">admin@mmakf.in</a> with the
+          identifier and the federation office will confirm it from the same records.
+        </div>
+      </noscript>
+
+      <div id="verifyStatus" class="v-status" role="status" aria-live="polite"></div>
+      <div id="verifyResult" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="container">
+      <div class="section-head">
+        <div class="eyebrow">How to read a result</div>
+        <h2 class="display-2" style="margin-top:16px">What this check <em>can</em> and cannot tell you</h2>
+        <div class="rule"></div>
+      </div>
+
+      <div class="grid grid-3">
+        <div class="card">
+          <span class="v-prov v-prov-examined">Examined</span>
+          <p class="card-body" style="margin-top:14px">
+            The credential is traced to a grading held by the federation, with a panel, a scorecard
+            and a recorded decision behind it. This is the strongest statement the federation makes
+            about a grade.
+          </p>
+        </div>
+        <div class="card">
+          <span class="v-prov v-prov-legacy">Legacy record</span>
+          <p class="card-body" style="margin-top:14px">
+            A real grade awarded before the federation kept digital examination records. The
+            federation holds evidence for it, but there is no examination scorecard in this system to
+            trace it to. It is carried honestly rather than erased — and never presented as examined.
+          </p>
+        </div>
+        <div class="card">
+          <span class="v-prov v-prov-register">Legacy register</span>
+          <p class="card-body" style="margin-top:14px">
+            Read from the federation's older hand-maintained list, which is used only while the
+            records database is unavailable. It is the weakest claim this service can make, and it is
+            labelled as such every time it is used.
+          </p>
+        </div>
+      </div>
+
+      <div class="v-notes">
+        <h3 class="v-notes-h">Two results people misread</h3>
+        <p class="body-txt">
+          <strong>Revoked.</strong> A withdrawn credential is reported as REVOKED, with the reason,
+          rather than disappearing. A revoked certificate that simply vanished from this page would
+          look exactly like one that never existed.
+        </p>
+        <p class="body-txt" style="margin-top:14px">
+          <strong>Not found.</strong> This means the federation's records hold nothing under that
+          identifier. It is a statement about the identifier — not about a person, and not proof that
+          somebody has never been graded. Check the spelling, then contact the office.
+        </p>
+        <p class="body-txt" style="margin-top:14px">
+          If this page reports that the service is unavailable, that is a fault at the federation's
+          end. It is not a result about the identifier you entered, and it should be retried.
+        </p>
+        <p class="body-txt" style="margin-top:14px">
+          The federation publishes nothing private here: no contact details, no date of birth, no
+          examination marks and no examiner names. Queries are logged as counts against a hashed
+          address so unusual enumeration can be detected.
+        </p>
+        <p class="body-txt" style="margin-top:14px">
+          Questions about a result: <a class="v-link" href="mailto:admin@mmakf.in">admin@mmakf.in</a>
+          &nbsp;·&nbsp; <a class="v-link" href="/contact">Contact the federation</a>
+        </p>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .v-bar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 14px;
+    align-items: end;
+    max-width: 760px;
+  }
+  @media (max-width: 560px) { .v-bar { grid-template-columns: 1fr; align-items: stretch; } }
+  .v-field { min-width: 0; }
+  .v-bar .input {
+    min-height: 52px;
+    font-size: 1rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .v-go { min-height: 52px; }
+  .v-help { margin-top: 8px; font-size: 0.78rem; color: var(--muted); line-height: 1.6; }
+  .v-help code { font-family: var(--font-display); letter-spacing: 0.06em; }
+
+  .v-status { margin-top: 20px; font-size: 0.88rem; color: var(--muted); }
+  .v-status:empty { margin-top: 0; }
+
+  .v-notes {
+    margin-top: 40px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    border-radius: var(--radius);
+    padding: 26px;
+  }
+  @media (max-width: 560px) { .v-notes { padding: 18px; } }
+  .v-notes-h {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--gold-3);
+    margin-bottom: 14px;
+  }
+  .v-notes strong { color: var(--white); }
+
+  .v-link { color: var(--gold-3); text-decoration: underline; text-underline-offset: 3px; }
+  .v-link:hover { color: var(--red-2); }
+
+  /* Provenance badges — deliberately three different visual weights. */
+  :global(.v-prov) {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    padding: 7px 14px;
+    border-radius: 100px;
+    border: 1px solid;
+  }
+  :global(.v-prov-examined) { color: #145A32; border-color: #A9CDB6; background: #EEF6F0; }
+  :global(.v-prov-legacy)   { color: var(--gold-3); border-color: var(--gold-dim); background: rgba(160, 124, 30, 0.08); }
+  :global(.v-prov-register) { color: var(--red-2); border-color: var(--red-3); background: rgba(142, 18, 18, 0.05); }
+
+  /* ── Result cards. Written as global because the script builds them. ── */
+  :global(.v-card) {
+    margin-top: 24px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 26px;
+    box-shadow: var(--shadow-1);
+    max-width: 760px;
+  }
+  @media (max-width: 560px) { :global(.v-card) { padding: 18px; } }
+
+  :global(.v-card-ok)      { border-left: 4px solid #2E7D4F; }
+  :global(.v-card-legacy)  { border-left: 4px solid var(--gold); }
+  :global(.v-card-weak)    { border-left: 4px solid var(--red-3); }
+  :global(.v-card-revoked) { border-left: 4px solid var(--red); background: rgba(142, 18, 18, 0.04); }
+  :global(.v-card-none)    { border-left: 4px solid var(--border-2); }
+  :global(.v-card-fault)   { border-left: 4px solid var(--red); }
+  :global(.v-card-note)    { border-left: 4px solid var(--gold-dim); }
+
+  :global(.v-verdict) {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    line-height: 1.15;
+  }
+  :global(.v-verdict-ok)      { color: #1E6B41; }
+  :global(.v-verdict-legacy)  { color: var(--gold-3); }
+  :global(.v-verdict-bad)     { color: var(--red-2); }
+  :global(.v-verdict-neutral) { color: var(--off-white); }
+
+  :global(.v-said) {
+    margin-top: 10px;
+    font-size: 0.92rem;
+    color: var(--off-white);
+    line-height: 1.7;
+  }
+  :global(.v-badges) { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+
+  :global(.v-rows) { margin-top: 20px; border-top: 1px solid var(--border); }
+  :global(.v-row) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    justify-content: space-between;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  :global(.v-k) {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: 2px;
+  }
+  :global(.v-v) { color: var(--white); text-align: right; overflow-wrap: anywhere; flex: 1 1 auto; }
+  @media (max-width: 480px) { :global(.v-v) { text-align: left; } }
+  :global(.v-v-id) { font-family: var(--font-display); font-weight: 600; letter-spacing: 0.06em; color: var(--gold-3); }
+
+  :global(.v-prov-note) {
+    margin-top: 18px;
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    font-size: 0.84rem;
+    line-height: 1.7;
+    color: var(--off-white);
+  }
+  :global(.v-revoke-note) {
+    margin-top: 18px;
+    background: rgba(142, 18, 18, 0.06);
+    border: 1px solid var(--red-3);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    font-size: 0.88rem;
+    line-height: 1.7;
+    color: var(--red-2);
+  }
+  :global(.v-revoke-note strong) { display: block; margin-bottom: 4px; }
+</style>
+
+<script>
+  const form = document.getElementById('verifyForm');
+  const out = document.getElementById('verifyResult');
+  const statusLine = document.getElementById('verifyStatus');
+  const input = document.getElementById('verify-id');
+
+  if (form instanceof HTMLFormElement && out instanceof HTMLElement &&
+      statusLine instanceof HTMLElement && input instanceof HTMLInputElement) {
+
+    const esc = (v: unknown) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+    const row = (k: string, v: unknown, cls = '') =>
+      v === null || v === undefined || v === ''
+        ? ''
+        : `<div class="v-row"><span class="v-k">${esc(k)}</span><span class="v-v ${cls}">${esc(v)}</span></div>`;
+
+    // The three provenances, kept verbally and visually distinct. The server
+    // sends its own note; these badges and headings label it.
+    const PROV = {
+      examined: {
+        badge: '<span class="v-prov v-prov-examined">Examined record</span>',
+        card: 'v-card-ok',
+        verdict: 'v-verdict-ok',
+      },
+      unverified_legacy: {
+        badge: '<span class="v-prov v-prov-legacy">Legacy record — not examined in this system</span>',
+        card: 'v-card-legacy',
+        verdict: 'v-verdict-legacy',
+      },
+      legacy_register: {
+        badge: '<span class="v-prov v-prov-register">Legacy register — hand maintained</span>',
+        card: 'v-card-weak',
+        verdict: 'v-verdict-legacy',
+      },
+    } as const;
+
+    type ProvKey = keyof typeof PROV;
+    const isProv = (v: unknown): v is ProvKey =>
+      v === 'examined' || v === 'unverified_legacy' || v === 'legacy_register';
+
+    const show = (html: string) => { out.innerHTML = html; };
+
+    const fault = (message: string) =>
+      show(`<div class="v-card v-card-fault" role="alert">
+        <div class="v-verdict v-verdict-bad">Service unavailable</div>
+        <p class="v-said">${esc(message)}</p>
+        <p class="v-said"><strong>This is not a result about the identifier you entered.</strong>
+        Nothing has been confirmed and nothing has been denied. Please try again shortly, or write to
+        <a class="v-link" href="mailto:admin@mmakf.in">admin@mmakf.in</a>.</p>
+      </div>`);
+
+    async function check(raw: string) {
+      const id = raw.trim().toUpperCase();
+      if (!id) return;
+
+      statusLine.textContent = 'Checking ' + id + ' against the federation records…';
+      out.innerHTML = '';
+
+      const response = await fetch('/api/verify?id=' + encodeURIComponent(id)).catch(() => null);
+      statusLine.textContent = '';
+
+      if (!response) {
+        fault('The check could not reach the federation server.');
+        return;
+      }
+
+      if (response.status === 429) {
+        show(`<div class="v-card v-card-fault" role="alert">
+          <div class="v-verdict v-verdict-bad">Too many checks</div>
+          <p class="v-said">Too many checks have come from this connection. Wait a minute and try
+          again. <strong>This is not a result about the identifier you entered.</strong></p>
+        </div>`);
+        return;
+      }
+
+      const data = await response.json().catch(() => null);
+
+      if (response.status === 503 || (data && data.unavailable)) {
+        fault(
+          (data && data.error) ||
+          'The verification service is temporarily unavailable.'
+        );
+        return;
+      }
+
+      if (!response.ok || !data) {
+        fault('The federation server returned an error (HTTP ' + response.status + ').');
+        return;
+      }
+
+      if (!data.found) {
+        show(`<div class="v-card v-card-none">
+          <div class="v-verdict v-verdict-neutral">Not found</div>
+          <p class="v-said">The federation's records hold nothing under
+          <strong>${esc(id)}</strong>.</p>
+          <p class="v-said">This is a statement about that identifier, not about a person: it is not
+          evidence that somebody has never been graded. Check the characters against the printed
+          document, then write to <a class="v-link" href="mailto:admin@mmakf.in">admin@mmakf.in</a>
+          if it still does not resolve.</p>
+        </div>`);
+        return;
+      }
+
+      const provenance = isProv(data.provenance) ? data.provenance : null;
+      const style = provenance ? PROV[provenance] : null;
+
+      // ── A certificate number ────────────────────────────────────────────
+      if (data.kind === 'certificate' && data.credential) {
+        const c = data.credential;
+        const revoked = c.status === 'revoked';
+        const suspended = c.status === 'suspended';
+        const expired = c.status === 'expired';
+
+        let verdict = 'Valid';
+        let verdictClass = style ? style.verdict : 'v-verdict-neutral';
+        let cardClass = style ? style.card : 'v-card-none';
+
+        if (revoked) { verdict = 'Revoked'; verdictClass = 'v-verdict-bad'; cardClass = 'v-card-revoked'; }
+        else if (suspended) { verdict = 'Suspended'; verdictClass = 'v-verdict-bad'; cardClass = 'v-card-revoked'; }
+        else if (expired) { verdict = 'Expired'; verdictClass = 'v-verdict-bad'; cardClass = 'v-card-revoked'; }
+
+        show(`<div class="v-card ${cardClass}"${revoked ? ' role="alert"' : ''}>
+          <div class="v-verdict ${verdictClass}">${esc(verdict)}</div>
+          <p class="v-said">This certificate is on the federation's records.</p>
+          <div class="v-badges">${style ? style.badge : ''}</div>
+          ${revoked ? `<div class="v-revoke-note"><strong>This certificate has been revoked by the federation.</strong>
+            ${esc(c.revokedReason || 'No reason is recorded against the revocation.')}
+            It must not be relied on. It is shown here rather than hidden so that a withdrawn
+            credential cannot be passed off as one that was never issued.</div>` : ''}
+          ${suspended ? `<div class="v-revoke-note"><strong>This certificate is suspended.</strong>
+            It is not currently in force. Contact the federation office before relying on it.</div>` : ''}
+          ${expired ? `<div class="v-revoke-note"><strong>This certificate has passed its validity date.</strong>
+            The award itself stands on the record; the document is no longer current.</div>` : ''}
+          <div class="v-rows">
+            ${row('Certificate number', c.certificateNo, 'v-v-id')}
+            ${row('Holder', c.name)}
+            ${row('Member ID', c.federationId)}
+            ${row('Grade', c.grade)}
+            ${row('Awarded on', c.awardedOn)}
+            ${row('Syllabus version', c.syllabusVersion)}
+            ${row('Issued by', c.issuingAuthority)}
+            ${row('Status', c.status)}
+          </div>
+          ${data.note ? `<p class="v-prov-note">${esc(data.note)}</p>` : ''}
+        </div>`);
+        return;
+      }
+
+      // ── A member identifier ─────────────────────────────────────────────
+      const m = data.member || {};
+      const hasGrade = Boolean(m.grade);
+
+      show(`<div class="v-card ${hasGrade && style ? style.card : 'v-card-none'}">
+        <div class="v-verdict ${hasGrade && style ? style.verdict : 'v-verdict-neutral'}">
+          ${hasGrade ? 'On the register' : 'On the register — no grade recorded'}
+        </div>
+        <p class="v-said">${
+          hasGrade
+            ? 'This member ID resolves to a membership record with an active grade against it.'
+            : 'This member ID resolves to a membership record. No active grade is recorded against it, so this check confirms the membership and nothing about a grade.'
+        }</p>
+        ${hasGrade && style ? `<div class="v-badges">${style.badge}</div>` : ''}
+        <div class="v-rows">
+          ${row('Member ID', m.id, 'v-v-id')}
+          ${row('Name', m.name)}
+          ${row('Category', m.type)}
+          ${row('Grade', m.grade)}
+          ${row('Grade type', m.gradeKind)}
+          ${row('Awarded on', m.awardedOn)}
+          ${row('Syllabus version', m.syllabusVersion)}
+          ${row('Unit', m.unit)}
+          ${row('Membership status', m.status)}
+          ${row('Valid till', m.validTill)}
+        </div>
+        ${data.note ? `<p class="v-prov-note">${esc(data.note)}</p>` : ''}
+        <p class="v-prov-note">A membership record is not a certificate. Where a certificate number
+        is printed on the document you hold, check that number instead — it is traced to the
+        examination itself.</p>
+      </div>`);
+    }
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      void check(input.value);
+    });
+
+    // A deep link such as /verify?id=MMAKF-CERT-… runs the same check the form
+    // does. The value in the box is the enquiry; the card below is the result.
+    if (input.value.trim()) void check(input.value);
+  }
+</script>

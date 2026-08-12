@@ -156,9 +156,23 @@ function textField(body: any, name: string, required = false, max = 2000): strin
   return t;
 }
 
+/**
+ * An instant, and it must carry its offset.
+ *
+ * A bare "2026-09-12T10:30" is read in the SERVER's timezone, which on a
+ * serverless host is UTC and never the venue's. A mat schedule five and a half
+ * hours out is the kind of error nobody notices until the morning, so a time
+ * without an offset is refused rather than guessed at.
+ */
 function dateField(body: any, name: string): Date | null {
   const t = textField(body, name, false, 40);
   if (t == null) return null;
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/.test(t)) {
+    throw new CompetitionError(
+      'bad_field',
+      `${name} must carry its timezone offset (for example 2026-09-12T10:30+05:30). A time without one would be read in the server's zone rather than the venue's.`
+    );
+  }
   const d = new Date(t);
   if (Number.isNaN(d.getTime())) throw new CompetitionError('bad_field', `${name} is not a valid date and time.`);
   return d;

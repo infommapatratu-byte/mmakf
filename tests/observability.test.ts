@@ -188,8 +188,19 @@ describe('timed operations', () => {
   });
 
   it('still records the timing when the operation throws', async () => {
-    await expect(timed('throwing', 0, async () => { throw new Error('nope'); })).rejects.toThrow('nope');
-    expect(err.length).toBeGreaterThan(0);
+    // Asserted across BOTH streams and on the operation name, not on the warn
+    // stream alone: whether a throw lands over or under its budget is a race,
+    // and the invariant under test is that the finally block ran at all.
+    await expect(
+      timed('throwing-op', 0, async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        throw new Error('nope');
+      })
+    ).rejects.toThrow('nope');
+
+    const emitted = [...out, ...err].join(' ');
+    expect(emitted).toContain('throwing-op');
+    expect(emitted).toMatch(/durationMs/);
   });
 });
 

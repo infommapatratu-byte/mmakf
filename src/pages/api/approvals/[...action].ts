@@ -22,7 +22,7 @@ import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
 import { isConfigured, db } from '@/db';
 import { ForbiddenError } from '@/lib/rbac';
 import type { AuditContext } from '@/db/federation';
-import { approve, reject, approvalState, ApprovalError } from '@/lib/approvals';
+import { approve, reject, ApprovalError } from '@/lib/approvals';
 
 export const prerender = false;
 
@@ -60,53 +60,13 @@ function unavailable() {
   }, 503);
 }
 
-// ─── Read one request ───────────────────────────────────────────────────────
-//
-// GET, because it changes nothing. `approvalState` applies the same authority
-// check the act itself requires, in the request's own scope: if you could not
-// approve it, you cannot read it.
-
-export const GET: APIRoute = async ({ request, params, url }) => {
-  const rl = await rateLimit(request, 'approvals-read', 120, 60);
-  if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
-
-  const action = String(params.action ?? '').replace(/^\/+|\/+$/g, '');
-  if (action !== 'state') return json({ error: 'Unknown approvals action' }, 404);
-
-  const identity = await identify(request.headers.get('cookie'));
-  if (!identity) return json({ error: 'Sign in to read an approval request' }, 401);
-  if (!isConfigured()) return unavailable();
-
-  const requestId = (url.searchParams.get('requestId') ?? '').trim();
-  if (!requestId || requestId.length > 64) {
-    return json({ error: 'Give the request identifier, for example MMAKF-APR-2026-000001.' }, 400);
-  }
-
-  const ctx: AuditContext = {
-    principal: identity.principal,
-    ip: clientIp(request),
-    authority: identity.shared ? `shared:${identity.via}` : 'user',
-  };
-
-  try {
-    const state = await approvalState(db(), ctx, requestId);
-    return json({ ok: true, result: state }, 200);
-  } catch (err: any) {
-    if (err instanceof ForbiddenError) {
-      return json({
-        error: 'Your credential does not hold the authority this request requires, in its scope. A request you could not approve is a request you cannot read.',
-        code: 'forbidden',
-      }, 403);
-    }
-    if (err instanceof ApprovalError) {
-      return json({ error: err.message, code: err.code }, statusFor(err.code));
-    }
-    console.error('[approvals] unexpected read', err);
-    return json({ error: 'Could not read that request.' }, 500);
-  }
-};
-
 // ─── Approve / reject ───────────────────────────────────────────────────────
+//
+// There is no GET here. Reading one request is `approvalState()`, and
+// /admin/approvals calls it in its own page loader — server-rendered, so the
+// screen works without JavaScript and the read is gated by the same authority
+// the act itself requires. A second read path over HTTP would be a second thing
+// to keep in step with that gate.
 
 export const POST: APIRoute = async ({ request, params }) => {
   const rl = await rateLimit(request, 'approvals-decide', 60, 60);

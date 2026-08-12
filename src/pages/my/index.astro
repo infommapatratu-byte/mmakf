@@ -307,8 +307,9 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
                 <>
                   <div class="card-title" style="margin-bottom:8px">{titleCase(currentMembership.category)}</div>
                   <div class="card-body">
-                    Valid from {fmt(currentMembership.validFrom)}
-                    {currentMembership.validTo ? ` to ${fmt(currentMembership.validTo)}` : ' — no end date recorded'}.
+                    {`Valid from ${fmt(currentMembership.validFrom)}${
+                      currentMembership.validTo ? ` to ${fmt(currentMembership.validTo)}` : ' — no end date recorded'
+                    }.`}
                   </div>
                 </>
               ) : passport && passport.memberships.length > 0 ? (

@@ -1326,23 +1326,56 @@ describe('a published answer cannot be rewritten without trace', () => {
   });
 });
 
-// ─── The schema defect this module refuses to paper over ────────────────────
+// ─── The invented DEFAULT 60 pass mark, now corrected ───────────────────────
 
-describe('the invented DEFAULT 60 pass mark', () => {
-  it('is refused loudly on an uncorrected database rather than silently applied', async () => {
-    // A second, untouched database: exactly what production has today.
-    const raw = new PGlite();
-    const rawDb = drizzle(raw, { schema: s });
-    await applyMigrations(raw);
+describe('an unset pass mark is representable, and is never invented', () => {
+  it('stores NULL rather than acquiring a threshold nobody wrote', async () => {
+    // The column carried NOT NULL DEFAULT 60. While that stood, "the federation
+    // has not set a pass mark" was literally UNREPRESENTABLE: every quiz
+    // silently acquired a marking threshold nobody approved, and a candidate
+    // could be failed against it. Migration 0004 made it nullable.
+    const course = await createCourse(db, admin, { slug: 'unset-pass-mark', title: 'Unset pass mark' });
+    const quiz = await addQuiz(db, admin, {
+      courseId: course.id, title: 'No pass mark set', passMarkPercent: null,
+    });
 
-    const course = await createCourse(rawDb, admin, { slug: 'raw-schema', title: 'Raw schema' });
-    const err = await addQuiz(rawDb, admin, {
-      courseId: course.id, title: 'No pass mark', passMarkPercent: null,
-    }).catch((e) => e);
+    const [row] = await db.select().from(s.quizzes).where(eq(s.quizzes.id, quiz.id));
+    expect(row.passMarkPercent).toBeNull();
+    expect(row.passMarkPercent).not.toBe(60);
+  });
 
-    expect(err).toBeInstanceOf(AcademyError);
-    expect(err.code).toBe('pass_mark_not_storable');
-    expect(err.message).toMatch(/not federation policy/i);
-    await raw.close();
-  }, 120_000);
+  it('records an attempt UNGRADED rather than deciding on a rule nobody wrote', async () => {
+    const course = await createCourse(db, admin, { slug: 'ungraded-flow', title: 'Ungraded flow' });
+    const module = await addModule(db, admin, { courseId: course.id, title: 'Module' });
+    // courseId is derived from the module, not passed — one source of truth.
+    await addLesson(db, admin, {
+      moduleId: module.id, title: 'Reading', kind: 'reading', body: 'Text',
+    });
+    const quiz = await addQuiz(db, admin, {
+      courseId: course.id, title: 'Ungraded quiz', passMarkPercent: null,
+    });
+    const q = await addQuizQuestion(db, admin, {
+      quizId: quiz.id, prompt: 'Which stance is zenkutsu-dachi?', kind: 'single',
+      options: [{ id: 'a', text: 'Front stance' }, { id: 'b', text: 'Back stance' }],
+      correctAnswer: 'a', marks: 1,
+    });
+    await publishCourse(db, admin, course.id, NOW);
+
+    const enrolment = await enrol(db, admin, { courseId: course.id, personId: STUDENT }, NOW);
+    const started = await startAttempt(db, { principal: student }, {
+      quizId: quiz.id, enrolmentId: enrolment.id,
+    }, NOW);
+    const result = await submitAttempt(db, { principal: student }, {
+      attemptId: started.attempt.id, responses: { [q.id]: 'a' },
+    }, NOW);
+
+    // The score IS computed and stored — the work happened and the candidate is
+    // owed the number. But no finding is made: not passed, not failed. That is
+    // the same treatment every other unconfigured rule in this system receives.
+    expect(result.result).toBe('ungraded');
+    expect(result.marksAwarded).toBe(1);
+    expect(result.scorePercent).toBe(100);
+    expect(result.ungradedReason).toMatch(/no pass mark/i);
+    expect(result.attempt.passed).toBeNull();
+  });
 });

@@ -1,0 +1,1215 @@
+---
+// Governance — committees, office, documents, meetings, actions and interests.
+//
+// The screen a general secretary works. Four things are deliberate:
+//
+//  1. AN ABSENCE IS TYPED, NEVER BLANK. `officeHoldersAt()` returns three
+//     different facts — not_configured, vacant, filled — and this page renders
+//     three different things. A committee nobody has constituted and a committee
+//     nobody currently sits on are not the same statement about the federation,
+//     and an empty table would say neither.
+//
+//  2. QUORUM IS NEVER GUESSED. Where `committees.quorum` is null the page says
+//     NOT CONFIGURED. Where a meeting was opened without one it says whether the
+//     meeting was quorate is NOT KNOWN. It never renders "quorate" from a
+//     headcount alone, because that would be this page deciding a constitutional
+//     question the federation has not answered.
+//
+//  3. SUPERSEDED STAYS READABLE. `documentHistory()` returns every version, and
+//     the superseded ones are rendered with the window they governed. A rule
+//     that applied in 2026 must remain readable in the form it had in 2026.
+//
+//  4. SCOPE IS FILTERED IN SQL. The index queries below apply
+//     `visibleScopes()` — rbac's own SQL-level filter — inside the WHERE
+//     clause, so out-of-scope rows are never read. Every DETAIL read goes
+//     through governance-ops.ts's own gated function.
+//
+// KNOWN GAP, ESCALATED NOT WORKED AROUND: governance-ops.ts exports no
+// scope-filtered LIST function for committees, documents or meetings — only
+// per-identifier reads. The three index queries here are therefore written
+// against the tables directly, using `visibleScopes()` from rbac.ts so the
+// scope decision still comes from the policy module. They return identifiers
+// and titles only; nothing that governance-ops.ts does not already disclose to
+// the same authority (`overdueActions()` already returns meeting codes and
+// titles under `unit:read`). Proper list functions are requested in
+// sharedFileEdits, and these queries should be deleted the day they land.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import { isConfigured, db, schema as s } from '@/db';
+import {
+  officeHoldersAt, committeeRoster, currentVersion, documentHistory, overdueActions,
+  type OfficeHoldersAt, type VersionResolution, type OverdueReport,
+} from '@/db/governance-ops';
+import { and, asc, desc, eq, inArray, or, sql } from 'drizzle-orm';
+
+export const prerender = false;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const configured = isConfigured();
+
+const q = Astro.url.searchParams;
+const today = new Date().toISOString().slice(0, 10);
+const asAt = /^\d{4}-\d{2}-\d{2}$/.test(q.get('asAt') ?? '') ? (q.get('asAt') as string) : today;
+const wantCommittee = Number(q.get('committee'));
+const wantMeeting = Number(q.get('meeting'));
+const wantDocument = (q.get('document') ?? '').trim().slice(0, 120);
+
+const principal = identity?.principal ?? null;
+const mayRead = canAnywhere(principal, 'unit:read');
+const mayWrite = canAnywhere(principal, 'unit:write');
+const mayReadDocs = canAnywhere(principal, 'content:read');
+const mayWriteDocs = canAnywhere(principal, 'content:write');
+const mayReadPii = canAnywhere(principal, 'person:read_pii');
+
+// ─── Scope filter, from rbac's own primitive ────────────────────────────────
+// Mirrors the shape governance-ops.ts applies internally: a committee's scope
+// row must fall inside a scope the caller holds `unit:read` in, and a national
+// committee (or a meeting belonging to none) is reachable only from a national
+// binding. Fail closed.
+const scopes = mayRead ? visibleScopes(principal, 'unit:read') : ({ kind: 'none' } as const);
+
+function committeeScopeWhere(): any {
+  if (scopes.kind === 'all') return null;
+  if (scopes.kind === 'none') return sql`false`;
+  const clauses: any[] = [];
+  if (scopes.states.length) {
+    clauses.push(and(eq(s.committees.scopeType, 'state'), inArray(s.committees.scopeId, scopes.states)));
+  }
+  if (scopes.districts.length) {
+    clauses.push(and(eq(s.committees.scopeType, 'district'), inArray(s.committees.scopeId, scopes.districts)));
+  }
+  if (scopes.dojos.length) {
+    clauses.push(and(eq(s.committees.scopeType, 'dojo'), inArray(s.committees.scopeId, scopes.dojos)));
+  }
+  if (!clauses.length) return sql`false`;
+  return clauses.length === 1 ? clauses[0] : or(...clauses);
+}
+
+const INDEX_LIMIT = 60;
+
+interface CommitteeRow {
+  id: number; code: string; name: string; kind: string;
+  scopeType: string; scopeId: number | null; quorum: number | null; active: boolean;
+}
+
+let committees: CommitteeRow[] = [];
+let committeesTruncated = false;
+let office: Record<number, OfficeHoldersAt> = {};
+let documents: Array<{ code: string; title: string; category: string; classification: string; active: boolean }> = [];
+let documentsTruncated = false;
+let meetings: Array<{ id: number; code: string; title: string; kind: string; heldOn: string | null; status: string; committeeName: string | null; quorumRequired: number | null; quorumPresent: number | null; quorumMet: boolean | null }> = [];
+let meetingsTruncated = false;
+
+let selectedCommittee: OfficeHoldersAt | null = null;
+let selectedRoster: any[] = [];
+let selectedRosterError: string | null = null;
+
+let selectedDocument: VersionResolution | null = null;
+let selectedVersions: any[] = [];
+let selectedDocumentError: string | null = null;
+
+let selectedMeeting: any = null;
+let selectedResolutions: any[] = [];
+let selectedActions: any[] = [];
+let meetingLookupNote: string | null = null;
+
+let actions: OverdueReport | null = null;
+let loadError: string | null = null;
+
+if (identity && configured && mayRead) {
+  const d = db();
+  const where = committeeScopeWhere();
+  try {
+    const cRows = await d.select({
+      id: s.committees.id, code: s.committees.code, name: s.committees.name,
+      kind: s.committees.kind, scopeType: s.committees.scopeType, scopeId: s.committees.scopeId,
+      quorum: s.committees.quorum, active: s.committees.active,
+    }).from(s.committees)
+      .where(where ?? undefined)
+      .orderBy(asc(s.committees.scopeType), asc(s.committees.name))
+      .limit(INDEX_LIMIT + 1);
+    committeesTruncated = cRows.length > INDEX_LIMIT;
+    committees = cRows.slice(0, INDEX_LIMIT) as CommitteeRow[];
+
+    // Three-way status per committee, from the module — not derived here.
+    const results = await Promise.all(committees.map((c) => officeHoldersAt(d, c.id, asAt)));
+    committees.forEach((c, i) => { office[c.id] = results[i]; });
+
+    const mRows = await d.select({
+      id: s.meetings.id, code: s.meetings.code, title: s.meetings.title, kind: s.meetings.kind,
+      heldOn: s.meetings.heldOn, status: s.meetings.status,
+      committeeName: s.committees.name,
+      quorumRequired: s.meetings.quorumRequired,
+      quorumPresent: s.meetings.quorumPresent,
+      quorumMet: s.meetings.quorumMet,
+    }).from(s.meetings)
+      .leftJoin(s.committees, eq(s.meetings.committeeId, s.committees.id))
+      .where(where ?? undefined)
+      .orderBy(desc(s.meetings.heldOn), desc(s.meetings.id))
+      .limit(INDEX_LIMIT + 1);
+    meetingsTruncated = mRows.length > INDEX_LIMIT;
+    meetings = mRows.slice(0, INDEX_LIMIT) as any;
+
+    actions = await overdueActions(d, principal!, asAt);
+
+    // Documents carry no scope column; classification is their gate, applied
+    // exactly as governance-ops.ts's own `assertMayReadDocument` applies it.
+    const docWhere = mayReadDocs ? undefined : eq(s.officialDocuments.classification, 'public');
+    const dRows = await d.select({
+      code: s.officialDocuments.code, title: s.officialDocuments.title,
+      category: s.officialDocuments.category, classification: s.officialDocuments.classification,
+      active: s.officialDocuments.active,
+    }).from(s.officialDocuments)
+      .where(docWhere)
+      .orderBy(asc(s.officialDocuments.category), asc(s.officialDocuments.title))
+      .limit(INDEX_LIMIT + 1);
+    documentsTruncated = dRows.length > INDEX_LIMIT;
+    documents = dRows.slice(0, INDEX_LIMIT) as any;
+
+    if (Number.isFinite(wantCommittee) && wantCommittee > 0) {
+      selectedCommittee = await officeHoldersAt(d, wantCommittee, asAt);
+      try {
+        selectedRoster = await committeeRoster(d, principal!, wantCommittee);
+      } catch (err: any) {
+        selectedRosterError = err?.name === 'ForbiddenError'
+          ? 'The full appointment history of this committee — including why terms ended — is outside your scope.'
+          : (err?.message ?? 'Could not load the appointment history.');
+      }
+    }
+
+    if (wantDocument) {
+      try {
+        selectedDocument = await currentVersion(d, wantDocument, asAt, principal);
+        selectedVersions = selectedDocument.status === 'document_not_registered'
+          ? []
+          : await documentHistory(d, wantDocument, principal);
+      } catch (err: any) {
+        selectedDocumentError = err?.message ?? 'Could not load that document.';
+      }
+    }
+
+    if (Number.isFinite(wantMeeting) && wantMeeting > 0) {
+      // Scope is applied IN the query: an id outside the caller's scope returns
+      // no row at all, so knowing the id is never enough (§53 IDOR).
+      const row = (await d.select({
+        id: s.meetings.id, code: s.meetings.code, title: s.meetings.title, kind: s.meetings.kind,
+        status: s.meetings.status, heldOn: s.meetings.heldOn, venue: s.meetings.venue,
+        noticeIssuedOn: s.meetings.noticeIssuedOn,
+        quorumRequired: s.meetings.quorumRequired, quorumPresent: s.meetings.quorumPresent,
+        quorumMet: s.meetings.quorumMet, committeeName: s.committees.name,
+        committeeQuorum: s.committees.quorum,
+      }).from(s.meetings)
+        .leftJoin(s.committees, eq(s.meetings.committeeId, s.committees.id))
+        .where(where ? and(eq(s.meetings.id, wantMeeting), where) : eq(s.meetings.id, wantMeeting))
+        .limit(1))[0];
+
+      if (!row) {
+        meetingLookupNote = `No meeting with identifier ${wantMeeting} is on record within your scope. This is not a report that no such meeting exists.`;
+      } else {
+        selectedMeeting = row;
+        selectedResolutions = await d.select().from(s.resolutions)
+          .where(eq(s.resolutions.meetingId, wantMeeting))
+          .orderBy(asc(s.resolutions.number), asc(s.resolutions.id));
+        selectedActions = await d.select().from(s.actionItems)
+          .where(eq(s.actionItems.meetingId, wantMeeting))
+          .orderBy(asc(s.actionItems.dueOn), asc(s.actionItems.id));
+      }
+    }
+  } catch (err: any) {
+    loadError = err?.message ?? 'The governance record could not be read.';
+  }
+}
+
+const signedInAs = identity
+  ? identity.shared
+    ? `${identity.principal.label} — shared credential (${identity.via}), not attributable to a person`
+    : `${identity.principal.label} — personal account #${identity.userId}`
+  : '';
+
+function scopeLabel(t: string, id: number | null): string {
+  if (t === 'national') return 'National';
+  return `${t.charAt(0).toUpperCase()}${t.slice(1)} #${id ?? '—'}`;
+}
+---
+
+<Base title="MMAKF Admin — Governance" showNav={false} showFooter={false}>
+  {!identity ? (
+    <section class="signin-wrap">
+      <div class="signin-box">
+        <div class="signin-brand">
+          <div class="signin-brand-1">MMAKF</div>
+          <div class="signin-brand-2">Governance</div>
+        </div>
+        <form id="loginForm" class="card signin-card">
+          <h1 class="card-title signin-h">Sign in</h1>
+          <label class="input-label" for="login-email">Email address</label>
+          <input class="input" type="email" id="login-email" name="email" autocomplete="username"
+                 autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="you@mmakf.in" />
+          <label class="input-label" for="login-password" style="margin-top:14px">Password</label>
+          <input class="input" type="password" id="login-password" name="password" autocomplete="current-password" required />
+          <div id="loginErr" role="alert" class="signin-err" hidden></div>
+          <button type="submit" class="btn btn-primary signin-btn">Sign in</button>
+          <p class="signin-note">Authorised personnel only. Every governance record is written against the credential used to make it.</p>
+        </form>
+      </div>
+    </section>
+  ) : (
+    <div class="admin-wrap">
+      <aside class="admin-side">
+        <div class="admin-brand">
+          <div class="admin-brand-1">MMAKF</div>
+          <div class="admin-brand-2">Governance</div>
+        </div>
+        <nav class="admin-nav" aria-label="Governance sections">
+          <a href="#committees">Committees &amp; office</a>
+          <a href="#documents">Official documents</a>
+          <a href="#meetings">Meetings &amp; resolutions</a>
+          <a href="#actions">Action items</a>
+          <a href="#interests">Conflicts of interest</a>
+          <a href="/admin/approvals" class="nav-sep">Two-person approvals →</a>
+          <a href="/admin/cases">Cases →</a>
+          <a href="/admin/queue">Approval queue →</a>
+          <a href="/admin">← Content admin</a>
+        </nav>
+        <div class="admin-foot">
+          <button class="btn btn-ghost admin-foot-btn" id="logoutBtn">Logout</button>
+        </div>
+      </aside>
+
+      <main class="admin-main">
+        <header class="admin-panel admin-panel-first">
+          <h1 class="admin-h">Governance</h1>
+          <p class="admin-sub">
+            Who held office, under which document, decided at which meeting, and whether that meeting
+            was entitled to decide it. Every question here is a question about a date in the past, so
+            every panel is answered as at a date rather than from a status column.
+          </p>
+          <p class="g-signed">Signed in as {signedInAs}</p>
+
+          <form class="g-asat" method="get" action="/admin/governance">
+            <label class="input-label" for="asAt">Answer everything as at</label>
+            <div class="g-asat-row">
+              <input class="input" type="date" id="asAt" name="asAt" value={asAt} />
+              <button type="submit" class="btn btn-ghost g-asat-btn">Apply</button>
+            </div>
+            <p class="g-hint">Past dates are answered from the record that applied then, not from today's rows.</p>
+          </form>
+
+          {!configured && (
+            <div class="g-warn" role="alert">
+              <strong>The federation database is not configured on this deployment.</strong>
+              Governance records live in Postgres, and there is none to read or write until
+              <code> DATABASE_URL</code> is set. Nothing below is being hidden — there is nothing to show,
+              and every control has been withheld rather than offered in a state where it cannot work.
+            </div>
+          )}
+          {configured && !mayRead && (
+            <div class="g-warn" role="alert">
+              <strong>Your credential does not hold <code>unit:read</code> in any scope.</strong>
+              The governance record is not readable with it. This is a statement about your authority,
+              not about whether the federation holds any records.
+            </div>
+          )}
+          {loadError && (
+            <div class="g-warn" role="alert"><strong>The governance record could not be read.</strong> {loadError}</div>
+          )}
+          {configured && mayRead && !mayWrite && (
+            <div class="g-warn g-warn-soft">
+              <strong>Read only.</strong> Your credential holds <code>unit:read</code> but not
+              <code> unit:write</code>, so no recording control is offered below — a button the server
+              would refuse is worse than no button.
+            </div>
+          )}
+          {scopes.kind === 'scoped' && (
+            <div class="g-warn g-warn-soft">
+              <strong>Scope limited.</strong> You hold <code>unit:read</code> in specific state, district or
+              dojo scopes only, so national committees and national meetings are not listed. An empty
+              panel below means nothing visible to you — not nothing on record.
+            </div>
+          )}
+        </header>
+
+        {configured && mayRead && (
+          <>
+          <!-- ─── Committees ─────────────────────────────────────────── -->
+          <section class="admin-panel" id="committees">
+            <h2 class="admin-h2">Committees and office</h2>
+            <p class="admin-sub">
+              A committee with no appointment in force on {asAt} reads <strong>VACANT</strong>. A committee
+              identifier that is on no record at all reads <strong>NOT CONFIGURED</strong>. They are
+              different facts and are never rendered the same way.
+            </p>
+
+            {committees.length === 0 ? (
+              <p class="g-empty">No committee is on record within your scope. This is not a report that the federation has none.</p>
+            ) : (
+              <div class="tbl-scroll">
+                <table class="g-tbl">
+                  <caption class="g-cap">Committees on record, as at {asAt}</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Committee</th><th scope="col">Kind</th><th scope="col">Scope</th>
+                      <th scope="col">Quorum</th><th scope="col">Office on {asAt}</th><th scope="col"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {committees.map((c) => (
+                      <tr>
+                        <td><strong>{c.name}</strong><br /><span class="g-mono">{c.code}</span>{!c.active && <span class="g-tag g-tag-off">inactive</span>}</td>
+                        <td>{c.kind}</td>
+                        <td>{scopeLabel(c.scopeType, c.scopeId)}</td>
+                        <td>
+                          {c.quorum == null
+                            ? <span class="g-tag g-tag-unset">NOT CONFIGURED</span>
+                            : <span>{c.quorum}</span>}
+                        </td>
+                        <td>
+                          {office[c.id]?.status === 'filled'
+                            ? <span class="g-tag g-tag-ok">{office[c.id].holders.length} in post</span>
+                            : office[c.id]?.status === 'vacant'
+                              ? <span class="g-tag g-tag-vacant">VACANT</span>
+                              : <span class="g-tag g-tag-unset">NOT CONFIGURED</span>}
+                        </td>
+                        <td><a class="btn-link" href={`/admin/governance?asAt=${asAt}&committee=${c.id}#committee-detail`}>Open</a></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {committeesTruncated && (
+              <p class="g-hint" role="alert">More than {INDEX_LIMIT} committees are on record within your scope; only the first {INDEX_LIMIT} are listed. This list is INCOMPLETE.</p>
+            )}
+
+            <div id="committee-detail">
+              {selectedCommittee && (
+                <div class="g-detail">
+                  <h3 class="g-h3">
+                    {selectedCommittee.committee ? selectedCommittee.committee.name : `Committee #${wantCommittee}`}
+                    <span class={`g-tag ${selectedCommittee.status === 'filled' ? 'g-tag-ok' : selectedCommittee.status === 'vacant' ? 'g-tag-vacant' : 'g-tag-unset'}`}>
+                      {selectedCommittee.status === 'filled' ? 'IN POST' : selectedCommittee.status === 'vacant' ? 'VACANT' : 'NOT CONFIGURED'}
+                    </span>
+                  </h3>
+                  <p class="g-note">{selectedCommittee.note}</p>
+
+                  {selectedCommittee.holders.length > 0 && (
+                    <div class="tbl-scroll">
+                      <table class="g-tbl">
+                        <caption class="g-cap">Office held on {selectedCommittee.asAt}</caption>
+                        <thead><tr><th scope="col">Office</th><th scope="col">Holder</th><th scope="col">Term</th><th scope="col">Appointed under</th><th scope="col">Appointment</th></tr></thead>
+                        <tbody>
+                          {selectedCommittee.holders.map((h) => (
+                            <tr>
+                              <td>{h.office}</td>
+                              <td>{h.fullName}<br /><span class="g-mono">{h.federationId}</span></td>
+                              <td>{h.termFrom} → {h.termTo ?? <span class="g-tag g-tag-unset">no end date recorded</span>}</td>
+                              <td>{h.appointedUnder ?? <span class="g-muted">not recorded</span>}</td>
+                              <td class="g-mono">#{h.appointmentId}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {selectedRosterError
+                    ? <p class="g-note" role="alert">{selectedRosterError}</p>
+                    : selectedRoster.length > 0 && (
+                      <details class="g-details">
+                        <summary>Full appointment history ({selectedRoster.length}) — including ended and voided terms</summary>
+                        <div class="tbl-scroll">
+                          <table class="g-tbl">
+                            <thead><tr><th scope="col">Office</th><th scope="col">Holder</th><th scope="col">Term</th><th scope="col">Status</th><th scope="col">Why it ended</th></tr></thead>
+                            <tbody>
+                              {selectedRoster.map((r: any) => (
+                                <tr class={r.status === 'void' ? 'g-void' : undefined}>
+                                  <td>{r.office}</td>
+                                  <td>{r.fullName} <span class="g-mono">#{r.appointmentId}</span></td>
+                                  <td>{r.termFrom} → {r.termTo ?? '—'}</td>
+                                  <td>{r.status}</td>
+                                  <td>{r.endedReason ?? <span class="g-muted">—</span>}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <p class="g-hint">A record is never deleted. An ENDED term was genuinely held and still answers past-dated questions; a VOIDED row was entered in error and never described reality.</p>
+                      </details>
+                    )}
+                </div>
+              )}
+            </div>
+
+            {mayWrite && (
+              <div class="g-forms">
+                <details class="g-details">
+                  <summary>Constitute a committee</summary>
+                  <form class="g-form" data-action="committee/constitute">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="cc-code">Code</label><input class="input" id="cc-code" name="code" required placeholder="MMAKF-CTE-EXEC" /></div>
+                      <div><label class="input-label" for="cc-name">Name</label><input class="input" id="cc-name" name="name" required /></div>
+                      <div><label class="input-label" for="cc-kind">Kind</label><input class="input" id="cc-kind" name="kind" required placeholder="executive | technical | standing | ad_hoc" /></div>
+                      <div>
+                        <label class="input-label" for="cc-scopeType">Scope</label>
+                        <select class="input" id="cc-scopeType" name="scopeType">
+                          <option value="national">National</option><option value="state">State</option>
+                          <option value="district">District</option><option value="dojo">Dojo</option>
+                        </select>
+                      </div>
+                      <div><label class="input-label" for="cc-scopeId">Scope unit id</label><input class="input" id="cc-scopeId" name="scopeId" inputmode="numeric" placeholder="leave blank for national" /></div>
+                      <div><label class="input-label" for="cc-quorum">Quorum</label><input class="input" id="cc-quorum" name="quorum" inputmode="numeric" placeholder="leave blank if none is set" /></div>
+                      <div class="g-span"><label class="input-label" for="cc-under">Constituted under</label><input class="input" id="cc-under" name="constitutedUnder" placeholder="the clause or resolution that created it" /></div>
+                      <div class="g-span"><label class="input-label" for="cc-remit">Remit</label><textarea class="input" id="cc-remit" name="remit" rows="2"></textarea></div>
+                    </div>
+                    <p class="g-hint">Leave the quorum blank unless MMAKF has fixed one. Blank is recorded as UNSET, which is not the same as zero.</p>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">Constitute</button>
+                  </form>
+                </details>
+
+                <details class="g-details">
+                  <summary>Set or change a quorum</summary>
+                  <form class="g-form" data-action="committee/quorum">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="cq-id">Committee id</label><input class="input" id="cq-id" name="committeeId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="cq-q">Quorum</label><input class="input" id="cq-q" name="quorum" inputmode="numeric" placeholder="blank clears it back to UNSET" /></div>
+                      <div class="g-span"><label class="input-label" for="cq-auth">Instrument that fixes it</label><input class="input" id="cq-auth" name="authority" required placeholder="bye-law clause or resolution" /></div>
+                    </div>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">Record quorum</button>
+                  </form>
+                </details>
+
+                <details class="g-details">
+                  <summary>Appoint to office</summary>
+                  <form class="g-form" data-action="committee/appoint">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="ca-cid">Committee id</label><input class="input" id="ca-cid" name="committeeId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="ca-pid">Person id</label><input class="input" id="ca-pid" name="personId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="ca-office">Office</label><input class="input" id="ca-office" name="office" required placeholder="chair | secretary | member" /></div>
+                      <div><label class="input-label" for="ca-from">Term from</label><input class="input" type="date" id="ca-from" name="termFrom" required /></div>
+                      <div><label class="input-label" for="ca-to">Term to</label><input class="input" type="date" id="ca-to" name="termTo" /></div>
+                      <div><label class="input-label" for="ca-under">Appointed under</label><input class="input" id="ca-under" name="appointedUnder" placeholder="election | resolution | nomination" /></div>
+                    </div>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">Appoint</button>
+                  </form>
+                </details>
+
+                <details class="g-details">
+                  <summary>End a term, or void an appointment recorded in error</summary>
+                  <form class="g-form" data-action="committee/end-appointment">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="ce-id">Appointment id</label><input class="input" id="ce-id" name="appointmentId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="ce-on">Ended on</label><input class="input" type="date" id="ce-on" name="endedOn" required /></div>
+                      <div class="g-span"><label class="input-label" for="ce-why">Reason</label><input class="input" id="ce-why" name="reason" required /></div>
+                    </div>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">End term</button>
+                  </form>
+                  <form class="g-form" data-action="committee/void-appointment">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="cv-id">Appointment id</label><input class="input" id="cv-id" name="appointmentId" inputmode="numeric" required /></div>
+                      <div class="g-span"><label class="input-label" for="cv-why">Reason it never described reality</label><input class="input" id="cv-why" name="reason" required /></div>
+                    </div>
+                    <p class="g-hint">Voiding says the appointment never happened, and excludes it at every date. Ending says the term was genuinely held and stopped. The row is not deleted either way.</p>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-ghost g-submit">Void appointment</button>
+                  </form>
+                </details>
+              </div>
+            )}
+          </section>
+
+          <!-- ─── Documents ──────────────────────────────────────────── -->
+          <section class="admin-panel" id="documents">
+            <h2 class="admin-h2">Official documents</h2>
+            <p class="admin-sub">
+              A published version is never edited. A revision creates a new version and closes the old
+              one's effective window — the superseded text stays exactly as published, because a rule
+              that applied in 2026 has to remain readable in the form it had in 2026.
+            </p>
+            {!mayReadDocs && (
+              <p class="g-hint">Your credential does not hold <code>content:read</code>, so only documents the federation has classified as public are listed, and unadopted drafts are not shown.</p>
+            )}
+
+            {documents.length === 0 ? (
+              <p class="g-empty">No document is registered that your credential may see. This is not a report that the federation has no rules — it is a report that none is on record here.</p>
+            ) : (
+              <div class="tbl-scroll">
+                <table class="g-tbl">
+                  <thead><tr><th scope="col">Document</th><th scope="col">Category</th><th scope="col">Classification</th><th scope="col"></th></tr></thead>
+                  <tbody>
+                    {documents.map((doc) => (
+                      <tr>
+                        <td><strong>{doc.title}</strong><br /><span class="g-mono">{doc.code}</span>{!doc.active && <span class="g-tag g-tag-off">inactive</span>}</td>
+                        <td>{doc.category}</td>
+                        <td>{doc.classification}</td>
+                        <td><a class="btn-link" href={`/admin/governance?asAt=${asAt}&document=${encodeURIComponent(doc.code)}#document-detail`}>Versions</a></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {documentsTruncated && <p class="g-hint" role="alert">More than {INDEX_LIMIT} documents are registered; only the first {INDEX_LIMIT} are listed.</p>}
+
+            <div id="document-detail">
+              {selectedDocumentError && <p class="g-note" role="alert">{selectedDocumentError}</p>}
+              {selectedDocument && (
+                <div class="g-detail">
+                  <h3 class="g-h3">{selectedDocument.documentCode}</h3>
+                  <p class="g-note">{selectedDocument.note}</p>
+                  {selectedVersions.length === 0 ? (
+                    <p class="g-empty">No version of this document is on record.</p>
+                  ) : (
+                    <div class="tbl-scroll">
+                      <table class="g-tbl">
+                        <caption class="g-cap">Every version, newest first. Superseded versions stay readable.</caption>
+                        <thead><tr><th scope="col">Version</th><th scope="col">Status</th><th scope="col">In force</th><th scope="col">Approved</th><th scope="col">SHA-256</th></tr></thead>
+                        <tbody>
+                          {selectedVersions.map((v: any) => (
+                            <tr class={selectedDocument && selectedDocument.version && v.id === selectedDocument.version.id ? 'g-inforce' : undefined}>
+                              <td>
+                                <strong>{v.version}</strong>
+                                {selectedDocument && selectedDocument.version && v.id === selectedDocument.version.id && <span class="g-tag g-tag-ok">in force on {asAt}</span>}
+                              </td>
+                              <td>{v.status}</td>
+                              <td>{v.effectiveFrom ?? <span class="g-muted">no start date</span>} → {v.effectiveTo ?? <span class="g-muted">no end date recorded</span>}</td>
+                              <td>{v.approvedOn ?? <span class="g-muted">—</span>}{v.approvedUnder ? <><br /><span class="g-muted">{v.approvedUnder}</span></> : null}</td>
+                              <td>{v.fileSha256
+                                ? <span class="g-mono g-hash">{v.fileSha256}</span>
+                                : <span class="g-tag g-tag-unset">NO CHECKSUM RECORDED</span>}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <p class="g-hint">A version with no checksum cannot be proved to be the file that was published. That is not a pass.</p>
+                </div>
+              )}
+            </div>
+
+            {mayWriteDocs && (
+              <div class="g-forms">
+                <details class="g-details">
+                  <summary>Register a document</summary>
+                  <form class="g-form" data-action="document/register">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="dr-code">Code</label><input class="input" id="dr-code" name="code" required placeholder="MMAKF-DOC-CONST" /></div>
+                      <div><label class="input-label" for="dr-title">Title</label><input class="input" id="dr-title" name="title" required /></div>
+                      <div><label class="input-label" for="dr-cat">Category</label><input class="input" id="dr-cat" name="category" required placeholder="constitution | byelaw | policy | regulation | form" /></div>
+                      <div>
+                        <label class="input-label" for="dr-class">Classification</label>
+                        <select class="input" id="dr-class" name="classification">
+                          <option value="">use the default (public)</option>
+                          <option value="public">public</option><option value="member">member</option>
+                          <option value="official">official</option><option value="restricted">restricted</option>
+                          <option value="confidential">confidential</option>
+                        </select>
+                      </div>
+                      <div class="g-span"><label class="input-label" for="dr-sum">Summary</label><textarea class="input" id="dr-sum" name="summary" rows="2"></textarea></div>
+                    </div>
+                    <p class="g-hint">Registering the document carries no content. Versions carry the content, and each is hashed when it is published.</p>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">Register</button>
+                  </form>
+                </details>
+
+                <details class="g-details">
+                  <summary>Publish a version</summary>
+                  <form class="g-form" data-action="document/publish">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="dp-code">Document code</label><input class="input" id="dp-code" name="documentCode" required /></div>
+                      <div><label class="input-label" for="dp-ver">Version</label><input class="input" id="dp-ver" name="version" required placeholder="1.0 or 2026-01" /></div>
+                      <div><label class="input-label" for="dp-from">Effective from</label><input class="input" type="date" id="dp-from" name="effectiveFrom" required /></div>
+                      <div><label class="input-label" for="dp-to">Effective to</label><input class="input" type="date" id="dp-to" name="effectiveTo" /></div>
+                      <div><label class="input-label" for="dp-on">Approved on</label><input class="input" type="date" id="dp-on" name="approvedOn" /></div>
+                      <div><label class="input-label" for="dp-under">Approved under</label><input class="input" id="dp-under" name="approvedUnder" placeholder="the resolution that adopted it" /></div>
+                      <div class="g-span"><label class="input-label" for="dp-url">File URL</label><input class="input" type="url" id="dp-url" name="fileUrl" /></div>
+                      <div class="g-span"><label class="input-label" for="dp-body">Text as published</label><textarea class="input" id="dp-body" name="bodyMarkdown" rows="8"></textarea></div>
+                    </div>
+                    <p class="g-hint">
+                      The checksum is taken over exactly the text stored here. Only the text form is offered:
+                      routing a binary file through this page would hash a transcoding of it rather than the
+                      bytes a reader downloads, which would certify the wrong thing.
+                    </p>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">Publish version</button>
+                  </form>
+                </details>
+              </div>
+            )}
+          </section>
+
+          <!-- ─── Meetings ───────────────────────────────────────────── -->
+          <section class="admin-panel" id="meetings">
+            <h2 class="admin-h2">Meetings and resolutions</h2>
+            <p class="admin-sub">
+              Quorum is configuration. Where none was configured on the day, this page reports that
+              whether the meeting was quorate is <strong>NOT KNOWN</strong>. It does not report the
+              meeting as quorate, and it does not report it as inquorate — neither is a finding the
+              federation has made.
+            </p>
+
+            {meetings.length === 0 ? (
+              <p class="g-empty">No meeting is on record within your scope.</p>
+            ) : (
+              <div class="tbl-scroll">
+                <table class="g-tbl">
+                  <thead><tr><th scope="col">Meeting</th><th scope="col">Committee</th><th scope="col">Held on</th><th scope="col">Quorum</th><th scope="col"></th></tr></thead>
+                  <tbody>
+                    {meetings.map((m) => (
+                      <tr>
+                        <td><strong>{m.title}</strong><br /><span class="g-mono">{m.code}</span> · {m.kind} · {m.status}</td>
+                        <td>{m.committeeName ?? <span class="g-muted">no committee — a national act</span>}</td>
+                        <td>{m.heldOn ?? <span class="g-muted">not recorded</span>}</td>
+                        <td>
+                          {m.quorumRequired == null
+                            ? <span class="g-tag g-tag-unset">NOT CONFIGURED</span>
+                            : m.quorumMet === true
+                              ? <span class="g-tag g-tag-ok">quorate {m.quorumPresent}/{m.quorumRequired}</span>
+                              : m.quorumMet === false
+                                ? <span class="g-tag g-tag-bad">NOT quorate {m.quorumPresent}/{m.quorumRequired}</span>
+                                : <span class="g-tag g-tag-unset">not counted (needs {m.quorumRequired})</span>}
+                        </td>
+                        <td><a class="btn-link" href={`/admin/governance?asAt=${asAt}&meeting=${m.id}#meeting-detail`}>Open</a></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {meetingsTruncated && <p class="g-hint" role="alert">More than {INDEX_LIMIT} meetings are on record within your scope; only the most recent {INDEX_LIMIT} are listed.</p>}
+
+            <div id="meeting-detail">
+              {meetingLookupNote && <p class="g-note" role="alert">{meetingLookupNote}</p>}
+              {selectedMeeting && (
+                <div class="g-detail">
+                  <h3 class="g-h3">{selectedMeeting.title} <span class="g-mono">{selectedMeeting.code}</span></h3>
+                  <dl class="g-dl">
+                    <div><dt>Committee</dt><dd>{selectedMeeting.committeeName ?? 'None — a national act'}</dd></div>
+                    <div><dt>Held on</dt><dd>{selectedMeeting.heldOn ?? 'not recorded'}</dd></div>
+                    <div><dt>Venue</dt><dd>{selectedMeeting.venue ?? 'not recorded'}</dd></div>
+                    <div><dt>Notice issued</dt><dd>{selectedMeeting.noticeIssuedOn ?? 'not recorded'}</dd></div>
+                  </dl>
+                  <p class="g-note">
+                    {selectedMeeting.quorumRequired == null
+                      ? `No quorum was configured for this meeting when it was opened, so whether it was quorate is NOT KNOWN.${selectedMeeting.committeeQuorum != null ? ` A quorum of ${selectedMeeting.committeeQuorum} is now on record for the committee, but it was not then and is NOT applied to this meeting.` : ''}`
+                      : selectedMeeting.quorumMet === null
+                        ? `A quorum of ${selectedMeeting.quorumRequired} applies to this meeting, and the room has not been counted. Whether it was quorate is NOT KNOWN.`
+                        : selectedMeeting.quorumMet
+                          ? `${selectedMeeting.quorumPresent} present against a quorum of ${selectedMeeting.quorumRequired}. Quorate.`
+                          : `${selectedMeeting.quorumPresent} present against a quorum of ${selectedMeeting.quorumRequired}. NOT quorate — decisions taken are challengeable.`}
+                  </p>
+
+                  <h4 class="g-h4">Resolutions</h4>
+                  {selectedResolutions.length === 0 ? (
+                    <p class="g-empty">No resolution is recorded for this meeting.</p>
+                  ) : (
+                    <div class="tbl-scroll">
+                      <table class="g-tbl">
+                        <thead><tr><th scope="col">No.</th><th scope="col">Resolution</th><th scope="col">Outcome</th><th scope="col">For / against / abstain</th><th scope="col">Effective</th></tr></thead>
+                        <tbody>
+                          {selectedResolutions.map((r: any) => (
+                            <tr>
+                              <td class="g-mono">{r.number}</td>
+                              <td>{r.text}</td>
+                              <td>{r.outcome}</td>
+                              <td>{r.votesFor ?? '—'} / {r.votesAgainst ?? '—'} / {r.abstentions ?? '—'}</td>
+                              <td>{r.effectiveFrom ?? <span class="g-muted">—</span>}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  <h4 class="g-h4">Action items from this meeting</h4>
+                  {selectedActions.length === 0 ? (
+                    <p class="g-empty">No action item arises from this meeting.</p>
+                  ) : (
+                    <div class="tbl-scroll">
+                      <table class="g-tbl">
+                        <thead><tr><th scope="col">Id</th><th scope="col">Action</th><th scope="col">Owner</th><th scope="col">Due</th><th scope="col">Status</th></tr></thead>
+                        <tbody>
+                          {selectedActions.map((a: any) => (
+                            <tr>
+                              <td class="g-mono">#{a.id}</td>
+                              <td>{a.description}</td>
+                              <td>{a.ownerPersonId ?? <span class="g-tag g-tag-unset">NO OWNER</span>}</td>
+                              <td>{a.dueOn ?? <span class="g-tag g-tag-unset">NO DUE DATE</span>}</td>
+                              <td>{a.status}{a.completedOn ? ` on ${a.completedOn}` : ''}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {mayWrite && (
+              <div class="g-forms">
+                <details class="g-details">
+                  <summary>Open a meeting</summary>
+                  <form class="g-form" data-action="meeting/open">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="mo-code">Code</label><input class="input" id="mo-code" name="code" required /></div>
+                      <div><label class="input-label" for="mo-title">Title</label><input class="input" id="mo-title" name="title" required /></div>
+                      <div><label class="input-label" for="mo-kind">Kind</label><input class="input" id="mo-kind" name="kind" required placeholder="agm | egm | executive | committee" /></div>
+                      <div><label class="input-label" for="mo-cid">Committee id</label><input class="input" id="mo-cid" name="committeeId" inputmode="numeric" placeholder="blank for an AGM or EGM" /></div>
+                      <div><label class="input-label" for="mo-held">Held on</label><input class="input" type="date" id="mo-held" name="heldOn" required /></div>
+                      <div><label class="input-label" for="mo-notice">Notice issued on</label><input class="input" type="date" id="mo-notice" name="noticeIssuedOn" /></div>
+                      <div><label class="input-label" for="mo-chair">Chair person id</label><input class="input" id="mo-chair" name="chairPersonId" inputmode="numeric" /></div>
+                      <div><label class="input-label" for="mo-venue">Venue</label><input class="input" id="mo-venue" name="venue" /></div>
+                    </div>
+                    <p class="g-hint">The committee's quorum is frozen onto the meeting as it stands today, so a bye-law changed later cannot decide whether this meeting was competent.</p>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">Open meeting</button>
+                  </form>
+                </details>
+
+                <details class="g-details">
+                  <summary>Record attendance, then count the room</summary>
+                  <form class="g-form" data-action="meeting/attendance">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="ma-mid">Meeting id</label><input class="input" id="ma-mid" name="meetingId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="ma-pid">Person id</label><input class="input" id="ma-pid" name="personId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="ma-role">Role at the meeting</label><input class="input" id="ma-role" name="role" /></div>
+                      <div><label class="input-label" for="ma-proxy">Holds proxy for person id</label><input class="input" id="ma-proxy" name="proxyForPersonId" inputmode="numeric" /></div>
+                      <div class="g-check"><input type="checkbox" id="ma-present" name="present" checked /><label for="ma-present">Present</label></div>
+                      <div class="g-check"><input type="checkbox" id="ma-apol" name="apologies" /><label for="ma-apol">Apologies received</label></div>
+                    </div>
+                    <p class="g-hint">Proxies are counted and reported but are NOT added to the headcount. Whether a proxy counts towards quorum is a constitutional question this system does not answer.</p>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">Record attendance</button>
+                  </form>
+                  <form class="g-form" data-action="meeting/quorum">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="mq-mid">Meeting id</label><input class="input" id="mq-mid" name="meetingId" inputmode="numeric" required /></div>
+                    </div>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-ghost g-submit">Count the room</button>
+                  </form>
+                </details>
+
+                <details class="g-details">
+                  <summary>Move a resolution</summary>
+                  <form class="g-form" data-action="meeting/resolution">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="mr-mid">Meeting id</label><input class="input" id="mr-mid" name="meetingId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="mr-no">Resolution number</label><input class="input" id="mr-no" name="number" required /></div>
+                      <div>
+                        <label class="input-label" for="mr-out">Outcome as declared by the meeting</label>
+                        <select class="input" id="mr-out" name="outcome" required>
+                          <option value="">choose…</option>
+                          <option value="carried">carried</option><option value="rejected">rejected</option>
+                          <option value="withdrawn">withdrawn</option><option value="deferred">deferred</option>
+                        </select>
+                      </div>
+                      <div><label class="input-label" for="mr-eff">Effective from</label><input class="input" type="date" id="mr-eff" name="effectiveFrom" /></div>
+                      <div><label class="input-label" for="mr-for">Votes for</label><input class="input" id="mr-for" name="votesFor" inputmode="numeric" /></div>
+                      <div><label class="input-label" for="mr-ag">Votes against</label><input class="input" id="mr-ag" name="votesAgainst" inputmode="numeric" /></div>
+                      <div><label class="input-label" for="mr-abs">Abstentions</label><input class="input" id="mr-abs" name="abstentions" inputmode="numeric" /></div>
+                      <div><label class="input-label" for="mr-moved">Moved by person id</label><input class="input" id="mr-moved" name="movedByPersonId" inputmode="numeric" /></div>
+                      <div><label class="input-label" for="mr-sec">Seconded by person id</label><input class="input" id="mr-sec" name="secondedByPersonId" inputmode="numeric" /></div>
+                      <div class="g-span"><label class="input-label" for="mr-text">The words that were moved</label><textarea class="input" id="mr-text" name="text" rows="4" required></textarea></div>
+                    </div>
+                    <p class="g-hint">The outcome is stated by the meeting, never computed from the vote counts — whether a motion carries on a simple or a two-thirds majority is constitutional policy. Where the numbers do not obviously support the outcome, the server flags it and says so.</p>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">Record resolution</button>
+                  </form>
+                </details>
+              </div>
+            )}
+          </section>
+
+          <!-- ─── Action items ───────────────────────────────────────── -->
+          <section class="admin-panel" id="actions">
+            <h2 class="admin-h2">Action items</h2>
+            {actions ? (
+              <>
+                <p class="admin-sub">{actions.note}</p>
+                {actions.scope === 'scoped' && <p class="g-hint">Limited to the committees within your scope. An empty list means nothing overdue that you may see.</p>}
+
+                <h3 class="g-h3">Overdue at {actions.asAt} ({actions.overdue.length})</h3>
+                {actions.overdue.length === 0 ? <p class="g-empty">No open action is past its due date.</p> : (
+                  <div class="tbl-scroll">
+                    <table class="g-tbl">
+                      <thead><tr><th scope="col">Action</th><th scope="col">Owner</th><th scope="col">Due</th><th scope="col">Days over</th><th scope="col">Meeting</th></tr></thead>
+                      <tbody>
+                        {actions.overdue.map((a: any) => (
+                          <tr>
+                            <td><span class="g-mono">#{a.id}</span> {a.description}</td>
+                            <td>{a.ownerName ?? <span class="g-tag g-tag-unset">NO OWNER</span>}</td>
+                            <td>{a.dueOn}</td>
+                            <td><span class="g-tag g-tag-bad">{a.daysOverdue}</span></td>
+                            <td>{a.meetingCode ? <a class="btn-link" href={`/admin/governance?asAt=${asAt}&meeting=${a.meetingId}#meeting-detail`}>{a.meetingCode}</a> : <span class="g-muted">—</span>}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                <h3 class="g-h3">Open with no due date ({actions.undated.length})</h3>
+                <p class="g-hint">Listed separately rather than omitted. An action nobody dated can never be overdue, and is not therefore an action nobody has to do.</p>
+                {actions.undated.length === 0 ? <p class="g-empty">Every open action carries a due date.</p> : (
+                  <ul class="g-list">
+                    {actions.undated.map((a: any) => (
+                      <li><span class="g-mono">#{a.id}</span> {a.description} — {a.ownerName ?? 'no owner recorded'}</li>
+                    ))}
+                  </ul>
+                )}
+
+                <h3 class="g-h3">Open with no owner ({actions.unowned.length})</h3>
+                {actions.unowned.length === 0 ? <p class="g-empty">Every open action has an owner.</p> : (
+                  <ul class="g-list">
+                    {actions.unowned.map((a: any) => (
+                      <li><span class="g-mono">#{a.id}</span> {a.description} — due {a.dueOn ?? 'not dated'}</li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            ) : <p class="g-empty">No action-item report is available.</p>}
+
+            {mayWrite && (
+              <div class="g-forms">
+                <details class="g-details">
+                  <summary>Raise or complete an action item</summary>
+                  <form class="g-form" data-action="action/raise">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="ar-mid">Meeting id</label><input class="input" id="ar-mid" name="meetingId" inputmode="numeric" /></div>
+                      <div><label class="input-label" for="ar-rid">Resolution id</label><input class="input" id="ar-rid" name="resolutionId" inputmode="numeric" /></div>
+                      <div><label class="input-label" for="ar-owner">Owner person id</label><input class="input" id="ar-owner" name="ownerPersonId" inputmode="numeric" /></div>
+                      <div><label class="input-label" for="ar-due">Due on</label><input class="input" type="date" id="ar-due" name="dueOn" /></div>
+                      <div class="g-span"><label class="input-label" for="ar-desc">What is to be done</label><textarea class="input" id="ar-desc" name="description" rows="2" required></textarea></div>
+                    </div>
+                    <p class="g-hint">An action must arise from a meeting or a resolution, so the record shows who agreed to it. No owner and no due date are supplied by default — an unowned, undated action is a real failure of governance and is surfaced above rather than hidden behind a guess.</p>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">Raise action</button>
+                  </form>
+                  <form class="g-form" data-action="action/complete">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="ac-id">Action item id</label><input class="input" id="ac-id" name="actionItemId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="ac-on">Completed on</label><input class="input" type="date" id="ac-on" name="completedOn" required /></div>
+                      <div class="g-span"><label class="input-label" for="ac-note">Note</label><input class="input" id="ac-note" name="note" /></div>
+                    </div>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-ghost g-submit">Mark complete</button>
+                  </form>
+                </details>
+              </div>
+            )}
+          </section>
+
+          <!-- ─── Conflicts of interest ──────────────────────────────── -->
+          <section class="admin-panel" id="interests">
+            <h2 class="admin-h2">Declared conflicts of interest</h2>
+            <p class="admin-sub">
+              Check a person before appointing them to a panel, a selection or an examination. The
+              check reports only on what has been <em>declared</em>: "none declared" is an absence of a
+              declaration and is never a finding that no conflict exists.
+            </p>
+
+            {!mayReadPii ? (
+              <p class="g-hint">
+                A declaration is free text about someone's family, money or dojo loyalties, so the register
+                is gated on <code>person:read_pii</code>. Your credential does not hold it, and no control
+                is offered.
+              </p>
+            ) : (
+              <form class="g-form g-form-open" data-action="interest/check" data-render="conflict">
+                <div class="g-grid">
+                  <div><label class="input-label" for="ic-pid">Person to check (id)</label><input class="input" id="ic-pid" name="personId" inputmode="numeric" required /></div>
+                  <div><label class="input-label" for="ic-asat">As at</label><input class="input" type="date" id="ic-asat" name="asAt" value={asAt} /></div>
+                  <div><label class="input-label" for="ic-purpose">Purpose</label><input class="input" id="ic-purpose" name="purpose" placeholder="examiner assignment, selection…" /></div>
+                  <div><label class="input-label" for="ic-people">People involved (ids, comma separated)</label><input class="input" id="ic-people" name="personIds" data-list="int" inputmode="numeric" /></div>
+                  <div><label class="input-label" for="ic-dojos">Dojos involved (ids, comma separated)</label><input class="input" id="ic-dojos" name="dojoIds" data-list="int" inputmode="numeric" /></div>
+                </div>
+                <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                <button type="submit" class="btn btn-primary g-submit">Run the check</button>
+                <div class="g-result" data-conflict-result hidden></div>
+              </form>
+            )}
+
+            {mayWrite && (
+              <div class="g-forms">
+                <details class="g-details">
+                  <summary>Record or withdraw a declaration</summary>
+                  <form class="g-form" data-action="interest/declare">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="id-pid">Person id</label><input class="input" id="id-pid" name="personId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="id-kind">Kind</label><input class="input" id="id-kind" name="kind" required placeholder="family | coaching | financial | dojo | other" /></div>
+                      <div><label class="input-label" for="id-on">Declared on</label><input class="input" type="date" id="id-on" name="declaredOn" required /></div>
+                      <div><label class="input-label" for="id-to">Valid to</label><input class="input" type="date" id="id-to" name="validTo" /></div>
+                      <div><label class="input-label" for="id-rp">Related person id</label><input class="input" id="id-rp" name="relatedPersonId" inputmode="numeric" /></div>
+                      <div><label class="input-label" for="id-rd">Related dojo id</label><input class="input" id="id-rd" name="relatedDojoId" inputmode="numeric" /></div>
+                      <div class="g-span"><label class="input-label" for="id-desc">Describe the interest</label><textarea class="input" id="id-desc" name="description" rows="2" required></textarea></div>
+                    </div>
+                    <p class="g-hint">A declaration naming neither a person nor a dojo is accepted, and is then treated as matching every decision — an interest that cannot be narrowed cannot be ruled out.</p>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-primary g-submit">Record declaration</button>
+                  </form>
+                  <form class="g-form" data-action="interest/withdraw">
+                    <div class="g-grid">
+                      <div><label class="input-label" for="iw-id">Declaration id</label><input class="input" id="iw-id" name="declarationId" inputmode="numeric" required /></div>
+                      <div><label class="input-label" for="iw-on">Ended on</label><input class="input" type="date" id="iw-on" name="endedOn" required /></div>
+                      <div class="g-span"><label class="input-label" for="iw-why">Reason</label><input class="input" id="iw-why" name="reason" required /></div>
+                    </div>
+                    <p class="g-hint">Never deleted. A panel seated in March relied on what stood in March, and closing the window is what keeps that answer true.</p>
+                    <div class="g-ok" hidden></div><div class="g-err" role="alert" hidden></div>
+                    <button type="submit" class="btn btn-ghost g-submit">Withdraw declaration</button>
+                  </form>
+                </details>
+              </div>
+            )}
+          </section>
+          </>
+        )}
+      </main>
+    </div>
+  )}
+</Base>
+
+<script>
+  // Sign-in — present only when the caller is unauthenticated.
+  const loginForm = document.getElementById('loginForm');
+  if (loginForm instanceof HTMLFormElement) {
+    const loginErr = document.getElementById('loginErr');
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (loginErr) loginErr.hidden = true;
+      const fd = new FormData(loginForm);
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(email ? { email, password } : { password }),
+      }).catch(() => null);
+      if (r && r.ok) { location.reload(); return; }
+      const body = r ? await r.json().catch(() => null) : null;
+      if (loginErr) {
+        loginErr.hidden = false;
+        loginErr.textContent = (body && body.error) ? String(body.error) : 'Sign-in failed. Check your details and try again.';
+      }
+    });
+  }
+
+  document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
+    location.reload();
+  });
+
+  // ─── One handler for every recording form ─────────────────────────────────
+  //
+  // The form's `data-action` is the API path. Values are sent as typed, and
+  // every rule about what they must be is applied by the module behind the
+  // endpoint — this never pre-judges a refusal it does not own, and it never
+  // claims a success the server did not report.
+  document.addEventListener('submit', async (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    const action = form.getAttribute('data-action');
+    if (!action) return;
+    event.preventDefault();
+
+    const ok = form.querySelector('.g-ok');
+    const err = form.querySelector('.g-err');
+    const button = form.querySelector('.g-submit');
+    const result = form.querySelector('[data-conflict-result]');
+    if (ok instanceof HTMLElement) { ok.hidden = true; ok.textContent = ''; }
+    if (err instanceof HTMLElement) { err.hidden = true; err.textContent = ''; }
+    if (result instanceof HTMLElement) { result.hidden = true; result.textContent = ''; }
+
+    const payload = {};
+    for (const el of Array.from(form.elements)) {
+      if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement)) continue;
+      if (!el.name) continue;
+      if (el instanceof HTMLInputElement && el.type === 'checkbox') { payload[el.name] = el.checked; continue; }
+      if (el.getAttribute('data-list') === 'int') {
+        payload[el.name] = el.value.split(',').map((x) => x.trim()).filter(Boolean).map(Number);
+        continue;
+      }
+      payload[el.name] = el.value.trim();
+    }
+
+    const label = button instanceof HTMLButtonElement ? button.textContent : '';
+    if (button instanceof HTMLButtonElement) { button.disabled = true; button.textContent = 'Recording…'; }
+
+    const response = await fetch('/api/governance/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(() => null);
+
+    if (button instanceof HTMLButtonElement) { button.disabled = false; button.textContent = label; }
+
+    const fail = (message) => {
+      if (err instanceof HTMLElement) { err.hidden = false; err.textContent = message; }
+    };
+
+    if (!response) { fail('Could not reach the server. NOTHING was recorded. Check your connection and try again.'); return; }
+
+    const body = await response.json().catch(() => null);
+
+    if (response.ok && body && body.ok) {
+      // The conflict check is a read: render what the server found rather than
+      // a success message, because "none declared" is the answer, not a failure.
+      if (form.getAttribute('data-render') === 'conflict' && result instanceof HTMLElement) {
+        const r = body.result || {};
+        const parts = [];
+        parts.push(r.status === 'conflict_found' ? 'CONFLICT FOUND' : r.status === 'declared_no_match' ? 'DECLARED, NO MATCH' : 'NONE DECLARED');
+        parts.push(String(r.note || ''));
+        for (const i of (r.interests || [])) {
+          parts.push('· ' + i.kind + ' — ' + i.description + ' (matched on ' + i.matchedOn + ', declared ' + i.declaredOn + ')');
+        }
+        result.hidden = false;
+        result.textContent = parts.join('\n');
+        result.setAttribute('data-status', String(r.status || ''));
+        return;
+      }
+      if (ok instanceof HTMLElement) {
+        ok.hidden = false;
+        const note = body.result && typeof body.result === 'object' && typeof body.result.note === 'string' ? body.result.note : '';
+        ok.textContent = 'Recorded by the server.' + (note ? ' ' + note : '') + ' Reload the page to see it in the panels above.';
+      }
+      return;
+    }
+
+    let message = (body && body.error) ? String(body.error) : '';
+    if (!message) {
+      if (response.status === 401) message = 'Your session has ended.';
+      else if (response.status === 429) message = 'Too many requests in a short time. Wait a minute and try again.';
+      else message = 'The server refused this (HTTP ' + response.status + ').';
+    }
+    if (response.status === 403 && !(body && body.code === 'forbidden')) {
+      message += ' The request was refused before it reached the governance module — usually a blocked or rewritten request rather than a permissions problem. Reload and try once more.';
+    }
+    fail(message + ' NOTHING was changed.');
+  });
+</script>
+
+<style is:global>
+  body { background: var(--bg); }
+
+  .signin-wrap { min-height: 90vh; display: flex; align-items: center; justify-content: center; padding: 64px 24px; }
+  .signin-box { width: 100%; max-width: 420px; }
+  .signin-brand { text-align: center; margin-bottom: 36px; }
+  .signin-brand-1 { font-family: var(--font-display); font-size: 1.8rem; font-weight: 700; letter-spacing: .06em; }
+  .signin-brand-2 { font-family: var(--font-display); font-size: .7rem; letter-spacing: .22em; text-transform: uppercase; color: var(--gold); margin-top: 6px; }
+  .signin-card { padding: 32px; }
+  .signin-h { font-size: 1.2rem; margin-bottom: 24px; }
+  .signin-err { color: var(--red-2); font-size: .85rem; margin-top: 12px; }
+  .signin-btn { width: 100%; margin-top: 20px; justify-content: center; min-height: 44px; }
+  .signin-note { margin-top: 20px; font-size: .75rem; color: var(--muted); text-align: center; line-height: 1.6; }
+
+  .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  @media (max-width: 800px) { .admin-wrap { grid-template-columns: 1fr; } }
+  .admin-side {
+    background: var(--bg-2); border-right: 1px solid var(--border); padding: 24px 0;
+    display: flex; flex-direction: column; position: sticky; top: 0; align-self: start; height: 100vh;
+  }
+  @media (max-width: 800px) { .admin-side { position: static; height: auto; } }
+  .admin-brand { padding: 0 24px 24px; border-bottom: 1px solid var(--border); }
+  .admin-brand-1 { font-family: var(--font-display); font-size: 1.4rem; font-weight: 700; letter-spacing: .06em; }
+  .admin-brand-2 { font-family: var(--font-display); font-size: .66rem; letter-spacing: .22em; text-transform: uppercase; color: var(--gold); margin-top: 4px; }
+  .admin-nav { flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .admin-nav a {
+    padding: 12px 14px; min-height: 44px; display: flex; align-items: center;
+    font-family: var(--font-display); font-size: .78rem; letter-spacing: .08em;
+    color: var(--off-white); border-radius: var(--radius); transition: all .18s;
+  }
+  .admin-nav a:hover { background: var(--card); color: var(--gold); }
+  .admin-nav .nav-sep { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .admin-foot { padding: 16px; border-top: 1px solid var(--border); }
+  .admin-foot-btn { width: 100%; justify-content: center; min-height: 44px; }
+
+  .admin-main { padding: 32px 36px 64px; max-width: 1100px; }
+  @media (max-width: 600px) { .admin-main { padding: 24px 16px 48px; } }
+  .admin-panel { padding: 36px 0; border-bottom: 1px solid var(--border); scroll-margin-top: 20px; }
+  .admin-panel-first { padding-top: 0; }
+  .admin-h { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; letter-spacing: .02em; }
+  .admin-h2 { font-family: var(--font-display); font-size: 1.2rem; font-weight: 600; letter-spacing: .02em; }
+  .admin-sub { color: var(--muted); font-size: .88rem; margin-top: 6px; line-height: 1.7; }
+
+  .g-signed { margin-top: 14px; font-size: .76rem; letter-spacing: .04em; color: var(--off-white); overflow-wrap: anywhere; }
+  .g-asat { margin-top: 18px; }
+  .g-asat-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .g-asat-row .input { max-width: 200px; }
+  .g-asat-btn { min-height: 44px; }
+  .g-hint { font-size: .78rem; color: var(--muted); line-height: 1.65; margin-top: 8px; }
+  .g-muted { color: var(--muted); }
+  .g-empty { font-size: .86rem; color: var(--muted); margin-top: 12px; font-style: italic; }
+  .g-note { font-size: .85rem; color: var(--off-white); line-height: 1.7; margin-top: 10px; }
+  .g-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .74rem; color: var(--muted); overflow-wrap: anywhere; }
+  .g-hash { font-size: .66rem; }
+
+  .g-warn {
+    margin-top: 16px; background: rgba(142,18,18,.05); border: 1px solid var(--red-3);
+    border-left: 3px solid var(--red); border-radius: var(--radius);
+    padding: 14px 16px; font-size: .85rem; line-height: 1.65; color: var(--off-white);
+  }
+  .g-warn strong { color: var(--red-2); }
+  .g-warn code { font-size: .8rem; }
+  .g-warn-soft { background: var(--card-2); border: 1px solid var(--border); border-left: 3px solid var(--gold-dim); }
+  .g-warn-soft strong { color: var(--gold-3); }
+
+  .g-tbl { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: .84rem; }
+  .g-cap { caption-side: top; text-align: left; font-size: .76rem; color: var(--muted); padding-bottom: 8px; }
+  .g-tbl th, .g-tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .g-tbl th { font-family: var(--font-display); font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+  .g-tbl tr.g-void td { opacity: .55; text-decoration: line-through; }
+  .g-tbl tr.g-inforce td { background: rgba(160,124,30,.06); }
+
+  .g-tag {
+    display: inline-block; font-family: var(--font-display); font-size: .64rem; letter-spacing: .1em;
+    text-transform: uppercase; padding: 3px 8px; border: 1px solid var(--border-2);
+    border-radius: var(--radius); margin-left: 6px; white-space: nowrap;
+  }
+  .g-tag-ok { color: var(--gold-3); border-color: var(--gold-dim); }
+  .g-tag-vacant { color: var(--red-2); border-color: var(--red-3); }
+  .g-tag-unset { color: var(--muted); border-style: dashed; }
+  .g-tag-bad { color: #fff; background: var(--red); border-color: var(--red); }
+  .g-tag-off { color: var(--muted); }
+
+  .g-detail { margin-top: 24px; padding: 20px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
+  .g-h3 { font-family: var(--font-display); font-size: 1.02rem; font-weight: 600; margin-top: 22px; }
+  .g-h4 { font-family: var(--font-display); font-size: .84rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-top: 22px; }
+  .g-dl { margin-top: 12px; display: grid; gap: 8px; }
+  .g-dl div { display: flex; gap: 10px; flex-wrap: wrap; font-size: .84rem; }
+  .g-dl dt { font-family: var(--font-display); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); min-width: 130px; }
+  .g-list { margin-top: 10px; padding-left: 18px; font-size: .84rem; line-height: 1.9; }
+
+  .g-forms { margin-top: 26px; display: grid; gap: 10px; }
+  .g-details { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+  .g-details > summary {
+    cursor: pointer; padding: 14px 16px; min-height: 44px; display: flex; align-items: center;
+    font-family: var(--font-display); font-size: .8rem; letter-spacing: .06em; color: var(--off-white);
+  }
+  .g-details > summary:hover { color: var(--gold-2); }
+  .g-details > *:not(summary) { padding: 0 16px 18px; }
+  .g-form { padding-top: 4px; }
+  .g-form + .g-form { border-top: 1px solid var(--border); padding-top: 18px; }
+  .g-form-open { margin-top: 18px; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+  .g-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .g-span { grid-column: 1 / -1; }
+  .g-check { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+  .g-check input { width: 20px; height: 20px; }
+  .g-check label { font-size: .84rem; }
+  .g-submit { margin-top: 14px; min-height: 44px; }
+  .g-ok { margin-top: 12px; font-size: .84rem; color: var(--gold-3); line-height: 1.65; }
+  .g-err { margin-top: 12px; font-size: .84rem; color: var(--red-2); line-height: 1.65; }
+  .g-result {
+    margin-top: 14px; padding: 14px; background: var(--card-2); border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim); border-radius: var(--radius);
+    font-size: .82rem; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .g-result[data-status="conflict_found"] { border-left-color: var(--red); }
+</style>

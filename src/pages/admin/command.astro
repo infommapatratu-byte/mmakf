@@ -78,8 +78,10 @@ async function attempt<T>(what: string, fn: () => Promise<T>): Promise<Panel<T>>
         state: 'denied',
         value: null,
         message:
-          `Reading ${what} requires the "${err.action}" authority, which this credential does not hold ` +
-          'in any scope. Records may well exist here; they are simply not yours to read.',
+          `Reading ${what} requires the "${err.action}" authority in the scope it covers, and this ` +
+          'credential does not hold it there. A scoped binding is not a narrower version of this ' +
+          'answer — it is a different one. Records may well exist here; they are simply not yours ' +
+          'to read.',
       };
     }
     if (err && SPEAKING_ERRORS.has(String(err.name)) && typeof err.message === 'string') {

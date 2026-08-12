@@ -323,7 +323,12 @@ export const quizzes = pgTable('quizzes', {
   lessonId: integer('lesson_id').references(() => lessons.id),
   courseId: integer('course_id').notNull().references(() => courses.id),
   title: text('title').notNull(),
-  passMarkPercent: integer('pass_mark_percent').notNull().default(60),
+  // NULLABLE, and no default. 60% was not a number MMAKF approved, and while a
+  // NOT NULL DEFAULT 60 stood, "the federation has not set a pass mark" was
+  // literally unrepresentable in the database — every quiz silently acquired a
+  // marking threshold nobody wrote. An unset pass mark now records the attempt
+  // UNGRADED for a human to decide, which is the honest outcome.
+  passMarkPercent: integer('pass_mark_percent'),
   attemptsAllowed: integer('attempts_allowed'),
   timeLimitMinutes: integer('time_limit_minutes'),
 }, (t) => ({ courseIdx: index('quizzes_course_idx').on(t.courseId) }));

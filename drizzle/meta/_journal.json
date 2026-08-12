@@ -29,6 +29,13 @@
       "when": 1786512236308,
       "tag": "0003_federation_domains",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786512236309,
+      "tag": "0004_quiz_pass_mark_nullable",
+      "breakpoints": true
     }
   ]
 }

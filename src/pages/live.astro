@@ -1,0 +1,646 @@
+---
+// /live — the live classroom.
+//
+// YouTube is the transport; MMAKF is the classroom. Attendance, the question
+// board and the curriculum link live here, in the federation's own records,
+// which is the whole point of not simply linking people to a video.
+//
+// WHAT THIS PAGE WILL NOT DO:
+//
+//  · It will not render a player when there is nothing to play. A live class
+//    with no broadcast id gets the honest sentence, not an empty black box.
+//  · It will not imply that classes appear here by themselves when the YouTube
+//    integration is unconfigured. Detection is what is missing, and that is
+//    what it says.
+//  · It will not list a class the caller may not read. Gating is done by
+//    calling academy.ts's own liveClassQuestions(), whose assertLiveClassReadable
+//    fails closed on an unrecognised visibility — rather than by a copy of that
+//    rule made here, which would drift. A class that is refused is not listed
+//    at all: on a private class the TITLE is itself the thing being protected.
+//  · It will not claim attendance for someone who merely opened the page.
+//    Attendance is recorded when a member joins the class, and the page says
+//    plainly that it is being recorded.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { eq, inArray } from 'drizzle-orm';
+import { canAnywhere, type Principal } from '@/lib/rbac';
+import { liveNow, upcomingClasses, integrationStatus } from '@/lib/youtube';
+import { liveClassQuestions } from '@/db/academy';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+/** Anyone at all. A public class is genuinely open; everything else is not. */
+const ANONYMOUS: Principal = { userId: null, label: 'anonymous', bindings: [] };
+const principal: Principal = identity?.principal ?? ANONYMOUS;
+
+const youtube = integrationStatus();
+// The missing variable names are operational detail. Naming them to the public
+// tells the internet what this deployment is missing; naming them to an editor
+// is how they get fixed.
+const showMissing = canAnywhere(principal, 'content:write');
+
+interface ClassView {
+  id: number;
+  code: string;
+  title: string;
+  visibility: string | null;
+  videoId: string | null;
+  startedAt: unknown;
+  scheduledStartAt: unknown;
+  viewers: number | null;
+  questions: any[];
+}
+
+let personId: number | null = null;
+let liveClasses: ClassView[] = [];
+let upcoming: ClassView[] = [];
+let hiddenLive = 0;
+let hiddenUpcoming = 0;
+let loadError: string | null = null;
+
+if (configured) {
+  if (identity?.userId != null) {
+    const user = (
+      await db().select({ personId: s.users.personId }).from(s.users).where(eq(s.users.id, identity.userId)).limit(1)
+    )[0];
+    personId = user?.personId ?? null;
+  }
+
+  try {
+    const liveRows = await liveNow(db());
+    const upcomingRows = await upcomingClasses(db(), 8);
+
+    // liveNow()/upcomingClasses() publish a class by its CODE, not by a row id.
+    // The id is resolved here so the gate below can be asked about it.
+    const codes = [...new Set([...liveRows, ...upcomingRows].map((c: any) => c.code))];
+    const idRows = codes.length
+      ? await db().select({ id: s.liveClasses.id, code: s.liveClasses.code })
+          .from(s.liveClasses).where(inArray(s.liveClasses.code, codes))
+      : [];
+    const idByCode = new Map<string, number>(idRows.map((r: any) => [r.code, r.id]));
+
+    /**
+     * Readable? Ask the module, never a local copy of its rule.
+     *
+     * liveClassQuestions() runs assertLiveClassReadable() and throws when the
+     * caller may not read the class — so a refusal here is the same refusal the
+     * API would give, and the two cannot drift apart.
+     */
+    async function gate(row: any): Promise<ClassView | null> {
+      const id = idByCode.get(row.code);
+      if (id == null) return null;
+      try {
+        const questions = await liveClassQuestions(db(), { principal }, id);
+        return {
+          id,
+          code: row.code,
+          title: row.title,
+          visibility: row.visibility ?? null,
+          videoId: row.videoId ?? null,
+          startedAt: row.startedAt ?? null,
+          scheduledStartAt: row.scheduledStartAt ?? null,
+          viewers: row.viewers ?? null,
+          questions,
+        };
+      } catch {
+        return null;
+      }
+    }
+
+    const liveGated = await Promise.all(liveRows.map(gate));
+    liveClasses = liveGated.filter((c): c is ClassView => c != null);
+    hiddenLive = liveRows.length - liveClasses.length;
+
+    const upcomingGated = await Promise.all(upcomingRows.map(gate));
+    upcoming = upcomingGated.filter((c): c is ClassView => c != null);
+    hiddenUpcoming = upcomingRows.length - upcoming.length;
+  } catch (err: any) {
+    loadError = String(err?.message ?? err);
+  }
+}
+
+const fmtTime = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? String(v)
+    : d.toLocaleString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+};
+
+const canParticipate = personId != null;
+const signedInButNoPerson = identity != null && personId == null;
+---
+
+<Base
+  title="Live classroom — MMAKF"
+  description="MMAKF live classes: what is streaming now, what is scheduled, and the question board for each class."
+>
+  <section>
+    <div class="container">
+      <div class="section-head" style="margin-bottom:32px">
+        <div class="eyebrow">Classroom</div>
+        <h1 class="display-2" style="margin-top:14px">The live <em class="r">classroom</em>.</h1>
+        <div class="rule"></div>
+        <p class="lead">
+          Classes stream on the federation's channel and are recorded here: who attended, what was asked, and what it
+          belongs to in the curriculum. Attendance records presence at a class. It is not an assessment, not a grade,
+          and it confers no rank.
+        </p>
+      </div>
+
+      {!configured && (
+        <div class="card">
+          <div class="card-title" style="font-size:1rem">The classroom is not available on this deployment</div>
+          <div class="card-body">
+            Classes, attendance and questions are federation records, and no federation database is configured here.
+            Rather than show an empty schedule that might read as "no classes are running", the page states the reason.
+          </div>
+        </div>
+      )}
+
+      {configured && !youtube.ready && (
+        <div class="card" role="note" style="border-left:3px solid var(--gold);margin-bottom:22px">
+          <div class="card-title" style="font-size:.98rem">Automatic broadcast detection is not configured</div>
+          <div class="card-body">
+            A class normally appears here by itself when an authorised teacher goes live. That detection is not
+            configured on this deployment, so nothing new can be discovered — only classes already recorded by the
+            federation are listed below.
+            {showMissing && youtube.missing.length > 0 && (
+              <div class="text-muted" style="font-size:.8rem;margin-top:10px">
+                Missing configuration: {youtube.missing.join(', ')}.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {configured && loadError && (
+        <div class="card" role="alert" style="border-left:3px solid var(--red);margin-bottom:22px">
+          <div class="card-title" style="font-size:.98rem">The class list could not be read</div>
+          <div class="card-body">{loadError}</div>
+        </div>
+      )}
+
+      {configured && signedInButNoPerson && (
+        <div class="card" role="note" style="margin-bottom:22px">
+          <div class="card-body">
+            You are signed in, but this account is not linked to a member record — so there is nobody for attendance or
+            a question to be recorded against. You can watch. Write to
+            <a class="text-gold" href="mailto:admin@mmakf.in"> admin@mmakf.in</a> with your member ID to have the
+            account linked.
+          </div>
+        </div>
+      )}
+
+      {configured && !identity && (
+        <div class="card" role="note" style="margin-bottom:22px">
+          <div class="card-body">
+            You are not signed in, so only classes the federation has made public are listed, your attendance is not
+            recorded, and you cannot ask a question. <a class="text-gold" href="/my">Sign in</a> to take part.
+          </div>
+        </div>
+      )}
+
+      {configured && !loadError && liveClasses.length === 0 && (
+        <div class="card">
+          <div class="card-title" style="font-size:1rem">No class is live right now</div>
+          <div class="card-body">
+            Nothing is streaming at this moment.
+            {hiddenLive > 0 && ` ${hiddenLive} live ${hiddenLive === 1 ? 'class is' : 'classes are'} not open to you and ${hiddenLive === 1 ? 'is' : 'are'} not listed.`}
+          </div>
+        </div>
+      )}
+
+      {liveClasses.map((c) => (
+        <article class="card live-card" data-code={c.code}>
+          <div style="margin-bottom:12px">
+            <span class="pill live"><span class="pill-dot"></span>Live now</span>
+            {c.visibility && <span class="pill" style="margin-left:8px">{c.visibility.replace(/_/g, ' ')}</span>}
+          </div>
+          <h2 class="card-title" style="font-size:1.3rem">{c.title}</h2>
+          <div class="text-muted" style="font-size:.82rem">
+            {`Started ${fmtTime(c.startedAt)} · class ${c.code}${
+              c.viewers != null ? ` · ${c.viewers} concurrent viewers reported by the platform` : ''
+            }`}
+          </div>
+
+          {/* ── The player ─────────────────────────────────────────────── */}
+          {c.videoId ? (
+            <div class="player" data-code={c.code} data-video={c.videoId} data-participate={canParticipate ? '1' : '0'}>
+              <div class="player-gate">
+                <p class="card-body" style="margin-bottom:14px">
+                  {canParticipate
+                    ? 'Joining opens the stream and records your attendance at this class against your member record.'
+                    : 'Joining opens the stream. Your attendance is not recorded, because this browser is not signed in as a member.'}
+                </p>
+                <button type="button" class="btn btn-primary join-class">Join the class</button>
+                <p style="margin-top:12px">
+                  <a class="text-gold" href={`https://www.youtube.com/watch?v=${c.videoId}`} target="_blank" rel="noopener noreferrer">
+                    Or watch on the federation's channel →
+                  </a>
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div class="note">
+              This class is recorded as live, but no broadcast is linked to it, so there is nothing to play. That is a
+              gap in the record rather than a fault in your browser — the federation office can attach the broadcast.
+            </div>
+          )}
+
+          {/* ── The question board ─────────────────────────────────────── */}
+          <section class="qa" data-code={c.code}>
+            <h3 class="module-title">Questions</h3>
+
+            {canParticipate ? (
+              <form class="ask-form" data-code={c.code}>
+                <label class="input-label" for={`ask-${c.id}`}>Ask the teacher</label>
+                <textarea class="input" id={`ask-${c.id}`} name="question" rows="2" maxlength="2000" required></textarea>
+                <div class="ask-error" role="alert" style="display:none;color:var(--red-2);font-size:.85rem;margin-top:10px"></div>
+                <button type="submit" class="btn btn-ghost" style="margin-top:12px;min-height:44px">Send question</button>
+              </form>
+            ) : (
+              <p class="text-muted" style="font-size:.85rem">
+                <a class="text-gold" href="/my">Sign in</a> as a member to ask a question.
+              </p>
+            )}
+
+            <div class="q-list" data-code={c.code}>
+              {c.questions.length === 0 ? (
+                <p class="text-muted" style="font-size:.85rem;margin-top:14px">No question has been asked yet.</p>
+              ) : (
+                c.questions.map((q: any) => (
+                  <div class="q-row">
+                    <div class="q-text">{q.question}</div>
+                    {q.answer && (
+                      <div class="q-answer">
+                        <span class="lesson-kind">Answered</span>
+                        {q.answer}
+                      </div>
+                    )}
+                    <div class="q-meta">
+                      <button
+                        type="button"
+                        class="btn btn-link upvote"
+                        data-question={q.id}
+                        disabled={!canParticipate}
+                      >
+                        Upvote
+                      </button>
+                      <span class="text-muted">{q.upvotes} vote{q.upvotes === 1 ? '' : 's'}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <p class="text-muted" style="font-size:.76rem;margin-top:12px">
+              The vote total counts votes cast, not people: the federation's record holds a counter and no per-person
+              vote, so the same member voting twice is counted twice. It is presented as what it is.
+            </p>
+          </section>
+        </article>
+      ))}
+    </div>
+  </section>
+
+  {configured && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Schedule</div>
+          <h2 class="display-2">Classes <em class="r">coming up</em>.</h2>
+          <div class="rule"></div>
+        </div>
+
+        {upcoming.length === 0 ? (
+          <div class="card">
+            <div class="card-body">
+              No class is scheduled.
+              {hiddenUpcoming > 0 && ` ${hiddenUpcoming} scheduled ${hiddenUpcoming === 1 ? 'class is' : 'classes are'} not open to you and ${hiddenUpcoming === 1 ? 'is' : 'are'} not listed.`}
+            </div>
+          </div>
+        ) : (
+          <div class="grid grid-2">
+            {upcoming.map((c) => (
+              <div class="card">
+                <div style="margin-bottom:10px"><span class="pill upcoming">Scheduled</span></div>
+                <div class="card-title">{c.title}</div>
+                <div class="card-body">
+                  {fmtTime(c.scheduledStartAt)}
+                  <div class="text-muted" style="font-size:.78rem;margin-top:6px">Class {c.code}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <p class="text-muted" style="font-size:.8rem;margin-top:20px;max-width:70ch">
+          A scheduled class opens for attendance when it goes live. Nothing on this page is a recording of what a class
+          will contain — only what the federation has published about it.
+        </p>
+      </div>
+    </section>
+  )}
+</Base>
+
+<style>
+  .live-card { margin-bottom: 26px; }
+
+  .player { margin-top: 20px; }
+  .player-gate {
+    border: 1px solid var(--border);
+    background: var(--card-2);
+    border-radius: var(--radius);
+    padding: 22px;
+  }
+  .player-frame {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .player-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .player-status { font-size: 0.82rem; color: var(--muted); margin-top: 10px; }
+
+  .note {
+    border-left: 3px solid var(--border-2);
+    background: var(--card-2);
+    padding: 14px 16px;
+    border-radius: var(--radius);
+    font-size: 0.86rem;
+    color: var(--off-white);
+    margin-top: 18px;
+    line-height: 1.7;
+  }
+
+  .qa { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .module-title {
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .q-row { padding: 14px 0; border-bottom: 1px solid var(--border); }
+  .q-row:last-child { border-bottom: 0; }
+  .q-text { font-size: 0.92rem; color: var(--white); line-height: 1.7; overflow-wrap: anywhere; }
+  .q-answer {
+    margin-top: 10px;
+    padding-left: 14px;
+    border-left: 2px solid var(--gold-dim);
+    font-size: 0.88rem;
+    color: var(--off-white);
+    line-height: 1.75;
+    overflow-wrap: anywhere;
+  }
+  .lesson-kind {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 0.58rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    margin-bottom: 4px;
+  }
+  .q-meta { display: flex; align-items: center; gap: 14px; margin-top: 10px; }
+  .q-meta .btn-link { min-height: 44px; }
+  .q-meta .btn-link[disabled] { opacity: 0.5; cursor: not-allowed; }
+  .q-meta .text-muted { font-size: 0.78rem; }
+
+  @media (max-width: 640px) {
+    .btn-primary, .btn-ghost { width: 100%; }
+  }
+</style>
+
+<script>
+  // The classroom's client side. Three jobs: open the stream, record attendance
+  // honestly, and keep the question board current.
+
+  type Json = Record<string, any>;
+
+  function escapeHtml(value: unknown): string {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  async function post(action: string, payload: Json, keepalive = false): Promise<{ ok: boolean; data: Json }> {
+    try {
+      const response = await fetch(`/api/academy/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        keepalive,
+      });
+      const data = (await response.json().catch(() => ({}))) as Json;
+      return { ok: response.ok, data };
+    } catch {
+      return { ok: false, data: { error: 'The request could not be sent. Check your connection.' } };
+    }
+  }
+
+  // ── The player ────────────────────────────────────────────────────────────
+  //
+  // The embed is inserted on a click rather than on load, which is what makes
+  // "join" mean something: attendance is recorded for a member who chose to
+  // join, not for anyone who scrolled past.
+  //
+  // If the browser refuses the frame — the site's Content-Security-Policy has
+  // to permit the video host, and a deployment where it does not is entirely
+  // possible — the violation is caught and the player is replaced with the
+  // reason and a working link. An embed that silently renders nothing is the
+  // exact defect this project treats as a fake feature.
+
+  const players = new Map<string, HTMLElement>();
+
+  document.querySelectorAll<HTMLElement>('.player').forEach((player) => {
+    const code = player.dataset.code as string;
+    const videoId = player.dataset.video as string;
+    const participate = player.dataset.participate === '1';
+    players.set(code, player);
+
+    const button = player.querySelector('.join-class') as HTMLButtonElement | null;
+    if (!button) return;
+
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      button.textContent = 'Joining…';
+
+      let statusLine = 'Watching. Your attendance is not being recorded — this browser is not signed in as a member.';
+
+      if (participate) {
+        const result = await post('live-join', { code, watchedSeconds: 0 });
+        if (!result.ok) {
+          const gate = player.querySelector('.player-gate') as HTMLElement;
+          gate.insertAdjacentHTML(
+            'beforeend',
+            `<p role="alert" style="color:var(--red-2);font-size:.86rem;margin-top:12px">${escapeHtml(result.data.error || 'Your attendance could not be recorded.')}</p>`
+          );
+          button.disabled = false;
+          button.textContent = 'Join the class';
+          return;
+        }
+        statusLine = `Your attendance at this class is being recorded. ${escapeHtml(result.data?.threshold?.detail ?? '')}`;
+      }
+
+      const src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?autoplay=1&rel=0`;
+      player.innerHTML =
+        `<div class="player-frame">` +
+        `<iframe src="${src}" title="Live class" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>` +
+        `</div>` +
+        `<p class="player-status">${statusLine}</p>` +
+        `<p style="margin-top:8px"><a class="text-gold" href="https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}" target="_blank" rel="noopener noreferrer">Open on the federation's channel →</a></p>`;
+
+      if (participate) startAttendance(code);
+    });
+  });
+
+  // A blocked frame is reported by the browser. Say so, and keep the link.
+  document.addEventListener('securitypolicyviolation', (event: SecurityPolicyViolationEvent) => {
+    if (!String(event.violatedDirective || '').startsWith('frame-src')) return;
+    players.forEach((player) => {
+      const frame = player.querySelector('.player-frame');
+      if (!frame) return;
+      frame.outerHTML =
+        '<div class="note" role="alert">The video player was blocked by this site&rsquo;s content security policy, so the stream cannot be embedded here. ' +
+        'The link below opens the same broadcast on the federation&rsquo;s channel. ' +
+        'Attendance already recorded is unaffected.</div>';
+    });
+  });
+
+  // ── Attendance ────────────────────────────────────────────────────────────
+  //
+  // Watch time is counted only while the tab is actually visible, and reported
+  // as a total. academy.ts takes the maximum of what it holds and what is
+  // reported, so a dropped connection shortens nothing.
+
+  function startAttendance(code: string) {
+    let watched = 0;
+    let lastTick = Date.now();
+
+    const tick = () => {
+      const now = Date.now();
+      if (document.visibilityState === 'visible') watched += Math.round((now - lastTick) / 1000);
+      lastTick = now;
+    };
+
+    window.setInterval(() => {
+      tick();
+      void post('live-join', { code, watchedSeconds: watched });
+    }, 60_000);
+
+    window.setInterval(tick, 5_000);
+
+    window.addEventListener('pagehide', () => {
+      tick();
+      void post('live-leave', { code, watchedSeconds: watched }, true);
+    });
+  }
+
+  // ── The question board ────────────────────────────────────────────────────
+
+  function renderQuestions(list: HTMLElement, questions: any[], canParticipate: boolean) {
+    if (!questions.length) {
+      list.innerHTML = '<p class="text-muted" style="font-size:.85rem;margin-top:14px">No question has been asked yet.</p>';
+      return;
+    }
+    list.innerHTML = questions
+      .map((q) => {
+        const answer = q.answer
+          ? `<div class="q-answer"><span class="lesson-kind">Answered</span>${escapeHtml(q.answer)}</div>`
+          : '';
+        return (
+          '<div class="q-row">' +
+          `<div class="q-text">${escapeHtml(q.question)}</div>` +
+          answer +
+          '<div class="q-meta">' +
+          `<button type="button" class="btn btn-link upvote" data-question="${escapeHtml(q.id)}"${canParticipate ? '' : ' disabled'}>Upvote</button>` +
+          `<span class="text-muted">${escapeHtml(q.upvotes)} vote${q.upvotes === 1 ? '' : 's'}</span>` +
+          '</div></div>'
+        );
+      })
+      .join('');
+    bindUpvotes(list, canParticipate);
+  }
+
+  async function refresh(code: string) {
+    const list = document.querySelector<HTMLElement>(`.q-list[data-code="${CSS.escape(code)}"]`);
+    if (!list) return;
+    try {
+      const response = await fetch(`/api/academy/questions?code=${encodeURIComponent(code)}`, {
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) return;
+      const data = (await response.json()) as Json;
+      const form = document.querySelector(`.ask-form[data-code="${CSS.escape(code)}"]`);
+      renderQuestions(list, Array.isArray(data.questions) ? data.questions : [], Boolean(form));
+    } catch {
+      // A failed refresh leaves the board exactly as the server last rendered
+      // it. Nothing is invented in its place.
+    }
+  }
+
+  function bindUpvotes(scope: ParentNode, canParticipate: boolean) {
+    if (!canParticipate) return;
+    scope.querySelectorAll<HTMLButtonElement>('.upvote').forEach((button) => {
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        const result = await post('question-upvote', { questionId: Number(button.dataset.question) });
+        const counter = button.nextElementSibling as HTMLElement | null;
+        if (result.ok && counter) {
+          const votes = Number(result.data.upvotes ?? 0);
+          counter.textContent = `${votes} vote${votes === 1 ? '' : 's'}`;
+        } else if (counter && result.data.error) {
+          counter.textContent = String(result.data.error);
+        }
+        button.disabled = false;
+      });
+    });
+  }
+
+  document.querySelectorAll<HTMLElement>('.q-list').forEach((list) => {
+    const code = list.dataset.code as string;
+    bindUpvotes(list, Boolean(document.querySelector(`.ask-form[data-code="${CSS.escape(code)}"]`)));
+    // The board of a class that is live is refreshed; a page with none polls
+    // nothing.
+    window.setInterval(() => void refresh(code), 30_000);
+  });
+
+  document.querySelectorAll<HTMLFormElement>('.ask-form').forEach((form) => {
+    const code = form.dataset.code as string;
+    const errorBox = form.querySelector('.ask-error') as HTMLElement;
+    const submit = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+    const field = form.querySelector('textarea') as HTMLTextAreaElement;
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      errorBox.style.display = 'none';
+      submit.disabled = true;
+      submit.textContent = 'Sending…';
+
+      const result = await post('question-ask', { code, question: field.value });
+      if (result.ok) {
+        field.value = '';
+        await refresh(code);
+      } else {
+        errorBox.textContent = result.data.error || 'Your question could not be sent.';
+        errorBox.style.display = 'block';
+      }
+      submit.disabled = false;
+      submit.textContent = 'Send question';
+    });
+  });
+</script>

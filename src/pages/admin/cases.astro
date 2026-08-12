@@ -1,0 +1,893 @@
+---
+// Cases — safeguarding, disciplinary and support. THE MOST SENSITIVE SCREEN HERE.
+//
+// A leak on this page is not a bug, it is a harm. Five rules shape all of it.
+//
+//  1. SAFEGUARDING IS INVISIBLE, NOT LOCKED. `hasSafeguardingAccess()` — which
+//     asks rbac for `safeguarding:read`, held by SUPER_ADMIN and
+//     SAFEGUARDING_OFFICER and deliberately NOT by FEDERATION_ADMIN — decides
+//     whether the section EXISTS in the markup at all. Not a disabled panel, not
+//     a count, not a nav entry, not a "you do not have access" message. A locked
+//     door tells you there is a room; a national administrator must not learn
+//     from this page that child-protection casework is held here, still less
+//     how much of it there is.
+//
+//  2. AN ANONYMOUS REPORTER IS NEVER RENDERED. Where `reporterAnonymous` is
+//     true, the reporter fields are not read into the template on any branch.
+//     The check is on the flag, not on whether the columns happen to be empty:
+//     a row that carried a stray value would otherwise leak it.
+//
+//  3. NO MEDICAL INFORMATION APPEARS. `recordClearance`, `recordInjury`,
+//     `fitnessToCompete` and `medicalHistory` are not imported, and the medical
+//     tables are not queried. Clinical data has a different lawful basis and a
+//     different set of readers, and a case console is not either.
+//
+//  4. CASE NOTES ARE APPEND-ONLY. The only control offered is "add note". There
+//     is no edit and no delete here because there is none in cases.ts and there
+//     must never be one: a file whose notes can be rewritten cannot evidence
+//     what was known and when, which is the only reason the file exists.
+//
+//  5. READS ARE BUILT, NOT FILTERED. Every field rendered from a case row is
+//     named explicitly below. A column added to `safeguarding_cases` next year
+//     cannot appear on this page until somebody writes the line that shows it.
+//
+// KNOWN GAP, ESCALATED NOT WORKED AROUND: cases.ts exports `listSafeguardingCases`
+// but no list function for disciplinary cases or support tickets. Those two
+// indexes are queried here directly — the disciplinary one under exactly the
+// module's own gate (`membership:revoke`, held nationally only), the ticket one
+// under `visibleScopes(person:read_pii)` mirroring `assertTicketDesk`'s
+// per-ticket scope. Proper list functions are requested in sharedFileEdits.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import { isConfigured, db, schema as s } from '@/db';
+import {
+  hasSafeguardingAccess, listSafeguardingCases, getSafeguardingCase,
+  getDisciplinaryCase, listCaseNotes, ticketStanding,
+} from '@/db/cases';
+import { and, desc, eq, inArray, or } from 'drizzle-orm';
+
+export const prerender = false;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const configured = isConfigured();
+const principal = identity?.principal ?? null;
+
+// THE GATE. Everything safeguarding on this page hangs off this single boolean,
+// and it is asked of rbac once.
+const sg = Boolean(identity) && hasSafeguardingAccess(principal);
+const disc = Boolean(identity) && canAnywhere(principal, 'membership:revoke');
+const desk = Boolean(identity) && canAnywhere(principal, 'person:read_pii');
+const sgWrite = sg && canAnywhere(principal, 'safeguarding:write');
+
+const q = Astro.url.searchParams;
+const wantSg = Number(q.get('sg'));
+const wantDc = Number(q.get('dc'));
+const wantTk = Number(q.get('tk'));
+
+const LIST_LIMIT = 60;
+
+let sgCases: any[] = [];
+let sgCase: any = null;
+let sgNotes: any[] = [];
+let sgError: string | null = null;
+
+let dcCases: any[] = [];
+let dcCase: any = null;
+let dcNotes: any[] = [];
+let dcError: string | null = null;
+
+let tickets: any[] = [];
+let ticket: any = null;
+let ticketStand: any = null;
+let tkError: string | null = null;
+let deskScopeLimited = false;
+
+if (identity && configured) {
+  const d = db();
+
+  if (sg) {
+    try {
+      // A SUMMARY, not the file: no concern text and no reporter identity, so an
+      // over-the-shoulder view of a worklist discloses nothing about a child.
+      sgCases = await listSafeguardingCases(d, principal!, LIST_LIMIT);
+      if (Number.isFinite(wantSg) && wantSg > 0) {
+        sgCase = await getSafeguardingCase(d, principal!, wantSg);
+        sgNotes = await listCaseNotes(d, principal!, 'safeguarding', wantSg);
+      }
+    } catch (err: any) {
+      sgError = err?.message ?? 'The safeguarding record could not be read.';
+    }
+  }
+
+  if (disc) {
+    try {
+      // The allegation text is NOT listed — only in the opened file, for the same
+      // reason listSafeguardingCases withholds the concern text from its list.
+      dcCases = await d.select({
+        id: s.disciplinaryCases.id, caseNo: s.disciplinaryCases.caseNo,
+        status: s.disciplinaryCases.status, receivedOn: s.disciplinaryCases.receivedOn,
+        hearingOn: s.disciplinaryCases.hearingOn, decidedOn: s.disciplinaryCases.decidedOn,
+        appealLodgedOn: s.disciplinaryCases.appealLodgedOn,
+        appealDecidedOn: s.disciplinaryCases.appealDecidedOn,
+        closedOn: s.disciplinaryCases.closedOn,
+      }).from(s.disciplinaryCases)
+        .orderBy(desc(s.disciplinaryCases.receivedOn), desc(s.disciplinaryCases.id))
+        .limit(LIST_LIMIT);
+
+      if (Number.isFinite(wantDc) && wantDc > 0) {
+        dcCase = await getDisciplinaryCase(d, principal!, wantDc);
+        dcNotes = await listCaseNotes(d, principal!, 'disciplinary', wantDc);
+      }
+    } catch (err: any) {
+      dcError = err?.message ?? 'The disciplinary record could not be read.';
+    }
+  }
+
+  if (desk) {
+    try {
+      // Mirrors assertTicketDesk: a ticket's scope is its raiser's unit, and a
+      // ticket with no resolvable raiser has NO scope — reachable only from a
+      // national binding, which is the fail-closed direction.
+      const vs = visibleScopes(principal, 'person:read_pii');
+      const cols = {
+        id: s.supportTickets.id, ticketNo: s.supportTickets.ticketNo,
+        category: s.supportTickets.category, subject: s.supportTickets.subject,
+        priority: s.supportTickets.priority, status: s.supportTickets.status,
+        confidential: s.supportTickets.confidential,
+        createdAt: s.supportTickets.createdAt, slaDueAt: s.supportTickets.slaDueAt,
+        firstResponseAt: s.supportTickets.firstResponseAt,
+      };
+      if (vs.kind === 'all') {
+        tickets = await d.select(cols).from(s.supportTickets)
+          .orderBy(desc(s.supportTickets.createdAt)).limit(LIST_LIMIT);
+      } else if (vs.kind === 'scoped') {
+        deskScopeLimited = true;
+        const clauses: any[] = [];
+        if (vs.states.length) clauses.push(inArray(s.persons.stateUnitId, vs.states));
+        if (vs.districts.length) clauses.push(inArray(s.persons.districtUnitId, vs.districts));
+        if (vs.dojos.length) clauses.push(inArray(s.persons.dojoId, vs.dojos));
+        if (clauses.length) {
+          tickets = await d.select(cols).from(s.supportTickets)
+            .innerJoin(s.persons, eq(s.supportTickets.raisedByPersonId, s.persons.id))
+            .where(clauses.length === 1 ? clauses[0] : or(...clauses))
+            .orderBy(desc(s.supportTickets.createdAt)).limit(LIST_LIMIT);
+        }
+      }
+
+      if (Number.isFinite(wantTk) && wantTk > 0) {
+        // ticketStanding applies the desk gate AND this ticket's own scope. It
+        // throws before anything is loaded here, so an id outside scope never
+        // reaches the row read below.
+        ticketStand = await ticketStanding(d, principal!, wantTk);
+        ticket = (await d.select().from(s.supportTickets).where(eq(s.supportTickets.id, wantTk)).limit(1))[0] ?? null;
+      }
+    } catch (err: any) {
+      tkError = err?.name === 'ForbiddenError'
+        ? 'That ticket is outside the scope your credential covers.'
+        : (err?.message ?? 'The support record could not be read.');
+    }
+  }
+}
+
+const nothingAvailable = Boolean(identity) && !sg && !disc && !desk;
+
+const signedInAs = identity
+  ? identity.shared
+    ? `${identity.principal.label} — shared credential (${identity.via}), not attributable to a person`
+    : `${identity.principal.label} — personal account #${identity.userId}`
+  : '';
+
+function iso(v: unknown): string {
+  if (!v) return '—';
+  return v instanceof Date ? v.toISOString().replace('T', ' ').slice(0, 16) : String(v);
+}
+---
+
+<Base title="MMAKF Admin — Cases" showNav={false} showFooter={false}>
+  {!identity ? (
+    <section class="signin-wrap">
+      <div class="signin-box">
+        <div class="signin-brand">
+          <div class="signin-brand-1">MMAKF</div>
+          <div class="signin-brand-2">Cases</div>
+        </div>
+        <form id="loginForm" class="card signin-card">
+          <h1 class="card-title signin-h">Sign in</h1>
+          <label class="input-label" for="login-email">Email address</label>
+          <input class="input" type="email" id="login-email" name="email" autocomplete="username"
+                 autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="you@mmakf.in" />
+          <label class="input-label" for="login-password" style="margin-top:14px">Password</label>
+          <input class="input" type="password" id="login-password" name="password" autocomplete="current-password" required />
+          <div id="loginErr" role="alert" class="signin-err" hidden></div>
+          <button type="submit" class="btn btn-primary signin-btn">Sign in</button>
+          <p class="signin-note">Casework is confidential. Every read and every entry is recorded against the credential used.</p>
+        </form>
+      </div>
+    </section>
+  ) : (
+    <div class="admin-wrap">
+      <aside class="admin-side">
+        <div class="admin-brand">
+          <div class="admin-brand-1">MMAKF</div>
+          <div class="admin-brand-2">Cases</div>
+        </div>
+        <nav class="admin-nav" aria-label="Case sections">
+          {/* The safeguarding entry does not exist in the markup unless the
+              credential holds safeguarding:read. A nav item is a disclosure. */}
+          {sg && <a href="#safeguarding">Safeguarding</a>}
+          {disc && <a href="#disciplinary">Disciplinary</a>}
+          {desk && <a href="#support">Support desk</a>}
+          <a href="/admin/governance" class="nav-sep">Governance →</a>
+          <a href="/admin/approvals">Two-person approvals →</a>
+          <a href="/admin/queue">Approval queue →</a>
+          <a href="/admin">← Content admin</a>
+        </nav>
+        <div class="admin-foot">
+          <button class="btn btn-ghost admin-foot-btn" id="logoutBtn">Logout</button>
+        </div>
+      </aside>
+
+      <main class="admin-main">
+        <header class="admin-panel admin-panel-first">
+          <h1 class="admin-h">Cases</h1>
+          <p class="admin-sub">
+            Confidential casework. Notes are append-only — a correction is a new note that supersedes
+            in narrative, never an edit — and no clinical or medical information is held on this screen
+            at all.
+          </p>
+          <p class="c-signed">Signed in as {signedInAs}</p>
+
+          {!configured && (
+            <div class="c-warn" role="alert">
+              <strong>The federation database is not configured on this deployment.</strong>
+              Case files live in Postgres and there is none to read or write until
+              <code> DATABASE_URL</code> is set. No control is offered below, because none could work.
+            </div>
+          )}
+          {nothingAvailable && (
+            <div class="c-warn" role="alert">
+              <strong>This credential holds no casework authority.</strong>
+              Nothing is available to it here. This is a statement about your authority and not about
+              what the federation holds.
+            </div>
+          )}
+        </header>
+
+        {configured && sg && (
+          <!-- ─── Safeguarding ───────────────────────────────────────────
+               This entire section is absent from the response for any
+               credential without safeguarding:read. -->
+          <section class="admin-panel c-sensitive" id="safeguarding">
+            <h2 class="admin-h2">Safeguarding</h2>
+            <p class="admin-sub">
+              Child-protection casework. The list below is a worklist, not the files: it carries no
+              concern text and no reporter identity, so it discloses nothing about a child to anyone
+              looking over your shoulder. Open a case to work it.
+            </p>
+            {sgError && <div class="c-warn" role="alert">{sgError}</div>}
+
+            {sgCases.length === 0 ? (
+              <p class="c-empty">No safeguarding case is on record.</p>
+            ) : (
+              <div class="tbl-scroll">
+                <table class="c-tbl">
+                  <thead><tr><th scope="col">Case</th><th scope="col">Kind</th><th scope="col">Received</th><th scope="col">Subject</th><th scope="col">Referred</th><th scope="col">Status</th><th scope="col"></th></tr></thead>
+                  <tbody>
+                    {sgCases.map((c) => (
+                      <tr>
+                        <td class="c-mono">{c.caseNo}</td>
+                        <td>{c.concernKind ?? <span class="c-muted">not categorised</span>}</td>
+                        <td>{c.receivedOn}</td>
+                        <td>{c.subjectIsMinor === true ? <span class="c-tag c-tag-bad">minor</span> : c.subjectIsMinor === false ? 'adult' : <span class="c-tag c-tag-unset">NOT RECORDED</span>}</td>
+                        <td>{c.referredToAuthority ? <span class="c-tag c-tag-ok">referred</span> : <span class="c-muted">no</span>}</td>
+                        <td>{c.status}{c.closedOn ? ` · closed ${c.closedOn}` : ''}</td>
+                        <td><a class="btn-link" href={`/admin/cases?sg=${c.id}#sg-detail`}>Open</a></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div id="sg-detail">
+              {sgCase && (
+                <div class="c-detail">
+                  <h3 class="c-h3">{sgCase.caseNo} <span class="c-tag c-tag-class">{sgCase.classification}</span></h3>
+
+                  {/* THE REPORTER. Decided on the flag, never on whether the
+                      columns happen to be empty. When the report was anonymous
+                      the reporter fields are not read on this branch at all. */}
+                  {sgCase.reporterAnonymous ? (
+                    <p class="c-note c-note-strong">
+                      Reported anonymously. No reporter identity was recorded, this case cannot be traced
+                      back to anyone, and there is nothing withheld here that could later be revealed.
+                      Nobody can be contacted about it.
+                    </p>
+                  ) : (
+                    <dl class="c-dl">
+                      <div><dt>Reporter</dt><dd>{sgCase.reporterName ?? 'not recorded'}</dd></div>
+                      <div><dt>Reporter contact</dt><dd>{sgCase.reporterContact ?? 'not recorded'}</dd></div>
+                    </dl>
+                  )}
+
+                  <dl class="c-dl">
+                    <div><dt>Status</dt><dd>{sgCase.status}</dd></div>
+                    <div><dt>Received on</dt><dd>{sgCase.receivedOn}{sgCase.receivedVia ? ` via ${sgCase.receivedVia}` : ''}</dd></div>
+                    <div><dt>Concern kind</dt><dd>{sgCase.concernKind ?? 'not categorised'}</dd></div>
+                    <div><dt>Subject</dt><dd>{sgCase.subjectDescription ?? 'not described'}{sgCase.subjectIsMinor === true ? ' — recorded as a minor' : sgCase.subjectIsMinor === false ? ' — recorded as an adult' : ' — whether a minor is NOT RECORDED'}</dd></div>
+                    <div><dt>Subject person id</dt><dd>{sgCase.subjectPersonId ?? 'not a federation member on record'}</dd></div>
+                    <div><dt>Person complained of</dt><dd>{sgCase.aboutPersonId ?? 'not identified on the record'}</dd></div>
+                    <div><dt>Assigned officer</dt><dd>{sgCase.assignedOfficerPersonId != null ? `person #${sgCase.assignedOfficerPersonId}` : 'NOT ASSIGNED'}</dd></div>
+                    <div><dt>Referred to authority</dt><dd>{sgCase.referredToAuthority ? `${sgCase.referredTo} on ${sgCase.referredOn}` : 'No referral is recorded.'}</dd></div>
+                    <div><dt>Outcome</dt><dd>{sgCase.outcome ?? 'not decided'}</dd></div>
+                    <div><dt>Closed</dt><dd>{sgCase.closedOn ?? 'open'}</dd></div>
+                    <div><dt>Review due</dt><dd>{sgCase.reviewDueOn ?? 'No review date is set. The federation has not configured a review interval, so none has been applied.'}</dd></div>
+                  </dl>
+
+                  <h4 class="c-h4">The concern as recorded</h4>
+                  <p class="c-body">{sgCase.concernSummary}</p>
+
+                  {sgCase.actionsTaken && (
+                    <>
+                      <h4 class="c-h4">Actions taken</h4>
+                      <p class="c-body">{sgCase.actionsTaken}</p>
+                    </>
+                  )}
+
+                  <h4 class="c-h4">Case notes ({sgNotes.length}) — append-only</h4>
+                  {sgNotes.length === 0 ? <p class="c-empty">No note is on this file.</p> : (
+                    <ul class="c-notes">
+                      {sgNotes.map((n: any) => (
+                        <li>
+                          <div class="c-note-meta">{iso(n.at)} · {n.classification}{n.authorUserId != null ? ` · account #${n.authorUserId}` : ''}</div>
+                          <div class="c-note-text">{n.note}</div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p class="c-hint">
+                    A note cannot be edited or deleted, here or anywhere. That is what makes this file
+                    able to evidence what was known and when.
+                  </p>
+
+                  {sgWrite && (
+                    <div class="c-forms">
+                      <form class="c-form" data-action="case/note">
+                        <input type="hidden" name="caseKind" value="safeguarding" />
+                        <input type="hidden" name="caseId" value={String(sgCase.id)} />
+                        <label class="input-label" for="sgn-note">Add a note</label>
+                        <textarea class="input" id="sgn-note" name="note" rows="3" required></textarea>
+                        <label class="input-label" for="sgn-class" style="margin-top:10px">Classification</label>
+                        <select class="input" id="sgn-class" name="classification">
+                          <option value="confidential">confidential — internal only (default)</option>
+                          <option value="restricted">restricted</option>
+                          <option value="official">official</option>
+                          <option value="member">member — MAY be shown to the case subject</option>
+                        </select>
+                        <p class="c-hint">Only a note marked <code>member</code> or <code>public</code> can ever be disclosed to the case subject. Everything else is withheld from them, and they are told that material is withheld.</p>
+                        <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                        <button type="submit" class="btn btn-primary c-submit">Add note</button>
+                      </form>
+
+                      <details class="c-details">
+                        <summary>Assign an officer, record an action, refer, or close</summary>
+                        <form class="c-form" data-action="case/safeguarding/assign">
+                          <input type="hidden" name="caseId" value={String(sgCase.id)} />
+                          <label class="input-label" for="sga-officer">Officer person id</label>
+                          <input class="input" id="sga-officer" name="officerPersonId" inputmode="numeric" required />
+                          <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                          <button type="submit" class="btn btn-ghost c-submit">Assign officer</button>
+                        </form>
+                        <form class="c-form" data-action="case/safeguarding/action">
+                          <input type="hidden" name="caseId" value={String(sgCase.id)} />
+                          <label class="input-label" for="sgx-action">What was done</label>
+                          <textarea class="input" id="sgx-action" name="action" rows="2" required></textarea>
+                          <label class="input-label" for="sgx-on" style="margin-top:10px">On</label>
+                          <input class="input" type="date" id="sgx-on" name="on" />
+                          <p class="c-hint">Recorded as an appended log line and as a case note. The column and the notes can never tell different stories.</p>
+                          <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                          <button type="submit" class="btn btn-ghost c-submit">Record action</button>
+                        </form>
+                        <form class="c-form" data-action="case/safeguarding/refer">
+                          <input type="hidden" name="caseId" value={String(sgCase.id)} />
+                          <label class="input-label" for="sgr-to">Authority referred to</label>
+                          <input class="input" id="sgr-to" name="referredTo" required />
+                          <label class="input-label" for="sgr-on" style="margin-top:10px">Referred on</label>
+                          <input class="input" type="date" id="sgr-on" name="referredOn" />
+                          <label class="input-label" for="sgr-note" style="margin-top:10px">Note</label>
+                          <textarea class="input" id="sgr-note" name="note" rows="2"></textarea>
+                          <p class="c-hint">There is no rule here about when a referral is required — that is statutory and policy ground the federation states. This records that one was made, so it can be evidenced.</p>
+                          <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                          <button type="submit" class="btn btn-ghost c-submit">Record referral</button>
+                        </form>
+                        <form class="c-form" data-action="case/safeguarding/close">
+                          <input type="hidden" name="caseId" value={String(sgCase.id)} />
+                          <label class="input-label" for="sgc-outcome">Outcome</label>
+                          <textarea class="input" id="sgc-outcome" name="outcome" rows="2" required></textarea>
+                          <label class="input-label" for="sgc-review" style="margin-top:10px">Review due on</label>
+                          <input class="input" type="date" id="sgc-review" name="reviewDueOn" />
+                          <p class="c-hint">Leave the review date blank if none has been set. MMAKF has published no review interval, so none is calculated — the file will say so rather than invent six months.</p>
+                          <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                          <button type="submit" class="btn btn-ghost c-submit">Close case</button>
+                        </form>
+                      </details>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {configured && disc && (
+          <!-- ─── Disciplinary ─────────────────────────────────────────── -->
+          <section class="admin-panel" id="disciplinary">
+            <h2 class="admin-h2">Disciplinary</h2>
+            <p class="admin-sub">
+              A sanction cannot be recorded without the decision that imposed it, and a decision cannot
+              be entered before the case has been heard. Neither refusal is negotiable, and neither is
+              decided here — both live in the module.
+            </p>
+            {dcError && <div class="c-warn" role="alert">{dcError}</div>}
+
+            {dcCases.length === 0 ? (
+              <p class="c-empty">No disciplinary case is on record.</p>
+            ) : (
+              <div class="tbl-scroll">
+                <table class="c-tbl">
+                  <thead><tr><th scope="col">Case</th><th scope="col">Received</th><th scope="col">Hearing</th><th scope="col">Decided</th><th scope="col">Appeal</th><th scope="col">Status</th><th scope="col"></th></tr></thead>
+                  <tbody>
+                    {dcCases.map((c: any) => (
+                      <tr>
+                        <td class="c-mono">{c.caseNo}</td>
+                        <td>{c.receivedOn}</td>
+                        <td>{c.hearingOn ?? <span class="c-muted">not scheduled</span>}</td>
+                        <td>{c.decidedOn ?? <span class="c-muted">not decided</span>}</td>
+                        <td>{c.appealDecidedOn ? `determined ${c.appealDecidedOn}` : c.appealLodgedOn ? `lodged ${c.appealLodgedOn}` : <span class="c-muted">none</span>}</td>
+                        <td>{c.status}{c.closedOn ? ` · closed ${c.closedOn}` : ''}</td>
+                        <td><a class="btn-link" href={`/admin/cases?dc=${c.id}#dc-detail`}>Open</a></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p class="c-hint">The allegation is not shown in this list — only in the opened file.</p>
+
+            <div id="dc-detail">
+              {dcCase && (
+                <div class="c-detail">
+                  <h3 class="c-h3">{dcCase.caseNo} <span class="c-tag c-tag-class">{dcCase.classification}</span></h3>
+                  <dl class="c-dl">
+                    <div><dt>Status</dt><dd>{dcCase.status}</dd></div>
+                    <div><dt>Received on</dt><dd>{dcCase.receivedOn}</dd></div>
+                    <div><dt>Subject</dt><dd>{dcCase.subjectPersonId != null ? `person #${dcCase.subjectPersonId}` : 'not identified'}{dcCase.subjectDojoId != null ? ` · dojo #${dcCase.subjectDojoId}` : ''}</dd></div>
+                    <div><dt>Complainant</dt><dd>{dcCase.anonymousComplainant ? 'Complained of anonymously. No complainant identity was recorded and none can be revealed.' : (dcCase.complainantPersonId != null ? `person #${dcCase.complainantPersonId}` : 'not recorded')}</dd></div>
+                    <div><dt>Rule said to be breached</dt><dd>{dcCase.allegedBreachOf ?? 'not stated'}</dd></div>
+                    <div><dt>Investigator</dt><dd>{dcCase.investigatorPersonId != null ? `person #${dcCase.investigatorPersonId}` : 'not appointed'}</dd></div>
+                    <div><dt>Hearing</dt><dd>{dcCase.hearingOn ?? 'not scheduled'}{dcCase.panelCommitteeId != null ? ` · panel committee #${dcCase.panelCommitteeId}` : ''}</dd></div>
+                    <div><dt>Decision</dt><dd>{dcCase.decision ?? 'not decided'}{dcCase.decidedOn ? ` (${dcCase.decidedOn})` : ''}</dd></div>
+                    <div><dt>Sanction</dt><dd>{dcCase.sanction ? `${dcCase.sanction} — from ${dcCase.sanctionFrom ?? 'not dated'} to ${dcCase.sanctionTo ?? 'no end date recorded'}` : 'none recorded'}</dd></div>
+                    <div><dt>Appeal</dt><dd>{dcCase.appealLodgedOn ? `lodged ${dcCase.appealLodgedOn}${dcCase.appealOutcome ? ` — “${dcCase.appealOutcome}” on ${dcCase.appealDecidedOn}` : ' — not yet determined'}` : 'none lodged'}</dd></div>
+                  </dl>
+
+                  <h4 class="c-h4">The allegation as recorded</h4>
+                  <p class="c-body">{dcCase.summary}</p>
+
+                  <h4 class="c-h4">Case notes ({dcNotes.length}) — append-only</h4>
+                  {dcNotes.length === 0 ? <p class="c-empty">No note is on this file.</p> : (
+                    <ul class="c-notes">
+                      {dcNotes.map((n: any) => (
+                        <li>
+                          <div class="c-note-meta">{iso(n.at)} · {n.classification}{n.authorUserId != null ? ` · account #${n.authorUserId}` : ''}</div>
+                          <div class="c-note-text">{n.note}</div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  <div class="c-forms">
+                    <form class="c-form" data-action="case/note">
+                      <input type="hidden" name="caseKind" value="disciplinary" />
+                      <input type="hidden" name="caseId" value={String(dcCase.id)} />
+                      <label class="input-label" for="dcn-note">Add a note</label>
+                      <textarea class="input" id="dcn-note" name="note" rows="3" required></textarea>
+                      <label class="input-label" for="dcn-class" style="margin-top:10px">Classification</label>
+                      <select class="input" id="dcn-class" name="classification">
+                        <option value="confidential">confidential — internal only (default)</option>
+                        <option value="restricted">restricted</option>
+                        <option value="official">official</option>
+                        <option value="member">member — MAY be shown to the case subject</option>
+                      </select>
+                      <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                      <button type="submit" class="btn btn-primary c-submit">Add note</button>
+                    </form>
+
+                    <details class="c-details">
+                      <summary>Appoint an investigator, schedule a hearing, decide, or record an appeal</summary>
+                      <form class="c-form" data-action="case/disciplinary/investigate">
+                        <input type="hidden" name="caseId" value={String(dcCase.id)} />
+                        <label class="input-label" for="di-pid">Investigator person id</label>
+                        <input class="input" id="di-pid" name="investigatorPersonId" inputmode="numeric" required />
+                        <label class="input-label" for="di-why" style="margin-top:10px">Reason for the appointment</label>
+                        <input class="input" id="di-why" name="reason" required />
+                        <p class="c-hint">The subject of a case cannot be its investigator. That refusal is the conflict rule applied at the one point where it is unarguable.</p>
+                        <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                        <button type="submit" class="btn btn-ghost c-submit">Appoint investigator</button>
+                      </form>
+                      <form class="c-form" data-action="case/disciplinary/hearing">
+                        <input type="hidden" name="caseId" value={String(dcCase.id)} />
+                        <label class="input-label" for="dh-on">Hearing date</label>
+                        <input class="input" type="date" id="dh-on" name="hearingOn" required />
+                        <label class="input-label" for="dh-panel" style="margin-top:10px">Panel committee id</label>
+                        <input class="input" id="dh-panel" name="panelCommitteeId" inputmode="numeric" />
+                        <label class="input-label" for="dh-why" style="margin-top:10px">Reason</label>
+                        <input class="input" id="dh-why" name="reason" required />
+                        <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                        <button type="submit" class="btn btn-ghost c-submit">Schedule hearing</button>
+                      </form>
+                      <form class="c-form" data-action="case/disciplinary/decide">
+                        <input type="hidden" name="caseId" value={String(dcCase.id)} />
+                        <label class="input-label" for="dd-dec">What was decided</label>
+                        <textarea class="input" id="dd-dec" name="decision" rows="2" required></textarea>
+                        <label class="input-label" for="dd-san" style="margin-top:10px">Sanction, if one was imposed</label>
+                        <input class="input" id="dd-san" name="sanction" />
+                        <div class="c-grid">
+                          <div><label class="input-label" for="dd-from">Sanction from</label><input class="input" type="date" id="dd-from" name="sanctionFrom" /></div>
+                          <div><label class="input-label" for="dd-to">Sanction to</label><input class="input" type="date" id="dd-to" name="sanctionTo" /></div>
+                        </div>
+                        <label class="input-label" for="dd-why" style="margin-top:10px">Reason</label>
+                        <input class="input" id="dd-why" name="reason" required />
+                        <p class="c-hint">Nothing here scores the case or picks a tariff. What the decision should be, and what sanction fits it, is stated by the deciding body.</p>
+                        <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                        <button type="submit" class="btn btn-ghost c-submit">Record decision</button>
+                      </form>
+                      <form class="c-form" data-action="case/disciplinary/appeal">
+                        <input type="hidden" name="caseId" value={String(dcCase.id)} />
+                        <div class="c-grid">
+                          <div><label class="input-label" for="da-lodged">Appeal lodged on</label><input class="input" type="date" id="da-lodged" name="lodgedOn" /></div>
+                          <div><label class="input-label" for="da-decided">Appeal determined on</label><input class="input" type="date" id="da-decided" name="decidedOn" /></div>
+                        </div>
+                        <label class="input-label" for="da-out" style="margin-top:10px">Appeal outcome</label>
+                        <input class="input" id="da-out" name="outcome" />
+                        <label class="input-label" for="da-why" style="margin-top:10px">Reason</label>
+                        <input class="input" id="da-why" name="reason" required />
+                        <p class="c-hint">The appeal window is configuration MMAKF has not published, so lateness is not assessed here. The lodging date is recorded and the deciding body applies whatever window the rules state.</p>
+                        <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                        <button type="submit" class="btn btn-ghost c-submit">Record appeal</button>
+                      </form>
+                    </details>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div class="c-forms">
+              <details class="c-details">
+                <summary>Raise a disciplinary case</summary>
+                <form class="c-form" data-action="case/disciplinary/raise">
+                  <label class="input-label" for="dr-sum">The allegation</label>
+                  <textarea class="input" id="dr-sum" name="summary" rows="3" required></textarea>
+                  <div class="c-grid">
+                    <div><label class="input-label" for="dr-breach">Rule said to be breached</label><input class="input" id="dr-breach" name="allegedBreachOf" /></div>
+                    <div><label class="input-label" for="dr-on">Received on</label><input class="input" type="date" id="dr-on" name="receivedOn" /></div>
+                    <div><label class="input-label" for="dr-subj">Subject person id</label><input class="input" id="dr-subj" name="subjectPersonId" inputmode="numeric" /></div>
+                    <div><label class="input-label" for="dr-dojo">Subject dojo id</label><input class="input" id="dr-dojo" name="subjectDojoId" inputmode="numeric" /></div>
+                    <div><label class="input-label" for="dr-comp">Complainant person id</label><input class="input" id="dr-comp" name="complainantPersonId" inputmode="numeric" /></div>
+                  </div>
+                  <div class="c-check">
+                    <input type="checkbox" id="dr-anon" name="anonymousComplainant" />
+                    <label for="dr-anon">The complainant is anonymous</label>
+                  </div>
+                  <p class="c-hint">Marking the complainant anonymous discards the complainant id entirely — it is not stored and hidden, it is not stored.</p>
+                  <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                  <button type="submit" class="btn btn-primary c-submit">Raise case</button>
+                </form>
+              </details>
+            </div>
+          </section>
+        )}
+
+        {configured && desk && (
+          <!-- ─── Support desk ─────────────────────────────────────────── -->
+          <section class="admin-panel" id="support">
+            <h2 class="admin-h2">Support desk</h2>
+            <p class="admin-sub">
+              MMAKF publishes no service standard, so no response deadline is applied to a ticket and
+              none is invented. A ticket with no deadline reports that no standard is configured — it
+              does not quietly acquire a plausible 48 hours nobody agreed to.
+            </p>
+            {deskScopeLimited && (
+              <p class="c-hint">
+                Limited to tickets raised by people within your scope. Tickets with no resolvable raiser
+                belong to the national desk and are not listed here.
+              </p>
+            )}
+            {tkError && <div class="c-warn" role="alert">{tkError}</div>}
+
+            {tickets.length === 0 ? (
+              <p class="c-empty">No support ticket is visible to your credential.</p>
+            ) : (
+              <div class="tbl-scroll">
+                <table class="c-tbl">
+                  <thead><tr><th scope="col">Ticket</th><th scope="col">Subject</th><th scope="col">Category</th><th scope="col">Raised</th><th scope="col">Standard</th><th scope="col">Status</th><th scope="col"></th></tr></thead>
+                  <tbody>
+                    {tickets.map((t: any) => (
+                      <tr>
+                        <td class="c-mono">{t.ticketNo}{t.confidential && <span class="c-tag c-tag-bad">confidential</span>}</td>
+                        <td>{t.subject}</td>
+                        <td>{t.category} · {t.priority}</td>
+                        <td>{iso(t.createdAt)}</td>
+                        <td>{t.slaDueAt ? `due ${iso(t.slaDueAt)}` : <span class="c-tag c-tag-unset">NOT CONFIGURED</span>}</td>
+                        <td>{t.status}</td>
+                        <td><a class="btn-link" href={`/admin/cases?tk=${t.id}#tk-detail`}>Open</a></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div id="tk-detail">
+              {ticket && (
+                <div class="c-detail">
+                  <h3 class="c-h3">{ticket.ticketNo} — {ticket.subject}</h3>
+                  {ticketStand && <p class="c-note">{ticketStand.note}</p>}
+                  <dl class="c-dl">
+                    <div><dt>Category</dt><dd>{ticket.category} · {ticket.priority}</dd></div>
+                    <div><dt>Status</dt><dd>{ticket.status}</dd></div>
+                    <div><dt>Raised by</dt><dd>{ticket.raisedByPersonId != null ? `person #${ticket.raisedByPersonId}` : 'not a member on record'}</dd></div>
+                    <div><dt>Contact</dt><dd>{ticket.contactEmail ?? 'none given'}{ticket.contactPhone ? ` · ${ticket.contactPhone}` : ''}</dd></div>
+                    <div><dt>First response</dt><dd>{ticket.firstResponseAt ? iso(ticket.firstResponseAt) : 'none recorded'}</dd></div>
+                    <div><dt>Resolved</dt><dd>{ticket.resolvedAt ? `${iso(ticket.resolvedAt)} — ${ticket.resolution}` : 'open'}</dd></div>
+                  </dl>
+                  <h4 class="c-h4">The message</h4>
+                  <p class="c-body">{ticket.body}</p>
+
+                  <div class="c-forms">
+                    <form class="c-form" data-action="ticket/respond">
+                      <input type="hidden" name="ticketId" value={String(ticket.id)} />
+                      <label class="input-label" for="tr-resp">Response to the member</label>
+                      <textarea class="input" id="tr-resp" name="response" rows="3" required></textarea>
+                      <div class="c-check">
+                        <input type="checkbox" id="tr-await" name="awaitingMember" />
+                        <label for="tr-await">Now awaiting the member</label>
+                      </div>
+                      <p class="c-hint">A response is written to the person who raised the ticket, so it is recorded as theirs to see. Internal handling notes are separate and stay confidential.</p>
+                      <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                      <button type="submit" class="btn btn-primary c-submit">Send response</button>
+                    </form>
+                    <form class="c-form" data-action="ticket/assign">
+                      <input type="hidden" name="ticketId" value={String(ticket.id)} />
+                      <label class="input-label" for="ta-user">Assign to account id</label>
+                      <input class="input" id="ta-user" name="assignedToUserId" inputmode="numeric" required />
+                      <label class="input-label" for="ta-dept" style="margin-top:10px">Department</label>
+                      <input class="input" id="ta-dept" name="department" />
+                      <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                      <button type="submit" class="btn btn-ghost c-submit">Assign</button>
+                    </form>
+                    <form class="c-form" data-action="ticket/resolve">
+                      <input type="hidden" name="ticketId" value={String(ticket.id)} />
+                      <label class="input-label" for="tv-res">How it was resolved</label>
+                      <textarea class="input" id="tv-res" name="resolution" rows="2" required></textarea>
+                      <div class="c-ok" hidden></div><div class="c-err" role="alert" hidden></div>
+                      <button type="submit" class="btn btn-ghost c-submit">Resolve</button>
+                    </form>
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+      </main>
+    </div>
+  )}
+</Base>
+
+<script>
+  const loginForm = document.getElementById('loginForm');
+  if (loginForm instanceof HTMLFormElement) {
+    const loginErr = document.getElementById('loginErr');
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (loginErr) loginErr.hidden = true;
+      const fd = new FormData(loginForm);
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(email ? { email, password } : { password }),
+      }).catch(() => null);
+      if (r && r.ok) { location.reload(); return; }
+      const body = r ? await r.json().catch(() => null) : null;
+      if (loginErr) {
+        loginErr.hidden = false;
+        loginErr.textContent = (body && body.error) ? String(body.error) : 'Sign-in failed. Check your details and try again.';
+      }
+    });
+  }
+
+  document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
+    location.reload();
+  });
+
+  // One handler for every case form. `data-action` is the API path; the module
+  // behind it decides every refusal, and this never claims a success the server
+  // did not report.
+  document.addEventListener('submit', async (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    const action = form.getAttribute('data-action');
+    if (!action) return;
+    event.preventDefault();
+
+    const ok = form.querySelector('.c-ok');
+    const err = form.querySelector('.c-err');
+    const button = form.querySelector('.c-submit');
+    if (ok instanceof HTMLElement) { ok.hidden = true; ok.textContent = ''; }
+    if (err instanceof HTMLElement) { err.hidden = true; err.textContent = ''; }
+
+    const fail = (message) => {
+      if (err instanceof HTMLElement) { err.hidden = false; err.textContent = message; }
+    };
+
+    const payload = {};
+    for (const el of Array.from(form.elements)) {
+      if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement)) continue;
+      if (!el.name) continue;
+      if (el instanceof HTMLInputElement && el.type === 'checkbox') { payload[el.name] = el.checked; continue; }
+      payload[el.name] = el.value.trim();
+    }
+
+    const label = button instanceof HTMLButtonElement ? button.textContent : '';
+    if (button instanceof HTMLButtonElement) { button.disabled = true; button.textContent = 'Recording…'; }
+
+    const response = await fetch('/api/governance/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(() => null);
+
+    if (button instanceof HTMLButtonElement) { button.disabled = false; button.textContent = label; }
+
+    if (!response) { fail('Could not reach the server. NOTHING was recorded. Check your connection and try again.'); return; }
+
+    const body = await response.json().catch(() => null);
+
+    if (response.ok && body && body.ok) {
+      if (ok instanceof HTMLElement) {
+        ok.hidden = false;
+        const note = body.result && typeof body.result === 'object' && typeof body.result.reviewNote === 'string' ? body.result.reviewNote : '';
+        ok.textContent = 'Recorded by the server. It cannot be edited or removed afterwards.' + (note ? ' ' + note : '') + ' Reload to see the file as it now stands.';
+      }
+      const ta = form.querySelector('textarea');
+      if (ta instanceof HTMLTextAreaElement) ta.value = '';
+      return;
+    }
+
+    let message = (body && body.error) ? String(body.error) : '';
+    if (!message) {
+      if (response.status === 401) message = 'Your session has ended.';
+      else if (response.status === 429) message = 'Too many requests in a short time. Wait a minute and try again.';
+      else message = 'The server refused this (HTTP ' + response.status + ').';
+    }
+    if (response.status === 403 && !(body && body.code === 'forbidden')) {
+      message += ' The request was refused before it reached the case module — usually a blocked or rewritten request rather than a permissions problem. Reload and try once more.';
+    }
+    fail(message + ' NOTHING was changed.');
+  });
+</script>
+
+<style is:global>
+  body { background: var(--bg); }
+
+  .signin-wrap { min-height: 90vh; display: flex; align-items: center; justify-content: center; padding: 64px 24px; }
+  .signin-box { width: 100%; max-width: 420px; }
+  .signin-brand { text-align: center; margin-bottom: 36px; }
+  .signin-brand-1 { font-family: var(--font-display); font-size: 1.8rem; font-weight: 700; letter-spacing: .06em; }
+  .signin-brand-2 { font-family: var(--font-display); font-size: .7rem; letter-spacing: .22em; text-transform: uppercase; color: var(--gold); margin-top: 6px; }
+  .signin-card { padding: 32px; }
+  .signin-h { font-size: 1.2rem; margin-bottom: 24px; }
+  .signin-err { color: var(--red-2); font-size: .85rem; margin-top: 12px; }
+  .signin-btn { width: 100%; margin-top: 20px; justify-content: center; min-height: 44px; }
+  .signin-note { margin-top: 20px; font-size: .75rem; color: var(--muted); text-align: center; line-height: 1.6; }
+
+  .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  @media (max-width: 800px) { .admin-wrap { grid-template-columns: 1fr; } }
+  .admin-side {
+    background: var(--bg-2); border-right: 1px solid var(--border); padding: 24px 0;
+    display: flex; flex-direction: column; position: sticky; top: 0; align-self: start; height: 100vh;
+  }
+  @media (max-width: 800px) { .admin-side { position: static; height: auto; } }
+  .admin-brand { padding: 0 24px 24px; border-bottom: 1px solid var(--border); }
+  .admin-brand-1 { font-family: var(--font-display); font-size: 1.4rem; font-weight: 700; letter-spacing: .06em; }
+  .admin-brand-2 { font-family: var(--font-display); font-size: .66rem; letter-spacing: .22em; text-transform: uppercase; color: var(--gold); margin-top: 4px; }
+  .admin-nav { flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .admin-nav a {
+    padding: 12px 14px; min-height: 44px; display: flex; align-items: center;
+    font-family: var(--font-display); font-size: .78rem; letter-spacing: .08em;
+    color: var(--off-white); border-radius: var(--radius); transition: all .18s;
+  }
+  .admin-nav a:hover { background: var(--card); color: var(--gold); }
+  .admin-nav .nav-sep { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .admin-foot { padding: 16px; border-top: 1px solid var(--border); }
+  .admin-foot-btn { width: 100%; justify-content: center; min-height: 44px; }
+
+  .admin-main { padding: 32px 36px 64px; max-width: 1100px; }
+  @media (max-width: 600px) { .admin-main { padding: 24px 16px 48px; } }
+  .admin-panel { padding: 36px 0; border-bottom: 1px solid var(--border); scroll-margin-top: 20px; }
+  .admin-panel-first { padding-top: 0; }
+  .admin-h { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; letter-spacing: .02em; }
+  .admin-h2 { font-family: var(--font-display); font-size: 1.2rem; font-weight: 600; letter-spacing: .02em; }
+  .admin-sub { color: var(--muted); font-size: .88rem; margin-top: 6px; line-height: 1.7; }
+
+  .c-sensitive { border-left: 3px solid var(--red); padding-left: 18px; margin-left: -18px; }
+  .c-signed { margin-top: 14px; font-size: .76rem; letter-spacing: .04em; color: var(--off-white); overflow-wrap: anywhere; }
+  .c-empty { font-size: .86rem; color: var(--muted); margin-top: 12px; font-style: italic; }
+  .c-hint { font-size: .78rem; color: var(--muted); line-height: 1.7; margin-top: 10px; max-width: 70ch; }
+  .c-muted { color: var(--muted); }
+  .c-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .74rem; overflow-wrap: anywhere; }
+  .c-note { font-size: .85rem; color: var(--off-white); line-height: 1.7; margin-top: 12px; }
+  .c-note-strong {
+    background: var(--card-2); border: 1px solid var(--border); border-left: 3px solid var(--gold-dim);
+    border-radius: var(--radius); padding: 12px 14px;
+  }
+  .c-body { font-size: .88rem; line-height: 1.8; margin-top: 8px; white-space: pre-wrap; max-width: 74ch; }
+
+  .c-warn {
+    margin-top: 16px; background: rgba(142,18,18,.05); border: 1px solid var(--red-3);
+    border-left: 3px solid var(--red); border-radius: var(--radius);
+    padding: 14px 16px; font-size: .85rem; line-height: 1.7; color: var(--off-white);
+  }
+  .c-warn strong { color: var(--red-2); }
+
+  .c-tbl { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: .84rem; }
+  .c-tbl th, .c-tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .c-tbl th { font-family: var(--font-display); font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+
+  .c-tag {
+    display: inline-block; font-family: var(--font-display); font-size: .62rem; letter-spacing: .1em;
+    text-transform: uppercase; padding: 3px 8px; border: 1px solid var(--border-2);
+    border-radius: var(--radius); margin-left: 6px; white-space: nowrap;
+  }
+  .c-tag-ok { color: var(--gold-3); border-color: var(--gold-dim); }
+  .c-tag-bad { color: #fff; background: var(--red); border-color: var(--red); }
+  .c-tag-unset { color: var(--muted); border-style: dashed; }
+  .c-tag-class { color: var(--red-2); border-color: var(--red-3); }
+
+  .c-detail { margin-top: 24px; padding: 20px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
+  .c-h3 { font-family: var(--font-display); font-size: 1.02rem; font-weight: 600; }
+  .c-h4 { font-family: var(--font-display); font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-top: 22px; }
+  .c-dl { margin-top: 14px; display: grid; gap: 8px; }
+  .c-dl div { display: grid; grid-template-columns: 190px 1fr; gap: 10px; font-size: .84rem; line-height: 1.65; }
+  @media (max-width: 620px) { .c-dl div { grid-template-columns: 1fr; gap: 2px; } }
+  .c-dl dt { font-family: var(--font-display); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .c-dl dd { overflow-wrap: anywhere; }
+
+  .c-notes { list-style: none; margin-top: 12px; display: grid; gap: 12px; }
+  .c-notes li { border-left: 2px solid var(--border-2); padding-left: 12px; }
+  .c-note-meta { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .7rem; color: var(--muted); }
+  .c-note-text { font-size: .86rem; line-height: 1.75; margin-top: 4px; white-space: pre-wrap; }
+
+  .c-forms { margin-top: 24px; display: grid; gap: 12px; }
+  .c-form { padding-top: 4px; }
+  .c-form + .c-form { border-top: 1px solid var(--border); padding-top: 18px; margin-top: 4px; }
+  .c-details { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card-2); }
+  .c-details > summary {
+    cursor: pointer; padding: 14px 16px; min-height: 44px; display: flex; align-items: center;
+    font-family: var(--font-display); font-size: .78rem; letter-spacing: .06em; color: var(--off-white);
+  }
+  .c-details > summary:hover { color: var(--gold-2); }
+  .c-details > *:not(summary) { padding: 0 16px 18px; }
+  .c-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 10px; }
+  .c-check { display: flex; align-items: center; gap: 8px; min-height: 44px; margin-top: 6px; }
+  .c-check input { width: 20px; height: 20px; }
+  .c-check label { font-size: .84rem; }
+  .c-submit { margin-top: 14px; min-height: 44px; }
+  .c-ok { margin-top: 12px; font-size: .84rem; color: var(--gold-3); line-height: 1.65; }
+  .c-err { margin-top: 12px; font-size: .84rem; color: var(--red-2); line-height: 1.65; }
+</style>

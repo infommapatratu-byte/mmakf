@@ -289,7 +289,7 @@ if (identity && configured) {
 
 const locked = Boolean(selected?.lockedAt);
 const lockReason = locked
-  ? `This grading was locked on ${String(selected.lockedAt).slice(0, 10)}. Scores and decisions are ` +
+  ? `This grading was locked at ${ts(selected.lockedAt)}. Scores and decisions are ` +
     'immutable from that moment. A correction is made by creating a new record, never by editing this one.'
   : null;
 
@@ -1135,7 +1135,10 @@ const STATUS_TONE: Record<string, string> = {
     const body: Record<string, unknown> = {};
     for (const key of new Set(fd.keys())) {
       const values = fd.getAll(key).map((v) => String(v)).filter((v) => v !== '');
-      if (key === 'referredComponents') { body[key] = values; continue; }
+      // Omitted entirely when nothing is ticked, so a pass is not stored with an
+      // empty referral list. A referral with none ticked is refused by the
+      // module, which is where that rule belongs.
+      if (key === 'referredComponents') { if (values.length) body[key] = values; continue; }
       if (!values.length) continue;
       body[key] = values[values.length - 1];
     }

@@ -1,0 +1,423 @@
+---
+// The public scoreboard — one mat, or every mat, at a glance.
+//
+// THREE THINGS THIS PAGE PROMISES, AND KEEPS:
+//
+//  1. IT IS READ ONLY. It reads through publicScoreboard(), which takes no
+//     principal, performs no write, and can reach none: there is no path from
+//     this page to a scoring endpoint. A display in a venue foyer must never be
+//     able to alter an official record.
+//
+//  2. IT POLLS, AND SAYS SO. There is no realtime transport in this system yet.
+//     Claiming "live" would be a lie of a few seconds' standing every few
+//     seconds, so the page states when it last refreshed, how old that is in
+//     seconds, and how often it asks again. If a refresh fails it keeps the last
+//     good figures and marks them stale rather than blanking or inventing.
+//
+//  3. IT SHOWS ONLY PUBLISHED MATERIAL. Only matches belonging to a PUBLISHED
+//     draw appear. An unpublished bracket is not leaked onto a wall.
+//
+// It has to work on a 3-metre venue display and on a phone at the mat side, so
+// the type scale is driven by viewport units with a floor, and the layout is one
+// column on a narrow screen.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured } from '@/db';
+import { publicEvents, publicScoreboard } from '@/pages/api/competition/[...action]';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const idParam = Number(Astro.url.searchParams.get('event') ?? '');
+const eventId = Number.isInteger(idParam) && idParam > 0 ? idParam : null;
+const matParam = Astro.url.searchParams.get('mat');
+
+let board: any = null;
+let events: any[] = [];
+let failed = false;
+
+if (configured) {
+  try {
+    if (eventId) board = await publicScoreboard(eventId, matParam);
+    if (!board) events = (await publicEvents(60)) as any[];
+  } catch (err) {
+    console.error('[scoreboard] read failed', err);
+    failed = true;
+  }
+}
+
+const REFRESH_SECONDS = 12;
+const words = (v: any) => String(v ?? '').replace(/_/g, ' ');
+const nameOf = (c: any) => (c ? c.name ?? c.entryNo ?? '—' : '—');
+const penaltyLine = (p: any) => {
+  const entries = Object.entries(p ?? {});
+  return entries.length ? entries.map(([k, n]) => `${k} ×${n}`).join('  ') : 'no penalties';
+};
+function fmtTime(v: any): string {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return String(v);
+  return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+}
+
+const liveEvents = events.filter((e) => ['live', 'check_in', 'results_pending'].includes(e.status));
+const otherEvents = events.filter((e) => !['live', 'check_in', 'results_pending'].includes(e.status));
+---
+
+<Base
+  title="Live scoreboard — MMAKF"
+  description="MMAKF competition scoreboard: mat by mat, with the score, penalties and state of each bout as last refreshed from the official record."
+  showFooter={false}
+>
+  <main class="sb" data-event={board ? board.event.id : ''} data-mat={matParam ?? ''} data-refresh={REFRESH_SECONDS}>
+    <header class="sb-top">
+      <div>
+        <div class="sb-brand">MMAKF</div>
+        <h1 class="sb-title">{board ? board.event.title : 'Scoreboard'}</h1>
+        {board && <div class="sb-sub">{board.event.code} · {words(board.event.status)}{board.event.venue ? ` · ${board.event.venue}` : ''}</div>}
+      </div>
+      <div class="sb-freshness">
+        <div class="sb-fresh-1">
+          Refreshed <span id="sbClock">{board ? fmtTime(board.refreshedAt) : '—'}</span>
+          <span id="sbAge" class="sb-age"></span>
+        </div>
+        <div class="sb-fresh-2">
+          This board is polled every {REFRESH_SECONDS} seconds. It is not a live feed —
+          what you see is the official record as at the time above.
+        </div>
+        <div id="sbStale" class="sb-stale" role="alert" hidden></div>
+        <div class="sb-controls">
+          <button type="button" class="sb-btn" id="sbRefresh">Refresh now</button>
+          <button type="button" class="sb-btn" id="sbFull">Full screen</button>
+        </div>
+      </div>
+    </header>
+
+    {!configured ? (
+      <section class="sb-empty">
+        <h2>The scoreboard has no record to read</h2>
+        <p>
+          Competition records are held in the federation database, which is not configured on this
+          deployment. Rather than show an empty board that looks like a competition with no points,
+          this page states plainly that there is nothing to read.
+        </p>
+      </section>
+    ) : failed ? (
+      <section class="sb-empty">
+        <h2>The scoreboard could not be read</h2>
+        <p>This is a fault on our side. The board will keep trying; nothing has been lost.</p>
+      </section>
+    ) : !board ? (
+      <section class="sb-empty">
+        <h2>Choose an event</h2>
+        {events.length === 0 ? (
+          <p>No event has been published on the competition register.</p>
+        ) : (
+          <>
+            {liveEvents.length > 0 && (
+              <div class="sb-picker">
+                {liveEvents.map((e: any) => (
+                  <a class="sb-pick sb-pick-live" href={`/scoreboard?event=${e.id}`}>
+                    <span class="sb-pick-code">{e.code}</span>
+                    <span class="sb-pick-title">{e.title}</span>
+                    <span class="sb-pick-meta">{words(e.status)}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+            {liveEvents.length === 0 && <p>No event is currently under way.</p>}
+            {otherEvents.length > 0 && (
+              <div class="sb-picker" style="margin-top:18px">
+                {otherEvents.slice(0, 12).map((e: any) => (
+                  <a class="sb-pick" href={`/scoreboard?event=${e.id}`}>
+                    <span class="sb-pick-code">{e.code}</span>
+                    <span class="sb-pick-title">{e.title}</span>
+                    <span class="sb-pick-meta">{words(e.status)}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+        <p class="sb-foot"><a href="/competitions">← Competitions</a></p>
+      </section>
+    ) : board.note ? (
+      <section class="sb-empty">
+        <h2>Nothing to show yet</h2>
+        <p>{board.note}</p>
+        <p class="sb-foot"><a href={`/competitions?event=${board.event.id}`}>← {board.event.code}</a></p>
+      </section>
+    ) : (
+      <>
+        {board.mats.length > 1 && (
+          <nav class="sb-mats" aria-label="Mats">
+            <a class={matParam ? 'sb-mat-link' : 'sb-mat-link on'} href={`/scoreboard?event=${board.event.id}`}>All mats</a>
+            {board.mats.map((m: string) => (
+              <a class={matParam === m ? 'sb-mat-link on' : 'sb-mat-link'}
+                 href={`/scoreboard?event=${board.event.id}&mat=${encodeURIComponent(m)}`}>
+                {m ? `Mat ${m}` : 'Unassigned'}
+              </a>
+            ))}
+          </nav>
+        )}
+
+        <div class="sb-grid" id="sbGrid" data-mats={board.byMat.map((b: any) => b.mat).join('')}>
+          {board.byMat.map((b: any, i: number) => (
+            <article class="sb-card" data-i={i}>
+              <div class="sb-card-h">
+                <span class="sb-mat">{b.mat ? `Mat ${b.mat}` : 'No mat assigned'}</span>
+                <span class="sb-state" data-f="state">{b.current ? words(b.current.status) : 'no bout'}</span>
+              </div>
+
+              <div class="sb-bout" data-f="bout">
+                <span data-f="category">{b.current?.categoryLabel ?? ''}</span>
+                <span data-f="round">{b.current ? `${b.current.round}${b.current.poolLabel ? ' ' + b.current.poolLabel : ''} · ${b.current.matchNo}` : 'No bout is called on this mat.'}</span>
+              </div>
+
+              <div class="sb-scores">
+                <div class="sb-competitor sb-aka">
+                  <div class="sb-side">Aka</div>
+                  <div class="sb-name" data-f="redName">{nameOf(b.current?.red)}</div>
+                  <div class="sb-dojo" data-f="redDojo">{b.current?.red?.dojo ?? ''}</div>
+                  <div class="sb-num" data-f="redScore">{b.current ? b.current.redScore : '–'}</div>
+                  <div class="sb-pen" data-f="redPen">{b.current ? penaltyLine(b.current.redPenalties) : ''}</div>
+                </div>
+                <div class="sb-competitor sb-ao">
+                  <div class="sb-side">Ao</div>
+                  <div class="sb-name" data-f="blueName">{nameOf(b.current?.blue)}</div>
+                  <div class="sb-dojo" data-f="blueDojo">{b.current?.blue?.dojo ?? ''}</div>
+                  <div class="sb-num" data-f="blueScore">{b.current ? b.current.blueScore : '–'}</div>
+                  <div class="sb-pen" data-f="bluePen">{b.current ? penaltyLine(b.current.bluePenalties) : ''}</div>
+                </div>
+              </div>
+
+              <div class="sb-next">
+                <span class="sb-next-k">Next</span>
+                <span data-f="next">
+                  {b.next
+                    ? `${b.next.categoryLabel} · ${b.next.round} · ${nameOf(b.next.red)} v ${nameOf(b.next.blue)}`
+                    : 'nothing further scheduled on this mat'}
+                </span>
+                <span class="sb-queue" data-f="queued">{b.queued > 0 ? `${b.queued} scheduled` : ''}</span>
+              </div>
+
+              {b.recent.length > 0 && (
+                <ul class="sb-recent" data-f="recent">
+                  {b.recent.map((r: any) => (
+                    <li>
+                      <span class="sb-recent-r">{r.round}</span>
+                      {nameOf(r.red)} {r.redScore}–{r.blueScore} {nameOf(r.blue)}
+                      {r.winner ? ` · ${nameOf(r.winner)} by ${words(r.winMethod ?? 'method not stated')}` : ''}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </article>
+          ))}
+        </div>
+
+        <p class="sb-foot">
+          Scores shown are the running total held against each bout on the official record. A bout that
+          is complete keeps the score it finished on; a result becomes official only when the category
+          is finalised, and finalised results are published on the
+          {' '}<a href={`/competitions?event=${board.event.id}`}>event page</a>.
+        </p>
+      </>
+    )}
+  </main>
+</Base>
+
+<script>
+  // Polling only. This script has no write path and never posts.
+  const root = document.querySelector('.sb');
+  if (root instanceof HTMLElement && root.dataset.event) {
+    const eventId = root.dataset.event;
+    const mat = root.dataset.mat || '';
+    const every = Math.max(5, Number(root.dataset.refresh || 12)) * 1000;
+    const clockEl = document.getElementById('sbClock');
+    const ageEl = document.getElementById('sbAge');
+    const staleEl = document.getElementById('sbStale');
+    const grid = document.getElementById('sbGrid');
+
+    let lastGood = Date.now();
+
+    const set = (card: Element, field: string, text: string) => {
+      const el = card.querySelector('[data-f="' + field + '"]');
+      if (el) el.textContent = text;
+    };
+    const nameOf = (c: any) => (c ? c.name || c.entryNo || '—' : '—');
+    const penalties = (p: any) => {
+      const entries = Object.entries(p || {});
+      return entries.length ? entries.map(([k, n]) => k + ' ×' + n).join('  ') : 'no penalties';
+    };
+    const words = (v: any) => String(v == null ? '' : v).replace(/_/g, ' ');
+
+    function paintAge() {
+      if (!(ageEl instanceof HTMLElement)) return;
+      const secs = Math.round((Date.now() - lastGood) / 1000);
+      ageEl.textContent = secs < 2 ? ' (just now)' : ' (' + secs + ' seconds ago)';
+    }
+
+    function paint(board: any) {
+      if (!grid || !Array.isArray(board.byMat)) return;
+      const cards = Array.from(grid.querySelectorAll('.sb-card'));
+      const signature = board.byMat.map((b: any) => b.mat).join('');
+      // The set of mats changed — the shape of the page is stale, so reload it
+      // rather than paint new data into cards that no longer describe it.
+      if (signature !== (grid.getAttribute('data-mats') || '')) { location.reload(); return; }
+
+      board.byMat.forEach((b: any, i: number) => {
+        const card = cards[i];
+        if (!card) return;
+        const m = b.current;
+        set(card, 'state', m ? words(m.status) : 'no bout');
+        set(card, 'category', m ? String(m.categoryLabel || '') : '');
+        set(card, 'round', m ? String(m.round) + (m.poolLabel ? ' ' + m.poolLabel : '') + ' · ' + String(m.matchNo) : 'No bout is called on this mat.');
+        set(card, 'redName', nameOf(m && m.red));
+        set(card, 'redDojo', (m && m.red && m.red.dojo) || '');
+        set(card, 'redScore', m ? String(m.redScore) : '–');
+        set(card, 'redPen', m ? penalties(m.redPenalties) : '');
+        set(card, 'blueName', nameOf(m && m.blue));
+        set(card, 'blueDojo', (m && m.blue && m.blue.dojo) || '');
+        set(card, 'blueScore', m ? String(m.blueScore) : '–');
+        set(card, 'bluePen', m ? penalties(m.bluePenalties) : '');
+        set(card, 'next', b.next
+          ? String(b.next.categoryLabel) + ' · ' + String(b.next.round) + ' · ' + nameOf(b.next.red) + ' v ' + nameOf(b.next.blue)
+          : 'nothing further scheduled on this mat');
+        set(card, 'queued', b.queued > 0 ? b.queued + ' scheduled' : '');
+      });
+
+      if (clockEl instanceof HTMLElement && board.refreshedAt) {
+        const d = new Date(board.refreshedAt);
+        clockEl.textContent = Number.isNaN(d.getTime())
+          ? String(board.refreshedAt)
+          : d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+      }
+      lastGood = Date.now();
+      if (staleEl instanceof HTMLElement) staleEl.hidden = true;
+      paintAge();
+    }
+
+    async function refresh() {
+      const url = '/api/competition/scoreboard?event=' + encodeURIComponent(eventId) + (mat ? '&mat=' + encodeURIComponent(mat) : '');
+      try {
+        const r = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (!r.ok) throw new Error('status ' + r.status);
+        paint(await r.json());
+      } catch {
+        // Keep the last good figures and say they are stale. Blanking a venue
+        // display, or leaving it looking current, would both be worse.
+        if (staleEl instanceof HTMLElement) {
+          staleEl.textContent = 'Could not refresh just now — the figures above are from the time shown and may have moved on.';
+          staleEl.hidden = false;
+        }
+      }
+    }
+
+    setInterval(refresh, every);
+    setInterval(paintAge, 1000);
+    paintAge();
+    document.getElementById('sbRefresh')?.addEventListener('click', refresh);
+    document.getElementById('sbFull')?.addEventListener('click', () => {
+      if (document.fullscreenElement) document.exitFullscreen?.();
+      else document.documentElement.requestFullscreen?.().catch(() => {});
+    });
+  }
+</script>
+
+<style>
+  .sb { max-width: 1400px; margin: 0 auto; padding: 24px 20px 60px; }
+  @media (max-width: 600px) { .sb { padding: 16px 14px 48px; } }
+
+  .sb-top {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 20px; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 18px;
+  }
+  .sb-brand { font-family: var(--font-display); font-size: .74rem; letter-spacing: .24em; color: var(--gold); text-transform: uppercase; }
+  .sb-title { font-family: var(--font-display); font-size: clamp(1.5rem, 3.2vw, 2.6rem); font-weight: 600; letter-spacing: .01em; margin-top: 4px; }
+  .sb-sub { font-size: .84rem; color: var(--muted); margin-top: 4px; }
+
+  .sb-freshness { text-align: right; min-width: 260px; }
+  @media (max-width: 700px) { .sb-freshness { text-align: left; } }
+  .sb-fresh-1 { font-family: var(--font-display); font-size: .96rem; letter-spacing: .04em; }
+  .sb-age { color: var(--muted); font-size: .82rem; }
+  .sb-fresh-2 { font-size: .74rem; color: var(--muted); line-height: 1.6; margin-top: 4px; max-width: 340px; }
+  .sb-stale { margin-top: 8px; font-size: .78rem; color: var(--red-2); line-height: 1.6; max-width: 340px; }
+  .sb-controls { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; flex-wrap: wrap; }
+  @media (max-width: 700px) { .sb-controls { justify-content: flex-start; } }
+  .sb-btn {
+    min-height: 44px; padding: 10px 16px; border: 1px solid var(--border-2); background: var(--bg-2);
+    color: var(--off-white); border-radius: var(--radius); cursor: pointer;
+    font-family: var(--font-display); font-size: .74rem; letter-spacing: .1em; text-transform: uppercase;
+  }
+  .sb-btn:hover { border-color: var(--gold-dim); color: var(--gold-2); }
+
+  .sb-mats { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 4px; }
+  .sb-mat-link {
+    min-height: 44px; display: flex; align-items: center; padding: 8px 16px;
+    border: 1px solid var(--border-2); border-radius: 999px; font-family: var(--font-display);
+    font-size: .76rem; letter-spacing: .08em; color: var(--off-white);
+  }
+  .sb-mat-link.on { border-color: var(--gold-dim); color: var(--gold-2); background: rgba(160,124,30,.06); }
+
+  .sb-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; margin-top: 20px; }
+  @media (max-width: 520px) { .sb-grid { grid-template-columns: 1fr; } }
+
+  .sb-card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); padding: 18px; }
+  .sb-card-h { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .sb-mat { font-family: var(--font-display); font-size: clamp(1rem, 1.6vw, 1.3rem); letter-spacing: .08em; text-transform: uppercase; }
+  .sb-state {
+    font-family: var(--font-display); font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--red-2); border: 1px solid var(--red-3); border-radius: 999px; padding: 4px 12px; white-space: nowrap;
+  }
+  .sb-bout { display: flex; flex-direction: column; gap: 2px; margin-top: 10px; font-size: .88rem; color: var(--off-white); }
+  .sb-bout span:first-child { font-family: var(--font-display); letter-spacing: .03em; }
+
+  .sb-scores { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+  .sb-competitor { padding: 14px; border-radius: var(--radius); background: var(--bg-2); border: 1px solid var(--border); }
+  .sb-aka { border-top: 5px solid var(--red); }
+  .sb-ao { border-top: 5px solid #1D4E89; }
+  .sb-side { font-family: var(--font-display); font-size: .68rem; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); }
+  .sb-name { font-size: clamp(1rem, 1.8vw, 1.45rem); font-weight: 600; line-height: 1.25; margin-top: 4px; overflow-wrap: anywhere; }
+  .sb-dojo { font-size: .78rem; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
+  .sb-num {
+    font-family: var(--font-display); font-weight: 700; font-variant-numeric: tabular-nums;
+    font-size: clamp(3rem, 8vw, 6rem); line-height: 1; margin-top: 6px;
+  }
+  .sb-pen { font-size: .76rem; color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+
+  .sb-next {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: .84rem; color: var(--off-white);
+  }
+  .sb-next-k { font-family: var(--font-display); font-size: .66rem; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
+  .sb-queue { color: var(--muted); font-size: .76rem; margin-left: auto; }
+
+  .sb-recent { margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 10px; }
+  .sb-recent li { font-size: .78rem; color: var(--muted); padding: 3px 0; overflow-wrap: anywhere; }
+  .sb-recent-r { font-family: var(--font-display); letter-spacing: .1em; margin-right: 6px; color: var(--off-white); }
+
+  .sb-empty { margin-top: 40px; max-width: 720px; }
+  .sb-empty h2 { font-family: var(--font-display); font-size: 1.4rem; }
+  .sb-empty p { color: var(--muted); line-height: 1.8; margin-top: 10px; font-size: .92rem; }
+  .sb-picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; margin-top: 18px; }
+  .sb-pick {
+    display: block; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card); min-height: 44px;
+  }
+  .sb-pick:hover { border-color: var(--gold-dim); }
+  .sb-pick-live { border-left: 4px solid var(--red); }
+  .sb-pick-code { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; color: var(--gold-2); }
+  .sb-pick-title { display: block; font-family: var(--font-display); font-size: 1rem; margin-top: 4px; }
+  .sb-pick-meta { display: block; font-size: .76rem; color: var(--muted); margin-top: 2px; }
+  .sb-foot { margin-top: 24px; font-size: .78rem; color: var(--muted); line-height: 1.7; max-width: 780px; }
+  .sb-foot a { color: var(--gold-2); }
+
+  /* A venue display is watched from across a hall: the numbers grow with the
+     viewport rather than being pinned to a size that suits a laptop. */
+  @media (min-width: 1500px) {
+    .sb-grid { grid-template-columns: repeat(auto-fit, minmax(600px, 1fr)); }
+    .sb-num { font-size: clamp(5rem, 9vw, 9rem); }
+    .sb-name { font-size: clamp(1.4rem, 2.2vw, 2.4rem); }
+  }
+</style>
