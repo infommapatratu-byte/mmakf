@@ -11,6 +11,7 @@
 import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import crypto from 'node:crypto';
 import * as s from './schema';
+import { isUniqueViolation } from './pgerror';
 import { assertCan, assertCanAnywhere, visibleScopes, type Action, type Principal, type Resource } from '@/lib/rbac';
 
 type DB = any; // drizzle client (postgres.js in prod, PGlite in tests)
@@ -269,21 +270,6 @@ export async function publicRegisterEntry(db: DB, federationId: string) {
 
 // ─── Rank records (§31 append-only, §72 derived current rank) ───────────────
 
-/**
- * Is this a Postgres unique-violation (SQLSTATE 23505)?
- *
- * Drivers and ORMs wrap the original error to differing depths — Drizzle's
- * message is the failed query text, not the constraint — so we walk the cause
- * chain rather than trusting the outermost shape.
- */
-function isUniqueViolation(err: any): boolean {
-  for (let e = err, depth = 0; e && depth < 5; e = e.cause, depth++) {
-    if (e.code === '23505') return true;
-    const m = String(e.message ?? '');
-    if (/duplicate key value|unique constraint|_uk"/i.test(m)) return true;
-  }
-  return false;
-}
 
 export async function awardRank(
   db: DB,

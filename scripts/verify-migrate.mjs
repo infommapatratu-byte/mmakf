@@ -21,7 +21,12 @@ const URL = `postgresql://postgres:postgres@127.0.0.1:${PORT}/postgres`;
 // verification of the runner that applies them.
 const MIGRATIONS = readdirSync('drizzle').filter((f) => f.endsWith('.sql')).sort();
 const LATEST = `drizzle/${MIGRATIONS[MIGRATIONS.length - 1]}`;
-const EXPECTED_TABLES = 14;
+// Derived by counting CREATE TABLE across the migrations, so adding tables
+// never silently breaks the check that verifies the runner.
+const EXPECTED_TABLES = MIGRATIONS.reduce(
+  (n, f) => n + (readFileSync(`drizzle/${f}`, 'utf8').match(/CREATE TABLE /g) || []).length,
+  0
+);
 
 function run(cmd, args, env = {}) {
   return new Promise((resolve) => {

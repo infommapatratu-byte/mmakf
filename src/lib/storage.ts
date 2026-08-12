@@ -131,16 +131,34 @@ export async function pushToList(key: string, record: any, cap: number): Promise
   if (redis) {
     try {
       const listKey = `mmakf:list:${key}`;
+      const archiveKey = `mmakf:archive:${key}`;
+
       await redis.lpush(listKey, JSON.stringify(record));
-      await redis.ltrim(listKey, 0, cap - 1);
+
+      // Overflow is MOVED to an archive, never discarded.
+      //
+      // The previous LTRIM silently deleted the oldest record once the list hit
+      // its cap: the 2001st membership application destroyed the 1st, with no
+      // warning and no way to recover it. For a federation these are official
+      // submissions — losing them is losing the register's history. LMOVE is
+      // atomic, so a record is never in neither list.
+      const length = await redis.llen(listKey);
+      for (let i = cap; i < length; i++) {
+        await redis.rpoplpush(listKey, archiveKey);
+      }
       return;
     } catch (e) {
       console.warn('Redis list push failed for', key, e);
     }
   }
-  // Local dev / degraded: fall back to the JSON blob path.
+
+  // Local dev / degraded: same guarantee, same archive.
   const list = (localGet<any[]>(`mmakf:${key}`, []) as any[]) || [];
   list.unshift(record);
+  if (list.length > cap) {
+    const archive = (localGet<any[]>(`mmakf:archive:${key}`, []) as any[]) || [];
+    localSet(`mmakf:archive:${key}`, [...archive, ...list.slice(cap)]);
+  }
   localSet(`mmakf:${key}`, list.slice(0, cap));
 }
 

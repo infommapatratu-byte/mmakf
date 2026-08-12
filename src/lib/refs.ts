@@ -27,3 +27,14 @@ export function reference(type: 'E' | 'R' | 'ORD' | 'GRD'): string {
 export function accessToken(): string {
   return crypto.randomBytes(24).toString('base64url');
 }
+
+/**
+ * A collision-free identifier for a stored record.
+ *
+ * Replaces `Date.now()`, which is not an identifier: two submissions in the
+ * same millisecond — a dojo entering a batch of students — produced the same
+ * value, and one silently overwrote the other in any id-keyed operation.
+ */
+export function recordId(): string {
+  return crypto.randomBytes(12).toString('base64url');
+}

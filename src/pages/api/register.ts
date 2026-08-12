@@ -11,7 +11,7 @@
 import type { APIRoute } from 'astro';
 import { pushToList } from '@/lib/storage';
 import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
-import { reference, accessToken } from '@/lib/refs';
+import { reference, accessToken, recordId } from '@/lib/refs';
 
 export const prerender = false;
 
@@ -57,10 +57,16 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   const appNo = reference('R');
+  // Returned to the applicant so they can check their own application later.
+  // Before this it was minted, stored, and read by nothing — the applicant had
+  // a reference number and no way to use it.
+  const token = accessToken();
   const record = {
-    id: Date.now(),
+    // A random id, not Date.now(): a dojo submitting a batch of students
+    // produces several records in the same millisecond, and those collided.
+    id: recordId(),
     appNo,
-    token: accessToken(),
+    token,
     ...app,
     ts: new Date().toISOString(),
     status: 'Received',
@@ -68,8 +74,15 @@ export const POST: APIRoute = async ({ request }) => {
 
   await pushToList('registrations', record, 2000);
 
-  return new Response(JSON.stringify({ ok: true, appNo }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-  });
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      appNo,
+      // Both halves are required to look the application up: the reference
+      // alone is not enough, so a guessed or overheard reference discloses
+      // nothing.
+      statusUrl: `/application?ref=${encodeURIComponent(appNo)}&token=${encodeURIComponent(token)}`,
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } }
+  );
 };

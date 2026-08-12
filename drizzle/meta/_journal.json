@@ -15,6 +15,13 @@
       "when": 1786503844743,
       "tag": "0001_user_session_controls",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786505268774,
+      "tag": "0002_commerce_core",
+      "breakpoints": true
     }
   ]
 }

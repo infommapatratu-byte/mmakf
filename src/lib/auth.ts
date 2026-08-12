@@ -106,10 +106,14 @@ export interface UnitSession {
   name: string;
   level: string;
   state: string;
+  /** Set for District-level codes. Absent means the code has no district. */
+  district?: string;
 }
 
 export function createUnitSessionCookie(u: UnitSession): string {
-  const payload = b64url(JSON.stringify({ k: 'unit', t: Date.now(), n: u.name, l: u.level, s: u.state }));
+  const payload = b64url(JSON.stringify({
+    k: 'unit', t: Date.now(), n: u.name, l: u.level, s: u.state, d: u.district ?? null,
+  }));
   return `${UNIT_COOKIE}=${payload}.${sign(payload, 'unit')}; ${attrs()}`;
 }
 
@@ -120,7 +124,12 @@ export function clearUnitSessionCookie(): string {
 export function getUnitSession(cookieHeader: string | null | undefined): UnitSession | null {
   const c = verify(parseCookies(cookieHeader)[UNIT_COOKIE], 'unit');
   if (!c || !c.n || !c.l || !c.s) return null;
-  return { name: String(c.n), level: String(c.l), state: String(c.s) };
+  return {
+    name: String(c.n),
+    level: String(c.l),
+    state: String(c.s),
+    district: c.d ? String(c.d) : undefined,
+  };
 }
 
 // ─── User sessions (per-person accounts, §65) ───

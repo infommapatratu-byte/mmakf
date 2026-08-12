@@ -4,6 +4,7 @@
 // public KEYS) and reviewed in the national admin panel.
 
 import type { APIRoute } from 'astro';
+import { recordId } from '@/lib/refs';
 import { pushToList } from '@/lib/storage';
 import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
 import { getUnitSession } from '@/lib/auth';
@@ -39,7 +40,9 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   const record = {
-    id: Date.now(),
+    // A random id, not Date.now(): a dojo submitting a batch of students
+    // produces several records in the same millisecond, and those collided.
+    id: recordId(),
     ts: new Date().toISOString(),
     unit: session.name,
     level: session.level,

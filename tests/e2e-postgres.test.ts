@@ -79,7 +79,11 @@ describe.skipIf(!process.env.CI && false)('end-to-end over the real Postgres dri
     expect(names).toContain('persons');
     expect(names).toContain('users');
     expect(names).toContain('audit_events');
-    expect(names.length).toBe(14);
+    // Derived from the migrations, not hard-coded: a new table must not turn
+    // this into a false failure.
+    const expected = readdirSync('drizzle').filter((f) => f.endsWith('.sql'))
+      .reduce((n, f) => n + (readFileSync(`drizzle/${f}`, 'utf8').match(/CREATE TABLE /g) || []).length, 0);
+    expect(names.length).toBe(expected);
   });
 
   it('carries the migration-0001 session columns', async () => {

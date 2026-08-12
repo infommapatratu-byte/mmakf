@@ -34,7 +34,12 @@ export const POST: APIRoute = async ({ request }) => {
     status: 200,
     headers: {
       'Content-Type': 'application/json',
-      'Set-Cookie': createUnitSessionCookie({ name: unit.name, level: unit.level, state: unit.state }),
+      'Set-Cookie': createUnitSessionCookie({
+        name: unit.name,
+        level: unit.level,
+        state: unit.state,
+        district: unit.district || undefined,
+      }),
     },
   });
 };

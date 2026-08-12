@@ -328,9 +328,9 @@ if (authed) {
           </div>
         </section>
 
-        <ListPanel id="unitAccess" title="Unit Access — State / District / Club portals" subtitle="Issue and revoke access codes for the /unit portal. Set Status to 'Disabled' to revoke instantly. Codes are private — never shown on the public site or data API." apiKey="unitAccess"
+        <ListPanel id="unitAccess" title="Unit Access — State / District / Club portals" subtitle="Issue and revoke access codes for the /unit portal. Set Status to 'Disabled' to revoke instantly. A unit only sees data at its own level: State sees the whole state, District sees its district (so District must be filled in, or the code sees nothing), Club sees only records naming that unit. Codes are private — never shown on the public site or data API." apiKey="unitAccess"
           rows={unitAccessList} fields={[
-            {n:'code',l:'Access code'},{n:'name',l:'Unit name',full:true},{n:'level',l:'Level (State/District/Club)'},{n:'state',l:'State (scopes their data)'},{n:'status',l:'Status (Active/Disabled)'}
+            {n:'code',l:'Access code'},{n:'name',l:'Unit name',full:true},{n:'level',l:'Level (State/District/Club)'},{n:'state',l:'State (scopes their data)'},{n:'district',l:'District — REQUIRED for District-level codes'},{n:'status',l:'Status (Active/Disabled)'}
           ]} />
 
         <section id="submissions" class="admin-panel">

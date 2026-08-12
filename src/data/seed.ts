@@ -263,7 +263,7 @@ export const SEED = {
   unitAccess: [
     { code: 'JH-STATE-8471',  name: 'Jharkhand Karate-Do Association (MMAKF)', level: 'State',    state: 'Jharkhand',   status: 'Active' },
     { code: 'BR-STATE-5529',  name: 'Bihar State MMAKF Unit',                  level: 'State',    state: 'Bihar',       status: 'Active' },
-    { code: 'RAM-DIST-2210',  name: 'Ramgarh District Association',            level: 'District', state: 'Jharkhand',   status: 'Active' },
+    { code: 'RAM-DIST-2210',  name: 'Ramgarh District Association',            level: 'District', state: 'Jharkhand',   district: 'Ramgarh', status: 'Active' },
     { code: 'RAN-CLUB-7734',  name: 'MMAKF Ranchi Training Centre',            level: 'Club',     state: 'Jharkhand',   status: 'Active' },
   ],
 
@@ -310,3 +310,20 @@ export const KEYS = [
 ] as const;
 
 export type DataKey = typeof KEYS[number];
+
+/**
+ * Keys that must NEVER appear in the public /api/data payload.
+ *
+ * `members` is the federation register: every member's name, grade, unit and
+ * state. Verification is a LOOKUP — you present one identifier and learn about
+ * one person — not a download. Serving the whole register unauthenticated (and
+ * CDN-cached) turned a verification service into a bulk export of the
+ * membership, which is a data-protection problem and a competitive one.
+ *
+ * Server-side readers (/api/verify, the unit portal) are unaffected: they read
+ * from storage directly and apply their own scoping.
+ */
+export const PRIVATE_KEYS: readonly DataKey[] = ['members'];
+
+/** What /api/data is allowed to return. */
+export const PUBLIC_KEYS = KEYS.filter((k) => !PRIVATE_KEYS.includes(k));

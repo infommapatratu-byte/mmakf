@@ -34,7 +34,19 @@ const statusOnly = process.argv.includes('--status');
 // Migrations run from an operator's machine, not a serverless function, so a
 // small pool is fine. prepare:false keeps this working through a transaction
 // pooler as well as a direct connection.
-const sql = postgres(url, { max: 1, prepare: false, connect_timeout: 15, idle_timeout: 20 });
+// The target schema is stated explicitly rather than inherited. A connection's
+// default search_path is ambient state — a managed provider, a pooler, or a
+// previous session can leave it pointing somewhere unexpected, and migrations
+// must never land in a schema by accident.
+const schema = process.env.DATABASE_SCHEMA || 'public';
+
+const sql = postgres(url, {
+  max: 1,
+  prepare: false,
+  connect_timeout: 15,
+  idle_timeout: 20,
+  connection: { search_path: schema },
+});
 
 function describeTarget(u) {
   try {
@@ -47,7 +59,12 @@ function describeTarget(u) {
 
 let exitCode = 0;
 try {
-  console.log(`Target: ${describeTarget(url)}`);
+  console.log(`Target: ${describeTarget(url)} (schema: ${schema})`);
+
+  // Create it if absent, then pin it for this session, so the run is unaffected
+  // by whatever the connection's default happened to be.
+  await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+  await sql.unsafe(`SET search_path TO ${schema}`);
 
   await sql`
     CREATE TABLE IF NOT EXISTS _mmakf_migrations (

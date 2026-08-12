@@ -7,6 +7,7 @@
 import Base from '@/layouts/Base.astro';
 import { get, getList } from '@/lib/storage';
 import { getUnitSession } from '@/lib/auth';
+import { scopeList, scopeProblem, scopeLabel } from '@/lib/unit-scope';
 
 export const prerender = false;
 
@@ -18,14 +19,15 @@ let mySubmissions: any[] = [];
 let circulars: any[] = [];
 let documents: any[] = [];
 
+let scopeWarning = '';
+
 if (session) {
-  const st = session.state.toLowerCase();
-  members = ((await get<any[]>('members')) || []).filter(
-    (m: any) => String(m.state || '').toLowerCase() === st
-  );
-  applications = (await getList<any>('registrations', 500))
-    .filter((r: any) => String(r.state || '').toLowerCase() === st)
-    .slice(0, 100);
+  // Scoping lives in src/lib/unit-scope.ts so it is unit-tested rather than
+  // buried in a template: it decides who can read applicants' personal details.
+  scopeWarning = scopeProblem(session) ?? '';
+
+  members = scopeList(session, (await get<any[]>('members')) || []);
+  applications = scopeList(session, await getList<any>('registrations', 500)).slice(0, 100);
   mySubmissions = (await getList<any>('submissions', 500))
     .filter((s: any) => s.unit === session.name)
     .slice(0, 50);
@@ -203,8 +205,17 @@ if (session) {
 
       {/* ── Applications to verify ── */}
       <section class="up-panel">
-        <h2 class="up-h">Registration applications — {session.state}</h2>
+        <h2 class="up-h">
+          Registration applications — {scopeLabel(session)}
+        </h2>
         <p class="up-sub">Verify each applicant with their club, then confirm to the federation office for ID issuance.</p>
+
+        {scopeWarning && (
+          <div class="card" style="margin-top:16px;border-left:3px solid var(--gold);padding:16px 18px">
+            <strong style="display:block;margin-bottom:4px">Nothing can be shown for this access code</strong>
+            <span style="color:var(--muted);font-size:.9rem">{scopeWarning}</span>
+          </div>
+        )}
         <div class="card" style="margin-top:18px;padding:0;overflow:hidden">
           {applications.length === 0 ? (
             <div style="padding:28px;text-align:center;color:var(--muted)">No pending applications from {session.state}.</div>

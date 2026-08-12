@@ -299,3 +299,9 @@ export const idSequences = pgTable('id_sequences', {
   year: integer('year').notNull(),
   next: integer('next').notNull().default(1),
 }, (t) => ({ uk: uniqueIndex('id_sequences_uk').on(t.prefix, t.year) }));
+
+// ─── Commerce & finance ─────────────────────────────────────────────────────
+//
+// Kept in its own file for size, re-exported here so `import * as s from
+// './schema'` remains the single entry point and drizzle-kit sees one schema.
+export * from './commerce.schema';

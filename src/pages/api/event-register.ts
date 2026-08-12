@@ -11,7 +11,7 @@
 import type { APIRoute } from 'astro';
 import { get, pushToList } from '@/lib/storage';
 import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
-import { reference, accessToken } from '@/lib/refs';
+import { reference, accessToken, recordId } from '@/lib/refs';
 import { upcomingEvents } from '@/lib/events';
 
 export const prerender = false;
@@ -65,7 +65,9 @@ export const POST: APIRoute = async ({ request }) => {
 
   const ref = reference('E');
   const record = {
-    id: Date.now(),
+    // A random id, not Date.now(): a dojo submitting a batch of students
+    // produces several records in the same millisecond, and those collided.
+    id: recordId(),
     ref,
     token: accessToken(),
     ...entry,
