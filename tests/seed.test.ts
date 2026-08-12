@@ -138,7 +138,15 @@ describe('content the federation has asked to be removed', () => {
     // It stood in fourteen places, including as a DEFAULT PARAMETER in a
     // component — which survives every attempt to remove it from the data,
     // because nothing passes the prop.
-    expect(grep(/9939144318|99391\s*44318/)).toEqual([]);
+    // Matched on the DIGITS, with any separator between them. The first version
+    // of this guard listed two spellings — bare and space-separated — and an
+    // agent promptly reintroduced the number as '+91-99391-44318' with DASHES,
+    // straight into the JSON-LD contactPoint, where a search engine would have
+    // republished it into a knowledge panel. Structured data is more exposed
+    // than a page, not less, and far harder to withdraw.
+    //
+    // A guard that enumerates formats catches the formats you thought of.
+    expect(grep(/9[\s.\-]*9[\s.\-]*3[\s.\-]*9[\s.\-]*1[\s.\-]*4[\s.\-]*4[\s.\-]*3[\s.\-]*1[\s.\-]*8/)).toEqual([]);
   });
 
   it('no personal UPI handle appears anywhere in the source', () => {
