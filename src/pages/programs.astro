@@ -27,29 +27,27 @@ const pillars = [
     image="https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=1800&q=70"
     eyebrow="Curriculum"
     title={`Nine <em>pathways</em>. One standard.`}
-    lead="Dojo and online, ages five to fifty-plus, beginner to black belt. Every program runs on the same Shotokan syllabus under the same Dan-graded faculty."
-    pills={['Dojo & Online', 'First class free']}
+    lead="One training system, taught as components rather than sold as nine separate subscriptions. Dojo and online, ages five upward, beginner to black belt — all on the same Shotokan syllabus under the same Dan-graded faculty."
+    pills={['Dojo, on-site & online', 'One fee framework']}
   />
 
   {/* ═══════ PROGRAMS GRID ═══════ */}
   <section>
     <div class="container">
       <div class="grid grid-3">
+        {/* PATHWAYS, NOT PRODUCTS. Every card here used to end in a monthly
+            price and an "Enroll" link — nine independent subscriptions on the
+            site of a national federation. What somebody pays now depends on
+            who they are and what they need, and only the fee engine decides
+            it. There is no price on this page and no `fee` field behind it. */}
         {programs.map((p: any) => (
           <div class="card hoverable fade">
             <div class="card-icon"><Icon name={p.icon || 'karate-gi'} size={36} color="var(--gold)" /></div>
             <div class="card-title">{p.name}</div>
             <div class="card-body" style="margin-bottom:18px">{p.desc}</div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px">
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
               <span class="pill">{p.lvl}</span>
               <span class="pill">{p.mode}</span>
-            </div>
-            <div style="display:flex;align-items:baseline;justify-content:space-between;padding-top:18px;border-top:1px solid var(--border)">
-              <div>
-                <span style="font-family:var(--font-display);font-size:1.8rem;font-weight:600;color:var(--gold)">₹{Number(p.fee).toLocaleString()}</span>
-                <span style="color:var(--muted);font-size:.85rem">/ month</span>
-              </div>
-              <a href="#enroll" class="btn-link">Enroll →</a>
             </div>
           </div>
         ))}

@@ -42,13 +42,31 @@ describe('seed integrity', () => {
     }
   });
 
-  it('fees and prices are non-negative integers', () => {
-    for (const p of SEED.programs) {
-      expect(Number.isInteger(p.fee) && p.fee >= 0, `program ${p.name}`).toBe(true);
+  it('NO TRAINING PATHWAY CARRIES A PRICE', () => {
+    // This test used to assert the opposite — that every programme had a
+    // non-negative integer `fee` — and it passed the whole time the site was
+    // showing nine independent monthly subscriptions: ₹800, ₹900, ₹900, ₹999,
+    // ₹1,000, ₹1,100, ₹1,200, ₹1,500, ₹1,800. The federation's objection was
+    // precisely that architecture, so the assertion is inverted.
+    //
+    // Kihon, kata, kumite and the rest are COMPONENTS of one training system.
+    // What somebody pays depends on who they are and what they need, and only
+    // src/db/fees.ts decides it — versioned, reproducible, and able to show
+    // which rule produced every line. A price typed into a content file can be
+    // neither.
+    for (const p of SEED.programs as any[]) {
+      expect(p.fee, `programme "${p.name}" carries a price again`).toBeUndefined();
+      expect(p.price, `programme "${p.name}" carries a price again`).toBeUndefined();
     }
+
+    // The grading fee table is DIFFERENT and stays. It is a published federation
+    // schedule with a rank against each figure, printed on /belt-system, and it
+    // is not a subscription.
     for (const k of SEED.beltGrading.kyu) {
       expect(Number.isInteger(k.fee) && k.fee >= 0, `kyu ${k.rank}`).toBe(true);
     }
+    // Shop products are goods with a shelf price, which is a normal thing to
+    // publish. Integer rupees, as everywhere else.
     for (const pr of SEED.products) {
       expect(Number.isInteger(pr.p) && pr.p >= 0, `product ${pr.n}`).toBe(true);
     }

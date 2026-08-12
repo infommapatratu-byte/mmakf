@@ -1,0 +1,368 @@
+---
+/**
+ * TRAINING & ENGAGEMENT — /training
+ *
+ * The federation's instruction was specific about what this page must NOT be:
+ *
+ *   "Do NOT make this page [School Card][Corporate Card][University Card]
+ *    [Individual Card]. Instead create an editorial experience."
+ *
+ * And about what the site must stop doing:
+ *
+ *   "MMAKF DOES NOT WANT A WEBSITE WITH ₹900 for one thing, ₹1,000 for another
+ *    … displayed as independent consumer subscriptions."
+ *
+ * So this page carries NO PRICE, and it is not four boxes in a row. It opens
+ * with the sentence that reframes the whole federation — one training system,
+ * delivered at every scale — and then branches by WHO IS ASKING, because that
+ * is the question that actually changes the answer.
+ *
+ * THE ONE HONEST THING THIS PAGE MUST KEEP SAYING. MMAKF has not published a
+ * fee framework. src/db/fees.ts is built, versioned and reproducible, and it is
+ * EMPTY. So no figure appears anywhere here, and the page says why rather than
+ * leaving a visitor to wonder whether the federation is expensive or evasive.
+ * The moment MMAKF supplies its rules, the estimator at /training/estimate
+ * starts answering and this page needs no change.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import Icon from '@/components/Icon.astro';
+import { get } from '@/lib/storage';
+import { isConfigured, db } from '@/db';
+import { activeFramework, todayIsoForFees } from '@/lib/training-fee-state';
+
+export const prerender = false;
+
+const fed = await get<any>('federation');
+const programs = (await get<any[]>('programs')) || [];
+
+/**
+ * Whether the federation has published fees at all.
+ *
+ * Asked of the DATABASE, not assumed. If a framework is published this page
+ * should stop saying there is none — and a page that keeps saying it after the
+ * federation has acted is its own kind of false statement.
+ */
+let framework: any = null;
+let frameworkUnavailable = false;
+if (isConfigured()) {
+  try {
+    framework = await activeFramework(db(), todayIsoForFees());
+  } catch {
+    // Reported, never rendered as "no fees exist" — those are different facts.
+    frameworkUnavailable = true;
+  }
+}
+
+/**
+ * Who MMAKF trains. Ordered institutions-first DELIBERATELY: the federation's
+ * scale is in schools and universities, and leading with the individual is what
+ * made the site read as one dojo selling monthly classes.
+ */
+const AUDIENCES = [
+  {
+    slug: 'schools',
+    label: 'Schools',
+    lede: 'Karate as part of the school week — physical education, self-defence, or a full co-curricular programme across every campus.',
+    detail: 'Delivered on-site by federation instructors, against the MMAKF syllabus, with assessment and certification where the school wants them. Programmes are built around the school year rather than sold by the month.',
+    scale: 'From one year group to every campus',
+    icon: 'school',
+  },
+  {
+    slug: 'corporates',
+    label: 'Corporates',
+    lede: 'Employee wellbeing, self-defence and women\'s safety training, delivered at your offices or ours.',
+    detail: 'Sessions are built to the organisation\'s shift patterns and locations. MMAKF makes no medical or psychological claim about outcomes — it teaches martial arts, well, to adults who mostly have not done it before.',
+    scale: 'From a single workshop to a standing programme',
+    icon: 'users',
+  },
+  {
+    slug: 'universities',
+    label: 'Universities & colleges',
+    lede: 'Student training, sports clubs, competition entry, and coach and referee education.',
+    detail: 'Institutions can affiliate a campus club into the federation structure, enter athletes into sanctioned competition, and put staff through technical and officiating courses.',
+    scale: 'Club, department or whole institution',
+    icon: 'globe',
+  },
+  {
+    slug: 'government',
+    label: 'Government & public bodies',
+    lede: 'Institutional programmes for departments, public sports bodies and community initiatives.',
+    detail: 'MMAKF responds to institutional enquiries and procurement processes. The federation claims no existing government partnership; each engagement stands on its own.',
+    scale: 'Institutional',
+    icon: 'shield',
+  },
+  {
+    slug: 'community',
+    label: 'Communities & clubs',
+    lede: 'Workshops, camps and self-defence programmes for residential communities, NGOs and clubs.',
+    detail: 'Often the shortest route into training for people who would never walk into a dojo — which is exactly why the federation runs them.',
+    scale: 'A workshop to a season',
+    icon: 'pin',
+  },
+  {
+    slug: 'individual',
+    label: 'Individuals & families',
+    lede: 'Train at an affiliated dojo, online, or one-to-one with a federation coach.',
+    detail: 'Children, adults, beginners and graded karateka train on the same syllabus. Personal coaching is a service MMAKF offers — it is not what MMAKF is.',
+    scale: 'One person, or a family',
+    icon: 'karate-gi',
+  },
+];
+
+/** The components a programme is assembled from — never nine separate products. */
+const PATHWAYS = programs.slice(0, 9);
+---
+
+<Base
+  title="Train with MMAKF — schools, institutions and individuals"
+  description="MMAKF delivers structured Shotokan and martial-arts education across India — to schools, universities, corporates, communities and individuals — under one federation fee framework."
+>
+  <PageHero
+    eyebrow="Training & engagement"
+    title="Train with <em>MMAKF</em>."
+    lead="From one student to an institution training hundreds, the federation delivers structured Shotokan through a national network of affiliated dojos and its own instructors."
+  />
+
+  {/* ═══════ THE REFRAME ═══════ */}
+  <section>
+    <div class="container">
+      <div class="lede-band">
+        <p class="lede-lg">
+          MMAKF is a national federation, not a dojo with a price list. The same
+          syllabus, the same Dan-graded faculty and the same examination standard
+          reach a child in a Patratu school, an athlete on the competitive
+          pathway, and four hundred students across a university campus.
+        </p>
+        <p class="lede-sub">
+          What differs is scale, place and purpose — which is exactly what
+          determines the fee.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ WHO IS ASKING ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Who is asking</div>
+        <h2 class="display-2">The federation trains <em>at every scale</em>.</h2>
+        <div class="rule gold"></div>
+      </div>
+
+      {/* Not a card grid. An editorial list: each audience gets a full row, its
+          own weight, and room for a real sentence — because "School / Corporate
+          / University / Individual" in four identical boxes tells a visitor
+          nothing they did not already know. */}
+      <ol class="aud-list">
+        {AUDIENCES.map((a, i) => (
+          <li class="aud">
+            <div class="aud-num" aria-hidden="true">{String(i + 1).padStart(2, '0')}</div>
+            <div class="aud-body">
+              <h3 class="aud-title">
+                <a href={`/training/${a.slug}`}>{a.label}</a>
+              </h3>
+              <p class="aud-lede">{a.lede}</p>
+              <p class="aud-detail">{a.detail}</p>
+              <div class="aud-meta">
+                <Icon name={a.icon} size={16} color="var(--gold)" />
+                <span>{a.scale}</span>
+              </div>
+            </div>
+            <div class="aud-go">
+              <a class="btn btn-ghost" href={`/training/${a.slug}`}>Request training &rarr;</a>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </section>
+
+  {/* ═══════ ONE FEE FRAMEWORK ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Fees</div>
+        <h2 class="display-2">One federation. One <em class="r">fee framework</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          MMAKF does not publish a list of monthly prices, because the same
+          question has different answers for a family of two and a school of four
+          hundred. The applicable fee is determined by your own circumstances.
+        </p>
+      </div>
+
+      <div class="fee-grid">
+        <div>
+          <h3 class="fee-h">What the framework considers</h3>
+          <ul class="fee-list">
+            <li>who is training, and how many</li>
+            <li>where — and whether MMAKF travels to you</li>
+            <li>how often, and for how long</li>
+            <li>dojo, on-site, online or hybrid</li>
+            <li>instructors and facilities required</li>
+            <li>assessment, grading and certification</li>
+            <li>competition support, where wanted</li>
+          </ul>
+        </div>
+        <div>
+          {framework ? (
+            <div class="fee-state">
+              <strong>The current framework is {framework.code}.</strong>
+              <p>
+                Your applicable fee is calculated from it, and every quotation the
+                federation issues shows the rules that produced each line.
+              </p>
+              <a class="btn btn-primary mt-6" href="/training/estimate">Estimate your fee &rarr;</a>
+            </div>
+          ) : (
+            <div class="fee-state pending">
+              {/* The honest state, and by far the most likely one to be read.
+                  "Contact us for pricing" would be evasive; this says which
+                  thing is actually true. */}
+              <strong>The federation has not yet published its fee framework.</strong>
+              <p>
+                The system that will calculate it is built — versioned, and able to
+                show exactly which rule produced every line of a quotation — and it
+                is deliberately empty until MMAKF sets its own rules. No figure is
+                shown here because inventing one would be worse than showing none.
+              </p>
+              <p>
+                Until then every enquiry is answered with a quotation prepared by
+                the federation office against what you actually need.
+              </p>
+              {frameworkUnavailable && (
+                <p class="fee-warn">
+                  The fee register could not be read just now, so this page cannot
+                  confirm whether a framework has been published since. That is a
+                  fault on our side, not an answer about your fee.
+                </p>
+              )}
+              <a class="btn btn-primary mt-6" href="/training/individual">Request a quotation &rarr;</a>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE COMPONENTS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">The training system</div>
+        <h2 class="display-2">Components, not <em>subscriptions</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Kihon, kata, kumite, self-defence and the competitive pathway are parts
+          of one system. A programme is assembled from them to suit who is
+          training — they are not nine products with nine prices.
+        </p>
+      </div>
+      <div class="path-strip">
+        {PATHWAYS.map((p: any) => (
+          <div class="path">
+            <Icon name={p.icon || 'karate-gi'} size={26} color="var(--gold)" />
+            <div class="path-name">{p.name}</div>
+            <div class="path-lvl">{p.lvl}</div>
+          </div>
+        ))}
+      </div>
+      <div class="mt-8">
+        <a class="btn btn-ghost" href="/programs">Every pathway in detail &rarr;</a>
+        <a class="btn btn-ghost" href="/belt-system">The syllabus and grades &rarr;</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .lede-band { max-width: 74ch; }
+  .lede-lg {
+    font-family: var(--font-display);
+    font-size: clamp(1.25rem, 2.6vw, 1.9rem);
+    line-height: 1.45; color: var(--white); margin: 0 0 20px;
+  }
+  .lede-sub { font-size: 1rem; color: var(--muted); margin: 0; max-width: 60ch; }
+
+  .aud-list { list-style: none; padding: 0; margin: 0; counter-reset: aud; }
+  .aud {
+    display: grid;
+    grid-template-columns: 64px 1fr minmax(0, 210px);
+    gap: clamp(16px, 3vw, 36px);
+    align-items: start;
+    padding: 34px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .aud:last-child { border-bottom: 0; }
+  @media (max-width: 860px) {
+    .aud { grid-template-columns: 44px 1fr; }
+    .aud-go { grid-column: 2; }
+  }
+
+  .aud-num {
+    font-family: var(--font-display); font-weight: 700;
+    font-size: clamp(1.5rem, 3vw, 2.1rem); line-height: 1;
+    color: var(--gold-dim);
+  }
+  .aud-title { margin: 0 0 10px; font-size: clamp(1.2rem, 2.4vw, 1.65rem); }
+  .aud-title a { color: var(--white); text-decoration: none; }
+  .aud-title a:hover { color: var(--gold); text-decoration: underline; }
+  .aud-lede { margin: 0 0 10px; font-size: 1rem; color: var(--off-white); line-height: 1.6; max-width: 62ch; }
+  .aud-detail { margin: 0 0 14px; font-size: .92rem; color: var(--muted); line-height: 1.65; max-width: 66ch; }
+  .aud-meta {
+    display: flex; align-items: center; gap: 9px;
+    font-family: var(--font-display); font-size: .68rem;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+  }
+  .aud-go { display: flex; justify-content: flex-end; }
+  @media (max-width: 860px) { .aud-go { justify-content: flex-start; margin-top: 6px; } }
+
+  .fee-grid {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+    gap: clamp(24px, 5vw, 56px); align-items: start;
+  }
+  @media (max-width: 820px) { .fee-grid { grid-template-columns: 1fr; } }
+
+  .fee-h {
+    font-family: var(--font-display); font-size: .72rem;
+    letter-spacing: .22em; text-transform: uppercase; color: var(--gold);
+    margin: 0 0 16px;
+  }
+  .fee-list { list-style: none; padding: 0; margin: 0; }
+  .fee-list li {
+    padding: 11px 0 11px 22px; border-bottom: 1px solid var(--border);
+    font-size: .95rem; color: var(--off-white); position: relative;
+  }
+  .fee-list li::before {
+    content: ''; position: absolute; left: 0; top: 19px;
+    width: 8px; height: 1px; background: var(--gold-dim);
+  }
+  .fee-list li:last-child { border-bottom: 0; }
+
+  .fee-state {
+    padding: 28px 30px; background: var(--card);
+    border: 1px solid var(--border-2); border-left: 3px solid var(--gold);
+    border-radius: var(--radius);
+  }
+  .fee-state.pending { border-left-color: var(--gold-dim); }
+  .fee-state strong {
+    font-family: var(--font-display); color: var(--white);
+    display: block; margin-bottom: 12px; font-size: 1.02rem;
+  }
+  .fee-state p { margin: 0 0 12px; font-size: .93rem; color: var(--muted); line-height: 1.7; }
+  .fee-warn { color: var(--red-2); }
+
+  .path-strip {
+    display: grid; gap: 1px; background: var(--border);
+    border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+  .path { background: var(--card); padding: 22px 20px; }
+  .path-name {
+    font-family: var(--font-display); font-weight: 600;
+    font-size: 1rem; color: var(--white); margin: 12px 0 5px;
+  }
+  .path-lvl { font-size: .82rem; color: var(--muted); }
+</style>

@@ -80,16 +80,52 @@ export const SEED = {
   ],
 
   // `icon` is a key into <Icon name="..."/> — no emojis
+  // TRAINING PATHWAYS — NOT NINE PRODUCTS WITH NINE PRICES.
+  //
+  // Each of these carried its own monthly figure: ₹800 for the women's
+  // programme, ₹900 for kids, ₹1,000 for kata, ₹1,100 for kumite, ₹1,200 for
+  // Shotokan, ₹1,500 for the competitive track, ₹1,800 for Dan preparation.
+  // Nine independent consumer subscriptions on the site of a national
+  // federation, and none of them could answer what a school pays to run karate
+  // for 400 children across two campuses for a year.
+  //
+  // Kihon, kata, kumite, self-defence, the women's programme and the
+  // competitive track are COMPONENTS OF ONE TRAINING SYSTEM. What somebody pays
+  // depends on who they are and what they need, and that is decided by the fee
+  // framework in src/db/fees.ts — which is versioned, reproducible, explains
+  // every line of every quotation, and is CURRENTLY EMPTY because MMAKF has
+  // not published its fees.
+  //
+  // So there is no `fee` field here any more. A price cannot be typed into a
+  // content file, which is the only way to guarantee it is never invented.
   programs: [
-    { icon: 'karate-gi',  name: 'Shotokan Karate',         desc: "The authentic Karate-Do discipline — MMAKF's core art. Train in Kihon, Kata and Kumite under MMAKF senior instructors.", lvl: 'All Levels · Ages 7+', fee: 1200, mode: 'Dojo / Online' },
-    { icon: 'kata',       name: 'Kata Specialization',     desc: 'Advanced form training under Sensei Dhiraj Pathak. Precision, memory and technical sequencing for competition and grading.', lvl: 'Coloured Belt+', fee: 1000, mode: 'Dojo / Online' },
-    { icon: 'kumite',     name: 'Kumite & Sparring',       desc: 'Tactical combat training under Chief Instructor Sensei Vikas Pathak (IV Dan). Sparring systems, reaction drills and competitive preparation.', lvl: 'Coloured Belt+', fee: 1100, mode: 'Dojo' },
-    { icon: 'shield',     name: 'Self-Defense',            desc: 'Practical self-defense for real situations. Escape techniques, situational awareness and street-ready responses led by Sensei Sumitra Devi.', lvl: 'All Levels · Ages 12+', fee: 900, mode: 'Dojo / Online' },
-    { icon: 'women',      name: "Women's Program",         desc: "MMAKF's dedicated women's martial arts and self-defense division. Safety awareness, confidence building and physical empowerment.", lvl: 'Women · Ages 14+', fee: 800, mode: 'Dojo / Online' },
-    { icon: 'star',       name: 'Kids Program',            desc: 'Fun, structured martial arts for children aged 5–14. Build motor skills, focus, discipline and confidence from day one.', lvl: 'Ages 5–14', fee: 900, mode: 'Dojo' },
-    { icon: 'medal',      name: 'Competitive / WKF Track', desc: 'Structured competitive pathway from district championships to WKF international registration.', lvl: 'Intermediate+', fee: 1500, mode: 'Dojo' },
-    { icon: 'globe',      name: 'Online Academy',       desc: "Complete Shotokan curriculum via MMAKF's virtual university. Recorded library, live sessions, belt certification.", lvl: 'All Levels · Worldwide', fee: 999, mode: 'Online' },
-    { icon: 'black-belt', name: 'Dan Grading Preparation', desc: 'Intensive preparation for MMAKF black belt grading under Shihan Pramod Kumar Pathak.', lvl: 'Brown Belt+', fee: 1800, mode: 'Dojo / Camp' },
+    { icon: 'karate-gi',  name: 'Shotokan Karate',          pathway: 'core',
+      desc: "The federation's core discipline. Kihon, kata and kumite, examined against the MMAKF syllabus.",
+      lvl: 'All levels · Ages 7+', mode: 'Dojo / Online' },
+    { icon: 'kata',       name: 'Kata',                     pathway: 'technical',
+      desc: 'Form — precision, memory and technical sequencing, for grading and for competition.',
+      lvl: 'Coloured belt and above', mode: 'Dojo / Online' },
+    { icon: 'kumite',     name: 'Kumite',                   pathway: 'technical',
+      desc: 'Sparring: distance, timing, tactics and the reaction work behind them.',
+      lvl: 'Coloured belt and above', mode: 'Dojo' },
+    { icon: 'shield',     name: 'Self-defence',             pathway: 'applied',
+      desc: 'Practical defence, situational awareness and escape technique.',
+      lvl: 'All levels · Ages 12+', mode: 'Dojo / Online / On-site' },
+    { icon: 'women',      name: "Women's training",         pathway: 'applied',
+      desc: 'Women-only training and the self-defence curriculum the federation runs in partner schools.',
+      lvl: 'Women · Ages 14+', mode: 'Dojo / On-site' },
+    { icon: 'star',       name: 'Children',                 pathway: 'foundation',
+      desc: 'Structured martial arts for children: motor skill, focus and discipline before technique.',
+      lvl: 'Ages 5–14', mode: 'Dojo / On-site' },
+    { icon: 'medal',      name: 'Competitive development',  pathway: 'performance',
+      desc: 'The competitive pathway, from district championships toward WKF registration.',
+      lvl: 'Intermediate and above', mode: 'Dojo' },
+    { icon: 'globe',      name: 'Online academy',           pathway: 'core',
+      desc: 'The Shotokan curriculum delivered remotely — recorded library and live sessions.',
+      lvl: 'All levels · Worldwide', mode: 'Online' },
+    { icon: 'black-belt', name: 'Dan preparation',          pathway: 'performance',
+      desc: 'Preparation for Dan examination, conducted under the technical authority of the federation.',
+      lvl: 'Brown belt and above', mode: 'Dojo / Camp' },
   ],
 
   schedule: [
