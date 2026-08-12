@@ -44,7 +44,7 @@ or `paymentStatusReport()` from `@/lib/payments`.
 | | |
 |---|---|
 | Branch | `wave-2b-federation` — **production still runs `6a44fdf`** |
-| Tests | 254 passing across 15 files |
+| Tests | **1103 passing across 31 files** |
 | Schema | **87 tables**, 4 migrations, applied and verified against real Postgres |
 | Typecheck / build | clean |
 | External links | 28/28 verified live by content type and size |
@@ -69,9 +69,10 @@ npm run dev:db          # real Postgres on 127.0.0.1:5433, persists to .pgdata/
 DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5433/postgres" npm run db:migrate
 npm run dev
 
-npm test                # 254 tests, includes real-Postgres suites
+npm test                # 1103 tests, includes real-Postgres suites
 npm run db:verify       # proves the migration runner end-to-end (5 checks)
 npm run links:check     # external rulebook links, by content type not status code
+npm run backup          # dump every table; -- --verify FILE before trusting it
 npm run user:create -- --email you@mmakf.in --role SUPER_ADMIN
 ```
 
