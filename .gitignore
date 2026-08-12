@@ -13,3 +13,6 @@ dist/
 
 # local development database
 .pgdata/
+
+# database dumps — never committed
+backups/

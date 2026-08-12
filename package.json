@@ -16,7 +16,8 @@
     "db:verify": "node scripts/verify-migrate.mjs",
     "dev:db": "node scripts/dev-db.mjs",
     "user:create": "node scripts/create-user.ts",
-    "links:check": "node scripts/check-links.mjs"
+    "links:check": "node scripts/check-links.mjs",
+    "backup": "node scripts/backup.mjs"
   },
   "dependencies": {
     "@astrojs/vercel": "^8.2.11",
