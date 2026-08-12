@@ -334,3 +334,8 @@ export * from './technical.schema';
 export * from './competition.schema';
 export * from './education.schema';
 export * from './governance.schema';
+
+// Training, engagement and the unified fee architecture. Added to replace nine
+// independent monthly prices typed into a content file with ONE versioned fee
+// framework whose output depends on who is asking and what they need.
+export * from './engagement.schema';

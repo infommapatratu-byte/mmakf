@@ -43,6 +43,13 @@
       "when": 1786512236310,
       "tag": "0005_mfa",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786540810309,
+      "tag": "0006_engagement_and_fees",
+      "breakpoints": true
     }
   ]
 }
