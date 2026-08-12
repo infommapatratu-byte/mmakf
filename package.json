@@ -13,7 +13,9 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "node scripts/migrate.mjs",
     "db:status": "node scripts/migrate.mjs --status",
-    "db:verify": "node scripts/verify-migrate.mjs"
+    "db:verify": "node scripts/verify-migrate.mjs",
+    "dev:db": "node scripts/dev-db.mjs",
+    "user:create": "node scripts/create-user.ts"
   },
   "dependencies": {
     "@astrojs/vercel": "^8.2.11",

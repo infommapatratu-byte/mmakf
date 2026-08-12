@@ -13,11 +13,15 @@
 //   node scripts/verify-migrate.mjs
 
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 
 const PORT = 5433 + (process.pid % 500);
 const URL = `postgresql://postgres:postgres@127.0.0.1:${PORT}/postgres`;
-const MIGRATION = 'drizzle/0000_federation_core.sql';
+// Derived, not hard-coded: adding a migration must not silently break the
+// verification of the runner that applies them.
+const MIGRATIONS = readdirSync('drizzle').filter((f) => f.endsWith('.sql')).sort();
+const LATEST = `drizzle/${MIGRATIONS[MIGRATIONS.length - 1]}`;
+const EXPECTED_TABLES = 14;
 
 function run(cmd, args, env = {}) {
   return new Promise((resolve) => {
@@ -40,7 +44,7 @@ await new Promise((resolve, reject) => {
   server.stderr.on('data', (d) => process.stderr.write(d));
 });
 
-const original = readFileSync(MIGRATION, 'utf8');
+const original = readFileSync(LATEST, 'utf8');
 const checks = [];
 const check = (name, ok, detail = '') => {
   checks.push({ name, ok, detail });
@@ -49,30 +53,34 @@ const check = (name, ok, detail = '') => {
 
 try {
   const status = await run(process.execPath, ['scripts/migrate.mjs', '--status'], { DATABASE_URL: URL });
-  check('status reports the migration pending on an empty database',
-    status.code === 0 && /PENDING\s+0000_federation_core\.sql/.test(status.out) && /1 migration\(s\) pending/.test(status.out),
+  const allListed = MIGRATIONS.every((m) => status.out.includes(`PENDING  ${m}`));
+  check(`status reports all ${MIGRATIONS.length} migration(s) pending on an empty database`,
+    status.code === 0 && allListed && status.out.includes(`${MIGRATIONS.length} migration(s) pending`),
     status.out.trim());
 
   const apply = await run(process.execPath, ['scripts/migrate.mjs'], { DATABASE_URL: URL });
-  check('applies the migration and reports the tables created',
-    apply.code === 0 && /Applied 1 migration/.test(apply.out) && /persons/.test(apply.out) && /audit_events/.test(apply.out),
+  check('applies every migration and reports the tables created',
+    apply.code === 0 &&
+      apply.out.includes(`Applied ${MIGRATIONS.length} migration`) &&
+      apply.out.includes('persons') &&
+      apply.out.includes('audit_events'),
     apply.out.trim());
 
   const tableCount = Number((apply.out.match(/Tables in public \((\d+)\)/) || [])[1] || 0);
-  check('all 14 federation tables exist', tableCount === 14, `found ${tableCount}`);
+  check(`all ${EXPECTED_TABLES} federation tables exist`, tableCount === EXPECTED_TABLES, `found ${tableCount}`);
 
   const again = await run(process.execPath, ['scripts/migrate.mjs'], { DATABASE_URL: URL });
   check('a second run is a no-op',
     again.code === 0 && /nothing to apply/.test(again.out),
     again.out.trim());
 
-  writeFileSync(MIGRATION, original + '\n-- drift\n');
+  writeFileSync(LATEST, original + '\n-- drift\n');
   const drift = await run(process.execPath, ['scripts/migrate.mjs'], { DATABASE_URL: URL });
   check('refuses an applied migration that was edited afterwards',
     drift.code === 1 && /ALTERED AFTER APPLY/.test(drift.out),
     drift.out.trim());
 } finally {
-  writeFileSync(MIGRATION, original);
+  writeFileSync(LATEST, original);
   server.kill();
 }
 

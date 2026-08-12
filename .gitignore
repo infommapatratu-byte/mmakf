@@ -10,3 +10,6 @@ dist/
 
 .vercel
 .env*.local
+
+# local development database
+.pgdata/

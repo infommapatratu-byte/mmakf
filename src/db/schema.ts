@@ -236,6 +236,11 @@ export const users = pgTable('users', {
   lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
   failedAttempts: integer('failed_attempts').notNull().default(0),
   lockedUntil: timestamp('locked_until', { withTimezone: true }),
+  // Bumping this invalidates every existing session for the user at once —
+  // "sign out everywhere", and the lever used when an account is compromised or
+  // authority is withdrawn. Sessions carry the epoch they were minted under.
+  sessionEpoch: integer('session_epoch').notNull().default(0),
+  mustChangePassword: text('must_change_password').notNull().default('no'), // yes | no
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({ emailIdx: uniqueIndex('users_email_uk').on(t.email) }));

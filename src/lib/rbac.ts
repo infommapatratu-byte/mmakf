@@ -247,9 +247,15 @@ export function canAnywhere(
 
 /** Throwing variant for endpoints: returns void or throws ForbiddenError. */
 export class ForbiddenError extends Error {
-  constructor(public action: Action) {
+  // Declared as a field rather than a constructor parameter property, so this
+  // module can be run directly by Node's type-stripping (used by the operator
+  // scripts in scripts/) without a build step.
+  readonly action: Action;
+
+  constructor(action: Action) {
     super(`Forbidden: ${action}`);
     this.name = 'ForbiddenError';
+    this.action = action;
   }
 }
 

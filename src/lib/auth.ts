@@ -15,9 +15,10 @@ import crypto from 'node:crypto';
 
 const ADMIN_COOKIE = 'mmakf_admin';
 const UNIT_COOKIE = 'mmakf_unit';
+const USER_COOKIE = 'mmakf_user';
 const MAX_AGE = 60 * 60 * 24 * 7; // 7 days
 
-type Audience = 'admin' | 'unit';
+type Audience = 'admin' | 'unit' | 'user';
 
 function getSecret(): string {
   const s = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD || 'dev-secret-change-me';
@@ -122,8 +123,52 @@ export function getUnitSession(cookieHeader: string | null | undefined): UnitSes
   return { name: String(c.n), level: String(c.l), state: String(c.s) };
 }
 
+// ─── User sessions (per-person accounts, §65) ───
+//
+// The cookie carries only the user id and the session epoch it was minted
+// under. Roles are NOT embedded: they are loaded from role_bindings on every
+// request (see src/db/users.ts resolvePrincipal) so that withdrawing someone's
+// authority takes effect immediately rather than whenever their cookie expires.
+//
+// Bumping users.session_epoch invalidates every cookie for that user at once —
+// the "sign out everywhere" lever, used on compromise or on withdrawal.
+
+export interface UserSessionClaims {
+  userId: number;
+  epoch: number;
+}
+
+export function createUserSessionCookie(c: UserSessionClaims): string {
+  const payload = b64url(JSON.stringify({ k: 'user', t: Date.now(), u: c.userId, e: c.epoch }));
+  return `${USER_COOKIE}=${payload}.${sign(payload, 'user')}; ${attrs()}`;
+}
+
+export function clearUserSessionCookie(): string {
+  return `${USER_COOKIE}=; ${clearAttrs()}`;
+}
+
+/**
+ * Read the user session claims. This proves the cookie is authentic and
+ * unexpired — it does NOT prove the account still exists or holds any
+ * authority. Callers must pass the claims to resolvePrincipal() against the
+ * database before permitting anything.
+ */
+export function getUserSession(cookieHeader: string | null | undefined): UserSessionClaims | null {
+  const c = verify(parseCookies(cookieHeader)[USER_COOKIE], 'user');
+  if (!c || typeof c.u !== 'number' || typeof c.e !== 'number') return null;
+  return { userId: c.u, epoch: c.e };
+}
+
 // ─── Password ───
 
+/**
+ * The legacy shared office password.
+ *
+ * Superseded by per-person accounts (src/db/users.ts). It remains only as the
+ * bootstrap path: without it, provisioning a database would lock the office out
+ * of its own admin panel entirely. `sharedPasswordAllowed()` is the gate that
+ * retires it, and must be consulted before calling this.
+ */
 export function checkPassword(submitted: string): boolean {
   const target = process.env.ADMIN_PASSWORD || 'mmakf2025';
   if (!submitted) return false;
@@ -131,4 +176,20 @@ export function checkPassword(submitted: string): boolean {
   const b = Buffer.from(target);
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * May the shared office password still be used to sign in?
+ *
+ * It is retired automatically once real accounts exist, so the federation
+ * cannot end up with per-person accountability on paper while a shared password
+ * quietly remains a way around it. Two escapes, both deliberate:
+ *  · no database configured — there are no accounts to sign in with yet;
+ *  · ALLOW_SHARED_ADMIN_PASSWORD=true — an explicit, auditable break-glass for
+ *    recovering a locked-out office.
+ */
+export function sharedPasswordAllowed(userCount: number, databaseConfigured: boolean): boolean {
+  if (!databaseConfigured) return true;
+  if (process.env.ALLOW_SHARED_ADMIN_PASSWORD === 'true') return true;
+  return userCount === 0;
 }
