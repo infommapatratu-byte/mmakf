@@ -24,6 +24,7 @@
 
 import { and, asc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import * as s from './schema';
+import { PUBLIC_EVENT_STATUSES } from './competition.schema';
 import { allocateFederationId, resolvePlacement, writeAudit, type AuditContext } from './federation';
 import {
   assertCan, assertCanAnywhere, can, canAnywhere, visibleScopes,
@@ -88,11 +89,11 @@ export const LEGAL_TRANSITIONS: Record<EventStatus, readonly EventStatus[]> = {
   postponed: ['published', 'cancelled'],
 };
 
-/** Statuses at which an event is public information. */
-const PUBLIC_STATUSES: readonly EventStatus[] = [
-  'published', 'registration_open', 'registration_closed',
-  'check_in', 'live', 'results_pending', 'results_final', 'archived',
-];
+// Statuses at which an event is public information. A FIFTH copy of this list
+// lived here under a DIFFERENT NAME, which is why the duplication survived so
+// long — nobody greps for a rule they believe is called something else. There
+// is now one definition, in the schema beside the enum it constrains.
+const PUBLIC_STATUSES: readonly EventStatus[] = PUBLIC_EVENT_STATUSES as readonly EventStatus[];
 
 /** Once here, the entry list is history and must not be rewritten. */
 const RESULTS_LOCKED_STATUSES: readonly EventStatus[] = ['results_final', 'archived'];

@@ -821,10 +821,12 @@ async function searchDistrictUnits(c: DomainContext): Promise<DomainResult> {
 // to a domain module's evolution. If the federation changes which statuses are
 // public, both lists must move together — hence this note.
 
-export const PUBLIC_EVENT_STATUSES = [
-  'published', 'registration_open', 'registration_closed',
-  'check_in', 'live', 'results_pending', 'results_final', 'archived',
-] as const;
+// Re-exported from the schema, where the one definition lives. Callers already
+// importing it from here keep working, and there is no second list to drift.
+// Imported AND re-exported: `export ... from` alone is not a local binding,
+// and this module uses the list a few lines below.
+import { PUBLIC_EVENT_STATUSES } from '@/db/competition.schema';
+export { PUBLIC_EVENT_STATUSES };
 
 async function searchCompetitionEvents(c: DomainContext): Promise<DomainResult> {
   if (!canAnywhere(c.principal, 'competition:read')) return { skip: 'not_authorised' };

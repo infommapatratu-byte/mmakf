@@ -40,6 +40,7 @@ import { identify, clientIp } from '@/lib/session';
 import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
 import { assertCan, can, ForbiddenError } from '@/lib/rbac';
 import { isConfigured, db, schema as s } from '@/db';
+import { PUBLIC_EVENT_STATUSES, isPublicEventStatus } from '@/db/competition.schema';
 import { writeAudit, type AuditContext } from '@/db/federation';
 import { get as storeGet, set as storeSet } from '@/lib/storage';
 import {
@@ -451,11 +452,9 @@ export async function adminEventDetail(principal: any, eventId: number) {
 // One definition of public visibility, used by /competitions and /scoreboard.
 // These functions take NO principal and perform NO writes.
 
-/** An event is public information from publication onwards, and never before. */
-const PUBLIC_EVENT_STATUSES: readonly string[] = [
-  'published', 'registration_open', 'registration_closed',
-  'check_in', 'live', 'results_pending', 'results_final', 'archived',
-];
+// An event is public information from publication onwards, and never before.
+// The list itself lives beside the enum it constrains, in
+// src/db/competition.schema.ts, and is re-exported through @/db/schema.
 
 /** Entry lists become public once entries have closed, not while they are open. */
 const ENTRY_LIST_PUBLIC_FROM: readonly string[] = [
@@ -518,7 +517,7 @@ export async function publicEventDetail(eventId: number) {
   const dbc = db();
   const event = (await dbc.select(PUBLIC_EVENT_COLUMNS).from(s.competitionEvents)
     .where(eq(s.competitionEvents.id, eventId)).limit(1))[0] as any;
-  if (!event || !PUBLIC_EVENT_STATUSES.includes(event.status)) return null;
+  if (!event || !isPublicEventStatus(event.status)) return null;
 
   const categories = await dbc.select().from(s.eventCategories)
     .where(eq(s.eventCategories.eventId, eventId))
@@ -619,7 +618,7 @@ export async function publicScoreboard(eventId: number, mat?: string | null) {
   const dbc = db();
   const event = (await dbc.select(PUBLIC_EVENT_COLUMNS).from(s.competitionEvents)
     .where(eq(s.competitionEvents.id, eventId)).limit(1))[0] as any;
-  if (!event || !PUBLIC_EVENT_STATUSES.includes(event.status)) return null;
+  if (!event || !isPublicEventStatus(event.status)) return null;
 
   const categories = await dbc.select({ id: s.eventCategories.id })
     .from(s.eventCategories).where(eq(s.eventCategories.eventId, eventId));

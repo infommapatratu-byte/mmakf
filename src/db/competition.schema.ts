@@ -38,6 +38,41 @@ export const eventStatus = pgEnum('event_status', [
   'results_pending', 'results_final', 'archived', 'cancelled', 'postponed',
 ]);
 
+/**
+ * The statuses at which a competition event is PUBLIC INFORMATION.
+ *
+ * It lives here, beside the enum it constrains, because it was previously
+ * written out in four places — the competition API route, src/lib/search.ts,
+ * src/lib/calendar.ts and src/lib/realtime.ts — each with a comment
+ * acknowledging the duplication and explaining why it was acceptable. It was
+ * not: a visibility rule that exists in four places is a rule that answers
+ * differently in four places the day one of them is edited, and the failure
+ * mode is an unpublished event reaching the public from whichever copy was
+ * missed.
+ *
+ * Anything not listed here — draft, technical_review, sanction_review,
+ * approved — is the federation's internal business until it publishes.
+ */
+export const PUBLIC_EVENT_STATUSES = [
+  'published', 'registration_open', 'registration_closed',
+  'check_in', 'live', 'results_pending', 'results_final', 'archived',
+] as const satisfies readonly (typeof eventStatus.enumValues)[number][];
+
+/**
+ * `as const satisfies` rather than a plain annotation, deliberately. The const
+ * keeps the literal types Drizzle needs to match the enum column, and the
+ * satisfies clause makes a TYPO a compile error — 'registration_opne' in a
+ * plain `readonly string[]` compiles fine and silently removes a status from
+ * public view. Neither form alone gives both.
+ *
+ * The membership test as a predicate, because the two call sites that need it
+ * hold a plain `string` from a database row and a literal tuple will not accept
+ * one without a cast at each site.
+ */
+export function isPublicEventStatus(status: string): boolean {
+  return (PUBLIC_EVENT_STATUSES as readonly string[]).includes(status);
+}
+
 export const disciplineKind = pgEnum('discipline_kind', ['kata', 'kumite', 'team_kata', 'team_kumite']);
 
 export const entryStatus = pgEnum('entry_status', [

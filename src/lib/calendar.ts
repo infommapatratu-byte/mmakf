@@ -65,17 +65,12 @@ export function isCalendarError(err: unknown): err is CalendarError {
 
 export type EntryKind = 'competition' | 'grading' | 'course';
 
-/**
- * Competition statuses whose existence the federation has published. Duplicated
- * from search.ts's PUBLIC_EVENT_STATUSES deliberately and for the same reason
- * given there: both are read-only views of a federation decision, and coupling
- * them means a change to one silently changes the other. If the federation
- * changes which statuses are public, BOTH lists move.
- */
-export const PUBLIC_EVENT_STATUSES = [
-  'published', 'registration_open', 'registration_closed',
-  'check_in', 'live', 'results_pending', 'results_final', 'archived',
-] as const;
+// Competition statuses whose existence the federation has published. This file
+// used to carry its own copy with a comment arguing the duplication was
+// deliberate. That argument was wrong: a visibility rule in four places answers
+// differently in four places the day one of them is edited.
+import { PUBLIC_EVENT_STATUSES } from '@/db/competition.schema';
+export { PUBLIC_EVENT_STATUSES };
 
 /**
  * Grading statuses that are public. `draft` is deliberately absent: a draft

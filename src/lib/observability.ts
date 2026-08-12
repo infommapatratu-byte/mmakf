@@ -225,30 +225,54 @@ export interface HealthCheck {
  * was never configured is not an outage, and reporting it as one trains an
  * operator to ignore the alert.
  */
+/**
+ * How a completed probe is classified.
+ *
+ * Pulled out of probe() because the test for it was measuring the machine, not
+ * the rule: it slept 60ms against a 100ms timeout and expected `degraded`, so a
+ * loaded CI box that overshot to 110ms reported `down` and failed a correct
+ * implementation. The threshold is the thing worth asserting, and it needs no
+ * clock at all.
+ *
+ * Half the timeout is the line. A dependency answering in half the time we are
+ * willing to wait is already the interesting signal — reachable but slow is
+ * worth knowing BEFORE it becomes unreachable, which is the whole reason this
+ * status exists.
+ */
+export function probeStatus(ok: boolean, durationMs: number, timeoutMs: number): 'ok' | 'degraded' | 'down' {
+  if (!ok) return 'down';
+  return durationMs > timeoutMs / 2 ? 'degraded' : 'ok';
+}
+
 export async function probe(
   name: string,
   configured: boolean,
   check: () => Promise<boolean>,
-  timeoutMs = 3000
+  timeoutMs = 3000,
+  /**
+   * Injectable clock. Default is the real one; a test supplies its own so the
+   * classification can be exercised without racing a scheduler.
+   */
+  now: () => number = Date.now
 ): Promise<HealthCheck> {
   if (!configured) return { name, status: 'not_configured' };
 
-  const started = Date.now();
+  const started = now();
   try {
     const ok = await Promise.race([
       check(),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timed out')), timeoutMs)),
     ]);
-    const durationMs = Date.now() - started;
-    // Reachable but slow is worth knowing before it becomes unreachable.
+    const durationMs = now() - started;
+    const status = probeStatus(Boolean(ok), durationMs, timeoutMs);
     return {
       name,
-      status: ok ? (durationMs > timeoutMs / 2 ? 'degraded' : 'ok') : 'down',
+      status,
       durationMs,
-      detail: ok && durationMs > timeoutMs / 2 ? `Responded in ${durationMs}ms` : undefined,
+      detail: status === 'degraded' ? `Responded in ${durationMs}ms` : undefined,
     };
   } catch (err: any) {
-    return { name, status: 'down', durationMs: Date.now() - started, detail: String(err?.message ?? err).slice(0, 200) };
+    return { name, status: 'down', durationMs: now() - started, detail: String(err?.message ?? err).slice(0, 200) };
   }
 }
 

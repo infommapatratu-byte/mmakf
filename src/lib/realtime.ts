@@ -59,6 +59,7 @@
 
 import { eq, sql } from 'drizzle-orm';
 import * as s from '@/db/schema';
+import { isPublicEventStatus } from '@/db/competition.schema';
 import { can, ForbiddenError, type Action, type Principal } from '@/lib/rbac';
 import {
   publicFeed, readFeed, CLASSIFICATIONS,
@@ -143,21 +144,11 @@ export function parseChannel(raw: string | null | undefined): ParsedChannel | nu
   return { kind, subject, name: `${kind}:${subject}` };
 }
 
-/**
- * The competition event statuses at which a competition is public information.
- *
- * MIRRORED from `PUBLIC_EVENT_STATUSES` in
- * `src/pages/api/competition/[...action].ts`, which is that file's private
- * definition of the same rule. Two copies of a visibility rule is one too many,
- * so `tests/realtime.test.ts` cross-checks this list against that file's own
- * `publicEventDetail()` at every status in the enum — the two are compared by
- * BEHAVIOUR, not by hope. Exporting the constant is reported as a shared-file
- * need; when it is exported, this list is deleted and imported instead.
- */
-const PUBLIC_EVENT_STATUSES: readonly string[] = [
-  'published', 'registration_open', 'registration_closed',
-  'check_in', 'live', 'results_pending', 'results_final', 'archived',
-];
+// The competition statuses at which an event is public information now have a
+// SINGLE definition, beside the enum they constrain, and this file imports it —
+// the mirrored copy that used to live here is deleted. The behavioural
+// cross-check in tests/realtime.test.ts stays: it proves this module and the
+// competition API agree, which a shared constant makes true but does not prove.
 
 /**
  * What a scoreboard channel carries.
@@ -367,7 +358,7 @@ async function authoriseScoreboard(db: DB, channel: ParsedChannel): Promise<Auth
   // this check a draft competition's matches would stream to anyone who guessed
   // the id, while /scoreboard — which refuses anything outside a published draw
   // — showed nothing. The two surfaces would disagree, in public.
-  if (!row || !PUBLIC_EVENT_STATUSES.includes(row.status)) {
+  if (!row || !isPublicEventStatus(row.status)) {
     return {
       ok: false, status: 404, code: 'unknown_channel',
       message: 'No published competition with that reference.',

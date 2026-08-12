@@ -12,6 +12,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import { eq } from 'drizzle-orm';
 import * as s from '../src/db/schema';
+import { PUBLIC_EVENT_STATUSES as SCHEMA_PUBLIC_EVENT_STATUSES } from '../src/db/competition.schema';
 import {
   search, SearchError, KIND_ORDER, PUBLIC_KINDS, NEVER_SEARCHABLE,
   PUBLIC_EVENT_STATUSES, MAX_QUERY_LENGTH,
@@ -1004,23 +1005,17 @@ describe('scope is applied in SQL, provably', () => {
   });
 });
 
-// ─── Constants restated from another module must not drift ──────────────────
+// ─── The visibility rule is shared, not restated ───────────────────────────
 
-describe('the duplicated event status list', () => {
-  it('still matches PUBLIC_STATUSES in src/db/competition.ts', () => {
-    // search.ts may not import from competition.ts (owned by another workflow),
-    // so the two lists are duplicated. A comment asking for them to be kept in
-    // step is not an enforcement mechanism; this is. If competition.ts changes
-    // which statuses are public and search.ts does not, unpublished events
-    // become visible — so the drift is a leak, not an inconsistency.
-    const competitionSource = readFileSync('src/db/competition.ts', 'utf8');
-    const block = competitionSource.match(
-      /const PUBLIC_STATUSES: readonly EventStatus\[\] = \[([\s\S]*?)\];/
-    );
-    expect(block).not.toBeNull();
-    const theirs = [...block![1]!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
-    expect(theirs.length).toBeGreaterThan(0);
-    expect([...PUBLIC_EVENT_STATUSES].sort()).toEqual(theirs);
+describe('the event status list is no longer duplicated', () => {
+  it('is the SAME object the schema exports, not a copy that matches today', () => {
+    // This test used to compare two hand-written lists by regex, because
+    // search.ts was not allowed to import from the module that owned the rule.
+    // Five copies existed by then, one of them under a different name. The rule
+    // now has one definition and this asserts identity rather than equality —
+    // two lists that happen to match today is the weaker property, and it was
+    // the one that kept being satisfied while a fifth copy drifted unnoticed.
+    expect(PUBLIC_EVENT_STATUSES).toBe(SCHEMA_PUBLIC_EVENT_STATUSES);
   });
 });
 

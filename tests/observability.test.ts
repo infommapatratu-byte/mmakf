@@ -5,7 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  redact, log, runJob, timed, probe, overallStatus, correlationId,
+  redact, log, runJob, timed, probe, probeStatus, overallStatus, correlationId,
 } from '../src/lib/observability';
 
 let out: string[] = [];
@@ -238,12 +238,31 @@ describe('health probes', () => {
     expect(p.detail).toMatch(/ECONNREFUSED/);
   });
 
-  it('flags a reachable but slow dependency as degraded', async () => {
-    const p = await probe('slow', true, async () => {
-      await new Promise((r) => setTimeout(r, 60));
-      return true;
-    }, 100);
+  it('classifies a reachable but slow dependency as degraded, without a stopwatch', () => {
+    // This test used to sleep 60ms against a 100ms timeout, which measured the
+    // scheduler: a loaded machine that overshot to 110ms reported `down` and
+    // failed a correct implementation. The threshold is what matters.
+    expect(probeStatus(true, 0, 100)).toBe('ok');
+    expect(probeStatus(true, 50, 100)).toBe('ok');          // exactly half is not slow
+    expect(probeStatus(true, 51, 100)).toBe('degraded');
+    expect(probeStatus(true, 99, 100)).toBe('degraded');
+    // A probe that completed but reported failure is down however fast it was.
+    expect(probeStatus(false, 1, 100)).toBe('down');
+  });
+
+  it('reports degraded end to end, with an injected clock rather than a sleep', async () => {
+    let t = 1_000;
+    const p = await probe('slow', true, async () => { t += 60; return true; }, 100, () => t);
     expect(p.status).toBe('degraded');
+    expect(p.durationMs).toBe(60);
+    expect(p.detail).toMatch(/Responded in 60ms/);
+  });
+
+  it('still says nothing about duration when a probe is healthy', async () => {
+    let t = 1_000;
+    const p = await probe('fast', true, async () => { t += 5; return true; }, 100, () => t);
+    expect(p.status).toBe('ok');
+    expect(p.detail).toBeUndefined();
   });
 
   it('rolls up to the worst real status', () => {
