@@ -20,7 +20,9 @@
     "dev:db": "node scripts/dev-db.mjs",
     "user:create": "node scripts/create-user.ts",
     "links:check": "node scripts/check-links.mjs",
-    "backup": "node scripts/backup.mjs"
+    "backup": "node scripts/backup.mjs",
+    "content:check": "node scripts/reseed.mjs",
+    "content:push": "node scripts/reseed.mjs --write"
   },
   "dependencies": {
     "@astrojs/vercel": "^8.2.11",
