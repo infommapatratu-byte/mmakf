@@ -59,9 +59,20 @@ Wave 2b builds the surfaces on top.
 | Role-scoped queries (§38, §75) | full-blob reads | row-level filters |
 | Reporting/aggregation (§51) | client-side over blobs | SQL |
 
-**Decision: PostgreSQL** (Neon or Supabase — both are Vercel-marketplace one-click, both give
-branching for the DEVELOPMENT/STAGING/PRODUCTION separation Directive §56 requires).
-Drizzle ORM for typed schema + migrations (§55).
+**Decision: PostgreSQL — vendor-neutral.**
+
+The driver is `postgres.js` over plain TCP, not a hosting provider's SDK. Nothing in the codebase
+names a vendor: `DATABASE_URL` is the only input, so **Supabase, Railway, Render, Fly, Aiven, RDS
+or a self-hosted server are all drop-in**, and changing host later is a change of connection
+string, not a migration project. This matters for a federation that must not be locked to one
+supplier's pricing or terms.
+
+Recommended host: **Supabase** (managed Postgres, Mumbai region available, free tier adequate for
+launch volumes, includes a transaction-mode pooler on port 6543 that suits serverless). Use the
+**pooler** connection string for the app and the **direct** connection string for migrations.
+
+Drizzle ORM for typed schema + migrations (§55). Serverless connection settings (`max: 1`,
+`prepare: false`) are documented in `src/db/index.ts`.
 
 ### 1.2 Coexistence, not big-bang
 
@@ -440,9 +451,13 @@ with the CHECK constraint from §3.8 preventing "free preview" labels on lessons
 
 | Env | DB | Deploy |
 |---|---|---|
-| development | Postgres branch `dev` (or local) | local `npm run dev` |
-| staging | Postgres branch `staging` | Vercel preview on PR |
-| production | Postgres `main` | Vercel production on `main` |
+| development | separate Postgres project/database (or local server) | local `npm run dev` |
+| staging | separate Postgres project/database | Vercel preview on PR |
+| production | production Postgres | Vercel production on `main` |
+
+Environments are separated by *database*, not by convention, and never share a connection
+string (§56). Because the driver is vendor-neutral, a developer may run a local Postgres and a
+staging instance on a different provider entirely.
 
 Drizzle migrations, forward-only, each with a documented rollback. Never run destructive
 migrations against production without a verified backup. Seeds are idempotent and never
@@ -453,21 +468,32 @@ overwrite production data.
 Creating the database requires dashboard access, so it is an operator action, not an
 automated one.
 
-1. **Create the database.** Vercel dashboard → project `mmakf` → Storage → Create → **Neon
-   Postgres** (region: Mumbai / `ap-south-1`, closest to the federation's users). Vercel injects
-   `DATABASE_URL` into all three environments automatically.
-2. **Pull the URL locally** so migrations can be run from a workstation:
-   `npx vercel link` then `npx vercel env pull .env.local` (`.env.local` is gitignored — the
-   connection string must never be committed).
-3. **Check what would run:** `npm run db:status` — prints the target host and every pending
-   migration without changing anything.
-4. **Apply:** `npm run db:migrate` — applies pending migrations, records each with a checksum,
-   then lists the tables that actually exist so the result is verified rather than assumed.
+1. **Create the database.** Any Postgres provider works; Supabase is the recommendation
+   (supabase.com → New project → region **Mumbai / ap-south-1**, closest to the federation's
+   users). Set a strong database password and store it in the federation's password manager, not
+   in a message.
+2. **Collect two connection strings** from Settings → Database:
+   - **Transaction pooler** (port `6543`) → this is the app's `DATABASE_URL`. Serverless functions
+     open a connection per invocation, which a direct connection limit cannot absorb.
+   - **Direct connection** (port `5432`) → used only to run migrations. DDL through a transaction
+     pooler is unreliable.
+3. **Set the app variable in Vercel:** project `mmakf` → Settings → Environment Variables →
+   `DATABASE_URL` = the pooler string, applied to Production, Preview and Development. Redeploy so
+   functions pick it up.
+4. **Run migrations from a workstation** using the *direct* string:
+   ```
+   DATABASE_URL="postgresql://...:5432/postgres" npm run db:status   # shows what would run
+   DATABASE_URL="postgresql://...:5432/postgres" npm run db:migrate  # applies, then lists tables
+   ```
+   Never commit either string. `.env.local` is gitignored if you prefer a file.
 5. **Confirm from production:** `curl https://www.mmakf.in/api/health` must report
-   `"database":"ok"`. While it reports `"not_configured"`, step 1 has not taken effect.
+   `"database":"ok"`. While it reports `"not_configured"`, step 3 has not taken effect; `"error"`
+   means the URL is set but unreachable — check the pooler string and that the password is
+   URL-encoded.
 
-The runner refuses to act without `DATABASE_URL` (no fallback target), and treats an edited
-already-applied migration as a hard error — that is how environments silently diverge.
+The runner refuses to act without `DATABASE_URL` (no fallback target), applies each migration
+inside a transaction (a failure rolls the whole file back), and treats an edited already-applied
+migration as a hard error — that is how environments silently diverge.
 
 ---
 

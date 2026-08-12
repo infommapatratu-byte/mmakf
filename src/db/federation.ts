@@ -13,7 +13,7 @@ import crypto from 'node:crypto';
 import * as s from './schema';
 import { assertCan, assertCanAnywhere, visibleScopes, type Action, type Principal, type Resource } from '@/lib/rbac';
 
-type DB = any; // drizzle client (neon-http in prod, PGlite in tests)
+type DB = any; // drizzle client (postgres.js in prod, PGlite in tests)
 
 // ─── Federation ID allocation (§73) ─────────────────────────────────────────
 

@@ -12,17 +12,19 @@
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "node scripts/migrate.mjs",
-    "db:status": "node scripts/migrate.mjs --status"
+    "db:status": "node scripts/migrate.mjs --status",
+    "db:verify": "node scripts/verify-migrate.mjs"
   },
   "dependencies": {
     "@astrojs/vercel": "^8.2.11",
-    "@neondatabase/serverless": "^1.1.0",
     "@upstash/redis": "^1.34.0",
     "astro": "^5.18.2",
-    "drizzle-orm": "^0.45.2"
+    "drizzle-orm": "^0.45.2",
+    "postgres": "^3.4.9"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.4",
+    "@electric-sql/pglite-socket": "^0.2.7",
     "@types/node": "^22.20.1",
     "drizzle-kit": "^0.31.10",
     "vitest": "^4.1.9"
