@@ -85,9 +85,9 @@ export const SEED = {
   ],
 
   news: [
-    { id: 1, title: 'District Championship 2026 concluded at Ramgarh', date: '23 Jun 2026', type: 'Competition', img: 'https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=1200&q=70', body: 'The MMAKF District Karate Championship 2026 was held at the Indoor Sports Complex on 22 June, with athletes from affiliated dojos competing across kata and kumite divisions. Full results are recorded in the federation results register.' },
-    { id: 2, title: 'Sensei Vikas Pathak elevated to IV Dan',             date: '04 May 2026', type: 'Promotion',    img: 'https://images.unsplash.com/photo-1593810450967-f9c42742e326?auto=format&fit=crop&w=1200&q=70', body: 'In a formal grading ceremony presided over by Grandmaster Shihan Pramod Kumar Pathak, Chief Instructor Sensei Vikas Pathak was elevated to IV Dan Black Belt in recognition of two decades of service to the federation and the Tiger Lee Shotokan lineage.' },
-    { id: 3, title: "Women's Self-Defense program now in 14 schools",      date: '21 Apr 2026', type: 'Community',     img: 'https://images.unsplash.com/photo-1571902943202-507ec2618e8f?auto=format&fit=crop&w=1200&q=70', body: "MMAKF's Women's Self-Defense initiative, led by Sensei Sumitra Devi, has now been adopted by 14 schools across the Ramgarh and Hazaribagh districts. The program runs as a free 12-week curriculum covering practical defense, situational awareness, and confidence building." },
+    { id: 1, title: 'District Championship 2026 concluded at Ramgarh', date: '23 Jun 2026', type: 'Competition', img: '/media/archive/championship-medal-ceremony.jpg', body: 'The MMAKF District Karate Championship 2026 was held at the Indoor Sports Complex on 22 June, with athletes from affiliated dojos competing across kata and kumite divisions. Full results are recorded in the federation results register.' },
+    { id: 2, title: 'Sensei Vikas Pathak elevated to IV Dan',             date: '04 May 2026', type: 'Promotion',    img: '', body: 'In a formal grading ceremony presided over by Grandmaster Shihan Pramod Kumar Pathak, Chief Instructor Sensei Vikas Pathak was elevated to IV Dan Black Belt in recognition of two decades of service to the federation and the Tiger Lee Shotokan lineage.' },
+    { id: 3, title: "Women's Self-Defense program now in 14 schools",      date: '21 Apr 2026', type: 'Community',     img: '/media/archive/selfdefence-school-class.jpg', body: "MMAKF's Women's Self-Defense initiative, led by Sensei Sumitra Devi, has now been adopted by 14 schools across the Ramgarh and Hazaribagh districts. The program runs as a free 12-week curriculum covering practical defense, situational awareness, and confidence building." },
   ],
 
   // `img` is an Unsplash hotlink (photography pass — MASTER-SPEC AS-6 revised);
@@ -152,8 +152,8 @@ export const SEED = {
   gallery: [
     { icon: 'kata',       title: 'Kata Practice',                cat: 'Training',   desc: 'Form training — the foundation of every grading.',                    img: 'https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=1000&q=70' },
     { icon: 'kumite',     title: 'Impact & Pad Work',            cat: 'Training',   desc: 'Supervised striking practice in the impact bay.',                     img: 'https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'medal',      title: 'Competition Karate',           cat: 'Competition', desc: 'The competitive track — district to state championships.',            img: 'https://images.unsplash.com/photo-1552072092-7f9b8d63efcb?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'black-belt', title: 'Grading Examinations',         cat: 'Grading',    desc: 'Candidates are examined on kihon, kata and kumite.',                  img: 'https://images.unsplash.com/photo-1564415315949-7a0c4c73aab4?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'medal',      title: 'Competition Karate',           cat: 'Competition', desc: 'The competitive track — district to state championships.',            img: '/media/archive/dojo-group.jpg' },
+    { icon: 'black-belt', title: 'Grading Examinations',         cat: 'Grading',    desc: 'Candidates are examined on kihon, kata and kumite.',                  img: '/media/archive/grading-certificate-ceremony.jpg' },
     { icon: 'women',      title: "Women's Wing",                 cat: 'Community',  desc: "Women-only batches and the school self-defense curriculum.",          img: 'https://images.unsplash.com/photo-1574680096145-d05b474e2155?auto=format&fit=crop&w=1000&q=70' },
     { icon: 'star',       title: 'Training Camps',               cat: 'Camps',      desc: 'Gasshuku — intensive multi-day training.',                            img: 'https://images.unsplash.com/photo-1599058917212-d750089bc07e?auto=format&fit=crop&w=1000&q=70' },
     { icon: 'dumbbell',   title: 'Strength & Conditioning',      cat: 'Training',   desc: 'Karate-specific strength, speed and mobility work.',                  img: 'https://images.unsplash.com/photo-1605296867304-46d5465a13f1?auto=format&fit=crop&w=1000&q=70' },
@@ -260,12 +260,23 @@ export const SEED = {
   // The national admin issues, edits and revokes these in the admin panel;
   // a unit signs in to /unit with its code. Rotate the sample codes before
   // real use (see ADMIN-GUIDE).
-  unitAccess: [
-    { code: 'JH-STATE-8471',  name: 'Jharkhand Karate-Do Association (MMAKF)', level: 'State',    state: 'Jharkhand',   status: 'Active' },
-    { code: 'BR-STATE-5529',  name: 'Bihar State MMAKF Unit',                  level: 'State',    state: 'Bihar',       status: 'Active' },
-    { code: 'RAM-DIST-2210',  name: 'Ramgarh District Association',            level: 'District', state: 'Jharkhand',   district: 'Ramgarh', status: 'Active' },
-    { code: 'RAN-CLUB-7734',  name: 'MMAKF Ranchi Training Centre',            level: 'Club',     state: 'Jharkhand',   status: 'Active' },
-  ],
+  /**
+   * Unit portal access codes — DELIBERATELY EMPTY.
+   *
+   * These are live credentials. Seeding them meant four working state and
+   * district portal logins sat in this public repository's git history
+   * (JH-STATE-8471 and friends), and because storage.get() falls back to this
+   * seed whenever a Redis key is unset or a read throws, a Redis outage or a
+   * mistyped environment variable silently made them valid again.
+   *
+   * Empty is the only safe default: a degraded read now grants NOTHING. The
+   * national office issues real codes through the admin panel, where they live
+   * in Redis and can be revoked without a deploy.
+   */
+  unitAccess: [] as Array<{
+    code: string; name: string; level: string; state: string;
+    district?: string; status: string;
+  }>,
 
   branches: [
     { name: 'MMAKF Hombu Dojo',              city: 'Patratu',    district: 'Ramgarh',    incharge: 'Shihan Pramod Kumar Pathak', status: 'Headquarters' },
@@ -299,6 +310,59 @@ export const SEED = {
       { rank: 'Rokudan — VI Dan',  note: 'Minimum 6 years after Godan',  wkf: 'Grandmaster level (Shihan)' },
     ],
   },
+  /**
+   * Press coverage — scanned clippings, self-hosted.
+   *
+   * These survived only on the CDN of MMAKF's own lapsed predecessor site. None
+   * is an indexed web article, so none can be found by searching; recovering
+   * and hosting them here is the only thing keeping them reachable.
+   *
+   * `verified` records what was actually established. A clipping is evidence
+   * that a newspaper printed something — not, on its own, independent
+   * confirmation of what it reports.
+   */
+  press: [
+    { outlet: 'Jharkhand Prahari (झारखंड प्रहरी)', date: 'Nov 2023',
+      headline: 'पतरातु में कराटे प्रशिक्षण सह बेल्ट ग्रेडिंग संपन्न',
+      summary: 'Belt grading at Rasda, Patratu. Names Sensei Vikas Pathak as chief instructor; around 45 students graded.',
+      img: '/media/archive/press-jharkhand-prahari.jpg', verified: 'Clipping held' },
+    { outlet: 'Jharkhand Ujala (झारखण्ड उजाला)', date: 'Nov 2023',
+      headline: 'Belt grading ceremony, Rasda',
+      summary: 'A second, independent outlet covering the same grading, with a different group photograph.',
+      img: '/media/archive/press-jharkhand-ujala.jpg', verified: 'Clipping held' },
+    { outlet: 'Johar Jharkhand (जौहर झारखंड)', date: 'Aug 2022',
+      headline: 'Bharat Gaurav Karate Khel Ratna award',
+      summary: 'Award coverage, with three colour photographs of Shihan Pramod Kumar Pathak.',
+      img: '/media/archive/press-johar-jharkhand.jpg', verified: 'Clipping held' },
+    { outlet: 'Sandhya Prahari (संध्या प्रहरी)', date: 'Aug 2022',
+      headline: 'जूनियर टाइगर ली',
+      summary: "Reports the conferral of the title 'Junior Tiger Lee'. Independently echoed by the Shivangan Publication Jharkhand Current Affairs 2022 compendium.",
+      img: '/media/archive/press-sandhya-prahari.jpg', verified: 'Clipping held · title corroborated by a third-party publication' },
+    { outlet: 'Outlet not legible on the scan', date: 'Undated',
+      headline: 'मार्शल आर्ट में प्रमोद ने बनाए हैं कई रिकॉर्ड',
+      summary: 'Local reporting of record attempts. The masthead is cropped from the scan, so the outlet and date cannot be confirmed.',
+      img: '/media/archive/press-records-clipping.jpg', verified: 'Clipping held · outlet and date unconfirmed' },
+  ],
+
+  /**
+   * Official channels.
+   *
+   * Every entry here was fetched and confirmed live before being published.
+   * The site previously carried NO outbound links at all — its only links were
+   * a mailto and a tel — so the academy's own YouTube channel, which links TO
+   * mmakf.in, had nothing pointing back. That is why none of the federation's
+   * real material ever surfaced alongside the site.
+   *
+   * Deliberately no follower or subscriber counts: they change, and a stale
+   * number on a federation site is a claim that quietly becomes untrue.
+   */
+  social: [
+    { name: 'YouTube — Pramod Pathak Martial Arts Academy', platform: 'YouTube', url: 'https://www.youtube.com/@PramodPathakMartialArt', primary: 'Yes', note: 'Main teaching channel — daily training videos' },
+    { name: 'YouTube — MMAK India',                          platform: 'YouTube', url: 'https://www.youtube.com/@mmak_india',              primary: 'No',  note: 'Federation channel' },
+    { name: 'Facebook — Modern Martial Art Karate Training Centre, Rasda/Patratu', platform: 'Facebook', url: 'https://www.facebook.com/people/Modern-Martial-Art-Karate-Training-Centrerasdapatratu/100093639247728/', primary: 'No', note: '' },
+    { name: 'X (Twitter)',                                    platform: 'X',       url: 'https://x.com/arts_marti79722',                    primary: 'No',  note: '' },
+    { name: 'Telegram channel',                               platform: 'Telegram',url: 'https://t.me/mmakindia',                            primary: 'No',  note: 'Announcements' },
+  ],
 };
 
 // Keys we persist in KV (so admin can edit each independently)
@@ -307,6 +371,7 @@ export const KEYS = [
   'events', 'news', 'products', 'achievements', 'testimonials', 'beltGrading',
   'facilities', 'faqs', 'gallery', 'syllabus', 'branches', 'stateUnits',
   'documents', 'results', 'members', 'courses', 'lessons', 'circulars',
+  'social', 'press',
 ] as const;
 
 export type DataKey = typeof KEYS[number];

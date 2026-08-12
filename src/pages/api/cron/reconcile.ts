@@ -1,0 +1,125 @@
+// Scheduled reconciliation.
+//
+// Two jobs that nothing was doing, both of which lose money or block sales:
+//
+//  1. EXPIRE STALE ORDERS. An unpaid order holds a stock reservation. With no
+//     scheduler, abandoned checkouts held the last gi forever and the item
+//     showed as out of stock while sitting on the shelf.
+//
+//  2. RETRY FAILED FULFILMENTS. The webhook handler deliberately returns 200
+//     when fulfilment throws, because a provider retry would hit the replay
+//     guard and change nothing. That is correct — but it means a payment that
+//     was captured and failed to fulfil is money taken with nothing issued, and
+//     nothing else was ever going to look at it again. This is the exceptions
+//     queue.
+//
+// Invoked by Vercel Cron (see vercel.json). Authorised by CRON_SECRET, because
+// an unauthenticated endpoint that mutates orders is an endpoint an attacker
+// can use to expire everyone's checkout.
+
+import type { APIRoute } from 'astro';
+import { and, eq, isNotNull, isNull, desc } from 'drizzle-orm';
+import { isConfigured, db } from '@/db';
+import { expireStaleOrders, confirmPayment, markWebhookProcessed } from '@/db/orders';
+import { providerById } from '@/lib/payments';
+import * as s from '@/db/schema';
+
+export const prerender = false;
+
+/** Retry at most this many failed events per run, so one run cannot run long. */
+const RETRY_BATCH = 25;
+
+function json(body: unknown, status: number) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+}
+
+function authorised(request: Request): boolean {
+  const secret = process.env.CRON_SECRET;
+  // No secret configured means the job cannot be triggered at all, rather than
+  // being open to anyone — an unset variable must never mean "allow".
+  if (!secret) return false;
+  const header = request.headers.get('authorization') || '';
+  return header === `Bearer ${secret}`;
+}
+
+export const GET: APIRoute = async ({ request }) => {
+  if (!authorised(request)) return json({ error: 'Unauthorized' }, 401);
+  if (!isConfigured()) return json({ ok: true, skipped: 'no database configured' }, 200);
+
+  const report: Record<string, unknown> = {};
+
+  // ── 1. Release reservations held by orders that were never paid ──────────
+  try {
+    report.ordersExpired = await expireStaleOrders(db());
+  } catch (err: any) {
+    report.ordersExpiredError = String(err?.message ?? err).slice(0, 300);
+  }
+
+  // ── 2. Re-attempt fulfilment for captured payments that failed to fulfil ──
+  let retried = 0;
+  let recovered = 0;
+  const stillFailing: string[] = [];
+
+  try {
+    const failures = await db()
+      .select()
+      .from(s.paymentEvents)
+      .where(and(eq(s.paymentEvents.signatureValid, true), isNotNull(s.paymentEvents.processingError)))
+      .orderBy(desc(s.paymentEvents.id))
+      .limit(RETRY_BATCH);
+
+    for (const event of failures) {
+      retried++;
+      const provider = providerById(event.provider);
+      if (!provider) { stillFailing.push(`${event.eventId}: unknown provider`); continue; }
+
+      try {
+        // Re-read the payment FROM THE PROVIDER rather than trusting the stored
+        // payload: by now the truth may have moved on, and the provider is the
+        // authority on whether money was taken.
+        const entity = (event.payload as any)?.payload?.payment?.entity;
+        const providerPaymentId = entity?.id;
+        if (!providerPaymentId) { stillFailing.push(`${event.eventId}: no payment id in payload`); continue; }
+
+        const verified = await provider.fetchPayment(String(providerPaymentId));
+        await confirmPayment(
+          db(),
+          { principal: { userId: null, label: `cron:${event.provider}`, bindings: [] }, authority: event.provider },
+          verified
+        );
+        await markWebhookProcessed(db(), event.id);
+        recovered++;
+      } catch (err: any) {
+        stillFailing.push(`${event.eventId}: ${String(err?.message ?? err).slice(0, 120)}`);
+      }
+    }
+  } catch (err: any) {
+    report.retryError = String(err?.message ?? err).slice(0, 300);
+  }
+
+  report.fulfilmentRetried = retried;
+  report.fulfilmentRecovered = recovered;
+  // Surfaced, not swallowed: anything still failing after a retry needs a human,
+  // and this is how the office learns it exists.
+  report.stillFailing = stillFailing;
+
+  // ── 3. Unpaid orders that are past their expiry but still reserved ────────
+  try {
+    const orphans = await db()
+      .select({ orderNo: s.orders.orderNo })
+      .from(s.orders)
+      .where(and(eq(s.orders.status, 'paid'), isNull(s.orders.paidAt)))
+      .limit(50);
+    // A paid order with no paidAt would mean the two writes diverged; report it
+    // rather than repairing silently, because it should be impossible.
+    report.inconsistentOrders = orphans.map((o: any) => o.orderNo);
+  } catch {
+    /* diagnostic only */
+  }
+
+  console.log('[cron/reconcile]', JSON.stringify(report));
+  return json({ ok: true, ...report }, 200);
+};

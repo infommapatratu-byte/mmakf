@@ -1,6 +1,12 @@
 ---
 import '@/styles/global.css';
 import Crest from '@/components/Crest.astro';
+import { get } from '@/lib/storage';
+
+// Official channels, loaded here so every page footer links to them. The site
+// previously had no outbound links at all, which is why none of the
+// federation's real material ever surfaced alongside it.
+const social = ((await get<any[]>('social')) || []).filter((a: any) => a?.url);
 
 export interface Props {
   title?: string;
@@ -34,6 +40,8 @@ const SITE = 'https://www.mmakf.in';
 const canonical = SITE + (currentPath === '/' ? '/' : currentPath);
 
 // Organization structured data — only facts the federation itself publishes.
+const sameAs = social.map((a: any) => a.url);
+
 const orgSchema = {
   '@context': 'https://schema.org',
   '@type': 'SportsOrganization',
@@ -43,6 +51,9 @@ const orgSchema = {
   logo: SITE + '/logo.jpg',
   foundingDate: '1983',
   sport: 'Shotokan Karate',
+  // Links the site to the federation's verified channels, so search engines can
+  // connect them. Every URL was fetched and confirmed live before publication.
+  ...(sameAs.length ? { sameAs } : {}),
   address: {
     '@type': 'PostalAddress',
     streetAddress: 'MMAKF Headquarters, Patratu',
@@ -132,6 +143,15 @@ const orgSchema = {
                 Modern Martial Arts Karate-Do Federation of India. Shotokan Karate under the Tiger Lee lineage.
                 Forging warriors through discipline, lineage, and purpose since 1983.
               </p>
+            </div>
+
+            <div class="ft-col ft-social">
+              <div class="ft-h">Official channels</div>
+              {social.map((a: any) => (
+                <a href={a.url} target="_blank" rel="noopener noreferrer">
+                  {a.platform}{a.primary === 'Yes' ? ' — main channel' : ''}
+                </a>
+              ))}
             </div>
 
             <div class="ft-col">

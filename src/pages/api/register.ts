@@ -1,26 +1,41 @@
 // Public endpoint: membership registration application.
 //
-// Issues an opaque application reference; the federation office reviews
-// applications in the admin panel and, on approval, adds the member to the
-// public register (which powers /api/verify). Applications are PRIVATE — the
-// `registrations` key is not in KEYS and is never served by /api/data.
+// Rebuilt around src/lib/registration.ts, which asks the questions a federation
+// actually needs — different ones per membership type — instead of the same six
+// for athletes, instructors, dojos and officials.
 //
-// Hardened (Phase 2): rate limited, body-size capped, strict string typing,
-// atomic append (no read-modify-write race), unguessable reference.
+// What changed and why it mattered:
+//  · An email address is now collected, so the office can actually reply.
+//  · Date of birth is collected, so an age category can be determined and
+//    minors can be identified. Applicants under 18 must supply guardian
+//    details and guardian consent.
+//  · State is validated against the federation's own list. It used to be any
+//    60-character string, and the unit portal matches on exact equality — so a
+//    typo made an application permanently invisible to the unit meant to verify
+//    it.
+//  · Over-length input is REJECTED, not silently truncated. The old endpoint
+//    stored a sliced value and told the applicant nothing.
+//  · The applicant receives a reference AND an access code, and can check their
+//    own application at /application.
+//
+// Applications remain PRIVATE: `registrations` is not in PUBLIC_KEYS and is
+// never served by /api/data.
 
 import type { APIRoute } from 'astro';
-import { pushToList } from '@/lib/storage';
+import { pushToList, get } from '@/lib/storage';
 import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
 import { reference, accessToken, recordId } from '@/lib/refs';
+import { validateApplication } from '@/lib/registration';
 
 export const prerender = false;
 
-const TYPES = ['Athlete', 'Instructor', 'Dojo / Club', 'Official'];
-const MAX_BODY = 16 * 1024;
+const MAX_BODY = 32 * 1024;
 
-function str(v: unknown, max: number): string {
-  if (typeof v !== 'string') return '';
-  return v.trim().slice(0, max);
+function json(body: unknown, status: number) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
 }
 
 export const POST: APIRoute = async ({ request }) => {
@@ -30,59 +45,55 @@ export const POST: APIRoute = async ({ request }) => {
   let body: any;
   try {
     const raw = await request.text();
-    if (raw.length > MAX_BODY) {
-      return new Response(JSON.stringify({ error: 'Request too large' }), { status: 413 });
-    }
+    if (raw.length > MAX_BODY) return json({ error: 'Request too large' }, 413);
     body = JSON.parse(raw);
   } catch {
-    return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
+    return json({ error: 'Invalid JSON' }, 400);
   }
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return new Response(JSON.stringify({ error: 'Invalid request' }), { status: 400 });
+    return json({ error: 'Invalid request' }, 400);
   }
 
-  const app = {
-    name: str(body.name, 120),
-    phone: str(body.phone, 32),
-    type: str(body.type, 40),
-    state: str(body.state, 60),
-    district: str(body.district, 60),
-    grade: str(body.grade, 60),
-  };
-  if (!app.name || !app.phone || !TYPES.includes(app.type)) {
-    return new Response(
-      JSON.stringify({ error: 'Name, phone and a valid membership type are required' }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } }
-    );
+  // The states the federation actually recognises, so a free-text value cannot
+  // orphan an application beyond any unit's view.
+  const stateUnits = (await get<any[]>('stateUnits')) || [];
+  const knownStates = stateUnits.map((u: any) => String(u?.state ?? '')).filter(Boolean);
+
+  const result = validateApplication(body, knownStates);
+  if (!result.ok) {
+    // Field-level errors, so the applicant can fix exactly what is wrong.
+    return json({ error: 'Please correct the highlighted fields.', fields: result.errors }, 400);
   }
 
   const appNo = reference('R');
   // Returned to the applicant so they can check their own application later.
-  // Before this it was minted, stored, and read by nothing — the applicant had
-  // a reference number and no way to use it.
+  // Before this it was minted, stored, and read by nothing.
   const token = accessToken();
+
   const record = {
     // A random id, not Date.now(): a dojo submitting a batch of students
     // produces several records in the same millisecond, and those collided.
     id: recordId(),
     appNo,
     token,
-    ...app,
+    ...result.cleaned,
     ts: new Date().toISOString(),
     status: 'Received',
+    history: [] as unknown[],
   };
 
   await pushToList('registrations', record, 2000);
 
-  return new Response(
-    JSON.stringify({
+  return json(
+    {
       ok: true,
       appNo,
+      isMinor: result.isMinor,
       // Both halves are required to look the application up: the reference
       // alone is not enough, so a guessed or overheard reference discloses
       // nothing.
       statusUrl: `/application?ref=${encodeURIComponent(appNo)}&token=${encodeURIComponent(token)}`,
-    }),
-    { status: 200, headers: { 'Content-Type': 'application/json' } }
+    },
+    200
   );
 };
