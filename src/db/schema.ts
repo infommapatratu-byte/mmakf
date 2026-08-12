@@ -48,6 +48,10 @@ export const scopeType = pgEnum('scope_type', ['national', 'state', 'district', 
 export const auditAction = pgEnum('audit_action', [
   'create', 'update', 'delete', 'approve', 'reject', 'revoke',
   'finalize', 'login', 'logout', 'export',
+  // Added in migration 0006. A suspension is a governance decision somebody has
+  // to answer for; recording it as a generic 'update' makes it indistinguishable
+  // from a clerk editing a row, which is the one thing the audit exists to prevent.
+  'suspend', 'reinstate',
 ]);
 
 // ─── Federation hierarchy ───────────────────────────────────────────────────
