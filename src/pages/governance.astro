@@ -2,6 +2,7 @@
 import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import { get } from '@/lib/storage';
+import { CREST } from '@/lib/brand';
 import { profileHref } from '@/lib/people';
 
 export const prerender = false;
@@ -167,7 +168,7 @@ const orgLevels = [
           <div class="feat-visual">
             {featured.img
               ? <img src={featured.img} alt={featured.name} loading="lazy" />
-              : <img class="crest-ph" src="/logo.jpg" alt="" loading="lazy" />}
+              : <img class="crest-ph" src={CREST} alt="" loading="lazy" />}
           </div>
           <div>
             <div class="card-eyebrow">{featured.role}</div>

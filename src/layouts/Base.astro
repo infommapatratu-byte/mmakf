@@ -5,6 +5,7 @@ import '@/styles/global.css';
 import '@/styles/a11y.css';
 import Crest from '@/components/Crest.astro';
 import { get } from '@/lib/storage';
+import { CREST_ABSOLUTE } from '@/lib/brand';
 
 // Official channels, loaded here so every page footer links to them. The site
 // previously had no outbound links at all, which is why none of the
@@ -59,7 +60,7 @@ const orgSchema = {
     'Modern Martial Arts Karate-Do Federation of India',
   ],
   url: SITE,
-  logo: SITE + '/logo.jpg',
+  logo: CREST_ABSOLUTE,
   foundingDate: '1983',
   sport: 'Shotokan Karate',
   // Links the site to the federation's verified channels, so search engines can

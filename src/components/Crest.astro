@@ -1,5 +1,8 @@
 ---
-// MMAKF official crest — uses the real federation logo at /logo.jpg.
+// MMAKF official crest. The path and the alt text come from src/lib/brand.ts
+// so the crest cannot differ between pages — see that file for why the current
+// artwork shows a white disc on the dark nav, and the one-line fix.
+import { CREST, CREST_ALT } from '@/lib/brand';
 // Sized via the size prop. Includes a subtle drop-shadow for visibility on light backgrounds.
 
 interface Props {
@@ -12,8 +15,8 @@ const { size = 56, showLabel = false, class: className = '' } = Astro.props;
 
 <div class={`crest ${className}`} style={`width:${size}px;display:inline-flex;flex-direction:column;align-items:center;gap:6px`}>
   <img
-    src="/logo.jpg"
-    alt="MMAKF — Modern Martial Arts Karate-Do Federation of India"
+    src={CREST}
+    alt={CREST_ALT}
     width={size}
     height={size}
     style={`width:${size}px;height:${size}px;object-fit:contain;display:block`}
