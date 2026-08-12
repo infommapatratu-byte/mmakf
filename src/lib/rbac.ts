@@ -52,7 +52,12 @@ export type Action =
   | 'finance:read' | 'finance:write'
   | 'safeguarding:read' | 'safeguarding:write'
   | 'audit:read'
-  | 'user:read' | 'user:write' | 'role:grant';
+  | 'user:read' | 'user:write' | 'role:grant'
+  // Training and engagement: the lead pipeline, institutional clients and
+  // training requests. NOT folded into 'unit:*' — a state unit is part of the
+  // federation and a school that buys a term of karate is a client, and giving
+  // one action authority over both puts a customer inside the hierarchy.
+  | 'engagement:read' | 'engagement:write';
 
 export interface Binding {
   role: Role;
@@ -93,6 +98,7 @@ const NATIONAL_FULL: Action[] = [
   'finance:read', 'finance:write',
   'audit:read',
   'user:read', 'user:write', 'role:grant',
+  'engagement:read', 'engagement:write',
 ];
 
 const GRANTS: Record<Role, Action[]> = {
@@ -138,6 +144,7 @@ const GRANTS: Record<Role, Action[]> = {
     'rank:read', 'grading:read', 'certificate:read',
     'competition:read', 'competition:write', 'result:read', 'result:enter',
     'content:read',
+    'engagement:read', 'engagement:write',
   ],
 
   DISTRICT_ADMIN: [
@@ -170,7 +177,7 @@ const GRANTS: Record<Role, Action[]> = {
   ATHLETE: ['person:read', 'rank:read', 'certificate:read', 'competition:read', 'result:read', 'content:read'],
   MEMBER: ['person:read', 'content:read'],
 
-  FINANCE_OFFICER: ['finance:read', 'finance:write', 'person:read', 'membership:read', 'audit:read', 'content:read'],
+  FINANCE_OFFICER: ['finance:read', 'finance:write', 'person:read', 'membership:read', 'audit:read', 'content:read', 'engagement:read'],
   SAFEGUARDING_OFFICER: ['safeguarding:read', 'safeguarding:write', 'person:read', 'person:read_pii', 'audit:read'],
 };
 
