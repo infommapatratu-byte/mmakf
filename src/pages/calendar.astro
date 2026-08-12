@@ -1,0 +1,409 @@
+---
+/**
+ * THE FEDERATION CALENDAR — /calendar
+ *
+ * One page for every dated thing the federation runs: championships, gradings
+ * and courses. Before this, each lived behind its own surface, and an athlete
+ * planning a season reconciled three lists by hand — which is how somebody ends
+ * up entering a championship the week of their grading.
+ *
+ * THREE THINGS THIS PAGE IS CAREFUL ABOUT.
+ *
+ *  1. AN UNDATED EVENT IS NOT ON THE CALENDAR. The federation genuinely
+ *     announces events before fixing a day, and `starts_on` is nullable for
+ *     that reason. Those announcements get their own section headed with what
+ *     they are. Putting them on a plausible day would be an invention; dropping
+ *     them would hide an announcement that was actually made.
+ *
+ *  2. REGISTRATION IS ANSWERED AS AT A DATE, and the page prints the date it
+ *     answered for. Someone planning in June needs to know entries close in
+ *     July — not that they are "open" in a way that will silently become false.
+ *     "No window recorded" is shown as exactly that, never as "open".
+ *
+ *  3. SANCTION IS SHOWN. A championship the federation has not sanctioned is
+ *     not a federation event, and it appears here labelled as unsanctioned
+ *     rather than sitting indistinguishable beside the ones that are.
+ *
+ * The subscribable feed at /calendar.ics is always the PUBLIC calendar, whoever
+ * is signed in — a calendar client sends no cookies. That is stated on the page
+ * rather than left to surprise someone.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import Icon from '@/components/Icon.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import {
+  federationCalendar, todayIso, isCalendarError,
+  type CalendarEntry, type CalendarResult, type EntryKind, type RegistrationState,
+} from '@/lib/calendar';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const url = Astro.url;
+
+const today = todayIso();
+
+/** A year ahead by default; ?from=&to= narrows it, and a bad value is reported. */
+const fromParam = url.searchParams.get('from') || undefined;
+const toParam = url.searchParams.get('to') || undefined;
+
+const KINDS: EntryKind[] = ['competition', 'grading', 'course'];
+const rawKind = url.searchParams.get('kind') || '';
+const activeKind: EntryKind | null = (KINDS as string[]).includes(rawKind) ? (rawKind as EntryKind) : null;
+
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+const signedIn = Boolean(principal && principal.bindings.length);
+
+let result: CalendarResult | null = null;
+let failure: string | null = null;
+
+if (configured) {
+  try {
+    result = await federationCalendar(db(), principal, {
+      from: fromParam,
+      // Left undefined on purpose: the module defaults it to twelve months
+      // AFTER validating `from`. Computing it here from an unvalidated value
+      // threw a RangeError before the readable refusal could be produced.
+      to: toParam,
+      asAt: today,
+      kinds: activeKind ? [activeKind] : undefined,
+    });
+  } catch (err: any) {
+    // A refused date is reported as a refused date. Rendering it as an empty
+    // calendar would say the federation has nothing scheduled.
+    failure = isCalendarError(err) ? err.message : 'The calendar could not be loaded.';
+  }
+}
+
+const KIND_LABEL: Record<EntryKind, string> = {
+  competition: 'Championships',
+  grading: 'Gradings',
+  course: 'Courses',
+};
+
+const CATEGORY_LABEL: Record<string, string> = {
+  national_championship: 'National championship',
+  open_national: 'Open national',
+  state_championship: 'State championship',
+  district_championship: 'District championship',
+  selection_trial: 'Selection trial',
+  seminar: 'Seminar',
+  camp: 'Camp',
+  grading: 'Grading',
+  technical_course: 'Technical course',
+  referee_course: 'Referee course',
+  other: 'Event',
+};
+
+const REGISTRATION_LABEL: Record<RegistrationState, string> = {
+  open: 'Entries open',
+  not_open_yet: 'Entries not open yet',
+  closed: 'Entries closed',
+  // Deliberately not "open". A missing window may be an omission in the
+  // register, and only the office can say which.
+  no_window_recorded: 'No entry window recorded',
+};
+
+const MONTHS = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+const monthKey = (iso: string) => iso.slice(0, 7);
+const monthTitle = (key: string) => {
+  const [y, m] = key.split('-');
+  return `${MONTHS[Number(m) - 1]} ${y}`;
+};
+
+/** Entries grouped by month, preserving the module's ordering within each. */
+const months: Array<{ key: string; entries: CalendarEntry[] }> = [];
+for (const e of result?.entries ?? []) {
+  const k = monthKey(e.startsOn!);
+  const last = months[months.length - 1];
+  if (last && last.key === k) last.entries.push(e);
+  else months.push({ key: k, entries: [e] });
+}
+
+const dayOf = (iso: string) => String(Number(iso.slice(8, 10)));
+const weekdayOf = (iso: string) =>
+  ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(`${iso}T00:00:00Z`).getUTCDay()];
+
+/** "2–3 August" for a multi-day event, "15" for a single day. */
+const dayRange = (e: CalendarEntry) => {
+  if (!e.endsOn || e.endsOn === e.startsOn) return dayOf(e.startsOn!);
+  if (monthKey(e.endsOn) === monthKey(e.startsOn!)) return `${dayOf(e.startsOn!)}–${dayOf(e.endsOn)}`;
+  return `${dayOf(e.startsOn!)} – ${dayOf(e.endsOn)} ${MONTHS[Number(e.endsOn.slice(5, 7)) - 1]}`;
+};
+
+const keep = (v: string) => {
+  const p = new URLSearchParams();
+  if (fromParam) p.set('from', fromParam);
+  if (toParam) p.set('to', toParam);
+  if (v) p.set('kind', v);
+  const q = p.toString();
+  return q ? `/calendar?${q}` : '/calendar';
+};
+
+const totalDated = result?.entries.length ?? 0;
+const totalUndated = result?.undated.length ?? 0;
+---
+
+<Base
+  title="Federation calendar — MMAKF"
+  description="Every championship, grading and course the Modern Martial Arts Karate-Do Federation of India has scheduled, with entry windows and sanction status."
+>
+  <PageHero
+    eyebrow="One calendar"
+    title="The federation <em>calendar</em>."
+    lead="Championships, gradings and courses in one place, with the entry window for each answered as at today's date and the federation's sanction shown where it applies."
+    pills={[`As at ${today}`]}
+  />
+
+  <section>
+    <div class="container">
+      <div class="cal-bar">
+        <div class="kind-bar" role="group" aria-label="Narrow the calendar">
+          <a href={keep('')} class:list={['kind-chip', { on: !activeKind }]}>Everything</a>
+          {KINDS.map((k) => (
+            <a href={keep(k)} class:list={['kind-chip', { on: activeKind === k }]}>{KIND_LABEL[k]}</a>
+          ))}
+        </div>
+        <a class="btn btn-ghost" href="/calendar.ics">
+          <Icon name="book" size={16} color="currentColor" /> Subscribe (.ics)
+        </a>
+      </div>
+
+      <p class="text-muted sub-note">
+        The subscription feed carries the <strong>public</strong> calendar to whoever opens it — a
+        calendar app sends no sign-in — and it carries only events with a confirmed date, because
+        iCalendar has no way to say "this is happening, the day is not fixed".
+      </p>
+
+      {!configured && (
+        <div class="notice" role="status">
+          <Icon name="shield" size={22} color="var(--gold)" />
+          <div>
+            <strong>The federation database is not configured for this environment.</strong>
+            <p>
+              The calendar is assembled from the competition, grading and course registers in
+              Postgres. Until <code>DATABASE_URL</code> is set there is nothing to assemble, which is
+              reported here rather than rendered as a federation with an empty season.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {failure && (
+        <div class="notice bad" role="alert">
+          <Icon name="shield" size={22} color="var(--red)" />
+          <div>
+            <strong>The calendar could not be loaded.</strong>
+            <p>{failure}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {result && (
+    <section class="bg2">
+      <div class="container">
+        {totalDated === 0 ? (
+          <div class="section-head">
+            <h2 class="display-2" style="font-size:clamp(1.4rem,2.6vw,2rem)">
+              Nothing is <em>scheduled</em> between {result.from} and {result.to}.
+            </h2>
+            <div class="rule gold"></div>
+            <p class="lead">
+              That is what the registers say for this window — not that the federation is inactive.
+              {totalUndated > 0 && <> {totalUndated} announced {totalUndated === 1 ? 'event has' : 'events have'} no confirmed date yet; they are listed below.</>}
+            </p>
+          </div>
+        ) : (
+          <div class="section-head">
+            <h2 class="display-2" style="font-size:clamp(1.4rem,2.6vw,2rem)">
+              {totalDated} scheduled between <em>{result.from}</em> and <em>{result.to}</em>.
+            </h2>
+            <div class="rule gold"></div>
+          </div>
+        )}
+
+        {months.map((m) => (
+          <div class="month">
+            <h3 class="month-title">{monthTitle(m.key)}</h3>
+            <ul class="entry-list">
+              {m.entries.map((e) => (
+                <li class:list={['entry', { cancelled: e.cancelled }]}>
+                  <div class="entry-date" aria-hidden="true">
+                    <span class="entry-day">{dayRange(e)}</span>
+                    <span class="entry-weekday">{weekdayOf(e.startsOn!)}</span>
+                  </div>
+                  <div class="entry-body">
+                    <div class="entry-kicker">
+                      {CATEGORY_LABEL[e.category || ''] || e.category || KIND_LABEL[e.kind]}
+                      <span class="entry-ref">{e.ref}</span>
+                    </div>
+                    {e.url
+                      ? <a class="entry-title" href={e.url}>{e.title}</a>
+                      : <span class="entry-title plain">{e.title}</span>}
+                    {(e.venue || e.city) && (
+                      <div class="entry-where">{[e.venue, e.city].filter(Boolean).join(' · ')}</div>
+                    )}
+                    <div class="entry-pills">
+                      {e.cancelled && <span class="pill bad">{e.status === 'postponed' ? 'Postponed' : 'Cancelled'}</span>}
+                      <span class:list={['pill', { featured: e.registration.state === 'open' }]}>
+                        {REGISTRATION_LABEL[e.registration.state]}
+                      </span>
+                      {e.sanctioned === true && (
+                        <span class="pill">Sanctioned{e.sanctionReference ? ` · ${e.sanctionReference}` : ''}</span>
+                      )}
+                      {e.sanctioned === false && <span class="pill bad">Not sanctioned</span>}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+
+        {totalUndated > 0 && (
+          <div class="undated">
+            <h3 class="month-title">Announced, date not yet confirmed</h3>
+            <p class="text-muted" style="font-size:.86rem;max-width:64ch;margin-bottom:18px">
+              The federation has announced these but has not fixed a day. They are kept apart from
+              the calendar above rather than placed on a plausible date, and they are not in the
+              subscription feed — a calendar entry cannot say "the day is not decided".
+            </p>
+            <ul class="entry-list">
+              {result.undated.map((e) => (
+                <li class="entry undated-entry">
+                  <div class="entry-date" aria-hidden="true">
+                    <span class="entry-day dash">—</span>
+                    <span class="entry-weekday">TBC</span>
+                  </div>
+                  <div class="entry-body">
+                    <div class="entry-kicker">
+                      {CATEGORY_LABEL[e.category || ''] || e.category || KIND_LABEL[e.kind]}
+                      <span class="entry-ref">{e.ref}</span>
+                    </div>
+                    {e.url
+                      ? <a class="entry-title" href={e.url}>{e.title}</a>
+                      : <span class="entry-title plain">{e.title}</span>}
+                    <div class="entry-pills">
+                      {e.sanctioned === false && <span class="pill bad">Not sanctioned</span>}
+                      {e.kind === 'course' && <span class="pill">Available on the academy</span>}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div class="cal-foot">
+          <p class="text-muted" style="font-size:.84rem;max-width:66ch">
+            Entry windows are answered as at <strong>{result.asAt}</strong>. A window shown as open
+            today may have closed by the day of the event, so check again before travelling.
+            {!signedIn && <> Signed-in officials see their own unit's fixtures in addition to these.</>}
+          </p>
+          <div class="mt-6 flex flex-wrap gap-3">
+            <a class="btn btn-ghost" href="/competitions">Championships &rarr;</a>
+            <a class="btn btn-ghost" href="/academy">Online academy &rarr;</a>
+            <a class="btn btn-ghost" href="/schedule">Weekly class timetable &rarr;</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  )}
+</Base>
+
+<style>
+  .cal-bar {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 20px; flex-wrap: wrap;
+  }
+  .kind-bar { display: flex; flex-wrap: wrap; gap: 8px; }
+  .kind-chip {
+    font-family: var(--font-display); font-size: .7rem;
+    letter-spacing: .14em; text-transform: uppercase;
+    padding: 9px 15px; border: 1px solid var(--border-2); border-radius: 999px;
+    color: var(--muted); text-decoration: none; background: var(--card);
+  }
+  .kind-chip:hover { color: var(--white); border-color: var(--gold-dim); }
+  .kind-chip.on { color: var(--bg); background: var(--gold); border-color: var(--gold); }
+
+  .sub-note { font-size: .84rem; margin-top: 16px; max-width: 70ch; line-height: 1.6; }
+
+  .notice {
+    display: flex; gap: 16px; align-items: flex-start;
+    margin-top: 26px; padding: 20px 22px;
+    background: var(--card); border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold); border-radius: var(--radius);
+  }
+  .notice.bad { border-left-color: var(--red); }
+  .notice strong { font-family: var(--font-display); color: var(--white); display: block; margin-bottom: 6px; }
+  .notice p { margin: 0; font-size: .9rem; color: var(--muted); line-height: 1.6; }
+
+  .month { margin-bottom: 42px; }
+  .month-title {
+    font-family: var(--font-display); font-size: .74rem;
+    letter-spacing: .22em; text-transform: uppercase;
+    color: var(--gold); margin-bottom: 18px;
+    padding-bottom: 12px; border-bottom: 1px solid var(--border-2);
+  }
+
+  .entry-list { list-style: none; padding: 0; margin: 0; }
+  .entry {
+    display: grid; grid-template-columns: 92px 1fr; gap: 22px;
+    padding: 20px 0; border-bottom: 1px solid var(--border);
+  }
+  .entry:last-child { border-bottom: 0; }
+  @media (max-width: 560px) { .entry { grid-template-columns: 1fr; gap: 10px; } }
+
+  .entry-date {
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+    padding-top: 2px;
+  }
+  @media (max-width: 560px) { .entry-date { flex-direction: row; gap: 10px; align-items: baseline; justify-content: flex-start; } }
+  .entry-day {
+    font-family: var(--font-display); font-weight: 700;
+    font-size: 1.7rem; line-height: 1; color: var(--white);
+  }
+  .entry-day.dash { color: var(--muted); } /* was --muted-2: 1.87:1 (WCAG 1.4.3, Q-28) */
+  .entry-weekday {
+    font-family: var(--font-display); font-size: .62rem;
+    letter-spacing: .18em; text-transform: uppercase;
+    color: var(--muted); margin-top: 6px; /* was --muted-2: 1.87:1 (WCAG 1.4.3, Q-28) */
+  }
+
+  .entry-kicker {
+    display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline;
+    font-family: var(--font-display); font-size: .64rem;
+    letter-spacing: .18em; text-transform: uppercase;
+    color: var(--gold); margin-bottom: 7px;
+  }
+  .entry-ref { color: var(--muted); letter-spacing: .1em; } /* was --muted-2: 1.87:1 (WCAG 1.4.3, Q-28) */
+  .entry-title {
+    font-family: var(--font-display); font-weight: 600; font-size: 1.06rem;
+    color: var(--white); text-decoration: none; display: block;
+  }
+  a.entry-title:hover { color: var(--gold); text-decoration: underline; }
+  .entry-where { font-size: .88rem; color: var(--muted); margin-top: 5px; }
+  .entry-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+
+  .entry.cancelled .entry-title { text-decoration: line-through; color: var(--muted); }
+
+  .undated { margin-top: 10px; padding-top: 26px; border-top: 1px solid var(--border-2); }
+  .undated-entry .entry-day { font-size: 1.4rem; }
+
+  .cal-foot { margin-top: 34px; padding-top: 26px; border-top: 1px solid var(--border-2); }
+
+  /* A cancellation and an unsanctioned event both need to read as a warning
+     rather than as another neutral tag. Not defined globally because .pill has
+     no such modifier and adding one is a design-system decision, not this
+     page's to make. */
+  .pill.bad { color: var(--red-2); border-color: var(--red-3); }
+</style>
