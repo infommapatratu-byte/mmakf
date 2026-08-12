@@ -33,14 +33,33 @@ and says so.
 | ID | P | Task | Depends on | Status |
 |---|---|---|---|---|
 | Q-01 | **P0** | Review and integrate the six agent-built surfaces; apply their shared-file edits | — | IN PROGRESS |
-| Q-02 | **P0** | Grading workflow backend: application → eligibility → panel → scorecard → approval → certificate | GRD-001..004 (schema done) | NOT_STARTED |
-| Q-03 | **P0** | Certificate issuance + QR + public verification, replacing the hand-typed register | Q-02 | NOT_STARTED |
-| Q-04 | **P0** | Migrate `/api/verify` off the 7-row Redis list onto real certificate records | Q-03 | NOT_STARTED |
+| Q-02 | **P0** | Grading workflow backend: application → eligibility → panel → scorecard → approval → certificate | GRD-001..004 | **DONE** — `src/db/grading.ts`, 41 tests |
+| Q-03 | **P0** | Certificate issuance + public verification | Q-02 | **DONE** — issuance refuses anything but a recorded pass |
+| Q-04 | **P0** | Migrate `/api/verify` off the 7-row Redis list | Q-03 | **DONE** — see below |
 
-`MEM-005` — the public member register — is the most serious remaining integrity defect: the
-credential-verification service a parent is told to trust can only confirm seven hand-typed people.
-It cannot be fixed by editing the list. It is fixed by Q-02 → Q-04, because a credential is only
-trustworthy if it came from an examination.
+### On Q-04 and what it did NOT solve
+
+`/api/verify` now prefers the authoritative chain and, crucially, **reports which provenance it
+used**:
+
+| | |
+|---|---|
+| `examined` | traced to a grading with examiner scores behind it |
+| `unverified_legacy` | a real grade predating digital records; evidence held, no examination record |
+| `legacy_register` | the old hand-typed list — used only while no database is configured |
+
+Reporting all three identically is what made the old endpoint misleading. A verification service
+that cannot say *how it knows* is not a verification service.
+
+**It does not silently fall back.** Once a database is configured, a miss returns "not found" rather
+than consulting the legacy list — otherwise a superseded hand-typed row could override the
+authoritative answer. A database fault returns 503 with `unavailable: true`, never "no such member":
+telling an enquirer a credential does not exist when we merely could not read is worse than an error.
+
+**Still open — and it needs MMAKF, not engineering.** The seven legacy rows are still the only data
+until real records exist. Migrating them is a controlled data migration through
+`recordLegacyGrade()`, which demands a note of what evidence the office actually holds for each. It
+cannot be done by anyone but the federation, and it must not be done by inventing examinations.
 
 ## Next
 

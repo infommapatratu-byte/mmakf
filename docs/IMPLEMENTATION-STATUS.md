@@ -41,7 +41,7 @@ Last updated 2026-08-12 · branch `wave-2b-federation` · production runs `6a44f
 | MEM-003 | Credential separation (§33) | **DATABASE** | instructor/examiner/official/governance are separate tables |
 | MEM-004 | Federation ID allocation | **BACKEND** | Atomic sequence, never time-derived. 40-way concurrency tested |
 | ORG-002 | Affiliation lifecycle workflow | **NOT_STARTED** | Schema exists; application → charter → renewal not built |
-| MEM-005 | Public member register | **BLOCKED** | **Currently 7 hand-typed rows in `seed.ts` — the most serious remaining integrity defect.** Cannot be fixed until gradings issue certificates |
+| MEM-005 | Public member register | **BLOCKED ON MMAKF** | `publicRegister()` now derives it from active membership joined to active rank, with provenance. The 7 legacy rows remain the only DATA until the federation migrates them via `recordLegacyGrade()`, which requires a note of the evidence held for each. Engineering is done; the content is not. |
 
 ## Technical & grading
 
@@ -52,9 +52,9 @@ Last updated 2026-08-12 · branch `wave-2b-federation` · production runs `6a44f
 | GRD-002 | Grading events + panel | **DATABASE** | Examiner authority frozen at assignment |
 | GRD-003 | Candidates + eligibility | **DATABASE** | Decision and reasoning stored, not re-derived |
 | GRD-004 | Scorecards | **DATABASE** | Per-examiner, so panel disagreement stays visible |
-| GRD-005 | Grading workflow (application → certificate) | **NOT_STARTED** | Backend not built |
-| CERT-001 | Certificate engine + QR | **DATABASE** | Snapshot frozen; revocation preserves history |
-| CERT-002 | Public verification | **PARTIALLY** | `/api/verify` exists but reads the hand-typed Redis list |
+| GRD-005 | Grading workflow (application → certificate) | **TESTING** | `src/db/grading.ts`, 41 tests against real Postgres |
+| CERT-001 | Certificate engine | **TESTING** | Issuance refuses anything but a recorded pass; idempotent; revocation revokes the rank it evidenced |
+| CERT-002 | Public verification | **BACKEND** | Prefers authoritative records and reports provenance: examined / unverified_legacy / legacy_register. No silent fallback; a DB fault returns 503, never "not found" |
 
 ## Competition
 
