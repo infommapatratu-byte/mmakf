@@ -4,7 +4,7 @@
 // enums and SQL semantics are exercised for real — not mocked.
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import { eq } from 'drizzle-orm';
@@ -40,10 +40,13 @@ beforeAll(async () => {
   db = drizzle(client, { schema: s });
 
   // Apply the generated migration exactly as production will.
-  const sqlText = readFileSync('drizzle/0000_federation_core.sql', 'utf8');
-  for (const stmt of sqlText.split('--> statement-breakpoint')) {
-    const t = stmt.trim();
-    if (t) await client.exec(t);
+  // EVERY migration, discovered rather than listed — a hardcoded file breaks
+  // the moment a later one adds a column the schema selects.
+  for (const f of readdirSync('drizzle').filter((x) => x.endsWith('.sql')).sort()) {
+    for (const stmt of readFileSync(`drizzle/${f}`, 'utf8').split('--> statement-breakpoint')) {
+      const t = stmt.trim();
+      if (t) await client.exec(t);
+    }
   }
 
   const [jh] = await db.insert(s.stateUnits)

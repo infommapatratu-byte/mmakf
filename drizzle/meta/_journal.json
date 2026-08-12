@@ -36,6 +36,13 @@
       "when": 1786512236309,
       "tag": "0004_quiz_pass_mark_nullable",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786512236310,
+      "tag": "0005_mfa",
+      "breakpoints": true
     }
   ]
 }

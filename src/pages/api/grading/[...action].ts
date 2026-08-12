@@ -23,7 +23,7 @@ import { eq } from 'drizzle-orm';
 import { identify, clientIp } from '@/lib/session';
 import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
 import { isConfigured, db } from '@/db';
-import { ForbiddenError, assertCan } from '@/lib/rbac';
+import { ForbiddenError, assertCan, canAnywhere, type Action } from '@/lib/rbac';
 import type { AuditContext } from '@/db/federation';
 import * as s from '@/db/schema';
 import {
@@ -147,6 +147,121 @@ function isAction(v: string): v is ActionName {
 const PANEL_ROLES = ['chief', 'examiner', 'assessor', 'observer'] as const;
 const OUTCOMES = ['pass', 'fail', 'refer'] as const;
 
+// --- Scope ------------------------------------------------------------------
+//
+// WHY THIS EXISTS. src/db/grading.ts gates its write paths with
+// assertCanAnywhere() - "does this principal hold the action in ANY scope?".
+// That is the correct question for a LIST gate and the wrong one for a write
+// addressed by id: it never looks at WHICH grading is being written to. A state
+// officer who holds grading:score in their own state therefore holds it, as far
+// as that check is concerned, over every grading in the country - they need only
+// know a candidate id.
+//
+// docs/SECURITY-ARCHITECTURE.md is explicit: "Scope is what prevents IDOR.
+// Knowing an id is never sufficient; the id must fall inside the caller's
+// scope." So the row behind the id is resolved and handed to the SAME rbac
+// can() every other surface uses.
+//
+// This is not a second authorisation model. No rule is written here: the
+// placement comes from the record, the decision comes from rbac, and the
+// module's own assertCanAnywhere still runs afterwards. It closes the gap
+// between the two questions rather than re-answering either.
+//
+// This also matches what the console shows. src/pages/admin/grading.astro
+// filters its list with visibleScopes() over these same three columns, so a
+// grading this check refuses is one that was never listed to the caller in the
+// first place.
+
+type Placement = {
+  stateUnitId: number | null;
+  districtUnitId: number | null;
+  dojoId: number | null;
+};
+
+type Db = ReturnType<typeof db>;
+
+async function eventPlacement(database: Db, gradingEventId: number): Promise<Placement | null> {
+  const row = (
+    await database
+      .select({
+        stateUnitId: s.gradingEvents.stateUnitId,
+        districtUnitId: s.gradingEvents.districtUnitId,
+        dojoId: s.gradingEvents.dojoId,
+      })
+      .from(s.gradingEvents)
+      .where(eq(s.gradingEvents.id, gradingEventId))
+      .limit(1)
+  )[0];
+  return row ?? null;
+}
+
+async function candidatePlacement(database: Db, candidateId: number): Promise<Placement | null> {
+  const row = (
+    await database
+      .select({ gradingEventId: s.gradingCandidates.gradingEventId })
+      .from(s.gradingCandidates)
+      .where(eq(s.gradingCandidates.id, candidateId))
+      .limit(1)
+  )[0];
+  if (!row) return null;
+  return eventPlacement(database, row.gradingEventId);
+}
+
+async function certificatePlacement(
+  database: Db,
+  certificateId: number
+): Promise<Placement | null> {
+  const cert = (
+    await database
+      .select({
+        gradingEventId: s.certificates.gradingEventId,
+        personId: s.certificates.personId,
+      })
+      .from(s.certificates)
+      .where(eq(s.certificates.id, certificateId))
+      .limit(1)
+  )[0];
+  if (!cert) return null;
+
+  if (cert.gradingEventId != null) {
+    const placed = await eventPlacement(database, cert.gradingEventId);
+    if (placed) return placed;
+  }
+
+  // A legacy certificate carries no grading event. Fall back to where its
+  // HOLDER sits, so revocation is still scoped to somebody's units instead of
+  // being reachable from any scope at all.
+  const person = (
+    await database
+      .select({
+        stateUnitId: s.persons.stateUnitId,
+        districtUnitId: s.persons.districtUnitId,
+        dojoId: s.persons.dojoId,
+      })
+      .from(s.persons)
+      .where(eq(s.persons.id, cert.personId))
+      .limit(1)
+  )[0];
+  return person ?? null;
+}
+
+/**
+ * Refuse an action aimed at units the caller has no authority over.
+ *
+ * A null placement means the target does not exist. Nothing is asserted in that
+ * case: the module is left to raise its own unknown_* error, so this file never
+ * invents a 404 message and never reveals, by the shape of the refusal, whether
+ * an out-of-scope id happens to exist.
+ */
+function assertInScope(
+  principal: Parameters<typeof assertCan>[0],
+  rbacAction: Action,
+  placement: Placement | null
+): void {
+  if (!placement) return;
+  assertCan(principal, rbacAction, placement);
+}
+
 // --- Handler ----------------------------------------------------------------
 
 export const POST: APIRoute = async ({ request, params }) => {
@@ -158,12 +273,15 @@ export const POST: APIRoute = async ({ request, params }) => {
   const rl = await rateLimit(request, `grading-${isAction(action) ? action : 'unknown'}`, 60, 60);
   if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
 
+  // Identity first, THEN the action check: the list of actions is a description
+  // of the admin surface, and an anonymous caller has no business enumerating
+  // it. A signed-in caller who mistypes still gets the list.
+  const identity = await identify(request.headers.get('cookie'));
+  if (!identity) return json({ error: 'Sign in to work a grading' }, 401);
+
   if (!isAction(action)) {
     return json({ error: 'Unknown grading action', code: 'unknown_action', actions: ACTIONS }, 404);
   }
-
-  const identity = await identify(request.headers.get('cookie'));
-  if (!identity) return json({ error: 'Sign in to work a grading' }, 401);
 
   // No fake features: without a database there is no grading chain to act on,
   // and saying so is the honest answer - not a 500, and not a silent no-op.
@@ -230,8 +348,18 @@ export const POST: APIRoute = async ({ request, params }) => {
 
       // -- Application ---------------------------------------------------
       case 'apply': {
+        // applyForGrading() scope-checks the PERSON. It does not check the
+        // grading being entered, so the event is checked here as well - entering
+        // a candidate writes into that grading's candidate list.
+        const gradingEventId = requireInt(body, 'gradingEventId');
+        assertInScope(
+          identity.principal,
+          'grading:read',
+          await eventPlacement(database, gradingEventId)
+        );
+
         const row = await applyForGrading(database, ctx, {
-          gradingEventId: requireInt(body, 'gradingEventId'),
+          gradingEventId,
           personId: requireInt(body, 'personId'),
           gradeDefinitionId: requireInt(body, 'gradeDefinitionId'),
           presentedByPersonId: optionalInt(body, 'presentedByPersonId'),
@@ -246,8 +374,15 @@ export const POST: APIRoute = async ({ request, params }) => {
         if (!(PANEL_ROLES as readonly string[]).includes(role)) {
           throw new BadRequest(`"role" must be one of: ${PANEL_ROLES.join(', ')}.`);
         }
+        const gradingEventId = requireInt(body, 'gradingEventId');
+        assertInScope(
+          identity.principal,
+          'grading:approve',
+          await eventPlacement(database, gradingEventId)
+        );
+
         const row = await assignExaminer(database, ctx, {
-          gradingEventId: requireInt(body, 'gradingEventId'),
+          gradingEventId,
           personId: requireInt(body, 'personId'),
           role: role as (typeof PANEL_ROLES)[number],
         });
@@ -257,6 +392,12 @@ export const POST: APIRoute = async ({ request, params }) => {
       // -- Scorecard -----------------------------------------------------
       case 'score': {
         const candidateId = requireInt(body, 'candidateId');
+        assertInScope(
+          identity.principal,
+          'grading:score',
+          await candidatePlacement(database, candidateId)
+        );
+
         const rawScore = body.score;
         const score =
           typeof rawScore === 'number' ? rawScore : Number(String(rawScore ?? '').trim());
@@ -310,8 +451,15 @@ export const POST: APIRoute = async ({ request, params }) => {
             .slice(0, 40);
         }
 
+        const candidateId = requireInt(body, 'candidateId');
+        assertInScope(
+          identity.principal,
+          'grading:approve',
+          await candidatePlacement(database, candidateId)
+        );
+
         const row = await decideCandidate(database, ctx, {
-          candidateId: requireInt(body, 'candidateId'),
+          candidateId,
           outcome: outcome as (typeof OUTCOMES)[number],
           referredComponents,
           examinerNotes: optionalText(body, 'examinerNotes', 4000),
@@ -322,11 +470,14 @@ export const POST: APIRoute = async ({ request, params }) => {
 
       // -- Certificate ---------------------------------------------------
       case 'issue-certificate': {
-        const certificate = await issueGradeCertificate(
-          database,
-          ctx,
-          requireInt(body, 'candidateId')
+        const candidateId = requireInt(body, 'candidateId');
+        assertInScope(
+          identity.principal,
+          'certificate:issue',
+          await candidatePlacement(database, candidateId)
         );
+
+        const certificate = await issueGradeCertificate(database, ctx, candidateId);
         return json(certificate, 201);
       }
 
@@ -335,6 +486,12 @@ export const POST: APIRoute = async ({ request, params }) => {
         // verification. Asking for it here as well only saves a round trip.
         const reason = requireText(body, 'reason', 1000);
         const certificateId = requireInt(body, 'certificateId');
+        assertInScope(
+          identity.principal,
+          'certificate:revoke',
+          await certificatePlacement(database, certificateId)
+        );
+
         await revokeCertificate(database, { ...ctx, reason }, certificateId, reason);
         return json({ ok: true, certificateId, status: 'revoked', reason }, 200);
       }
@@ -342,6 +499,12 @@ export const POST: APIRoute = async ({ request, params }) => {
       // -- Lock ----------------------------------------------------------
       case 'lock': {
         const gradingEventId = requireInt(body, 'gradingEventId');
+        assertInScope(
+          identity.principal,
+          'grading:approve',
+          await eventPlacement(database, gradingEventId)
+        );
+
         await lockGrading(database, ctx, gradingEventId);
         return json({ ok: true, gradingEventId, status: 'locked' }, 200);
       }
@@ -351,11 +514,19 @@ export const POST: APIRoute = async ({ request, params }) => {
       return json({ error: err.message, code: 'invalid_request' }, 400);
     }
     if (err instanceof ForbiddenError) {
+      // Two different refusals wear the same status, and telling them apart is
+      // the difference between "ask for the role" and "this is not yours to
+      // touch". rbac answers which one it is; nothing is guessed here.
+      const holdsElsewhere = canAnywhere(identity.principal, err.action);
       return json(
         {
-          error: `You do not have authority to do this (${err.action}).`,
+          error: holdsElsewhere
+            ? `Your credential carries ${err.action}, but not over this grading — it sits in ` +
+              'units outside your scope. Knowing its id is not authority over it.'
+            : `You do not have authority to do this (${err.action}).`,
           code: 'forbidden',
           action: err.action,
+          reason: holdsElsewhere ? 'out_of_scope' : 'action_not_held',
         },
         403
       );

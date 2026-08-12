@@ -5,7 +5,7 @@
 // tests attack it directly.
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import { and, eq } from 'drizzle-orm';
@@ -22,8 +22,10 @@ const nat: Principal = {
 beforeAll(async () => {
   const client = new PGlite();
   db = drizzle(client, { schema: s });
-  for (const st of readFileSync('drizzle/0000_federation_core.sql', 'utf8').split('--> statement-breakpoint')) {
-    if (st.trim()) await client.exec(st.trim());
+  for (const f of readdirSync('drizzle').filter((x) => x.endsWith('.sql')).sort()) {
+    for (const st of readFileSync(`drizzle/${f}`, 'utf8').split('--> statement-breakpoint')) {
+      if (st.trim()) await client.exec(st.trim());
+    }
   }
   const [jh] = await db.insert(s.stateUnits).values({ code: 'ST-JH', state: 'JH', name: 'JH' }).returning({ id: s.stateUnits.id });
   JH = jh.id;

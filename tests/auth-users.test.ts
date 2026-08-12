@@ -1,7 +1,7 @@
 // Per-person authentication — behaviour and attacks (§53, §65).
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import { eq } from 'drizzle-orm';
@@ -25,8 +25,12 @@ beforeAll(async () => {
   process.env.ADMIN_SESSION_SECRET = 'test-secret-for-auth-user-suite';
   const client = new PGlite();
   db = drizzle(client, { schema: s });
-  for (const f of ['drizzle/0000_federation_core.sql', 'drizzle/0001_user_session_controls.sql']) {
-    for (const st of readFileSync(f, 'utf8').split('--> statement-breakpoint')) {
+  // EVERY migration, discovered rather than listed. A hardcoded pair broke the
+  // moment a later migration added a column the schema selects — the suite then
+  // fails on a query, which looks like a code defect rather than a stale
+  // fixture.
+  for (const f of readdirSync('drizzle').filter((x) => x.endsWith('.sql')).sort()) {
+    for (const st of readFileSync(`drizzle/${f}`, 'utf8').split('--> statement-breakpoint')) {
       if (st.trim()) await client.exec(st.trim());
     }
   }

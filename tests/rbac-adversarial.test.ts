@@ -4,7 +4,7 @@
 // outcome we want. Any attack that succeeds here is a P0 finding.
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import * as s from '../src/db/schema';
@@ -21,8 +21,10 @@ const nat: Principal = {
 beforeAll(async () => {
   const client = new PGlite();
   db = drizzle(client, { schema: s });
-  for (const stmt of readFileSync('drizzle/0000_federation_core.sql', 'utf8').split('--> statement-breakpoint')) {
-    if (stmt.trim()) await client.exec(stmt.trim());
+  for (const f of readdirSync('drizzle').filter((x) => x.endsWith('.sql')).sort()) {
+    for (const stmt of readFileSync(`drizzle/${f}`, 'utf8').split('--> statement-breakpoint')) {
+      if (stmt.trim()) await client.exec(stmt.trim());
+    }
   }
   const [jh] = await db.insert(s.stateUnits).values({ code: 'ST-JH', state: 'Jharkhand', name: 'JH' }).returning({ id: s.stateUnits.id });
   const [br] = await db.insert(s.stateUnits).values({ code: 'ST-BR', state: 'Bihar', name: 'BR' }).returning({ id: s.stateUnits.id });

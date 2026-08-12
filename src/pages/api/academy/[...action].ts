@@ -159,6 +159,29 @@ async function liveClassIdForCode(code: string): Promise<number | null> {
   return row?.id ?? null;
 }
 
+/**
+ * A question as the CLASSROOM BOARD needs it, and not one field more.
+ *
+ * liveClassQuestions() keeps `personId` on a members-only class deliberately —
+ * a moderation surface has to attribute a question, and stripping the name from
+ * someone entitled to see it helps nobody. This endpoint is not that surface.
+ * It feeds /live, which renders the text, the answer and the vote count, so
+ * shipping the asker's person id to every member's browser would put "who asked
+ * what" on the wire for no purpose the page has. Whitelisted rather than
+ * deleted-by-key so a column added to the table later cannot arrive here on its
+ * own. Moderators read the attributed view through moderationQuestions().
+ */
+function boardQuestion(q: any) {
+  return {
+    id: q.id,
+    question: q.question,
+    answer: q.answer ?? null,
+    answeredAt: q.answeredAt ?? null,
+    status: q.status,
+    upvotes: q.upvotes,
+  };
+}
+
 function intOf(v: unknown): number | null {
   const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
   return Number.isInteger(n) && n > 0 ? n : null;
@@ -195,7 +218,7 @@ export const GET: APIRoute = async ({ params, request, url }) => {
     const id = await liveClassIdForCode(code);
     if (id == null) return json({ error: 'Unknown class' }, 404);
     const questions = await liveClassQuestions(db(), { principal }, id);
-    return json({ questions }, 200);
+    return json({ questions: questions.map(boardQuestion) }, 200);
   } catch (err: any) {
     if (err instanceof ForbiddenError) {
       return json({ error: 'This class is not open to you.' }, 403);
@@ -323,7 +346,7 @@ export const POST: APIRoute = async ({ params, request }) => {
         const liveClassId = await liveClassIdForCode(code);
         if (liveClassId == null) return json({ error: 'Unknown class' }, 404);
         const row = await askQuestion(db(), ctx, { liveClassId, personId, question });
-        return json({ ok: true, question: row }, 200);
+        return json({ ok: true, question: boardQuestion(row) }, 200);
       }
 
       case 'question-upvote': {
@@ -345,10 +368,12 @@ export const POST: APIRoute = async ({ params, request }) => {
     }
     if (err instanceof AcademyError) {
       // The module's message was written to be read by the person who hit it.
-      return json(
-        { error: err.message, code: err.code, detail: err.detail ?? null },
-        statusForAcademyError(err.code)
-      );
+      // `detail` is NOT forwarded: on every code a learner can reach it is
+      // empty, and the one place academy.ts populates it (publishCourse) is a
+      // list of unpublishable lesson titles that belongs to the authoring
+      // surface. Forwarding a field that is empty today is how it ends up on
+      // the wire the day something starts filling it.
+      return json({ error: err.message, code: err.code }, statusForAcademyError(err.code));
     }
     console.error(`[academy] ${action}`, err);
     return json({ error: 'Could not complete that action' }, 500);

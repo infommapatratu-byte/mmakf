@@ -38,6 +38,12 @@ export const prerender = false;
 const identity = await identify(Astro.request.headers.get('cookie'));
 const configured = isConfigured();
 
+// This page renders candidate names, federation ids, marks, examiner notes and
+// the signed-in identity. None of that may sit in a shared cache or be handed
+// back by the back button after a logout on a shared laptop at a grading venue.
+Astro.response.headers.set('Cache-Control', 'no-store, private');
+Astro.response.headers.set('Referrer-Policy', 'no-referrer');
+
 let mayRead = false;
 let mayScore = false;
 let mayApprove = false;

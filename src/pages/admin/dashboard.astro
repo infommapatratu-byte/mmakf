@@ -268,6 +268,21 @@ const eventStatusRows = dash ? statusRows(dash.eventsByStatus) : [];
 const dojosWithheld = dash?.withheld.find((w) => w.key === 'dojosByStatus') ?? null;
 const eventsWithheld = dash?.withheld.find((w) => w.key === 'eventsByStatus') ?? null;
 
+/**
+ * Name WHY a breakdown is missing before quoting the module's own detail.
+ *
+ * "Not authorised" and "not narrowable" look identical on a page if only the
+ * detail is printed, and they are different facts: the first says the rows
+ * exist and you may not count them, the second says no column in that table can
+ * narrow the figure to this level at all. Neither is a zero, and the reader has
+ * to be able to tell them apart.
+ */
+function withheldMessage(w: { reason: string; detail: string } | null): string | null {
+  if (!w) return null;
+  const head = w.reason === 'not_authorised' ? 'Withheld from this credential' : 'Not narrowable to this scope';
+  return `${head}: ${w.detail}`;
+}
+
 const qualityRows =
   quality?.state === 'ready'
     ? quality.value.items.map((i) => ({
@@ -552,7 +567,7 @@ const heading = scopeRef ? scopeRef.label : 'Dashboard';
                     <DataTable
                       caption="Dojos by status"
                       state={dojosWithheld ? 'denied' : 'ready'}
-                      deniedMessage={dojosWithheld ? dojosWithheld.detail : null}
+                      deniedMessage={withheldMessage(dojosWithheld)}
                       columns={[
                         { key: 'status', label: 'Status', min: '160px' },
                         { key: 'count', label: 'Dojos', numeric: true },
@@ -600,7 +615,7 @@ const heading = scopeRef ? scopeRef.label : 'Dashboard';
                     <DataTable
                       caption="Events by status"
                       state={eventsWithheld ? 'denied' : 'ready'}
-                      deniedMessage={eventsWithheld ? eventsWithheld.detail : null}
+                      deniedMessage={withheldMessage(eventsWithheld)}
                       columns={[
                         { key: 'status', label: 'Status', min: '190px' },
                         { key: 'count', label: 'Events', numeric: true },

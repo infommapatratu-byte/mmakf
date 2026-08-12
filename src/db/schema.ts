@@ -241,6 +241,22 @@ export const users = pgTable('users', {
   // authority is withdrawn. Sessions carry the epoch they were minted under.
   sessionEpoch: integer('session_epoch').notNull().default(0),
   mustChangePassword: text('must_change_password').notNull().default('no'), // yes | no
+
+  // Multi-factor authentication (TOTP, RFC 6238).
+  //
+  // The secret is stored encrypted and NEVER leaves the server. Recovery codes
+  // are stored HASHED — a database leak must not hand over working bypasses —
+  // and each is removed as it is consumed, so a code cannot be replayed even if
+  // it was observed.
+  //
+  // mfaEnrolledAt is set only after a code has been verified. An account that
+  // scanned a QR and never proved it works is NOT enrolled, because an
+  // administrator who mis-scanned would otherwise lock themselves out of the
+  // federation on their next sign-in.
+  mfaSecretEncrypted: text('mfa_secret_encrypted'),
+  mfaEnrolledAt: timestamp('mfa_enrolled_at', { withTimezone: true }),
+  mfaRecoveryHashes: jsonb('mfa_recovery_hashes'),
+  mfaLastUsedAt: timestamp('mfa_last_used_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({ emailIdx: uniqueIndex('users_email_uk').on(t.email) }));

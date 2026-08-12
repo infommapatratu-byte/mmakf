@@ -24,11 +24,30 @@ import { identify } from '@/lib/session';
 import { isConfigured, db } from '@/db';
 import * as s from '@/db/schema';
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import { athletePassport, type AthletePassport } from '@/db/athletes';
-import { courseProgress, type CourseProgressReport } from '@/db/academy';
+import { athletePassport, AthleteError, type AthletePassport } from '@/db/athletes';
+import { AcademyError, courseProgress, type CourseProgressReport } from '@/db/academy';
+import { ForbiddenError } from '@/lib/rbac';
 import { liveNow, upcomingClasses } from '@/lib/youtube';
 
 export const prerender = false;
+
+/**
+ * What a member may be told about a failure.
+ *
+ * The modules write their refusals to be read by the person who hit them, so
+ * those are shown verbatim. Anything else — a driver fault, a timeout, a
+ * constraint name — is a fact about the server, not about the member, and
+ * putting `err.message` on the page is how a connection string reaches a
+ * stranger. Those are logged and summarised.
+ */
+function readableError(err: any, context: string): string {
+  if (err instanceof AcademyError || err instanceof AthleteError) return String(err.message);
+  if (err instanceof ForbiddenError) {
+    return 'The federation’s permission rules do not allow this account to read that record.';
+  }
+  console.error(`[my] ${context}`, err);
+  return `${context} could not be read. The fault has been logged for the federation office; nothing has been changed.`;
+}
 
 const configured = isConfigured();
 
@@ -124,7 +143,12 @@ if (!configured) {
                 error: null,
               };
             } catch (err: any) {
-              return { enrolment: row.enrolment, course: row.course, progress: null, error: String(err?.message ?? err) };
+              return {
+                enrolment: row.enrolment,
+                course: row.course,
+                progress: null,
+                error: readableError(err, 'Your progress on this course'),
+              };
             }
           })
         );
@@ -132,7 +156,7 @@ if (!configured) {
         live = await liveNow(db());
         upcoming = await upcomingClasses(db(), 5);
       } catch (err: any) {
-        loadError = String(err?.message ?? err);
+        loadError = readableError(err, 'Your record');
       }
     }
   }
@@ -403,9 +427,9 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
                 </tbody>
               </table>
             </div>
+            <p class="tbl-hint" style="padding:0 18px 14px">Scroll the table sideways</p>
           </div>
         )}
-        <p class="tbl-hint">Scroll the table sideways</p>
       </div>
     </section>
   )}
@@ -502,6 +526,11 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
 </Base>
 
 <style>
+  /* House convention: every page defines its own alternating section ground.
+     Without this the `.bg2` sections on this page rendered on the plain page
+     ground, so the member area lost the banding every other page has. */
+  .bg2 { background: var(--bg-2); }
+
   .my-tbl {
     width: 100%;
     border-collapse: collapse;

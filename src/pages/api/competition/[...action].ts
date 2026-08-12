@@ -38,7 +38,7 @@ import type { APIRoute } from 'astro';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { identify, clientIp } from '@/lib/session';
 import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
-import { assertCan, ForbiddenError } from '@/lib/rbac';
+import { assertCan, can, ForbiddenError } from '@/lib/rbac';
 import { isConfigured, db, schema as s } from '@/db';
 import { writeAudit, type AuditContext } from '@/db/federation';
 import { get as storeGet, set as storeSet } from '@/lib/storage';
@@ -379,13 +379,27 @@ async function officialsForEvent(dbc: any, eventId: number) {
 
 /**
  * Everything /admin/competition needs about one event, in one call.
- * eventWithCategories() authorises; nothing below widens that decision.
+ *
+ * eventWithCategories() decides whether the event may be READ at all. What it
+ * does NOT decide is how much of it this caller may see, and that matters here:
+ * `competition:read` is held by every athlete, instructor, referee and dojo
+ * administrator in the federation. src/db/draws.ts refuses an UNPUBLISHED draw
+ * to anyone who could not have made it - advance knowledge of a bracket nobody
+ * has published is precisely what a rigging allegation is built on - so this
+ * projection applies that same rule rather than quietly widening it by reading
+ * the tables directly.
+ *
+ *   . draws     - published only, unless the caller holds competition:write
+ *   . matches   - only those belonging to a draw the caller may see
+ *   . officials - the appointment sheet is an officials' record; it goes to
+ *                 competition:write / result:enter, and is reported as WITHHELD
+ *                 to anyone else rather than shown as an empty list
  */
 export async function adminEventDetail(principal: any, eventId: number) {
   const dbc = db();
   const { event, categories } = await eventWithCategories(dbc, principal, eventId);
   const categoryIds = (categories as any[]).map((c) => c.id);
-  const [counts, draws, matches, officials, ruleset] = await Promise.all([
+  const [counts, allDraws, allMatches, allOfficials, ruleset] = await Promise.all([
     entryCounts(dbc, eventId),
     drawsForEvent(dbc, categoryIds),
     matchesWithNames(dbc, eq(s.matches.eventId, eventId)),
@@ -393,9 +407,25 @@ export async function adminEventDetail(principal: any, eventId: number) {
     loadRuleset(eventId),
   ]);
 
+  const placement = {
+    stateUnitId: event.stateUnitId,
+    districtUnitId: event.districtUnitId,
+    dojoId: event.organiserDojoId,
+  };
+  const mayWrite = can(principal, 'competition:write', placement);
+  const mayEnterResults = can(principal, 'result:enter', placement);
+
   const supersededDrawIds = new Set(
-    (draws as any[]).filter((d) => d.supersedesDrawId != null).map((d) => d.supersedesDrawId)
+    (allDraws as any[]).filter((d) => d.supersedesDrawId != null).map((d) => d.supersedesDrawId)
   );
+  const draws = mayWrite
+    ? (allDraws as any[])
+    : (allDraws as any[]).filter((d) => d.publishedAt != null);
+  const visibleDrawIds = new Set(draws.map((d: any) => d.id));
+  const matches = mayWrite
+    ? (allMatches as any[])
+    : (allMatches as any[]).filter((m: any) => m.drawId != null && visibleDrawIds.has(m.drawId));
+  const officials = mayWrite || mayEnterResults ? (allOfficials as any[]) : [];
 
   return {
     event,
@@ -403,13 +433,16 @@ export async function adminEventDetail(principal: any, eventId: number) {
     categories: (categories as any[]).map((c) => ({
       ...c,
       counts: counts.get(c.id) ?? {},
-      draws: (draws as any[])
-        .filter((d) => d.categoryId === c.id)
-        .map((d) => ({ ...d, superseded: supersededDrawIds.has(d.id) })),
+      draws: draws
+        .filter((d: any) => d.categoryId === c.id)
+        .map((d: any) => ({ ...d, superseded: supersededDrawIds.has(d.id) })),
     })),
     matches,
     officials,
     ruleset,
+    // The page states which of these it is showing in full and which it is not,
+    // so a narrowed board never reads as a complete one.
+    visibility: { mayWrite, mayEnterResults, officialsWithheld: !(mayWrite || mayEnterResults) },
   };
 }
 
@@ -647,7 +680,9 @@ export const GET: APIRoute = async ({ params, request, url }) => {
         return json({ events: await publicEvents(Number(url.searchParams.get('limit') ?? 60)) }, 200);
       }
       const eventId = Number(url.searchParams.get('event') ?? url.searchParams.get('id') ?? '');
-      if (!Number.isInteger(eventId)) return json({ error: 'An event id is required.' }, 400);
+      if (!Number.isInteger(eventId) || eventId <= 0) {
+        return json({ error: 'An event id is required.', code: 'missing_field' }, 400);
+      }
 
       if (action === 'public-event') {
         const detail = await publicEventDetail(eventId);
@@ -674,34 +709,88 @@ export const GET: APIRoute = async ({ params, request, url }) => {
 
     if (action === 'event') {
       const id = Number(url.searchParams.get('id') ?? '');
-      if (!Number.isInteger(id)) return json({ error: 'An event id is required.' }, 400);
+      if (!Number.isInteger(id) || id <= 0) {
+        return json({ error: 'An event id is required.', code: 'missing_field' }, 400);
+      }
       return json(await adminEventDetail(identity.principal, id), 200);
     }
 
     if (action === 'category') {
       const id = Number(url.searchParams.get('id') ?? '');
-      if (!Number.isInteger(id)) return json({ error: 'A category id is required.' }, 400);
+      if (!Number.isInteger(id) || id <= 0) {
+        return json({ error: 'A category id is required.', code: 'missing_field' }, 400);
+      }
       const dbc = db();
       const { category, entries } = await categoryEntries(dbc, identity.principal, id);
-      const draws = await drawsForEvent(dbc, [id]);
-      const matches = await matchesWithNames(dbc, eq(s.matches.categoryId, id));
-      const results = await officialResults(dbc, id);
-      return json({ category, entries, draws, matches, results }, 200);
+      const event = await eventById(dbc, category.eventId);
+      const placement = {
+        stateUnitId: event?.stateUnitId ?? null,
+        districtUnitId: event?.districtUnitId ?? null,
+        dojoId: event?.organiserDojoId ?? null,
+      };
+      const mayWrite = can(identity.principal, 'competition:write', placement);
+      const mayEnterResults = can(identity.principal, 'result:enter', placement);
+
+      const allDraws = (await drawsForEvent(dbc, [id])) as any[];
+      const draws = mayWrite ? allDraws : allDraws.filter((d) => d.publishedAt != null);
+      const visibleDrawIds = new Set(draws.map((d) => d.id));
+      const allMatches = (await matchesWithNames(dbc, eq(s.matches.categoryId, id))) as any[];
+      const matches = mayWrite
+        ? allMatches
+        : allMatches.filter((m) => m.drawId != null && visibleDrawIds.has(m.drawId));
+
+      // A PROVISIONAL placing is a working figure, not a result - and the row
+      // carries the correction reason and the user id that authorised it. Both
+      // go to the officials who compute them; everyone else sees exactly what
+      // the public page shows, and no more.
+      const allResults = (await officialResults(dbc, id)) as any[];
+      const results = mayWrite || mayEnterResults
+        ? allResults
+        : allResults
+            .filter((r) => PUBLIC_RESULT_STATUSES.includes(r.status))
+            .map((r) => ({
+              entryId: r.entryId,
+              placing: r.placing,
+              medal: r.medal,
+              status: r.status,
+              corrected: r.corrected,
+              matchesWon: r.matchesWon,
+              matchesLost: r.matchesLost,
+            }));
+
+      return json(
+        { category, entries, draws, matches, results, visibility: { mayWrite, mayEnterResults } },
+        200
+      );
     }
 
     if (action === 'match') {
       const id = Number(url.searchParams.get('id') ?? '');
-      if (!Number.isInteger(id)) return json({ error: 'A match id is required.' }, 400);
+      if (!Number.isInteger(id) || id <= 0) {
+        return json({ error: 'A match id is required.', code: 'missing_field' }, 400);
+      }
       const dbc = db();
       const detail = await explainMatch(dbc, id);
       const event = await eventById(dbc, detail.match.eventId);
       // explainMatch is deliberately unguarded so a disputed log can always be
       // rendered; the read is gated here against the event's own placement.
-      assertCan(identity.principal, 'competition:read', {
+      //
+      // It takes result:enter (or competition:write), NOT competition:read: the
+      // log names the official who signalled every action and carries whatever
+      // free-text note they attached to it. competition:read is held by every
+      // athlete and instructor in the federation, and a referee's working note
+      // about a bout is not theirs to read.
+      const placement = {
         stateUnitId: event?.stateUnitId ?? null,
         districtUnitId: event?.districtUnitId ?? null,
         dojoId: event?.organiserDojoId ?? null,
-      });
+      };
+      if (
+        !can(identity.principal, 'result:enter', placement) &&
+        !can(identity.principal, 'competition:write', placement)
+      ) {
+        throw new ForbiddenError('result:enter');
+      }
       return json(
         { ...detail, allowedTransitions: allowedTransitions(detail.match.status as MatchState) },
         200
@@ -710,7 +799,9 @@ export const GET: APIRoute = async ({ params, request, url }) => {
 
     if (action === 'draw') {
       const id = Number(url.searchParams.get('id') ?? '');
-      if (!Number.isInteger(id)) return json({ error: 'A draw id is required.' }, 400);
+      if (!Number.isInteger(id) || id <= 0) {
+        return json({ error: 'A draw id is required.', code: 'missing_field' }, 400);
+      }
       return json(await readDraw(db(), id, identity.principal), 200);
     }
 
@@ -734,11 +825,14 @@ export const POST: APIRoute = async ({ params, request }) => {
   const rl = await rateLimit(request, bucket, limit, 60);
   if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
 
-  const identity = await identify(request.headers.get('cookie'));
-  if (!identity) return json({ error: 'Sign in to record a competition action.' }, 401);
-
+  // Before identify(): without a database a user cookie cannot be resolved at
+  // all, so identify() returns null and the caller would be told to sign in
+  // when they already are. Say what is actually wrong.
   const unavailable = requireDatabase();
   if (unavailable) return unavailable;
+
+  const identity = await identify(request.headers.get('cookie'));
+  if (!identity) return json({ error: 'Sign in to record a competition action.' }, 401);
 
   try {
     const body = await readBody(request, action === 'set-ruleset' ? 65536 : 16384);
