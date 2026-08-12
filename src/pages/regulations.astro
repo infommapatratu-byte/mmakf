@@ -1,0 +1,791 @@
+---
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const fed = await get('federation');
+
+/**
+ * THE RULES & REGULATIONS REGISTER
+ *
+ * Two classes of document, deliberately never mixed:
+ *
+ *   external — rules published by OTHER bodies that MMAKF competes under. Every
+ *              URL in this list was fetched and inspected before publication.
+ *   own      — MMAKF's own instruments. NOTHING here is drafted, paraphrased or
+ *              summarised. Each carries an honest state. A stated gap is
+ *              credible; an invented constitution is fraud.
+ *
+ * ── HOW THESE LINKS WERE VERIFIED (and why a status code is not enough) ──
+ *
+ * wkf.net SOFT-404s. A request for a superseded rulebook —
+ *   /files/pdf/documents/WKF_Competition_Rules_2024_EN.pdf
+ * returns HTTP 200 with Content-Type: image/png and a 1,623-byte PNG body.
+ * A status-code check calls that dead rulebook healthy and ships a link that
+ * downloads a broken image to anyone who trusts this federation's register.
+ *
+ * So each entry records what the server ACTUALLY returned: content type and
+ * body size, both shown on the page. Every PDF below was additionally
+ * confirmed to begin with the %PDF- magic bytes. Re-verify with:
+ *
+ *   curl -sIL -o /dev/null -w '%{content_type} %{size_download}\n' "<url>"
+ *
+ * and reject anything that is not application/pdf at a plausible size.
+ *
+ * This register is admin-editable: it is served from the `regulations` storage
+ * key when the office has saved one, and falls back to the literal below.
+ */
+
+type Entry = {
+  title: string;
+  body: string;        // issuing organisation
+  edition: string;     // version or edition, as the PUBLISHER labels it
+  effective: string;   // effective date — never guessed
+  url: string;
+  evidence: string;    // what the fetch actually returned
+  note?: string;
+};
+
+type Area = { area: string; blurb: string; items: Entry[] };
+
+// Date this register's links were last fetched and inspected.
+const CHECKED = '12 August 2026';
+
+const WKF = 'World Karate Federation (WKF)';
+const NADA = 'National Anti-Doping Agency (NADA India)';
+const WADA = 'World Anti-Doping Agency (WADA)';
+const W = 'https://www.wkf.net/files/pdf/documents';
+
+const EXTERNAL_FALLBACK: Area[] = [
+  {
+    area: 'Competition — kumite and kata',
+    blurb:
+      'The rules under which bouts and kata performances are scored. MMAKF does not author these; the federation applies them at its own events to the extent stated in its competition notices.',
+    items: [
+      {
+        title: 'KUMITE Competition Rules',
+        body: WKF,
+        edition: '2026 · Master Copy V11',
+        effective: '2026 edition',
+        url: `${W}/WKF%202026%20Kumite%20Competition%20Rules%20MASTER%20COPY_V11.pdf`,
+        evidence: 'application/pdf · 4.49 MB',
+      },
+      {
+        title: 'KATA Competition Rules',
+        body: WKF,
+        edition: '2026 · Master Copy V2',
+        effective: '2026 edition',
+        url: `${W}/WKF%20Kata%20Competition%20Rules%202026%20MASTER%20COPY_V2.pdf`,
+        evidence: 'application/pdf · 820 KB',
+      },
+      {
+        title: 'Kata Sheet — kata name and order list',
+        body: WKF,
+        edition: '2026 · Karate 1',
+        effective: '2026 edition',
+        url: `${W}/KATA%20NAME%20ORDER%202026%20Karate%201.pdf`,
+        evidence: 'application/pdf · 205 KB',
+        note: 'This is the WKF’s approved kata name and order sheet, published on the WKF documents index under the heading "Kata Sheet".',
+      },
+      {
+        title: 'Competition Rules Bulletin',
+        body: WKF,
+        edition: '2026 · V2',
+        effective: '2026 edition',
+        url: `${W}/WKF%20Competition%20Rules%20Bulletin%202026_V2.pdf`,
+        evidence: 'application/pdf · 163 KB',
+        note: 'Amendments and clarifications issued against the competition rules. Read alongside the kumite and kata rulebooks, not instead of them.',
+      },
+      {
+        title: 'Organizing Rules',
+        body: WKF,
+        edition: '2024 (file dated 07.11.2024)',
+        effective: '2024 edition',
+        url: `${W}/WKF%20Organising%20Rules%202024_07112024.1.pdf`,
+        evidence: 'application/pdf · 1.09 MB',
+      },
+      {
+        title: 'WKF World Ranking Rules',
+        body: WKF,
+        edition: '2026',
+        effective: '2026 edition',
+        url: `${W}/wkf_worldranking_rules_2026.pdf`,
+        evidence: 'application/pdf · 556 KB',
+      },
+    ],
+  },
+  {
+    area: 'Refereeing and judging',
+    blurb:
+      'Who may officiate, how officials are licensed and ranked, and the conditions attached to a WKF refereeing appointment.',
+    items: [
+      {
+        title: 'WKF Referee Rules',
+        body: WKF,
+        edition: '2025',
+        effective: '2025 edition',
+        url: `${W}/WKF_Referee_Rules_2025.pdf`,
+        evidence: 'application/pdf · 355 KB',
+      },
+      {
+        title: 'WKF Referees — Conditions and Requirements',
+        body: WKF,
+        edition: '2026',
+        effective: '2026 edition',
+        url: `${W}/2026_Referee_conditions_and_requirements.pdf`,
+        evidence: 'application/pdf · 446 KB',
+      },
+      {
+        title: 'WKF Referees — Conditions and Requirements',
+        body: WKF,
+        edition: '2027',
+        effective: '2027 edition',
+        url: `${W}/2027_Referee_conditions_and_requirements.pdf`,
+        evidence: 'application/pdf · 1.17 MB',
+        note: 'Published in advance of the 2027 cycle. Officials preparing for appointment should read the edition matching the year of the appointment.',
+      },
+    ],
+  },
+  {
+    area: 'Governance and integrity',
+    blurb:
+      'The constitutional and conduct instruments of the world governing body. They bind the WKF and its members; they are reproduced here for reference only.',
+    items: [
+      {
+        title: 'WKF Statutes',
+        body: WKF,
+        edition: 'Not stated on the WKF documents index',
+        effective: 'Not published on the index page — see the document',
+        url: `${W}/WKF_Statutes.pdf`,
+        evidence: 'application/pdf · 372 KB',
+      },
+      {
+        title: 'Disciplinary and Ethics Code',
+        body: WKF,
+        edition: 'English edition — undated in the WKF filename',
+        effective: 'Parallel French and Spanish editions on the same index are dated 15 March 2016',
+        url: `${W}/wkf-disciplinary-and-ethics-code-eng.pdf`,
+        evidence: 'application/pdf · 356 KB',
+        note: 'The English file carries no date in its name. We record what is observable rather than assert an effective date we cannot source.',
+      },
+      {
+        title: 'WKF Safe Sport Policy',
+        body: WKF,
+        edition: 'Not stated on the WKF documents index',
+        effective: 'Not published on the index page — see the document',
+        url: `${W}/WKF_Safe_Sport_Policy.pdf`,
+        evidence: 'application/pdf · 392 KB',
+        note: 'The world body’s safeguarding instrument. MMAKF’s own safeguarding policy is a separate document and is listed below as not yet published.',
+      },
+    ],
+  },
+  {
+    area: 'Medical, concussion and anti-doping',
+    blurb:
+      'Medical eligibility, head-injury management and the anti-doping rules of the world governing body. Anti-doping obligations inside India are additionally governed by NADA — see the section below.',
+    items: [
+      {
+        title: 'WKF Anti-Doping Rules',
+        body: WKF,
+        edition: '2021, updated December 2025',
+        effective: '2021 rules as updated December 2025',
+        url: `${W}/WKF%20Anti%20Doping%20Rules%202021_Updated%20Dec25.pdf`,
+        evidence: 'application/pdf · 1.07 MB',
+      },
+      {
+        title: 'Medical Commission Rules',
+        body: WKF,
+        edition: '2026',
+        effective: '2026 edition',
+        url: `${W}/WKFMedical_Commission_Rules_2026.pdf`,
+        evidence: 'application/pdf · 2.23 MB',
+      },
+      {
+        title: 'Concussion Protocol',
+        body: WKF,
+        edition: 'Not stated on the WKF documents index',
+        effective: 'Not published on the index page — see the document',
+        url: `${W}/WKF%20Medical%20Commission_Concussion%20Protocol.pdf`,
+        evidence: 'application/pdf · 2.37 MB',
+      },
+    ],
+  },
+  {
+    area: 'Dan grades',
+    blurb:
+      'The world body’s regulation on Dan grade recognition. It governs WKF recognition only. It is not MMAKF’s grading syllabus, and it does not state MMAKF’s Dan requirements.',
+    items: [
+      {
+        title: 'WKF Dan Grade Regulation',
+        body: WKF,
+        edition: 'Not stated on the WKF documents index',
+        effective: 'Not published on the index page — see the document',
+        url: `${W}/WKF_DAN_GRADE_REGULATION.pdf`,
+        evidence: 'application/pdf · 208 KB',
+      },
+    ],
+  },
+  {
+    area: 'Anti-doping in India — NADA',
+    blurb:
+      'Every athlete competing in India is bound by the National Anti-Doping Rules and the Prohibited List, independently of any karate rulebook. These are statutory instruments of the Government of India.',
+    items: [
+      {
+        title: 'NADA India — official agency website',
+        body: `${NADA}, Ministry of Youth Affairs & Sports`,
+        edition: 'Live site',
+        effective: 'Current',
+        url: 'https://nadaindia.yas.gov.in/',
+        evidence: 'text/html · 298 KB',
+        note: 'The agency now publishes on the government yas.gov.in domain. See the warning below about the older address.',
+      },
+      {
+        title: 'National Anti-Doping Rules 2021 (as amended)',
+        body: NADA,
+        edition: '2021, as amended',
+        effective: '2021 rules as amended',
+        url: 'https://nadaindia.yas.gov.in/wp-content/uploads/Amendment-to-NADA-Rules-2021.pdf',
+        evidence: 'application/pdf · 1020 KB',
+        note: 'Listed on NADA’s resources index as "NADA India Anti-Doping Rules 2021"; the file itself is named as an amendment to those rules. Both facts are recorded here rather than resolved by guesswork.',
+      },
+      {
+        title: 'Prohibited List 2026',
+        body: `${WADA}, republished by ${NADA}`,
+        edition: '2026',
+        effective: 'In force from 1 January 2026 (as stated on NADA’s resources index)',
+        url: 'https://nadaindia.yas.gov.in/wp-content/uploads/2026list_en_final_clean_september_2025.pdf',
+        evidence: 'application/pdf · 373 KB',
+      },
+      {
+        title: 'Therapeutic Use Exemption (TUE) application form',
+        body: NADA,
+        edition: 'Current form on the NADA resources index',
+        effective: 'Current',
+        url: 'https://nadaindia.yas.gov.in/wp-content/uploads/TUE-Application-Form-1.pdf',
+        evidence: 'application/pdf · 681 KB',
+      },
+      {
+        title: 'NADA India — resources index',
+        body: NADA,
+        edition: 'Live index page',
+        effective: 'Current',
+        url: 'https://nadaindia.yas.gov.in/updated-resources/',
+        evidence: 'text/html · 405 KB',
+        note: 'The authoritative index. If any direct link above has been rotated by the agency, the current file will be found here.',
+      },
+      {
+        title: 'World Anti-Doping Code',
+        body: WADA,
+        edition: '2021 Code (PDF)',
+        effective: '1 January 2021',
+        // The /en/resources/ path returns HTTP 202 with a ZERO-byte body — a
+        // soft failure that a status-code check reports as healthy. Verified by
+        // content type and size, not by status alone.
+        url: 'https://www.wada-ama.org/sites/default/files/resources/files/2021_wada_code.pdf',
+        evidence: 'application/pdf · 3.4 MB',
+      },
+    ],
+  },
+];
+
+/**
+ * MMAKF's OWN instruments.
+ *
+ * Every one of these is a document the federation itself must author, adopt and
+ * publish. None has been drafted here. `state` is the honest status and nothing
+ * else — no summary, no paraphrase, no placeholder text that could be mistaken
+ * for policy.
+ */
+type Own = { title: string; ref: string; covers: string; state: string };
+
+const OWN_FALLBACK: Own[] = [
+  { title: 'Constitution & Bye-Laws', ref: 'MMAKF/CONST', state: 'Not yet published',
+    covers: 'Legal form of the federation, membership classes, general body and executive, elections, powers of office bearers, amendment procedure.' },
+  { title: 'Code of Conduct — Members & Officials', ref: 'MMAKF/COC', state: 'Not yet published',
+    covers: 'Standards of behaviour expected of athletes, instructors, officials and office bearers, and the consequences of breach.' },
+  { title: 'Athlete Safeguarding & Child Protection Policy', ref: 'MMAKF/SGP', state: 'Not yet published',
+    covers: 'Protection of minors and adults at risk, instructor screening, supervision and travel rules, reporting routes, and the designated safeguarding contact.' },
+  { title: 'Anti-Doping Policy', ref: 'MMAKF/ADP', state: 'Not yet published',
+    covers: 'How MMAKF gives effect to the National Anti-Doping Rules within the federation — education, testing cooperation, and results-management responsibilities.' },
+  { title: 'Grading Syllabus & Examination Regulations', ref: 'MMAKF/GRD', state: 'Not yet published',
+    covers: 'The kyu and Dan syllabus, examiner appointment, eligibility and time-in-grade requirements, examination conduct, and appeal against a grading result.' },
+  { title: 'National Competition Regulations', ref: 'MMAKF/CMP', state: 'Not yet published',
+    covers: 'How the WKF competition rules are applied at MMAKF events — age and weight divisions, entry and eligibility, protest procedure, and sanctioning of events.' },
+  { title: 'National Selection Policy', ref: 'MMAKF/SEL', state: 'Not yet published',
+    covers: 'Criteria and procedure for selecting athletes to represent a district, a state unit or the federation, and the route to challenge a selection decision.' },
+  { title: 'Referee & Judge Certification Regulation', ref: 'MMAKF/REF', state: 'Not yet published',
+    covers: 'Certification levels for judges and referees, examination and re-certification cycle, appointment to events, and the officials register.' },
+  { title: 'Disciplinary & Appeals Procedure', ref: 'MMAKF/DAP', state: 'Not yet published',
+    covers: 'Complaint intake, investigation, hearing rights, sanctions available, and the independent appeal route.' },
+  { title: 'Affiliation Regulations — dojo, district and state charters', ref: 'MMAKF/AFF', state: 'Not yet published',
+    covers: 'Requirements and procedure for chartering a dojo, a district association and a state association, and the grounds for suspension or withdrawal of a charter.' },
+];
+
+// Admin override: the office can maintain the whole register from the CMS
+// without a deploy. Falls back to the literals above when the key is unset.
+const stored = await get<any>('regulations');
+const external: Area[] =
+  Array.isArray(stored?.external) && stored.external.length ? stored.external : EXTERNAL_FALLBACK;
+const own: Own[] =
+  Array.isArray(stored?.own) && stored.own.length ? stored.own : OWN_FALLBACK;
+const checked: string = typeof stored?.checked === 'string' && stored.checked ? stored.checked : CHECKED;
+
+const externalCount = external.reduce((n, a) => n + a.items.length, 0);
+const email = fed?.contact?.email || 'admin@mmakf.in';
+---
+
+<Base
+  title="Rules & Regulations — MMAKF"
+  description="The rules MMAKF competes under and the register of the federation's own governing documents. Every external link is verified against the publisher and dated."
+>
+  <PageHero
+    eyebrow="Rules & Regulations"
+    title={`The <em class="r">rulebook</em> register.`}
+    lead="Two separate things live on this page: the rules published by other organisations that MMAKF competes under, and the register of MMAKF's own governing documents. They are never mixed, and nothing on this page is a summary of a rule — the rule is whatever the linked document says."
+    pills={[`${externalCount} external documents verified`, `Links last checked ${checked}`]}
+  />
+
+  {/* ═══════ HOW TO READ THIS REGISTER ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Read this first</div>
+        <h2 class="display-2">Whose rules are <em class="r">whose</em>.</h2>
+        <div class="rule"></div>
+      </div>
+
+      <div class="reg-split fade">
+        <div class="card reg-key reg-key-ext">
+          <div class="card-eyebrow">Class A — other organisations</div>
+          <h3 class="card-title">Rules MMAKF competes under</h3>
+          <p class="card-body">
+            Published and owned by the World Karate Federation, the National Anti-Doping Agency of
+            India and the World Anti-Doping Agency. <strong>MMAKF did not write these documents and
+            cannot amend them.</strong> They are listed here so members, instructors and officials can
+            reach the current text from a source the federation has actually checked. Copyright and
+            authority rest with the issuing body.
+          </p>
+        </div>
+
+        <div class="card reg-key reg-key-own">
+          <div class="card-eyebrow">Class B — MMAKF's own</div>
+          <h3 class="card-title">Documents the federation must publish</h3>
+          <p class="card-body">
+            The federation's constitution, conduct, safeguarding, grading, selection and disciplinary
+            instruments. These are MMAKF's to author and adopt.
+            <strong>Where a document has not been published, this page says so.</strong>
+            No draft, summary or specimen text appears here — a member must never mistake a website
+            paragraph for an adopted federation rule.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ MMAKF'S OWN DOCUMENTS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Class B · MMAKF's own instruments</div>
+        <h2 class="display-2">Federation <em class="r">documents</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          The register below lists every governing document a national karate federation is expected
+          to hold, and the current publication state of each. The "covers" column describes the
+          subject matter a document of that name addresses — it is not, and must not be read as,
+          MMAKF policy.
+        </p>
+      </div>
+
+      <div class="tbl-scroll fade">
+        <table class="reg-tbl">
+          <caption class="sr-only">
+            MMAKF's own governing documents, with the subject each covers and its publication state.
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Document</th>
+              <th scope="col">Reference</th>
+              <th scope="col">Subject matter</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            {own.map((d) => (
+              <tr>
+                <th scope="row" class="reg-title">{d.title}</th>
+                <td class="text-muted nowrap">{d.ref}</td>
+                <td class="reg-covers">{d.covers}</td>
+                <td><span class="pill reg-state">{d.state}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div class="tbl-hint" aria-hidden="true">Scroll the table sideways to see every column</div>
+
+      <div class="reg-note fade mt-8">
+        <h3 class="reg-note-h">Why these say "Not yet published"</h3>
+        <p class="body-txt">
+          MMAKF has not published the text of these documents on this website. Rather than print a
+          plausible-looking draft, the federation records the gap. Where a document exists in the
+          federation office in signed form, a certified copy is issued on request — the office is the
+          authority on what has been adopted, not this page.
+        </p>
+        <p class="body-txt mt-4">
+          Fee amounts, eligibility criteria, time-in-grade requirements, selection standards and
+          syllabus content are <strong>not yet published by the federation</strong> and are therefore
+          not stated anywhere on this page.
+        </p>
+        <div class="flex flex-wrap gap-3 mt-6">
+          <a href={`mailto:${email}?subject=${encodeURIComponent('Request for a federation document')}`} class="btn btn-gold">
+            Request a document from the office
+          </a>
+          <a href="/governance#documents" class="btn btn-ghost">Documents &amp; forms register</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ EXTERNAL RULES ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Class A · Published by other organisations</div>
+        <h2 class="display-2">Rules we <em class="r">compete</em> under.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Each entry records the issuing body, the edition or version exactly as that body labels it,
+          the effective date where the publisher states one, and what the link actually returned when
+          it was last fetched. Every link below opens the publisher's own site.
+        </p>
+      </div>
+
+      {external.map((group) => (
+        <div class="reg-group fade">
+          <h3 class="reg-group-h">{group.area}</h3>
+          <p class="reg-group-blurb">{group.blurb}</p>
+
+          <ul class="reg-list">
+            {group.items.map((d) => (
+              <li class="reg-item">
+                <div class="reg-item-main">
+                  <a href={d.url} class="reg-item-title" target="_blank" rel="noopener noreferrer">
+                    {d.title}
+                    <span class="reg-ext" aria-hidden="true">↗</span>
+                  </a>
+                  <div class="reg-issuer">{d.body}</div>
+                  {d.note && <p class="reg-item-note">{d.note}</p>}
+                </div>
+
+                <dl class="reg-meta">
+                  <div class="reg-meta-row">
+                    <dt>Edition / version</dt>
+                    <dd>{d.edition}</dd>
+                  </div>
+                  <div class="reg-meta-row">
+                    <dt>Effective</dt>
+                    <dd>{d.effective}</dd>
+                  </div>
+                  <div class="reg-meta-row">
+                    <dt>Link verified</dt>
+                    <dd>{checked} · <span class="reg-evidence">{d.evidence}</span></dd>
+                  </div>
+                </dl>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  {/* ═══════ WHAT IS NOT LINKED, AND WHY ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Honest gaps</div>
+        <h2 class="display-2">What this page does <em class="r">not</em> link.</h2>
+        <div class="rule"></div>
+      </div>
+
+      <div class="reg-warn fade" role="note">
+        <h3 class="reg-warn-h">The old NADA India address is no longer the agency</h3>
+        <p class="body-txt">
+          <span class="reg-dead">nadaindia.org</span> is still printed on a great many Indian sports
+          websites and circulars. On {checked} that address returned a 114-byte page whose entire
+          content is a JavaScript redirect to a parked domain lander — not an anti-doping resource.
+          MMAKF deliberately does not link it. The agency publishes at
+          <a href="https://nadaindia.yas.gov.in/" target="_blank" rel="noopener noreferrer">nadaindia.yas.gov.in</a>,
+          on the Government of India domain, and that is the address linked above.
+        </p>
+      </div>
+
+      <div class="reg-warn fade" role="note">
+        <h3 class="reg-warn-h">A live link is not the same as a live document</h3>
+        <p class="body-txt">
+          The WKF's document server answers requests for withdrawn rulebooks with
+          <strong> HTTP 200 and a 1.6 KB image file</strong> rather than a 404. A superseded rulebook
+          therefore looks perfectly healthy to any ordinary link checker, and a federation that ran
+          one would publish a rulebook link that quietly downloads a broken image. Every link on this
+          page was checked on the content type and body size actually returned, not on the status
+          code — that is what the "Link verified" line records.
+        </p>
+      </div>
+
+      <div class="reg-warn fade" role="note">
+        <h3 class="reg-warn-h">Documents we could not verify are absent, not guessed</h3>
+        <p class="body-txt">
+          Where MMAKF could not confirm a current official URL for a document, no link is published
+          and no substitute is offered. In particular, this page states no affiliation to, and links
+          no rulebook of, any Indian national karate body other than as the federation has published
+          elsewhere on this site. An unverified link on a rulebook page is worse than an empty row.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ MAINTENANCE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="reg-maint fade">
+        <div class="eyebrow">Maintenance of this register</div>
+        <h2 class="reg-maint-h">Checked {checked}</h2>
+        <div class="rule"></div>
+        <p class="body-txt">
+          Governing bodies republish their rules — usually on an annual cycle, and often at the same
+          filename with a new version suffix, or at a new filename that silently orphans the old one.
+          A rules page is therefore only as good as the date on it. This register records when each
+          link was last fetched so a reader can judge for themselves how much to trust it.
+        </p>
+        <p class="body-txt mt-4">
+          If a link on this page is broken, has been superseded, or points at a document that is no
+          longer current, please tell the federation office and it will be corrected.
+          <strong> Always check the edition on the document itself</strong> before relying on it for a
+          competition, a grading or an appeal: where this page and the issuing body disagree, the
+          issuing body is right.
+        </p>
+        <div class="flex flex-wrap gap-3 mt-6">
+          <a href={`mailto:${email}?subject=${encodeURIComponent('Broken or outdated link on the Rules & Regulations page')}`} class="btn btn-primary">
+            Report a broken link
+          </a>
+          <a href="/governance" class="btn btn-ghost">Governance &amp; officials</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .nowrap { white-space: nowrap; }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
+  /* ── Class A / Class B key ── */
+  .reg-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 780px) { .reg-split { grid-template-columns: 1fr; } }
+
+  .reg-key { border-top: 3px solid var(--border-2); }
+  .reg-key-ext { border-top-color: var(--gold-dim); }
+  .reg-key-own { border-top-color: var(--red); }
+  .reg-key .card-body { margin-top: 10px; }
+
+  /* ── MMAKF own-documents table ── */
+  .reg-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    min-width: 720px;
+  }
+  .reg-tbl th, .reg-tbl td {
+    padding: 14px 16px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+  }
+  .reg-tbl thead th {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    background: var(--card-2);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .reg-tbl tbody tr:last-child th,
+  .reg-tbl tbody tr:last-child td { border-bottom: 0; }
+  .reg-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--white);
+    max-width: 24ch;
+  }
+  .reg-covers { color: var(--off-white); max-width: 52ch; line-height: 1.6; }
+  .reg-state {
+    color: var(--red-2);
+    border-color: rgba(142, 18, 18, 0.32);
+    white-space: nowrap;
+  }
+
+  /* ── Notes / warnings ── */
+  .reg-note, .reg-warn {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    padding: 26px 28px;
+  }
+  .reg-warn { border-left-color: var(--red); margin-bottom: 16px; }
+  .reg-warn:last-child { margin-bottom: 0; }
+  @media (max-width: 520px) { .reg-note, .reg-warn { padding: 20px 18px; } }
+
+  .reg-note-h, .reg-warn-h {
+    font-family: var(--font-display);
+    font-size: 1.02rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--white);
+    margin-bottom: 10px;
+  }
+  .reg-warn a { color: var(--gold-2); text-decoration: underline; text-underline-offset: 3px; }
+  .reg-warn a:hover { color: var(--gold-3); }
+  .reg-dead {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9em;
+    color: var(--red-2);
+    text-decoration: line-through;
+    word-break: break-all;
+  }
+
+  /* ── External register ── */
+  .reg-group { margin-bottom: 56px; }
+  .reg-group:last-child { margin-bottom: 0; }
+  .reg-group-h {
+    font-family: var(--font-display);
+    font-size: 1.24rem;
+    font-weight: 600;
+    color: var(--white);
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--gold-dim);
+  }
+  .reg-group-blurb {
+    color: var(--off-white);
+    font-size: 0.9rem;
+    line-height: 1.7;
+    margin: 14px 0 22px;
+    max-width: 72ch;
+  }
+
+  .reg-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 14px; }
+
+  .reg-item {
+    background: var(--card);
+    border: 1px solid var(--border);
+    padding: 20px 22px;
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    gap: 18px 32px;
+    align-items: start;
+    transition: border-color .18s;
+  }
+  .reg-item:hover { border-color: var(--gold-dim); }
+  @media (max-width: 820px) {
+    .reg-item { grid-template-columns: 1fr; gap: 14px; padding: 18px 16px; }
+  }
+
+  .reg-item-main { min-width: 0; }
+
+  .reg-item-title {
+    font-family: var(--font-display);
+    font-size: 1.02rem;
+    font-weight: 600;
+    color: var(--white);
+    line-height: 1.35;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    /* 44px touch target without disturbing the text baseline */
+    padding: 10px 0;
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+  .reg-item-title:hover, .reg-item-title:focus-visible { color: var(--gold-2); }
+  .reg-ext { color: var(--gold-2); font-size: 0.85em; flex: none; }
+
+  .reg-issuer {
+    font-size: 0.8rem;
+    color: var(--muted);
+    letter-spacing: 0.02em;
+  }
+  .reg-item-note {
+    margin-top: 10px;
+    font-size: 0.82rem;
+    line-height: 1.65;
+    color: var(--off-white);
+    padding-left: 12px;
+    border-left: 2px solid var(--border-2);
+    max-width: 60ch;
+  }
+
+  .reg-meta { margin: 0; display: grid; gap: 8px; min-width: 0; }
+  .reg-meta-row {
+    display: grid;
+    grid-template-columns: 11.5ch minmax(0, 1fr);
+    gap: 12px;
+    align-items: baseline;
+  }
+  @media (max-width: 420px) {
+    .reg-meta-row { grid-template-columns: 1fr; gap: 2px; }
+  }
+  .reg-meta dt {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .reg-meta dd {
+    margin: 0;
+    font-size: 0.84rem;
+    color: var(--off-white);
+    line-height: 1.55;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .reg-evidence {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+    color: var(--gold-2);
+  }
+
+  /* ── Maintenance ── */
+  .reg-maint {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    padding: 40px 44px;
+    max-width: 860px;
+  }
+  @media (max-width: 560px) { .reg-maint { padding: 28px 20px; } }
+  .reg-maint-h {
+    font-family: var(--font-display);
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-top: 14px;
+  }
+</style>
