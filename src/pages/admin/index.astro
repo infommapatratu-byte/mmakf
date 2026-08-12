@@ -84,6 +84,9 @@ if (authed) {
           <a href="#faqs">FAQs</a>
           <a href="#gallery">Gallery</a>
           <a href="#syllabus">Syllabus</a>
+          <a href="#stats">Homepage Statistics</a>
+          <a href="#kyuGrades">Kyu Ranks & Fees</a>
+          <a href="#danGrades">Dan Ranks</a>
           <a href="#courses">Academy Courses</a>
           <a href="#lessons">Academy Lessons</a>
           <a href="#circulars">Circulars</a>
@@ -195,6 +198,21 @@ if (authed) {
         <ListPanel id="syllabus" title="Grading Syllabus" subtitle="Kata syllabus rows on the /belt-system page." apiKey="syllabus"
           rows={data!.syllabus} fields={[
             {n:'grade',l:'Grading (e.g. 10th → 9th Kyu)'},{n:'belt',l:'Belt'},{n:'kumite',l:'Kumite'},{n:'kihon',l:'Kihon',full:true},{n:'kata',l:'Kata',full:true}
+          ]} />
+
+        <ListPanel id="stats" title="Homepage Statistics" subtitle="The five headline figures in the hero band. Publish only figures the federation can evidence." apiKey="stats"
+          rows={data!.stats} fields={[
+            {n:'value',l:'Value (e.g. 1983, 130+)'},{n:'label',l:'Label',full:true}
+          ]} />
+
+        <ListPanel id="kyuGrades" title="Grading — Kyu Ranks & Fees" subtitle="Coloured-belt ranks shown on /belt-system. Order top to bottom = 10th Kyu upward." apiKey="beltGrading.kyu"
+          rows={data!.beltGrading.kyu} fields={[
+            {n:'rank',l:'Rank (e.g. 9th Kyu — Yellow)',full:true},{n:'fee',l:'Examination fee (₹)',type:'number'}
+          ]} />
+
+        <ListPanel id="danGrades" title="Grading — Dan Ranks" subtitle="Black-belt ranks shown on /belt-system." apiKey="beltGrading.dan"
+          rows={data!.beltGrading.dan} fields={[
+            {n:'rank',l:'Rank (e.g. Shodan — I Dan)',full:true},{n:'note',l:'Eligibility note',full:true},{n:'wkf',l:'Pathway note',full:true}
           ]} />
 
         <ListPanel id="courses" title="Academy — Courses" subtitle="Course catalogue on /academy. Lessons attach by exact course title." apiKey="courses"
@@ -528,8 +546,20 @@ if (authed) {
       const listEl = panel.querySelector('.lp-list');
       const addForm = panel.querySelector('.lp-form');
 
+      // A panel may target a nested list, e.g. "beltGrading.kyu". Reads take
+      // the sub-list; writes POST the whole parent object with that sub-list
+      // replaced, because the API stores one value per top-level key.
+      const [rootKey, subKey] = key.split('.');
+      const readRows = () => (subKey ? (data[rootKey] || {})[subKey] : data[rootKey]) || [];
+      const bodyFor = (rows) =>
+        subKey ? JSON.stringify({ ...(data[rootKey] || {}), [subKey]: rows }) : JSON.stringify(rows);
+      const commit = (rows) => {
+        if (subKey) data[rootKey] = { ...(data[rootKey] || {}), [subKey]: rows };
+        else data[rootKey] = rows;
+      };
+
       function render() {
-        const rows = data[key] || [];
+        const rows = readRows();
         listEl.innerHTML = rows.map((r, i) => {
           const main = fields[0]?.n;
           const secondary = fields.filter((f, idx) => idx > 0 && r[f.n] !== undefined && r[f.n] !== '').map((f) => esc(String(r[f.n]).slice(0, 70))).slice(0, 3).join(' · ');
@@ -547,15 +577,15 @@ if (authed) {
           b.addEventListener('click', async () => {
             if (!confirm('Delete this item?')) return;
             const idx = +b.dataset.idx;
-            const rows = data[key].slice();
+            const rows = readRows().slice();
             rows.splice(idx, 1);
             b.disabled = true;
-            const r = await fetch('/api/data/' + key, {
+            const r = await fetch('/api/data/' + rootKey, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(rows),
+              body: bodyFor(rows),
             });
             b.disabled = false;
-            if (r.ok) { data[key] = rows; render(); toast('Deleted'); }
+            if (r.ok) { commit(rows); render(); toast('Deleted'); }
             else toast('Delete failed');
           });
         });
@@ -574,15 +604,15 @@ if (authed) {
         });
         if (key === 'news') item.id = Date.now();
         if (key === 'products') item.id = Date.now();
-        const rows = (data[key] || []).slice();
+        const rows = readRows().slice();
         rows.unshift(item);
         if (btn) btn.disabled = true;
-        const r = await fetch('/api/data/' + key, {
+        const r = await fetch('/api/data/' + rootKey, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(rows),
+          body: bodyFor(rows),
         }).catch(() => null);
         if (btn) btn.disabled = false;
-        if (r && r.ok) { data[key] = rows; addForm.reset(); render(); toast('Added'); }
+        if (r && r.ok) { commit(rows); addForm.reset(); render(); toast('Added'); }
         else toast('Add failed');
       });
 

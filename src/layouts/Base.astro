@@ -27,6 +27,36 @@ const navItems = [
   { href: '/contact',      label: 'Contact' },
 ];
 const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
+
+// Canonical URL per page (P2: no canonical existed; og:url was hardcoded to
+// the site root, so every page advertised itself to crawlers as the homepage).
+const SITE = 'https://www.mmakf.in';
+const canonical = SITE + (currentPath === '/' ? '/' : currentPath);
+
+// Organization structured data — only facts the federation itself publishes.
+const orgSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'SportsOrganization',
+  name: 'Modern Martial Arts Karate-Do Federation of India',
+  alternateName: 'MMAKF',
+  url: SITE,
+  logo: SITE + '/logo.jpg',
+  foundingDate: '1983',
+  sport: 'Shotokan Karate',
+  address: {
+    '@type': 'PostalAddress',
+    streetAddress: 'MMAKF Headquarters, Patratu',
+    addressRegion: 'Jharkhand',
+    addressLocality: 'Ramgarh District',
+    addressCountry: 'IN',
+  },
+  contactPoint: {
+    '@type': 'ContactPoint',
+    telephone: '+91-99391-44318',
+    email: 'admin@mmakf.in',
+    contactType: 'customer service',
+  },
+};
 ---
 
 <!doctype html>
@@ -43,8 +73,12 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://www.mmakf.in" />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:site_name" content="MMAKF — Modern Martial Arts Karate-Do Federation of India" />
+    <meta property="og:locale" content="en_IN" />
     <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href={canonical} />
+    <script type="application/ld+json" set:html={JSON.stringify(orgSchema)} />
     <script is:inline>
       // P1-15: only enable the hidden-until-revealed state when JS is running.
       document.documentElement.classList.add('js-reveal');
