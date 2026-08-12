@@ -25,14 +25,15 @@ const dojoKun = [
 
 <Base
   title="About — MMAKF"
-  description="The story, lineage and leadership of the Modern Martial Arts Karate-Do Federation of India — Shotokan Karate under the Tiger Lee lineage since 1983."
+  description="The story and leadership of the Modern Martial Arts Karate-Do Federation of India — Shotokan Karate since 1983."
 >
   <PageHero
     image="https://images.unsplash.com/photo-1564415315949-7a0c4c73aab4?auto=format&fit=crop&w=1800&q=70"
     eyebrow="The Federation"
     title={`A <em>lineage</em>, not just a dojo.`}
-    lead={`${fed.name} — established ${fed.founded} at ${fed.headquarters}. Carrying the Tiger Lee inheritance of ${fed.style} through three generations of senseis and tens of thousands of students.`}
-    pills={[`Est. ${fed.founded}`, fed.lineage, fed.affiliation]}
+    lead={`${fed.name} — established ${fed.founded} at ${fed.headquarters}. Teaching ${fed.style} through three generations of senseis.`}
+    {/* fed.lineage is empty until MMAKF records a real one; an empty pill is dropped rather than rendered. */}
+    pills={[`Est. ${fed.founded}`, fed.lineage, fed.affiliation].filter(Boolean)}
   />
 
   {/* ═══════ STORY ═══════ */}
@@ -47,7 +48,7 @@ const dojoKun = [
         <div class="body-txt fade" style="display:flex;flex-direction:column;gap:18px">
           <p>
             MMAKF was founded in {fed.founded} by Shihan Pramod Kumar Pathak, direct inheritor of the
-            Jr. Tiger Lee Shotokan lineage in India. What began as a single training hall in Patratu
+            Shotokan Karate-Do in India. What began as a single training hall in Patratu
             grew into an institutional federation — at its peak running structured karate programs
             across more than 130 schools, with thousands of students each quarter.
           </p>
@@ -98,8 +99,8 @@ const dojoKun = [
       </div>
       <div class="grid grid-3">
         {[
-          { num: '01', h: 'Jr. Tiger Lee',                sub: 'Source Lineage',                    d: 'The original Shotokan authority from whom the MMAKF transmission descends.' },
-          { num: '02', h: 'Shihan Pramod Kumar Pathak',   sub: 'VI Dan · Grandmaster · Soke',       d: `Founder of MMAKF (${fed.founded}). Direct inheritor of the Tiger Lee lineage in India and the federation's senior technical authority.` },
+          { num: '01', h: 'Shotokan Karate-Do',           sub: 'The discipline',                    d: 'The style MMAKF teaches and examines. The federation has not published a transmission lineage, so none is claimed here.' },
+          { num: '02', h: 'Shihan Pramod Kumar Pathak',   sub: 'VI Dan · Grandmaster · Soke',       d: `Founder of MMAKF (${fed.founded}). The federation's senior technical authority. Conferred the title \"Junior Tiger Lee\" in 2021 — his own title, not a lineage.` },
           { num: '03', h: 'Active Senseis',               sub: 'III–IV Dan · Federation Faculty',   d: "Sensei Vikas, Sensei Dhiraj and Sensei Sumitra — the active generation transmitting the system to today's students." },
         ].map((l) => (
           <div class="card fade">

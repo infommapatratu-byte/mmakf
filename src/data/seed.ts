@@ -5,27 +5,42 @@ export const SEED = {
   federation: {
     name: 'Modern Martial Arts Karate-Do Federation of India',
     shortName: 'MMAKF',
-    tagline: 'Forging warriors through discipline, lineage, and purpose since 1983.',
+    tagline: 'Forging warriors through discipline, respect and purpose since 1983.',
     founded: '1983',
     style: 'Shotokan Karate',
-    lineage: 'Tiger Lee Lineage',
+    // EMPTY ON PURPOSE. This site claimed a "Tiger Lee lineage" in nine places.
+    // "Junior Tiger Lee" is a TITLE CONFERRED ON SHIHAN PRAMOD KUMAR PATHAK in
+    // 2021 — his name, not a school of Shotokan that MMAKF descends from. Every
+    // page saying otherwise stated something the federation never claimed. The
+    // field stays so MMAKF can record its real lineage when it chooses to; empty,
+    // it renders as absent rather than as a guess.
+    lineage: '',
     headquarters: 'Patratu, Jharkhand, India',
     affiliation: 'WKF International Pathway',
-    upi: '9939144318@ybl',
+    // NO UPI HANDLE. The federation asked twice for this to be removed: it was a
+    // personal handle published as the federation's payment route. Payment goes
+    // through the merchant account when its credentials are supplied.
+    upi: '',
     contact: {
       email: 'admin@mmakf.in',
-      emailSecondary: 'karate.pramod@gmail.com',
-      phone: '+91 99391 44318',
+      emailSecondary: 'karate.pramod@gmail.com',   // Shihan Pramod Kumar Pathak
+      // NO TELEPHONE NUMBER. The number published across fourteen places on this
+      // site was Sensei's personal mobile. The federation asked for it to be
+      // removed; email is the contact route.
+      phone: '',
       address: 'MMAKF Headquarters, Patratu, Ramgarh District, Jharkhand, India',
       hours: 'Mon–Sat · 06:00–09:00 & 17:00–20:00 IST',
     },
   },
 
+  // Only figures the federation can point to a source for. "5,000+ students per
+  // quarter", "130+ schools reached" and "34 active black belts" are gone: precise,
+  // unverifiable, and the register cannot produce any of them. Once the federation
+  // database is live these become COUNTS, derived from records rather than typed.
   stats: [
     { value: '1983', label: 'Established' },
-    { value: '5,000+', label: 'Students / Quarter' },
-    { value: '130+', label: 'Schools Reached' },
-    { value: '34', label: 'Active Black Belts' },
+    { value: 'Shotokan', label: 'Discipline' },
+    { value: 'Patratu', label: 'Headquarters' },
     { value: 'WKF', label: 'International Pathway' },
   ],
 
@@ -66,7 +81,7 @@ export const SEED = {
 
   // `icon` is a key into <Icon name="..."/> — no emojis
   programs: [
-    { icon: 'karate-gi',  name: 'Shotokan Karate',         desc: "The authentic Karate-Do discipline — MMAKF's core art. Train in Kihon, Kata, and Kumite under the Tiger Lee Shotokan lineage.", lvl: 'All Levels · Ages 7+', fee: 1200, mode: 'Dojo / Online' },
+    { icon: 'karate-gi',  name: 'Shotokan Karate',         desc: "The authentic Karate-Do discipline — MMAKF's core art. Train in Kihon, Kata and Kumite under MMAKF senior instructors.", lvl: 'All Levels · Ages 7+', fee: 1200, mode: 'Dojo / Online' },
     { icon: 'kata',       name: 'Kata Specialization',     desc: 'Advanced form training under Sensei Dhiraj Pathak. Precision, memory and technical sequencing for competition and grading.', lvl: 'Coloured Belt+', fee: 1000, mode: 'Dojo / Online' },
     { icon: 'kumite',     name: 'Kumite & Sparring',       desc: 'Tactical combat training under Chief Instructor Sensei Vikas Pathak (IV Dan). Sparring systems, reaction drills and competitive preparation.', lvl: 'Coloured Belt+', fee: 1100, mode: 'Dojo' },
     { icon: 'shield',     name: 'Self-Defense',            desc: 'Practical self-defense for real situations. Escape techniques, situational awareness and street-ready responses led by Sensei Sumitra Devi.', lvl: 'All Levels · Ages 12+', fee: 900, mode: 'Dojo / Online' },
@@ -92,19 +107,48 @@ export const SEED = {
     { day: 'Sun', t: '8:00 AM',  d: 'Online: Kihon & Kata',   lvl: 'All',           ins: 'Sensei Vikas Pathak',  mode: 'online' },
   ],
 
-  events: [
-    { day: '15', mo: 'JUN', year: '2026', type: 'Grading',     t: 'MMAKF National Black Belt Grading Camp', loc: 'MMAKF Dojo — Main Hall',   fee: '₹500',  status: 'upcoming' },
-    { day: '22', mo: 'JUN', year: '2026', type: 'Tournament',  t: 'District Karate Championship 2026',       loc: 'Indoor Sports Complex',     fee: '₹300',  status: 'upcoming' },
-    { day: '05', mo: 'JUL', year: '2026', type: 'Seminar',     t: 'Shihan Pramod Pathak — Open Seminar on Kata', loc: 'MMAKF Academy',         fee: '₹800',  status: 'upcoming' },
-    { day: '19', mo: 'JUL', year: '2026', type: 'Workshop',    t: 'Women Self-Defense Workshop — Sensei Sumitra Devi', loc: 'MMAKF Dojo',     fee: 'Free',  status: 'upcoming' },
-    { day: '02', mo: 'AUG', year: '2026', type: 'Tournament',  t: 'State Karate Championship — MMAKF Team',  loc: 'State Sports Centre',       fee: '₹600',  status: 'upcoming' },
-    { day: '15', mo: 'AUG', year: '2026', type: 'Exhibition',  t: 'Independence Day Karate Demonstration',   loc: 'City Park Amphitheatre',    fee: 'Free',  status: 'upcoming' },
-  ],
+  // EMPTY. Six events were listed here — a grading camp, two championships, a
+  // seminar, a workshop and a demonstration — all dated into 2026 and NONE of
+  // them announced by the federation. They were invented to make the page look
+  // busy. A fixture nobody scheduled sends a member to a venue on a day nothing
+  // is happening, which is the worst thing this site can do to somebody.
+  //
+  // The real calendar is /calendar, assembled from the competition and grading
+  // registers. It shows what the federation has actually entered, and says so
+  // when that is nothing.
+  events: [] as Array<{
+    day: string; mo: string; year: string; type: string;
+    t: string; loc: string; fee: string; status: string;
+  }>,
 
+  // REWRITTEN. All three previous items were invented, including their dates —
+  // one announced a "District Championship 2026 concluded at Ramgarh" on a day
+  // that had not happened. The federation tells us that championship was in
+  // 2022. These four items are the ones the press archive or the federation can
+  // actually source, and each carries the source it came from.
+  //
+  // An item has an IMAGE only where the image genuinely belongs to it. The press
+  // clippings are scans of the articles themselves, so they are safe. The Ramgarh
+  // championship has no photograph the federation has identified, so it has none
+  // — attaching a plausible one is exactly the misattribution that put a
+  // photograph of a stranger next to Sensei Vikas Pathak.
   news: [
-    { id: 1, title: 'District Championship 2026 concluded at Ramgarh', date: '23 Jun 2026', type: 'Competition', img: '/media/archive/championship-medal-ceremony.jpg', body: 'The MMAKF District Karate Championship 2026 was held at the Indoor Sports Complex on 22 June, with athletes from affiliated dojos competing across kata and kumite divisions. Full results are recorded in the federation results register.' },
-    { id: 2, title: 'Sensei Vikas Pathak elevated to IV Dan',             date: '04 May 2026', type: 'Promotion',    img: '', body: 'In a formal grading ceremony presided over by Grandmaster Shihan Pramod Kumar Pathak, Chief Instructor Sensei Vikas Pathak was elevated to IV Dan Black Belt in recognition of two decades of service to the federation and the Tiger Lee Shotokan lineage.' },
-    { id: 3, title: "Women's Self-Defense program now in 14 schools",      date: '21 Apr 2026', type: 'Community',     img: '/media/archive/selfdefence-school-class.jpg', body: "MMAKF's Women's Self-Defense initiative, led by Sensei Sumitra Devi, has now been adopted by 14 schools across the Ramgarh and Hazaribagh districts. The program runs as a free 12-week curriculum covering practical defense, situational awareness, and confidence building." },
+    { id: 1, title: 'Belt grading concluded at Rasda, Patratu', date: 'Nov 2023', type: 'Grading',
+      img: '/media/archive/press-jharkhand-prahari.jpg',
+      source: 'Jharkhand Prahari and Jharkhand Ujala, November 2023 — both clippings held by the federation office',
+      body: 'A karate training and belt grading was held at Rasda, Patratu, with around 45 students graded. Sensei Vikas Pathak is named as chief instructor. Two independent local newspapers covered the same grading, each with a different group photograph.' },
+    { id: 2, title: 'Shihan Pramod Kumar Pathak conferred the title "Junior Tiger Lee"', date: 'Aug 2022', type: 'Honour',
+      img: '/media/archive/press-sandhya-prahari.jpg',
+      source: 'Sandhya Prahari, August 2022 — corroborated by Shivangan Publication, Jharkhand Current Affairs 2022',
+      body: 'The title "Junior Tiger Lee" was conferred on Shihan Pramod Kumar Pathak, who founded the federation. It is his personal title and not the name of a school or a lineage. The conferral is recorded in a local newspaper and independently in a third-party current-affairs compendium.' },
+    { id: 3, title: 'Bharat Gaurav Karate Khel Ratna', date: 'Aug 2022', type: 'Honour',
+      img: '/media/archive/press-johar-jharkhand.jpg',
+      source: 'Johar Jharkhand, August 2022 — clipping held by the federation office',
+      body: 'Award coverage for Shihan Pramod Kumar Pathak, printed with three colour photographs.' },
+    { id: 4, title: 'District Championship held at Ramgarh', date: '2022', type: 'Competition',
+      img: '',
+      source: 'Recorded by the federation office. The exact date is not on the record and is not guessed here.',
+      body: 'A district championship was held at Ramgarh in 2022. The federation has not supplied the day, the venue, the entry numbers or the results, so none are stated. Results will appear on this site when they are entered into the competition register.' },
   ],
 
   // `img` is an Unsplash hotlink (photography pass — MASTER-SPEC AS-6 revised);
@@ -121,7 +165,7 @@ export const SEED = {
     { id: 9,  n: 'Sparring Headgear',             cat: 'equipment',   icon: 'shield',     p: 1700, m: 2600, badge: null },
     { id: 10, n: 'MMAKF Training Bag',            cat: 'accessories', icon: 'book',       p: 1300, m: 1900, badge: 'New' },
     { id: 11, n: 'MMAKF T-Shirt — Black',         cat: 'merch',       icon: 'karate-gi',  p: 599,  m: 899,  badge: 'Popular' },
-    { id: 12, n: 'Tiger Lee Edition Hoodie',      cat: 'merch',       icon: 'medal',      p: 1499, m: 2200, badge: 'Limited' },
+    { id: 12, n: 'MMAKF Hoodie — Black',          cat: 'merch',       icon: 'medal',      p: 1499, m: 2200, badge: 'Limited' },
   ],
 
   achievements: [
@@ -136,7 +180,7 @@ export const SEED = {
   testimonials: [
     { txt: "Sensei Dhiraj's kata classes transformed my technique completely. Training at MMAKF is different — the lineage, the discipline, the system. You feel it the moment you step on the mat.", name: 'Ankan Roy', role: 'I Dan Black Belt · MMAKF Instructor' },
     { txt: "As a parent, I was amazed how quickly my daughter's confidence grew under Sensei Sumitra Devi's women's program. MMAKF is truly a life-changing institution.", name: 'Parent of Student', role: "Kids & Women's Program" },
-    { txt: 'I trained in three academies before MMAKF. Nothing compares to training under the Tiger Lee Shotokan lineage with Shihan Pramod Pathak. This is authentic martial education.', name: 'Daksh Mohan Mishra', role: 'National Champion · II Dan Black Belt' },
+    { txt: 'I trained in three academies before MMAKF. Nothing compares to training under Shihan Pramod Pathak. This is authentic martial education.', name: 'Daksh Mohan Mishra', role: 'National Champion · II Dan Black Belt' },
   ],
 
   // `icon` is a key into <Icon name="..."/>
@@ -159,23 +203,62 @@ export const SEED = {
     { q: 'What should I wear to my first class?',             a: 'Comfortable sportswear (t-shirt and track pants) is fine for your first sessions. Once you enrol, you will need a karate-gi — available at the dojo shop, with kids and adult sizes in stock.' },
     { q: 'How many times a week should I train?',             a: 'We recommend a minimum of 2–3 sessions per week for steady progress. Serious grading and competition students typically train 4–6 days a week across dojo and online sessions.' },
     { q: 'How long does it take to earn a black belt?',       a: 'A dedicated student training consistently typically reaches Shodan (1st Dan) in 4–6 years, progressing through the ten kyu grades. There are no shortcuts — every MMAKF black belt is examined personally under the authority of Shihan Pramod Kumar Pathak.' },
-    { q: 'Are MMAKF belts and certificates recognised?',      a: 'Yes. MMAKF operates on the WKF international pathway — our coaches and athletes are registered under WKF SportsID and Sportdata ranking systems, and gradings follow the formal Shotokan syllabus of the Tiger Lee lineage.' },
+    { q: 'Are MMAKF belts and certificates recognised?',      a: 'Yes. MMAKF operates on the WKF international pathway — our coaches and athletes are registered under WKF SportsID and Sportdata ranking systems, and gradings follow the MMAKF Shotokan syllabus.' },
     { q: 'Is there a dedicated program for women?',           a: "Yes — the Women's Empowerment Division led by Sensei Sumitra Devi (III Dan) runs dedicated women-only batches, a free 12-week self-defense curriculum through partner schools, and regular workshops." },
     { q: 'Can I really learn karate online?',                 a: 'The Online Academy carries the same syllabus, the same senseis and the same grading standard as the dojo. You get the structured course library, weekly live sessions and belt evaluation by video submission — students train with us from across India and abroad.' },
-    { q: 'How do fees and payments work?',                    a: 'Program fees are monthly, and grading fees are per examination. Payments are accepted by UPI (9939144318@ybl) or in person at the dojo office. There are no hidden charges.' },
+    { q: 'How do fees and payments work?',                    a: 'Program fees are monthly, and grading fees are per examination. Payment arrangements are confirmed by the federation office when you enrol. No payment handle is published on this site.' },
     { q: 'Do you prepare students for tournaments?',          a: 'Yes. The Competitive / WKF Track takes students from district championships to state, national and WKF-registered international competition, with dedicated kumite and kata coaching.' },
   ],
 
+  // KARATE FIRST. MMAKF is a modern martial arts federation and other disciplines
+  // belong here, but karate is what it teaches, examines and competes in, so it
+  // leads.
+  //
+  // `own: true` marks a PHOTOGRAPH THE FEDERATION HOLDS — its own people, its own
+  // events. Everything else is illustrative stock, and the page labels it as such
+  // rather than letting a visitor read a stranger as an MMAKF member. That
+  // distinction exists because a stock photograph of a girl exercising was once
+  // published on this site beside a news item about Sensei Vikas Pathak.
+  //
+  // Every URL below returned 200 when it was added. One candidate returned 404
+  // and was dropped rather than shipped.
   gallery: [
-    { icon: 'kata',       title: 'Kata Practice',                cat: 'Training',   desc: 'Form training — the foundation of every grading.',                    img: 'https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'kumite',     title: 'Impact & Pad Work',            cat: 'Training',   desc: 'Supervised striking practice in the impact bay.',                     img: 'https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'medal',      title: 'Competition Karate',           cat: 'Competition', desc: 'The competitive track — district to state championships.',            img: '/media/archive/dojo-group.jpg' },
-    { icon: 'black-belt', title: 'Grading Examinations',         cat: 'Grading',    desc: 'Candidates are examined on kihon, kata and kumite.',                  img: '/media/archive/grading-certificate-ceremony.jpg' },
-    { icon: 'women',      title: "Women's Wing",                 cat: 'Community',  desc: "Women-only batches and the school self-defense curriculum.",          img: 'https://images.unsplash.com/photo-1574680096145-d05b474e2155?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'star',       title: 'Training Camps',               cat: 'Camps',      desc: 'Gasshuku — intensive multi-day training.',                            img: 'https://images.unsplash.com/photo-1599058917212-d750089bc07e?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'dumbbell',   title: 'Strength & Conditioning',      cat: 'Training',   desc: 'Karate-specific strength, speed and mobility work.',                  img: 'https://images.unsplash.com/photo-1605296867304-46d5465a13f1?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'book',       title: 'Study & Theory',               cat: 'Training',   desc: 'Terminology, rulebooks and syllabus manuals.',                        img: 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=1000&q=70' },
-    { icon: 'globe',      title: 'Tournament Floor',             cat: 'Competition', desc: 'Sanctioned competition under federation officials.',                 img: 'https://images.unsplash.com/photo-1509563268479-0f004cf3f58b?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'karate-gi',  title: 'The dojo',                     cat: 'Karate',       own: true,
+      desc: 'MMAKF students and instructors at the Patratu dojo.',
+      img: '/media/archive/dojo-group.jpg' },
+    { icon: 'black-belt', title: 'Grading examination',          cat: 'Grading',      own: true,
+      desc: 'Candidates receiving certificates after examination on kihon, kata and kumite.',
+      img: '/media/archive/grading-certificate-ceremony.jpg' },
+    { icon: 'medal',      title: 'Medal ceremony',               cat: 'Competition',  own: true,
+      desc: 'A federation medal presentation.',
+      img: '/media/archive/championship-medal-ceremony.jpg' },
+    { icon: 'women',      title: 'School self-defence class',    cat: 'Community',    own: true,
+      desc: 'The self-defence curriculum running in a partner school.',
+      img: '/media/archive/selfdefence-school-class.jpg' },
+
+    // Illustrative. Karate first, then the wider martial arts the federation name
+    // covers. None of these depicts an MMAKF member or an MMAKF event.
+    { icon: 'kata',       title: 'Kata',                         cat: 'Karate',       own: false,
+      desc: 'Form — the foundation of every grade from white belt to Dan.',
+      img: 'https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'kumite',     title: 'Kumite',                       cat: 'Karate',       own: false,
+      desc: 'Sparring, controlled and supervised at every level.',
+      img: 'https://images.unsplash.com/photo-1509563268479-0f004cf3f58b?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'star',       title: 'Training camp',                cat: 'Karate',       own: false,
+      desc: 'Gasshuku — intensive multi-day training.',
+      img: 'https://images.unsplash.com/photo-1599058917212-d750089bc07e?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'book',       title: 'Terminology and theory',       cat: 'Karate',       own: false,
+      desc: 'The Japanese vocabulary, the rulebooks and the syllabus manuals.',
+      img: 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'kumite',     title: 'Impact and pad work',          cat: 'Martial arts', own: false,
+      desc: 'Striking practice shared across the martial arts MMAKF covers.',
+      img: 'https://images.unsplash.com/photo-1591117207239-788bf8de6c3b?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'women',      title: 'Self-defence',                 cat: 'Martial arts', own: false,
+      desc: 'Practical defence, situational awareness and confidence.',
+      img: 'https://images.unsplash.com/photo-1574680096145-d05b474e2155?auto=format&fit=crop&w=1000&q=70' },
+    { icon: 'dumbbell',   title: 'Strength and conditioning',    cat: 'Martial arts', own: false,
+      desc: 'Sport-specific strength, speed and mobility.',
+      img: 'https://images.unsplash.com/photo-1605296867304-46d5465a13f1?auto=format&fit=crop&w=1000&q=70' },
   ],
 
 
@@ -217,24 +300,28 @@ export const SEED = {
   ],
 
   // Championship results register (events page).
+  // Two of the three rows here were invented, complete with medal tallies ("34
+  // golds", "11 gold · 9 silver · 14 bronze") and candidate counts ("214
+  // candidates examined"). A results register that invents results is worse than
+  // no results register. What remains is the one competition the federation has
+  // confirmed, with no numbers attached to it, because none were supplied.
   results: [
-    { title: 'District Karate Championship 2026',      date: '22 Jun 2026', venue: 'Indoor Sports Complex, Ramgarh', note: 'MMAKF Ramgarh topped the medal table — 34 golds across kata and kumite divisions.' },
-    { title: 'State Invitational Cup 2026',            date: '09 Mar 2026', venue: 'Ranchi',                          note: 'Federation team: 11 gold · 9 silver · 14 bronze. Six athletes selected for the state squad.' },
-    { title: 'MMAKF National Grading Camp — Winter',   date: '14 Dec 2025', venue: 'Hombu Dojo, Patratu',             note: '214 candidates examined; 3 new Shodan awarded by the Examination Board.' },
+    { title: 'District Championship — Ramgarh', date: '2022', venue: 'Ramgarh, Jharkhand',
+      note: 'Recorded by the federation office. Medal counts, categories and placings are not on the record and are not stated here.' },
   ],
 
   // Federation members register — powers the public ID verification tool on
   // /registration and the admin Members panel. Public data only (no phone).
   // ID format: MMAKF-{A|I|D|O}-{year}-{serial}  (Athlete/Instructor/Dojo/Official)
-  members: [
-    { id: 'MMAKF-I-1983-00001', name: 'Pramod Kumar Pathak',  type: 'Instructor', grade: 'VI Dan',         state: 'Jharkhand',   unit: 'Hombu Dojo, Patratu',   status: 'Active',    validTill: 'Lifetime' },
-    { id: 'MMAKF-I-2004-00023', name: 'Vikas Pathak',         type: 'Instructor', grade: 'IV Dan',         state: 'Jharkhand',   unit: 'Hombu Dojo, Patratu',   status: 'Active',    validTill: 'Dec 2026' },
-    { id: 'MMAKF-I-2010-00047', name: 'Sumitra Devi',         type: 'Instructor', grade: 'III Dan',        state: 'Jharkhand',   unit: "Women's Wing",          status: 'Active',    validTill: 'Dec 2026' },
-    { id: 'MMAKF-A-2015-00891', name: 'Daksh Mohan Mishra',   type: 'Athlete',    grade: 'II Dan',         state: 'Jharkhand',   unit: 'Competitive / WKF Track', status: 'Active',  validTill: 'Dec 2026' },
-    { id: 'MMAKF-A-2018-01204', name: 'Siddharth Prasad',     type: 'Athlete · Coach', grade: 'WKF Registered', state: 'Jharkhand', unit: 'Online Academy',   status: 'Active',    validTill: 'Dec 2026' },
-    { id: 'MMAKF-A-2022-03412', name: 'Ankan Roy',            type: 'Athlete',    grade: 'I Dan',          state: 'West Bengal', unit: 'Kolkata Centre',        status: 'Active',    validTill: 'Dec 2026' },
-    { id: 'MMAKF-D-1996-00004', name: 'MMAKF Ramgarh Centre', type: 'Dojo',       grade: '—',              state: 'Jharkhand',   unit: 'Ramgarh District',      status: 'Chartered', validTill: 'Mar 2027' },
-  ],
+  // EMPTY. Five hand-typed rows stood here as the public member register, and
+  // /api/verify reported them as though they had been verified. A member
+  // register is the one thing on a federation site that must never be typed by
+  // hand. The real one is the persons and rank_records tables, reachable through
+  // /verify, which reports WHICH provenance it used and never silently falls back.
+  members: [] as Array<{
+    id: string; name: string; type: string; grade: string;
+    state: string; unit: string; status: string; validTill: string;
+  }>,
 
   // ─── Online Academy (LMS) ───
   // Courses group lessons by `course` title match. Lessons with a `video` URL
@@ -267,11 +354,12 @@ export const SEED = {
 
   // Official circulars from the national office — shown in the Unit Portal
   // and listed on /governance.
-  circulars: [
-    { no: 'MMAKF/CIR/2026-07', date: '01 Jul 2026', title: 'State-squad selection criteria for the 2026 season', body: 'All state units must submit their squad longlists (max 20 athletes per category) to the Tournament Commission by 31 July. Selection trials follow the WKF kumite/kata format.' },
-    { no: 'MMAKF/CIR/2026-05', date: '15 May 2026', title: 'Revised grading fee schedule effective 1 June 2026', body: 'The kyu grading fee table published on the Belt System page applies to all units from 1 June. District associations may not levy additional examination charges.' },
-    { no: 'MMAKF/CIR/2026-03', date: '02 Mar 2026', title: 'Annual charter renewals due — Forms A-1 / A-2', body: 'All dojo and unit charters expire 31 March. Submit renewal forms with grading records for the year to the federation office. Late renewals suspend tournament rights.' },
-  ],
+  // EMPTY. Three circulars were listed, each with a reference number, a date and
+  // a body — a selection-criteria notice, a revised fee schedule and a charter
+  // renewal deadline. The federation has issued none of them. A fabricated
+  // circular is a fabricated INSTRUCTION: a unit could have acted on the charter
+  // deadline and lost its tournament rights over a document nobody wrote.
+  circulars: [] as Array<{ no: string; date: string; title: string; body: string }>,
 
   // Unit-portal access codes — ADMIN-ONLY key (never in public KEYS/API).
   // The national admin issues, edits and revokes these in the admin panel;

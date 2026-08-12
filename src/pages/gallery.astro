@@ -38,11 +38,20 @@ const cats = [...new Set(gallery.map((g: any) => g.cat))];
           <figure class="gitem fade" data-cat={g.cat}>
             <div class="gitem-visual">
               {g.img
-                ? <img class="gitem-photo" src={g.img} alt={g.title} loading="lazy" />
+                ? <img class="gitem-photo" src={g.img}
+                       alt={g.own ? `${g.title} — a federation photograph` : `${g.title} — illustrative`}
+                       loading="lazy" />
                 : <Icon name={g.icon || 'kata'} size={56} color="var(--gold)" />}
             </div>
             <figcaption>
-              <div class="gitem-cat">{g.cat}</div>
+              <div class="gitem-cat">
+                {g.cat}
+                {/* A visitor must be able to tell an MMAKF photograph from an
+                    illustrative one. A stock image of a stranger read as an MMAKF
+                    member has already happened on this site once. */}
+                {g.own === true && <span class="gitem-own">Federation photograph</span>}
+                {g.own === false && <span class="gitem-stock">Illustrative</span>}
+              </div>
               <div class="gitem-title">{g.title}</div>
               <div class="gitem-desc">{g.desc}</div>
             </figcaption>
@@ -51,8 +60,9 @@ const cats = [...new Set(gallery.map((g: any) => g.cat))];
       </div>
 
       <div class="mt-8 text-muted" style="text-align:center;font-size:.85rem">
-        Follow the federation's events calendar to see the next tournament or camp in person —
-        <a href="/events" class="text-gold">upcoming events →</a>
+        Photographs marked <em>Federation photograph</em> are MMAKF's own. The rest are
+        illustrative and show no MMAKF member or event —
+        <a href="/press" class="text-gold">the press archive →</a>
       </div>
     </div>
   </section>
@@ -115,6 +125,13 @@ const cats = [...new Set(gallery.map((g: any) => g.cat))];
     transform: scale(1.03);
   }
   .gitem figcaption { padding: 16px 18px 18px; }
+  .gitem-own, .gitem-stock {
+    margin-left: 10px; padding: 2px 9px; border-radius: 100px;
+    font-size: .84em; letter-spacing: .1em; border: 1px solid var(--border-2);
+  }
+  .gitem-own { color: var(--gold-2); border-color: var(--gold-dim); }
+  .gitem-stock { color: var(--muted); }
+
   .gitem-cat {
     font-family: var(--font-display);
     font-size: 0.6rem;

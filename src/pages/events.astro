@@ -104,7 +104,7 @@ const programs = await get<any[]>('programs');
           </div>
           <noscript>
             <div style="margin-top:12px;color:var(--off-white);font-size:.8rem;text-align:center">
-              JavaScript is required to register online — call <a href="tel:+919939144318" class="text-gold">{fed.contact.phone}</a>.
+              JavaScript is required to register online — email <a href="mailto:admin@mmakf.in" class="text-gold">admin@mmakf.in</a>.
             </div>
           </noscript>
         </form>
@@ -242,7 +242,7 @@ const programs = await get<any[]>('programs');
       (document.getElementById('evRegDone') as HTMLElement).style.display = 'block';
       (window as any).showNotif('Entry received. Note your reference number.');
     } catch {
-      (window as any).showNotif('Could not submit. Please call +91 99391 44318.');
+      (window as any).showNotif('Could not submit. Please email admin@mmakf.in.');
       btn.disabled = false; btn.textContent = 'Submit Entry';
     }
   });

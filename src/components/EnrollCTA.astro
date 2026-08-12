@@ -6,7 +6,10 @@ interface Props {
   programs: any[];
   phone?: string;
 }
-const { programs, phone = '+91 99391 44318' } = Astro.props;
+// No telephone default. The number that stood here was a personal mobile, and a
+// DEFAULT is the worst place for one: it survives every attempt to remove it from
+// the data, because nothing passes the prop.
+const { programs, email = 'admin@mmakf.in' } = Astro.props;
 const tel = phone.replace(/\s/g, '');
 ---
 
@@ -79,7 +82,7 @@ const tel = phone.replace(/\s/g, '');
         f.reset();
       } catch {
         // Inputs are preserved so the visitor can retry (MASTER-SPEC F15).
-        (window as any).showNotif('Could not submit. Please call +91 99391 44318.');
+        (window as any).showNotif('Could not submit. Please email admin@mmakf.in.');
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Book Free Trial'; }
       }
