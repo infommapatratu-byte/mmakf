@@ -16,3 +16,7 @@ dist/
 
 # database dumps — never committed
 backups/
+
+# agent scratch files
+*.tmp.mjs
+.tmp-*/

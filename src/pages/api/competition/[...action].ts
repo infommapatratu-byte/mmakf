@@ -225,7 +225,7 @@ export async function loadRuleset(eventId: number): Promise<RulesetLookup> {
     return {
       ok: false,
       reason:
-        'No scoring ruleset has been recorded for this event. Point values, tie-breaks and placings are set by the competition regulations in force — they are not assumed here — so nothing can be scored until an officer records them against this event.',
+        'No scoring ruleset has been recorded for this event. Point values, tie-breaks and placings are set by the competition regulations in force — they are not assumed here — so no point can be recorded and no result can be finalised until an officer records them against this event.',
     };
   }
   try {
