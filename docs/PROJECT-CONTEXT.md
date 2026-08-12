@@ -132,6 +132,12 @@ No React, no client framework.
 | `docs/BACKUP-RESTORE.md` | Proven cycle, with the transcript |
 | `docs/DISASTER-RECOVERY.md` | What breaks, what it costs, what to do |
 | `docs/PRIVACY.md` | Children's data, DPDP, and what MMAKF must supply |
+| `docs/ACCESSIBILITY.md` | The WCAG 2.2 AA audit: every surface measured, every defect, and what is still not tested |
+| `docs/API-ARCHITECTURE.md` | The HTTP contract, and where the existing endpoints diverge from it |
+| `docs/api/OPENAPI.md` | Every endpoint, with request and response shapes taken from the code |
+| `docs/DESIGN-SYSTEM.md` | The tokens, components and rules the site already follows |
+| `docs/RESPONSIVE-DESIGN.md` | Breakpoints, and how each surface behaves at 320px |
+| `docs/CONTENT-ARCHITECTURE.md` | Which facts live in Postgres, which in the editorial store, and why |
 
 ---
 

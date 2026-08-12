@@ -11,7 +11,7 @@ Per-subsystem state. **No vague completion language** — every row carries one 
 
 Last updated 2026-08-12 · branch `wave-2b-federation` · production runs `6a44fdf`
 
-**1481 tests passing · 40 test files · 87 tables · tsc clean · build clean · migrations 5/5**
+**1540 tests passing · 42 test files · 87 tables · 7 migrations · tsc clean · build clean**
 
 ---
 
@@ -142,9 +142,10 @@ Last updated 2026-08-12 · branch `wave-2b-federation` · production runs `6a44f
 |---|---|---|---|
 | EVT-001 | Domain event feed | **TESTING** | `src/lib/domain-events.ts`. Cursor-based consumers; a failing consumer does not advance or block others |
 | NOT-001 | Notification engine | **TESTING** | `src/lib/notifications.ts`, 25 tests. Allow-list; essential messages unsuppressable; deduplicated on `domainEventId`. **Still no transport** — messages QUEUE rather than fail, and `transportStatus()` says which channels are unconfigured rather than letting the federation believe it is emailing members |
-| API-001 | Documented public API | **NOT_STARTED** | |
-| RT-001 | Real-time (live scores, live classes) | **NOT_STARTED** | |
+| API-001 | Documented public API | **TESTING** | `/api/v1`, `docs/API-ARCHITECTURE.md`, `docs/api/OPENAPI.md`, 35 tests. States plainly that **no API key scheme exists** and what that means for writes |
+| RT-001 | Real-time (live scores, live classes) | **TESTING** | `src/lib/realtime.ts` over the domain-event spine, `/api/stream/[channel]`, 42 tests. Authorised at subscribe time, bounded to four minutes so a revoked principal cannot hold a stream |
 | AI-001 | Federation assistant | **NOT_STARTED** | Deliberately last — requires authoritative data first |
-| A11Y-001 | Accessibility | **PARTIALLY** | Specific fixes made. No systematic WCAG 2.2 AA pass yet (Q-28) |
+| A11Y-001 | Accessibility | **TESTING** | WCAG 2.2 AA audit across 43 surfaces, 22 defects fixed, 103 automated guards, `docs/ACCESSIBILITY.md`. Contrast is COMPUTED from the tokens, so reverting one fails the suite with the ratio. Still no axe pass and **no screen-reader testing** — nothing in the audit was ever *heard* |
 | OBS-001 | Observability | **BACKEND** | `src/lib/observability.ts`. Secrets and personal data redacted by key substring; probes time out |
 | CAL-001 | Federation calendar | **TESTING** | `src/lib/calendar.ts`, 41 tests. Registration answered *as at a date*; sanction carried onto the entry and into the iCalendar feed; RFC 5545 folding at 75 **octets** |
+| MEM-004 | Membership standing, renewal, lapse | **TESTING** | `src/db/membership.ts`, 42 tests. Standing is **derived, never stored** — a nightly job that fails on a Friday would have the register calling lapsed members active all weekend, and a stored flag can never answer "was this person covered on the day of the incident" |
