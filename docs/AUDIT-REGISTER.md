@@ -104,6 +104,26 @@ round-trips, stats/statistics without source, `stats` and `beltGrading` having n
 recycled photography, unheaded events section, touch-target sizes, and the Shotokan-terminology
 cluster). Full list retained in the workflow journal; scheduled into the P1→P2 remediation queue.
 
+### 3.5 Wave 2a — adversarial findings against the new federation data layer
+
+Found by attacking the authorisation model before it carried any data
+(`tests/rbac-adversarial.test.ts`, 26 attacks). Each row's attack is now a
+permanent regression test — the test passing means the attack fails.
+
+| ID | Severity | Area | Finding | Evidence | Fix | Status |
+|---|---|---|---|---|---|---|
+| W2A-1 | **P0** | `src/db/federation.ts` | **Scope laundering.** Placement was authorised against the ids the *caller supplied*, and foreign keys prove only that each id exists — not that they agree. A district administrator could create a person with their own `districtUnitId` (passing the scope check) and another state's `stateUnitId`, landing the record inside a state they hold no authority over. | Attack "a district admin cannot file a person into ANOTHER state by naming their own district" resolved with `{ id: 1 }` instead of rejecting | `resolvePlacement()` validates the district/dojo/state chain against the real hierarchy **before** authorisation, so `can()` is asked about a placement that exists. Mismatch throws `HierarchyError` rather than being silently corrected — quiet correction would hide both bugs and attacks. | **FIXED — VERIFIED** (5 tests) |
+| W2A-2 | **P1** | `src/db/federation.ts` | **Audit-trail IDOR.** `auditTrail()` gated on holding `audit:read` *anywhere*, so a state-scoped finance officer could read the complete audit history of every other state. | Attack "a state-scoped officer cannot read the audit trail of another state" returned rows | The entity's placement is resolved (`entityPlacement()`) and `assertCan('audit:read', placement)` is applied. Unknown entity types resolve to an unlocated resource, so only national reach can read them — fail closed. | **FIXED — VERIFIED** (2 tests) |
+| W2A-3 | **P1** | `src/lib/rbac.ts` | **Unguarded privilege granting.** Nothing constrained who could bind which role. A `FEDERATION_ADMIN` could mint a `SUPER_ADMIN` or `SAFEGUARDING_OFFICER` and act through it — full escalation, including child-protection casework. | `canGrantRole is not a function` — the guard did not exist | `canGrantRole()` requires three independent conditions: `role:grant` in a scope covering the target; SUPER_ADMIN/SAFEGUARDING_OFFICER only grantable by a SUPER_ADMIN; and no amplification — the target role's action set must be a subset of the granter's own. | **FIXED — VERIFIED** (5 tests) |
+| W2A-4 | P2 | `src/db/federation.ts` | List gates called `can(principal, action, {})`, which refuses every scoped administrator (a state admin has no national binding), so scoped roles could not list their own records at all. Availability defect, not a security hole. | Test "list queries are scope-filtered in SQL" threw `Forbidden: person:read` for a valid state admin | Split the two questions: `assertCanAnywhere()` gates the endpoint, `visibleScopes()` restricts rows in SQL. | **FIXED — VERIFIED** |
+| W2A-5 | P2 | repo | `@types/node` absent — `tsc --noEmit` produced 20+ errors for `process`, `Buffer`, `node:crypto`, so type checking could not gate anything. | `npx tsc --noEmit` before: 20+ errors | Added `@types/node@22`. Typecheck now exits 0. | **FIXED — VERIFIED** |
+
+Attacks that **failed on first attempt** (no fix needed — the model already held): forged
+role names, non-array `bindings`, null/undefined principals, `scopeType: 'state'` with a null
+`scopeId` escalating to national, unknown `scopeType` defaulting open, expired and suspended
+bindings, string/number `scopeId` coercion, state admins reaching unlocated national resources,
+roles without `person:read` listing people, and federation-ID collision under 40-way concurrency.
+
 ## 4. Method notes
 
 - **No finding is entered on assertion alone.** Each is reproduced by an independent agent

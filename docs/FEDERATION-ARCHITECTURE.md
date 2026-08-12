@@ -21,6 +21,29 @@ JSON blobs cannot provide (Directive §54).
 
 This document specifies that foundation and the migration path to it.
 
+### 0.1 Wave 2a — status: BUILT AND TESTED, AWAITING A DATABASE
+
+The foundation layer now exists in code and is proven against a real Postgres engine
+(PGlite in-process, applying the same migration file production will apply).
+
+| Component | File | State |
+|---|---|---|
+| Core schema — 14 tables, 9 enums | `src/db/schema.ts` | Built |
+| Migration | `drizzle/0000_federation_core.sql` | Generated, applies cleanly |
+| Migration runner | `scripts/migrate.mjs` | Built — checksums applied migrations, refuses edited history |
+| Connection layer | `src/db/index.ts` | Built — reports *not configured* rather than pretending (§70) |
+| Authorisation | `src/lib/rbac.ts` | Built — 16 roles, deny-by-default, scope-checked, grant guard |
+| Record operations + audit | `src/db/federation.ts` | Built — hierarchy validation, append-only ranks, audit on every mutation |
+| Tests | `tests/federation-db.test.ts` (19) + `tests/rbac-adversarial.test.ts` (26) | Passing against real Postgres |
+
+**What is deliberately NOT yet true:** no page or endpoint reads or writes these tables. Until
+`DATABASE_URL` is provisioned there is no federation data, and per §70 the site must not display
+registry, ranking or certificate surfaces that would have nothing behind them. `/api/health`
+reports `database: "not_configured"` — an honest third state, never conflated with healthy.
+
+**To activate** (§10.1 below): provision Postgres → set `DATABASE_URL` → `npm run db:migrate` →
+Wave 2b builds the surfaces on top.
+
 ---
 
 ## 1. Storage decision
@@ -424,6 +447,27 @@ with the CHECK constraint from §3.8 preventing "free preview" labels on lessons
 Drizzle migrations, forward-only, each with a documented rollback. Never run destructive
 migrations against production without a verified backup. Seeds are idempotent and never
 overwrite production data.
+
+### 10.1 Provisioning runbook (the one manual step in Wave 2a)
+
+Creating the database requires dashboard access, so it is an operator action, not an
+automated one.
+
+1. **Create the database.** Vercel dashboard → project `mmakf` → Storage → Create → **Neon
+   Postgres** (region: Mumbai / `ap-south-1`, closest to the federation's users). Vercel injects
+   `DATABASE_URL` into all three environments automatically.
+2. **Pull the URL locally** so migrations can be run from a workstation:
+   `npx vercel link` then `npx vercel env pull .env.local` (`.env.local` is gitignored — the
+   connection string must never be committed).
+3. **Check what would run:** `npm run db:status` — prints the target host and every pending
+   migration without changing anything.
+4. **Apply:** `npm run db:migrate` — applies pending migrations, records each with a checksum,
+   then lists the tables that actually exist so the result is verified rather than assumed.
+5. **Confirm from production:** `curl https://www.mmakf.in/api/health` must report
+   `"database":"ok"`. While it reports `"not_configured"`, step 1 has not taken effect.
+
+The runner refuses to act without `DATABASE_URL` (no fallback target), and treats an edited
+already-applied migration as a hard error — that is how environments silently diverge.
 
 ---
 
