@@ -29,7 +29,7 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import crypto from 'node:crypto';
 import * as s from './schema';
 import { allocateFederationId, writeAudit, type AuditContext } from './federation';
-import { assertCan, assertCanAnywhere, type Action } from '@/lib/rbac';
+import { assertCan, assertCanAnywhere, can, canAnywhere, visibleScopes, type Action } from '@/lib/rbac';
 import { isUniqueViolation } from './pgerror';
 
 type DB = any;
@@ -337,6 +337,10 @@ export async function addModule(
     summary: input.summary ?? null,
     displayOrder: input.displayOrder ?? 0,
   }).returning();
+  await writeAudit(db, ctx, {
+    entityType: 'course_module', entityId: row.id, action: 'create',
+    newValue: { courseId: course.id, title: row.title },
+  });
   return row;
 }
 
@@ -395,6 +399,13 @@ export async function addLesson(db: DB, ctx: AuditContext, input: AddLessonInput
     isPreview: input.isPreview ?? false,
     displayOrder: input.displayOrder ?? 0,
   }).returning();
+  await writeAudit(db, ctx, {
+    entityType: 'lesson', entityId: row.id, action: 'create',
+    newValue: {
+      courseId: course.id, moduleId: mod.id, title: row.title, kind: row.kind,
+      mediaAssetId: row.mediaAssetId, liveClassId: row.liveClassId,
+    },
+  });
   return row;
 }
 
@@ -445,6 +456,18 @@ export async function addQuiz(db: DB, ctx: AuditContext, input: AddQuizInput) {
       attemptsAllowed: input.attemptsAllowed ?? null,
       timeLimitMinutes: input.timeLimitMinutes ?? null,
     }).returning();
+    // The pass mark that will decide passes and fails is recorded at the moment
+    // it was set, INCLUDING null — "nobody set one" is the fact most likely to
+    // be argued about later.
+    await writeAudit(db, ctx, {
+      entityType: 'quiz', entityId: row.id, action: 'create',
+      newValue: {
+        courseId: course.id, title: row.title,
+        passMarkPercent: row.passMarkPercent,
+        attemptsAllowed: row.attemptsAllowed,
+        timeLimitMinutes: row.timeLimitMinutes,
+      },
+    });
     return row;
   } catch (err: any) {
     if (isNotNullViolation(err, 'pass_mark_percent')) {
@@ -526,6 +549,14 @@ export async function addQuizQuestion(db: DB, ctx: AuditContext, input: AddQuizQ
     marks,
     displayOrder: input.displayOrder ?? 0,
   }).returning();
+  // The AUDIT LOG IS NOT A SAFE PLACE FOR AN ANSWER KEY. `audit:read` is held
+  // by roles with no business marking this quiz, so the correct answer and the
+  // explanation are deliberately not recorded here — only that a question was
+  // written, and what it is worth.
+  await writeAudit(db, ctx, {
+    entityType: 'quiz_question', entityId: row.id, action: 'create',
+    newValue: { quizId: quiz.id, kind: row.kind, marks: row.marks, optionCount: options.length },
+  });
   return row;
 }
 
@@ -665,12 +696,22 @@ export async function courseOutline(db: DB, ctx: AuditContext, courseId: number)
 
 // ─── Enrolment ──────────────────────────────────────────────────────────────
 
+/**
+ * Enrol a person on a published course.
+ *
+ * THE CALLER DOES NOT CHOOSE THE STATUS. It was previously accepted as input,
+ * which meant a learner enrolling themselves could pass `status: 'active'` on a
+ * fee-bearing course and walk straight past the fee — `assertSelfOrAuthority`
+ * returns 'self' for them, and nothing downstream looked at the money. The
+ * status is DERIVED from whether the course carries a fee, and only
+ * `activateEnrolment()`, which reads the paid order, may move it on.
+ */
 export async function enrol(
   db: DB,
   ctx: AuditContext,
   input: {
     courseId: number; personId: number; orderId?: number | null;
-    status?: 'pending_payment' | 'active'; expiresAt?: Date | null;
+    expiresAt?: Date | null;
   },
   now: Date = new Date()
 ) {
@@ -687,10 +728,9 @@ export async function enrol(
     [row] = await db.insert(s.enrolments).values({
       courseId: course.id,
       personId: person.id,
-      // A fee-bearing course starts unpaid: only confirmPayment() in
-      // src/db/orders.ts may decide that money arrived, and nothing here may
-      // assume it did.
-      status: input.status ?? (course.feeCode ? 'pending_payment' : 'active'),
+      // A fee-bearing course starts unpaid: only a captured payment may decide
+      // that money arrived, and nothing here may assume it did.
+      status: course.feeCode ? 'pending_payment' : 'active',
       orderId: input.orderId ?? null,
       enrolledAt: now,
       expiresAt: input.expiresAt ?? null,
@@ -716,7 +756,19 @@ async function loadEnrolment(db: DB, enrolmentId: number) {
   return row;
 }
 
-/** Activate an enrolment once payment is confirmed elsewhere. */
+/**
+ * Activate an enrolment once the money has actually arrived.
+ *
+ * THE PAYMENT IS PROVEN FROM THE ORDER, not asserted by the caller. This used
+ * to flip the status on `content:write` alone, which made an editorial
+ * permission into the power to declare that a student had paid — the one thing
+ * `enrol()` is careful never to assume. A fee-bearing course now requires an
+ * order that is CAPTURED (`paid_at` set, not merely a status a payment page
+ * bounced back), that belongs to the same person, and that carries a line for
+ * THIS course. Any of those missing grants nothing and says which one.
+ *
+ * A free course has nothing to prove and activates on authority alone.
+ */
 export async function activateEnrolment(db: DB, ctx: AuditContext, enrolmentId: number) {
   assertCanAnywhere(ctx.principal, 'content:write');
   const enrolment = await loadEnrolment(db, enrolmentId);
@@ -724,22 +776,101 @@ export async function activateEnrolment(db: DB, ctx: AuditContext, enrolmentId: 
   if (enrolment.status !== 'pending_payment') {
     throw new AcademyError('enrolment_not_pending', `This enrolment is ${enrolment.status}.`);
   }
+
+  const course = await loadCourse(db, enrolment.courseId);
+  let evidence: Record<string, unknown> = { fee: null, basis: 'the course carries no fee' };
+
+  if (course.feeCode) {
+    if (enrolment.orderId == null) {
+      throw new AcademyError(
+        'no_order',
+        `"${course.title}" carries the fee ${course.feeCode} and this enrolment has no order against it, so there is nothing that could show payment.`
+      );
+    }
+    const order = (await db.select().from(s.orders)
+      .where(eq(s.orders.id, enrolment.orderId)).limit(1))[0];
+    if (!order) throw new AcademyError('unknown_order', 'The order on this enrolment does not exist.');
+    // An order raised for someone else proves nothing about this student.
+    if (order.personId != null && order.personId !== enrolment.personId) {
+      throw new AcademyError(
+        'order_belongs_to_another_person',
+        'The order on this enrolment was raised for a different person.'
+      );
+    }
+    if (order.paidAt == null || (order.status !== 'paid' && order.status !== 'fulfilled')) {
+      throw new AcademyError(
+        'order_not_paid',
+        `Order ${order.orderNo} is ${order.status} and carries no captured payment, so this enrolment cannot be activated.`
+      );
+    }
+    // A paid order is not enough: it must be paid FOR THIS COURSE. Otherwise
+    // one paid shop order would activate every course enrolment pointed at it.
+    const lines = await db.select().from(s.orderLines).where(and(
+      eq(s.orderLines.orderId, order.id),
+      eq(s.orderLines.kind, 'course')
+    ));
+    const line = lines.find((l: any) =>
+      (l.refType === 'course' && l.refId === course.id) ||
+      (l.refId === course.id && l.refType == null) ||
+      (l.feeCode != null && l.feeCode === course.feeCode));
+    if (!line) {
+      throw new AcademyError(
+        'order_does_not_cover_this_course',
+        `Order ${order.orderNo} is paid but carries no line for "${course.title}".`
+      );
+    }
+    evidence = {
+      fee: course.feeCode,
+      basis: 'captured payment',
+      orderId: order.id, orderNo: order.orderNo,
+      paidAt: new Date(order.paidAt).toISOString(),
+      orderLineId: line.id, totalPaise: line.totalPaise,
+    };
+  }
+
   const [row] = await db.update(s.enrolments).set({ status: 'active' })
     .where(eq(s.enrolments.id, enrolmentId)).returning();
   await writeAudit(db, ctx, {
     entityType: 'enrolment', entityId: enrolmentId, action: 'update',
-    oldValue: { status: enrolment.status }, newValue: { status: 'active' },
+    oldValue: { status: enrolment.status },
+    // The evidence is stored with the decision so "why was this activated?" is
+    // answerable from the audit row alone, months later.
+    newValue: { status: 'active', evidence },
   });
   return row;
 }
 
-function assertLearnable(enrolment: { status: string }) {
+/**
+ * May learning be recorded against this enrolment right now?
+ *
+ * `expiresAt` was previously stored and never read, so an enrolment that had
+ * run out stayed fully learnable — and, with every lesson marked, fully
+ * certifiable. The date is the federation's own datum, not a rule invented
+ * here: where it is null nothing is applied.
+ */
+function assertLearnable(
+  enrolment: { status: string; expiresAt?: Date | string | null },
+  now: Date
+) {
   if (enrolment.status !== 'active') {
     throw new AcademyError(
       'enrolment_not_active',
       `This enrolment is ${enrolment.status.replace(/_/g, ' ')}, so learning cannot be recorded against it.`
     );
   }
+  const expiry = enrolmentExpiry(enrolment);
+  if (expiry != null && expiry.getTime() <= now.getTime()) {
+    throw new AcademyError(
+      'enrolment_expired',
+      `This enrolment expired on ${expiry.toISOString().slice(0, 10)}, so learning cannot be recorded against it.`
+    );
+  }
+}
+
+function enrolmentExpiry(enrolment: { expiresAt?: Date | string | null }): Date | null {
+  if (enrolment.expiresAt == null) return null;
+  const d = enrolment.expiresAt instanceof Date ? enrolment.expiresAt : new Date(enrolment.expiresAt);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 // ─── Progress ───────────────────────────────────────────────────────────────
@@ -779,7 +910,7 @@ export async function markLessonComplete(
   const enrolment = await loadEnrolment(db, input.enrolmentId);
   const person = await loadPerson(db, enrolment.personId);
   const actedBy = await assertSelfOrAuthority(db, ctx, person);
-  assertLearnable(enrolment);
+  assertLearnable(enrolment, now);
 
   const lesson = (await db.select().from(s.lessons).where(eq(s.lessons.id, input.lessonId)).limit(1))[0];
   if (!lesson) throw new AcademyError('unknown_lesson', 'Unknown lesson');
@@ -794,7 +925,17 @@ export async function markLessonComplete(
     throw new AcademyError('lesson_unavailable', `This lesson cannot be completed: ${availability.reason}.`);
   }
 
+  const existing = (await db.select().from(s.lessonProgress).where(and(
+    eq(s.lessonProgress.enrolmentId, enrolment.id),
+    eq(s.lessonProgress.lessonId, lesson.id)
+  )).limit(1))[0];
+
   const reported = Math.max(0, Math.trunc(input.watchedSeconds ?? 0));
+  // The minimum is measured against the ACCUMULATED total, not this visit
+  // alone. Comparing the visit refused a student who had already watched the
+  // whole lesson and came back to click the button — a refusal the stored
+  // record itself contradicts.
+  const cumulative = Math.max(existing?.watchedSeconds ?? 0, reported);
   const min = policy.lessonWatchMinSeconds ?? null;
   const minimum: PolicyNote = min == null
     ? {
@@ -807,20 +948,15 @@ export async function markLessonComplete(
         rule: 'lesson_minimum_watch_seconds',
         configured: true,
         value: min,
-        detail: `${reported}s reported against a configured minimum of ${min}s.`,
+        detail: `${cumulative}s watched in total against a configured minimum of ${min}s.`,
       };
 
-  if (lesson.kind === 'video' && min != null && reported < min) {
+  if (lesson.kind === 'video' && min != null && cumulative < min) {
     throw new AcademyError(
       'watch_time_below_minimum',
-      `This lesson requires ${min}s of viewing; ${reported}s were reported.`
+      `This lesson requires ${min}s of viewing; ${cumulative}s have been watched.`
     );
   }
-
-  const existing = (await db.select().from(s.lessonProgress).where(and(
-    eq(s.lessonProgress.enrolmentId, enrolment.id),
-    eq(s.lessonProgress.lessonId, lesson.id)
-  )).limit(1))[0];
 
   let progress;
   if (existing) {
@@ -955,6 +1091,73 @@ function attemptLimitNote(quiz: { attemptsAllowed: number | null }): PolicyNote 
       };
 }
 
+export interface AnswerKeyRelease {
+  released: boolean;
+  reason: string;
+}
+
+/**
+ * May the marked detail of an attempt be shown back to the candidate?
+ *
+ * Handing a student the correct answers, the explanations and which questions
+ * they got wrong DEFEATS AN ATTEMPT LIMIT THE FEDERATION SET: take attempt one,
+ * read the key, score full marks on attempt two. The review was released
+ * unconditionally the moment an attempt was submitted, which made
+ * `attemptsAllowed` decorative.
+ *
+ * This is not an invented rule. It protects a rule MMAKF configured and does
+ * nothing where MMAKF configured none: with no attempt limit there is no limit
+ * to defeat, and the review is released as before.
+ *
+ * The unrestricted view is `grading:read` IN THE LEARNER'S OWN SCOPE — an
+ * instructor, an examiner, a technical director. Deliberately not `person:read`,
+ * which members hold over themselves and which would release the key to exactly
+ * the person it is being withheld from; and deliberately not "is this the
+ * learner", because an administrator reviewing their own attempt is still an
+ * administrator.
+ */
+async function answerKeyRelease(
+  db: DB,
+  ctx: AuditContext,
+  quiz: { id: number; attemptsAllowed: number | null },
+  enrolmentId: number,
+  person: { stateUnitId: number | null; districtUnitId: number | null; dojoId: number | null }
+): Promise<AnswerKeyRelease> {
+  const assessor = can(ctx.principal, 'grading:read', {
+    stateUnitId: person.stateUnitId,
+    districtUnitId: person.districtUnitId,
+    dojoId: person.dojoId,
+  });
+  if (assessor) {
+    return { released: true, reason: 'Released: the caller may read gradings for this learner.' };
+  }
+  if (quiz.attemptsAllowed == null) {
+    return {
+      released: true,
+      reason: 'Released: MMAKF has set no attempt limit on this quiz, so there is no further attempt to protect.',
+    };
+  }
+  const used = Number((await db.select({ n: sql<number>`count(*)::int` })
+    .from(s.quizAttempts)
+    .where(and(eq(s.quizAttempts.quizId, quiz.id), eq(s.quizAttempts.enrolmentId, enrolmentId))))[0]?.n ?? 0);
+  if (used >= quiz.attemptsAllowed) {
+    return {
+      released: true,
+      reason: `Released: all ${quiz.attemptsAllowed} permitted attempt(s) have been used, so nothing remains to be defeated.`,
+    };
+  }
+  return {
+    released: false,
+    reason: `Withheld: ${quiz.attemptsAllowed - used} of ${quiz.attemptsAllowed} permitted attempt(s) remain, and showing the marked answers now would decide the next one. An instructor can see them.`,
+  };
+}
+
+/** The attempt row with the marking breakdown removed. The record keeps it. */
+function attemptWithoutMarking(row: any) {
+  const { answers, ...rest } = row;
+  return { ...rest, answers: null };
+}
+
 export interface QuizStanding {
   quizId: number;
   title: string;
@@ -1050,6 +1253,15 @@ export interface StudentQuizView {
   questions: StudentQuestion[];
 }
 
+/** An option as a candidate may see it: an id and a label, and nothing else. */
+function studentOptions(options: any[]): Array<{ id: string; text: string }> {
+  return options.map((o: any, i: number) =>
+    typeof o === 'string'
+      ? { id: String(i + 1), text: o }
+      : { id: String(o?.id ?? i + 1), text: String(o?.text ?? '') }
+  );
+}
+
 async function loadQuizForEnrolment(db: DB, quizId: number, enrolment: { courseId: number }) {
   const quiz = (await db.select().from(s.quizzes).where(eq(s.quizzes.id, quizId)).limit(1))[0];
   if (!quiz) throw new AcademyError('unknown_quiz', 'Unknown quiz');
@@ -1078,7 +1290,7 @@ export async function quizForStudent(
 
   const quiz = await loadQuizForEnrolment(db, input.quizId, enrolment);
 
-  const questions: StudentQuestion[] = await db.select({
+  const rows = await db.select({
     id: s.quizQuestions.id,
     prompt: s.quizQuestions.prompt,
     kind: s.quizQuestions.kind,
@@ -1088,6 +1300,16 @@ export async function quizForStudent(
   }).from(s.quizQuestions)
     .where(eq(s.quizQuestions.quizId, quiz.id))
     .orderBy(asc(s.quizQuestions.displayOrder), asc(s.quizQuestions.id));
+
+  // Options are narrowed AGAIN here, not only at write. addQuizQuestion()
+  // strips an authoring `correct: true` flag, but it is not the only way a row
+  // reaches this table — a seed, an import or a migration writes the jsonb
+  // directly, and any of those would hand the answer key to the browser inside
+  // `options`. This read owes the student nothing but an id and a label.
+  const questions: StudentQuestion[] = rows.map((q: any) => ({
+    ...q,
+    options: Array.isArray(q.options) ? studentOptions(q.options) : null,
+  }));
 
   return {
     quiz: { id: quiz.id, title: quiz.title, timeLimitMinutes: quiz.timeLimitMinutes },
@@ -1113,7 +1335,7 @@ export async function startAttempt(
   const enrolment = await loadEnrolment(db, input.enrolmentId);
   const person = await loadPerson(db, enrolment.personId);
   await assertSelfOrAuthority(db, ctx, person);
-  assertLearnable(enrolment);
+  assertLearnable(enrolment, now);
 
   const quiz = await loadQuizForEnrolment(db, input.quizId, enrolment);
 
@@ -1186,6 +1408,8 @@ export interface SubmitAttemptResult {
   ungradedReason: string | null;
   /** Null when MMAKF has set no time limit for this quiz. */
   withinTimeLimit: boolean | null;
+  /** Whether the marked breakdown came back with this result, and why. */
+  answerKey: AnswerKeyRelease;
 }
 
 /**
@@ -1220,6 +1444,10 @@ export async function submitAttempt(
   await assertSelfOrAuthority(db, ctx, person);
 
   const quiz = (await db.select().from(s.quizzes).where(eq(s.quizzes.id, attempt.quizId)).limit(1))[0];
+  // Not a formality: without this an attempt whose quiz has gone crashes on
+  // `quiz.id` with a TypeError, which is an unknown state dressed up as a bug
+  // report instead of a refusal.
+  if (!quiz) throw new AcademyError('unknown_quiz', 'The quiz this attempt belongs to no longer exists.');
   const questions = await db.select().from(s.quizQuestions)
     .where(eq(s.quizQuestions.quizId, quiz.id))
     .orderBy(asc(s.quizQuestions.displayOrder), asc(s.quizQuestions.id));
@@ -1247,21 +1475,39 @@ export async function submitAttempt(
   const needsHumanMarking = marking.some((m: any) => m.correct === null);
   const passMark = passMarkNote(quiz);
 
+  const withinTimeLimit = quiz.timeLimitMinutes == null
+    ? null
+    : (now.getTime() - new Date(attempt.startedAt).getTime()) <= quiz.timeLimitMinutes * 60_000;
+
   let result: AttemptResult;
   let ungradedReason: string | null = null;
-  if (needsHumanMarking) {
+  if (marksAvailable === 0) {
+    // Every question was removed after the attempt opened. `marksAwarded >=
+    // passMark * 0` is true, so without this branch an empty attempt PASSES.
+    result = 'ungraded';
+    ungradedReason = 'This quiz carries no marks, so there is nothing to measure against a pass mark.';
+  } else if (needsHumanMarking) {
     result = 'ungraded';
     ungradedReason = 'This quiz contains free-text answers, which this module does not mark. An examiner must mark it.';
   } else if (!passMark.configured) {
     result = 'ungraded';
     ungradedReason = passMark.detail;
+  } else if (withinTimeLimit === false) {
+    // The time limit was computed here and then ignored, so an attempt handed
+    // in hours after a limit the federation DID set was still declared a pass.
+    // What should happen to a late submission — void it, allow grace, mark it
+    // anyway — is policy MMAKF has not stated, so the honest outcome is to
+    // record the work UNGRADED and let a human decide, rather than to invent
+    // either a grace period or a zero.
+    result = 'ungraded';
+    ungradedReason = `This attempt was submitted outside the configured time limit of ${quiz.timeLimitMinutes} minute(s). MMAKF has set no rule for a late submission, so it is recorded ungraded for an examiner to decide.`;
   } else {
-    result = scorePercent >= (passMark.value as number) ? 'passed' : 'failed';
+    // Compared in whole marks, NOT on the rounded percentage. `scorePercent` is
+    // an integer for storage and display; deciding on it would round a
+    // candidate on 49.6% up to 50 and pass them against a 50% mark they did
+    // not reach.
+    result = marksAwarded * 100 >= (passMark.value as number) * marksAvailable ? 'passed' : 'failed';
   }
-
-  const withinTimeLimit = quiz.timeLimitMinutes == null
-    ? null
-    : (now.getTime() - new Date(attempt.startedAt).getTime()) <= quiz.timeLimitMinutes * 60_000;
 
   const [row] = await db.update(s.quizAttempts).set({
     submittedAt: now,
@@ -1287,9 +1533,14 @@ export async function submitAttempt(
     },
   }).where(eq(s.quizAttempts.id, attempt.id)).returning();
 
+  // The breakdown is STORED either way — the record must stay reconstructible.
+  // What is decided here is only whether it travels back to this caller.
+  const answerKey = await answerKeyRelease(db, ctx, quiz, enrolment.id, person);
+
   return {
-    attempt: row, scorePercent, marksAwarded, marksAvailable,
-    result, passMark, ungradedReason, withinTimeLimit,
+    attempt: answerKey.released ? row : attemptWithoutMarking(row),
+    scorePercent, marksAwarded, marksAvailable,
+    result, passMark, ungradedReason, withinTimeLimit, answerKey,
   };
 }
 
@@ -1313,27 +1564,45 @@ export async function attemptResult(db: DB, ctx: AuditContext, attemptId: number
     throw new AcademyError('not_submitted', 'This attempt has not been submitted, so it has no result.');
   }
 
+  const quiz = (await db.select().from(s.quizzes)
+    .where(eq(s.quizzes.id, attempt.quizId)).limit(1))[0];
+  if (!quiz) throw new AcademyError('unknown_quiz', 'The quiz this attempt belongs to no longer exists.');
+
   const questions = await db.select().from(s.quizQuestions)
     .where(eq(s.quizQuestions.quizId, attempt.quizId))
     .orderBy(asc(s.quizQuestions.displayOrder), asc(s.quizQuestions.id));
   const stored = (attempt.answers ?? {}) as Record<string, any>;
+  const answerKey = await answerKeyRelease(db, ctx, quiz, enrolment.id, person);
 
   return {
-    attempt,
+    // Redacted together with the per-question detail: `answers` carries the
+    // same marking breakdown, so leaving it here would undo the withholding.
+    attempt: answerKey.released ? attempt : attemptWithoutMarking(attempt),
     result: (stored.result ?? 'ungraded') as AttemptResult,
     scorePercent: attempt.scorePercent,
     passed: attempt.passed,
-    questions: questions.map((q: any) => ({
-      id: q.id,
-      prompt: q.prompt,
-      kind: q.kind,
-      options: q.options,
-      marks: q.marks,
-      correctAnswer: q.correctAnswer,
-      explanation: q.explanation,
-      given: stored.responses?.[String(q.id)] ?? null,
-      correct: (stored.marking ?? []).find((m: any) => m.questionId === q.id)?.correct ?? null,
-    })),
+    answerKey,
+    questions: questions.map((q: any) => {
+      const base = {
+        id: q.id,
+        prompt: q.prompt,
+        kind: q.kind,
+        // Never the raw stored options — see studentOptions().
+        options: Array.isArray(q.options) ? studentOptions(q.options) : null,
+        marks: q.marks,
+        given: stored.responses?.[String(q.id)] ?? null,
+      };
+      // The keys are ABSENT rather than null when withheld: a null
+      // `correctAnswer` beside a populated one elsewhere in the same payload
+      // still tells a candidate something.
+      if (!answerKey.released) return base;
+      return {
+        ...base,
+        correctAnswer: q.correctAnswer,
+        explanation: q.explanation,
+        correct: (stored.marking ?? []).find((m: any) => m.questionId === q.id)?.correct ?? null,
+      };
+    }),
   };
 }
 
@@ -1449,6 +1718,37 @@ export async function completeEnrolment(
     }
   }
 
+  // A course with no certificate leaves no certificate row to be idempotent
+  // against, so the status is the guard. Without it a second call re-ran the
+  // whole completion — a fresh `completedAt`, a recomputed final score and a
+  // second audit record saying the enrolment finished twice.
+  if (enrolment.status === 'completed') {
+    return {
+      enrolment,
+      completion: await completionCheck(db, enrolmentId),
+      certificate: null,
+      issued: false,
+      alreadyIssued: true,
+      note: 'This enrolment was already completed; nothing was done again.',
+    };
+  }
+
+  // Lessons ticked off while an enrolment was live do not survive its
+  // withdrawal, suspension or non-payment. A certificate must not rest on one.
+  if (enrolment.status !== 'active') {
+    throw new AcademyError(
+      'enrolment_not_active',
+      `This enrolment is ${String(enrolment.status).replace(/_/g, ' ')}, so it cannot be completed.`
+    );
+  }
+  const expiry = enrolmentExpiry(enrolment);
+  if (expiry != null && expiry.getTime() <= now.getTime()) {
+    throw new AcademyError(
+      'enrolment_expired',
+      `This enrolment expired on ${expiry.toISOString().slice(0, 10)}. An authority must extend it before a certificate can be issued against it.`
+    );
+  }
+
   const completion = await completionCheck(db, enrolmentId);
   if (!completion.complete) {
     throw new AcademyError('not_complete', completion.reasons.join(' '), completion.checks);
@@ -1513,6 +1813,12 @@ export async function completeEnrolment(
         passMarkPercent: q.passMark.value,
       })),
       finalScorePercent,
+      // Named on the document itself: a number printed on a certificate must
+      // say how it was arrived at, or a reader will assume it is a weighted
+      // federation mark. It is not — MMAKF has set no weighting.
+      finalScoreBasis: finalScorePercent == null
+        ? 'no quiz on this course produced a score'
+        : 'unweighted mean of the best attempt at each quiz; MMAKF has set no weighting',
       issuedAt: now.toISOString(),
       // Distinguishes this from an examined grade at every verification. A
       // course completion is not a rank and never becomes one.
@@ -1597,6 +1903,67 @@ async function loadLiveClass(db: DB, liveClassId: number) {
   const row = (await db.select().from(s.liveClasses).where(eq(s.liveClasses.id, liveClassId)).limit(1))[0];
   if (!row) throw new AcademyError('unknown_live_class', 'Unknown live class');
   return row;
+}
+
+export type LiveClassAudience = 'moderator' | 'member' | 'public';
+
+/**
+ * Who may read what happened inside a live class.
+ *
+ * The Q&A and the resource list were both open reads — no principal, no check —
+ * so the questions asked in a PRIVATE class, and the identity of everyone who
+ * asked them, were available to anyone who could guess a class id. That is the
+ * IDOR this project exists to refuse: knowing an id is never authorisation.
+ *
+ * Fails closed on an unknown visibility: a value this function does not
+ * recognise is treated as private, not as public.
+ */
+async function assertLiveClassReadable(
+  db: DB,
+  ctx: AuditContext,
+  cls: { id: number; courseId: number | null; visibility: string; published: boolean }
+): Promise<LiveClassAudience> {
+  if (canAnywhere(ctx.principal, 'content:write')) return 'moderator';
+
+  // An unpublished class is editorial material. It is not a members' page yet.
+  if (!cls.published) {
+    throw new AcademyError(
+      'class_not_published',
+      'This class has not been published, so only the federation’s content editors may read it.'
+    );
+  }
+
+  // A public class is readable by anyone, but a federation member reading it is
+  // still a member: the audience decides how much of the ASKER is shown, and
+  // stripping a name from someone entitled to see it helps nobody.
+  if (cls.visibility === 'public') {
+    return canAnywhere(ctx.principal, 'content:read') ? 'member' : 'public';
+  }
+
+  if (cls.visibility === 'members') {
+    assertCanAnywhere(ctx.principal, 'content:read');
+    return 'member';
+  }
+
+  if (cls.visibility === 'course' && cls.courseId != null) {
+    const self = await actorPersonId(db, ctx);
+    const enrolled = self == null ? null : (await db.select({ id: s.enrolments.id })
+      .from(s.enrolments).where(and(
+        eq(s.enrolments.courseId, cls.courseId),
+        eq(s.enrolments.personId, self),
+        inArray(s.enrolments.status, ['active', 'completed'])
+      )).limit(1))[0];
+    if (!enrolled) {
+      throw new AcademyError('not_enrolled', 'This class is restricted to students enrolled on its course.');
+    }
+    return 'member';
+  }
+
+  // 'private', a course-only class with no course, or anything unrecognised.
+  // This throws ForbiddenError, because the moderator branch above already
+  // established the caller does not hold content:write.
+  assertCanAnywhere(ctx.principal, 'content:write');
+  return 'moderator';
 }
 
 const ATTENDANCE_IS_NOT_PROFICIENCY =
@@ -1726,15 +2093,29 @@ export interface AttendanceReport {
   liveClassId: number;
   code: string;
   threshold: PolicyNote;
+  /** Attendees THIS CALLER MAY SEE, not the size of the class. See `scope`. */
   present: number;
   /** Null when no threshold is configured. */
   meetingThreshold: number | null;
+  /** Says plainly whether this register is the whole class or a slice of it. */
+  scope: { kind: 'all' | 'scoped' | 'none'; detail: string };
   attendees: Array<{
     personId: number; fullName: string; watchedSeconds: number;
     attendedLive: boolean; meetsThreshold: boolean | null;
   }>;
 }
 
+/**
+ * The attendance register for a class.
+ *
+ * SCOPE IS APPLIED IN SQL. `assertCanAnywhere` is a gate, not a filter: it
+ * passes any principal holding `person:read` in ANY scope, so a single dojo
+ * administrator was reading the full national register — every attendee's name
+ * — off one national class. The rows are now restricted by the caller's own
+ * bindings in the query, and the count reports what they may see rather than
+ * how many people were really there, because the headcount is itself a fact
+ * about people outside their authority.
+ */
 export async function liveClassAttendanceReport(
   db: DB,
   ctx: AuditContext,
@@ -1744,6 +2125,34 @@ export async function liveClassAttendanceReport(
   assertCanAnywhere(ctx.principal, 'person:read');
   const cls = await loadLiveClass(db, liveClassId);
 
+  const scopes = visibleScopes(ctx.principal, 'person:read');
+  const conditions: any[] = [eq(s.liveClassAttendance.liveClassId, liveClassId)];
+  let scopeNote: AttendanceReport['scope'] = {
+    kind: 'all',
+    detail: 'The caller has national reach for person:read, so this register is the whole class.',
+  };
+
+  if (scopes.kind === 'scoped') {
+    const scoped: any[] = [];
+    if (scopes.states.length) scoped.push(inArray(s.persons.stateUnitId, scopes.states));
+    if (scopes.districts.length) scoped.push(inArray(s.persons.districtUnitId, scopes.districts));
+    if (scopes.dojos.length) scoped.push(inArray(s.persons.dojoId, scopes.dojos));
+    conditions.push(scoped.length === 1 ? scoped[0] : sql`(${sql.join(scoped, sql` OR `)})`);
+    scopeNote = {
+      kind: 'scoped',
+      detail: 'Restricted to attendees inside the caller’s own units. Others attended and are not shown here.',
+    };
+  }
+  if (scopes.kind === 'none') {
+    // Gate passed, filter resolves to nothing: grant nothing rather than
+    // everything.
+    conditions.push(sql`false`);
+    scopeNote = {
+      kind: 'none',
+      detail: 'The caller holds person:read in no resolvable scope, so no attendee is shown.',
+    };
+  }
+
   const rows = await db.select({
     personId: s.liveClassAttendance.personId,
     fullName: s.persons.fullName,
@@ -1751,7 +2160,7 @@ export async function liveClassAttendanceReport(
     attendedLive: s.liveClassAttendance.attendedLive,
   }).from(s.liveClassAttendance)
     .innerJoin(s.persons, eq(s.persons.id, s.liveClassAttendance.personId))
-    .where(eq(s.liveClassAttendance.liveClassId, liveClassId));
+    .where(and(...conditions));
 
   const min = policy.liveAttendanceMinSeconds ?? null;
   const threshold: PolicyNote = min == null
@@ -1767,6 +2176,7 @@ export async function liveClassAttendanceReport(
     liveClassId,
     code: cls.code,
     threshold,
+    scope: scopeNote,
     present: rows.length,
     meetingThreshold: min == null ? null : rows.filter((r: any) => r.watchedSeconds >= min).length,
     attendees: rows.map((r: any) => ({
@@ -1821,6 +2231,9 @@ export async function answerQuestion(
     throw new AcademyError('question_hidden', 'This question has been hidden. Restore it before answering.');
   }
   if (!input.answer?.trim()) throw new AcademyError('answer_required', 'An answer cannot be empty.');
+  // The named answerer is published beside the answer, so it must be a real
+  // person rather than whatever id the caller passed.
+  await loadPerson(db, input.answeredByPersonId);
 
   const [row] = await db.update(s.liveClassQuestions).set({
     answer: input.answer.trim(),
@@ -1828,6 +2241,15 @@ export async function answerQuestion(
     answeredAt: now,
     status: 'answered',
   }).where(eq(s.liveClassQuestions.id, question.id)).returning();
+
+  // The answer column is overwritten in place, so the audit log is the ONLY
+  // record that the class was previously told something else. Without it a
+  // published answer could be rewritten with no trace.
+  await writeAudit(db, ctx, {
+    entityType: 'live_class_question', entityId: question.id, action: 'update',
+    oldValue: { status: question.status, answer: question.answer, answeredByPersonId: question.answeredByPersonId },
+    newValue: { status: 'answered', answer: row.answer, answeredByPersonId: row.answeredByPersonId },
+  });
   return row;
 }
 
@@ -1912,9 +2334,18 @@ export async function restoreQuestion(
   return row;
 }
 
-/** What the class sees. Hidden questions are absent — they still exist. */
-export async function liveClassQuestions(db: DB, liveClassId: number) {
-  return db.select({
+/**
+ * What the class sees. Hidden questions are absent — they still exist.
+ *
+ * Gated by the class's own visibility, and the asker's person id is withheld on
+ * a PUBLIC class: a page anyone on the internet can open must not enumerate
+ * which member asked what.
+ */
+export async function liveClassQuestions(db: DB, ctx: AuditContext, liveClassId: number) {
+  const cls = await loadLiveClass(db, liveClassId);
+  const audience = await assertLiveClassReadable(db, ctx, cls);
+
+  const rows = await db.select({
     id: s.liveClassQuestions.id,
     personId: s.liveClassQuestions.personId,
     question: s.liveClassQuestions.question,
@@ -1929,6 +2360,9 @@ export async function liveClassQuestions(db: DB, liveClassId: number) {
       inArray(s.liveClassQuestions.status, ['open', 'answered'])
     ))
     .orderBy(desc(s.liveClassQuestions.upvotes), asc(s.liveClassQuestions.id));
+
+  if (audience !== 'public') return rows;
+  return rows.map(({ personId, ...rest }: any) => rest);
 }
 
 /** What a moderator sees: everything, including what was hidden and still is. */
@@ -2038,7 +2472,10 @@ export async function attachResource(db: DB, ctx: AuditContext, input: AttachRes
   return row;
 }
 
-export async function liveClassResources(db: DB, liveClassId: number) {
+/** The resource list, gated by the class's visibility for the same reason. */
+export async function liveClassResources(db: DB, ctx: AuditContext, liveClassId: number) {
+  const cls = await loadLiveClass(db, liveClassId);
+  await assertLiveClassReadable(db, ctx, cls);
   return db.select().from(s.liveClassResources)
     .where(eq(s.liveClassResources.liveClassId, liveClassId))
     .orderBy(asc(s.liveClassResources.displayOrder), asc(s.liveClassResources.id));

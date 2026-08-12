@@ -1,0 +1,312 @@
+---
+// A table of federation records that tells the truth about its own state.
+//
+// A table has FIVE possible states and a dashboard that renders only one of
+// them lies in the other four. Each is explicit here:
+//
+//   ready + rows     the records.
+//   ready + no rows  "No records." — an empty register is a true answer and is
+//                    printed as such. It is NEVER a row of zeros, and never an
+//                    absent section that leaves the reader assuming a load
+//                    failed.
+//   loading          a live probe that has not answered yet. Rendered with
+//                    aria-busy and visible skeleton rows so nobody reads a
+//                    half-drawn table as final.
+//   error            the module refused or failed. The module's OWN message is
+//                    shown, in role="alert" — never a swallowed exception and
+//                    never an empty table pretending the register is empty.
+//   denied           the caller may not read these rows. Named as a permission
+//                    boundary, not disguised as an absence, because "no records"
+//                    and "not yours to see" are different facts.
+//
+// HORIZONTAL SCROLL IS THE TABLE'S OWN PROBLEM. Every federation table is wider
+// than a 360px phone. The scroll lives on `.tbl-scroll` INSIDE this component
+// (global.css already carries the edge-fade affordance), so the page body never
+// scrolls sideways — which is the failure that makes an admin screen unusable
+// at the mat side.
+
+export interface Column {
+  key: string;
+  label: string;
+  /** Right-aligned and tabular. Use for counts and amounts. */
+  numeric?: boolean;
+  /** A minimum width, when a column must not collapse. */
+  min?: string;
+}
+
+interface Source {
+  table: string;
+  column?: string;
+  filter: string;
+}
+
+interface Props {
+  /** What this table is. Rendered above the table and as its caption. */
+  caption: string;
+  columns: Column[];
+  rows?: Array<Record<string, unknown>>;
+  state?: 'ready' | 'loading' | 'error' | 'denied';
+  /** Shown when state is ready and there are no rows. */
+  emptyMessage?: string;
+  /** The module's own message. Shown when state is 'error'. */
+  errorMessage?: string | null;
+  /** Why the caller may not read these rows. Shown when state is 'denied'. */
+  deniedMessage?: string | null;
+  /** A qualification the reader needs before trusting the rows. */
+  note?: string | null;
+  /** Provenance, rendered under the table. */
+  source?: Source | null;
+  /** id for deep-linking, and for a client script that fills a live table. */
+  id?: string;
+  /** Skeleton rows drawn while loading. */
+  loadingRows?: number;
+  /** Shown under the table when the row list is known to be incomplete. */
+  incompleteMessage?: string | null;
+}
+
+const {
+  caption,
+  columns,
+  rows = [],
+  state = 'ready',
+  emptyMessage = 'No records.',
+  errorMessage = null,
+  deniedMessage = null,
+  note = null,
+  source = null,
+  id,
+  loadingRows = 3,
+  incompleteMessage = null,
+} = Astro.props;
+
+const NUM = new Intl.NumberFormat('en-IN');
+
+/**
+ * A cell.
+ *
+ * null and undefined become an em dash, NOT 0 and NOT an empty cell — an empty
+ * cell in a numeric column reads as zero to anyone scanning down the column.
+ */
+function cell(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—';
+  if (v === true) return 'Yes';
+  if (v === false) return 'No';
+  if (typeof v === 'number') return Number.isFinite(v) ? NUM.format(v) : '—';
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (Array.isArray(v)) return v.length ? v.map((x) => cell(x)).join(', ') : '—';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+const isReady = state === 'ready';
+const isEmpty = isReady && rows.length === 0;
+const skeleton = Array.from({ length: Math.max(1, loadingRows) });
+---
+
+<figure class="dt" id={id}>
+  <figcaption class="dt-cap">{caption}</figcaption>
+
+  {note && <p class="dt-note">{note}</p>}
+
+  {state === 'denied' && (
+    <p class="dt-state dt-denied">
+      {deniedMessage ||
+        'Your credential does not hold the authority needed to read these records. This is a permission boundary, not an empty register — there may well be records here.'}
+    </p>
+  )}
+
+  {state === 'error' && (
+    <p class="dt-state dt-error" role="alert">
+      {errorMessage ||
+        'These records could not be read. Nothing is shown rather than a zero that would look like a measurement.'}
+    </p>
+  )}
+
+  {(state === 'loading' || isReady) && (
+    <div class="tbl-scroll dt-scroll">
+      <table class="dt-table" aria-busy={state === 'loading' ? 'true' : 'false'}>
+        <caption class="dt-sr">{caption}</caption>
+        <thead>
+          <tr>
+            {columns.map((c) => (
+              <th scope="col" class:list={[{ 'dt-num': c.numeric }]} style={c.min ? `min-width:${c.min}` : undefined}>{c.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {state === 'loading' && skeleton.map(() => (
+            <tr>
+              {columns.map(() => (<td><span class="dt-skel" aria-hidden="true"></span></td>))}
+            </tr>
+          ))}
+
+          {isEmpty && (
+            <tr>
+              <td colspan={columns.length} class="dt-empty">{emptyMessage}</td>
+            </tr>
+          )}
+
+          {isReady && rows.map((r) => (
+            <tr>
+              {columns.map((c) => (
+                <td class:list={[{ 'dt-num': c.numeric }]}>{cell(r[c.key])}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )}
+
+  {state === 'loading' && (
+    <p class="dt-state dt-loading" role="status">Requesting live values…</p>
+  )}
+
+  {isReady && rows.length > 0 && <p class="tbl-hint">Scroll the table sideways to see every column</p>}
+
+  {incompleteMessage && <p class="dt-state dt-incomplete">{incompleteMessage}</p>}
+
+  {source && (
+    <details class="dt-src">
+      <summary>How these rows were selected</summary>
+      <dl>
+        <dt>Table</dt><dd><code>{source.table}</code></dd>
+        {source.column && (<Fragment><dt>Column</dt><dd><code>{source.column}</code></dd></Fragment>)}
+        <dt>Filter</dt><dd><code>{source.filter}</code></dd>
+      </dl>
+    </details>
+  )}
+</figure>
+
+<style is:global>
+  .dt { margin: 0; min-width: 0; }
+  .dt-cap {
+    font-family: var(--font-display);
+    font-size: 0.86rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--white);
+    margin-bottom: 10px;
+  }
+  .dt-note {
+    font-size: 0.8rem;
+    line-height: 1.65;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+
+  .dt-scroll {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    max-width: 100%;
+  }
+  .dt-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.85rem;
+  }
+  .dt-sr {
+    position: absolute;
+    width: 1px; height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .dt-table th,
+  .dt-table td {
+    text-align: left;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    overflow-wrap: anywhere;
+  }
+  .dt-table th {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    background: var(--card-2);
+    white-space: nowrap;
+  }
+  .dt-table tbody tr:last-child td { border-bottom: 0; }
+  .dt-table td { color: var(--off-white); }
+  .dt-num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .dt-empty {
+    color: var(--muted);
+    font-style: italic;
+    padding: 20px 14px;
+  }
+
+  .dt-skel {
+    display: block;
+    height: 12px;
+    border-radius: 2px;
+    background: var(--card-2);
+    min-width: 60px;
+  }
+
+  .dt-state {
+    font-size: 0.82rem;
+    line-height: 1.65;
+    border-radius: var(--radius);
+    padding: 13px 15px;
+  }
+  .dt-denied {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    color: var(--off-white);
+  }
+  .dt-error {
+    background: rgba(142, 18, 18, 0.05);
+    border: 1px solid var(--red-3);
+    border-left: 3px solid var(--red);
+    color: var(--off-white);
+  }
+  .dt-loading, .dt-incomplete {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    color: var(--off-white);
+    margin-top: 10px;
+  }
+
+  .dt-src { margin-top: 10px; }
+  .dt-src summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .dt-src summary:hover { color: var(--gold-2); }
+  .dt-src dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 12px;
+    font-size: 0.74rem;
+    line-height: 1.55;
+  }
+  .dt-src dt {
+    font-family: var(--font-display);
+    font-size: 0.58rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: 2px;
+  }
+  .dt-src dd { color: var(--off-white); min-width: 0; }
+  .dt-src code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    overflow-wrap: anywhere;
+  }
+</style>

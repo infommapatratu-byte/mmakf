@@ -14,7 +14,8 @@ import { eq } from 'drizzle-orm';
 import * as s from '../src/db/schema';
 import {
   search, SearchError, KIND_ORDER, PUBLIC_KINDS, NEVER_SEARCHABLE,
-  MAX_QUERY_LENGTH, type SearchHit, type SearchKind, type NewsItem,
+  PUBLIC_EVENT_STATUSES, MAX_QUERY_LENGTH,
+  type SearchHit, type SearchKind, type NewsItem,
 } from '../src/lib/search';
 import type { Principal } from '../src/lib/rbac';
 
@@ -734,5 +735,317 @@ describe('unpublished reference material', () => {
     // Confidential classification is excluded by allow-list at every level, so a
     // classification added to the enum later is excluded by default.
     expect(titles(r.hits)).not.toContain('Constitution Review Panel — confidential minutes');
+  });
+});
+
+// ─── Fail-closed: the inputs nobody types on purpose ────────────────────────
+//
+// Each of these was a live defect. They share a shape: a caller hands search
+// something malformed, and the OLD code answered anyway — with everything, with
+// nothing, or with a stack trace. A search that cannot be trusted to refuse is
+// not trustworthy when it accepts.
+
+describe('malformed input grants nothing and says so', () => {
+  it('reads an EMPTY kinds array as no domains, not as every domain', async () => {
+    // The attack is a caller that filters its domain list down to nothing —
+    // "search only the domains this surface is allowed to show" — and gets a
+    // full-federation search because [] was read as "unset".
+    const r = await search(db, national, 'Kumar', { kinds: [], newsProvider, limit: 50 });
+    expect(r.hits).toHaveLength(0);
+    expect(r.kinds).toHaveLength(0);
+    expect(r.skipped).toHaveLength(KIND_ORDER.length);
+    for (const sk of r.skipped) expect(sk.reason).toBe('not_requested');
+
+    // And the same query with kinds OMITTED does reach the register, so the
+    // assertion above is about `[]` and not about an unrelated refusal.
+    const unset = await search(db, national, 'Kumar', { newsProvider, limit: 50 });
+    expect(kinds(unset.hits)).toContain('person');
+  });
+
+  it('refuses an unknown domain instead of silently dropping it', async () => {
+    await expect(
+      search(db, national, 'Kumar', { kinds: ['persons' as SearchKind], newsProvider })
+    ).rejects.toMatchObject({ code: 'unknown_kind' });
+  });
+
+  it('refuses a non-finite limit rather than reporting a complete empty page', async () => {
+    // The old failure: Math.min(Math.max(1, NaN), 50) is NaN, so slice(0, NaN)
+    // returned [] and `truncated` was false — "no results, and that is all of
+    // them" over a register that was full of matches.
+    for (const bad of [Number.NaN, Infinity, -Infinity, '20' as unknown as number]) {
+      await expect(
+        search(db, national, 'Kumar', { limit: bad, newsProvider })
+      ).rejects.toMatchObject({ code: 'limit_invalid' });
+    }
+    // A real limit over the same query does find rows, so the refusals above
+    // are not masking an empty fixture.
+    const ok = await search(db, national, 'Kumar', { kinds: ['person'], newsProvider });
+    expect(ok.hits.length).toBeGreaterThan(0);
+  });
+
+  it('clamps a fractional or zero limit instead of refusing it', async () => {
+    const r = await search(db, national, 'Kumar', { kinds: ['person'], newsProvider, limit: 0 });
+    expect(r.hits).toHaveLength(1);
+    expect(r.truncated).toBe(true);
+  });
+
+  it('reduces a principal with unusable bindings to the anonymous surface', async () => {
+    // rbac.visibleScopes() iterates `bindings` directly, so a principal whose
+    // bindings are missing used to throw a TypeError out of the middle of a
+    // search. An unresolvable caller must grant nothing, not crash.
+    const broken = { userId: 99, label: 'broken', bindings: undefined as any };
+    const r = await search(db, broken, 'Kumar', { newsProvider, limit: 50 });
+    for (const hit of r.hits) expect(PUBLIC_KINDS).toContain(hit.kind);
+    expect(kinds(r.hits)).not.toContain('person');
+    expect(r.skipped.find((x) => x.kind === 'person')?.reason).toBe('not_public');
+  });
+
+  it('reduces a principal whose bindings are the wrong type to the anonymous surface', async () => {
+    const broken = { userId: 98, label: 'broken', bindings: 'SUPER_ADMIN' as any };
+    const r = await search(db, broken, 'MMAKF-MEM-2026-000001', {
+      kinds: ['person', 'certificate'], newsProvider,
+    });
+    expect(r.hits).toHaveLength(0);
+    expect(r.kinds).toHaveLength(0);
+  });
+});
+
+// ─── The audit row must name the reader ─────────────────────────────────────
+
+describe('an audit of a register search names the caller who made it', () => {
+  it('refuses an audit context naming a different principal', async () => {
+    const before = await db.select().from(s.auditEvents);
+    await expect(
+      search(db, stateAdminJH, 'Kumar', {
+        kinds: ['person'], newsProvider,
+        // The JH admin searches, but the row would have been filed against the
+        // national administrator. A false record of who read the register is
+        // worse than no record at all.
+        audit: { principal: national, reason: 'membership enquiry' },
+      })
+    ).rejects.toMatchObject({ code: 'audit_actor_mismatch' });
+    const after = await db.select().from(s.auditEvents);
+    expect(after.length).toBe(before.length);
+  });
+
+  it('refuses to file an audit row for a search nobody was signed in for', async () => {
+    await expect(
+      search(db, anonymous, 'Shotokan', {
+        kinds: ['dojo'], newsProvider,
+        audit: { principal: national },
+      })
+    ).rejects.toMatchObject({ code: 'audit_actor_mismatch' });
+  });
+});
+
+// ─── Document classification is CONFIGURATION, not this module's guess ──────
+
+describe('document classification comes from the federation, not from search', () => {
+  beforeAll(async () => {
+    const [doc] = await db.insert(s.officialDocuments).values({
+      code: 'MMAKF-DOC-OFFH', title: 'Officials Handbook',
+      category: 'policy', summary: 'Handbook issued to officials.',
+      classification: 'member',
+    }).returning({ id: s.officialDocuments.id });
+    const [v] = await db.insert(s.documentVersions)
+      .values({ documentId: doc.id, version: '1.0', status: 'published' })
+      .returning({ id: s.documentVersions.id });
+    await db.update(s.officialDocuments)
+      .set({ currentVersionId: v.id }).where(eq(s.officialDocuments.id, doc.id));
+  });
+
+  it('searches only `public` when no audience is configured, at every level', async () => {
+    for (const who of [anonymous, member, stateAdminJH, national, superAdmin]) {
+      const r = await search(db, who, 'Handbook', { kinds: ['document'], newsProvider });
+      expect(titles(r.hits)).toEqual([]);
+    }
+  });
+
+  it('says the rule was never set rather than looking like an empty register', async () => {
+    const r = await search(db, superAdmin, 'Handbook', { kinds: ['document'], newsProvider });
+    const notice = r.notices.find(
+      (n) => n.code === 'document_classification_audience_not_configured'
+    );
+    expect(notice).toBeDefined();
+    // The notice has to name what was NOT searched, or it is decoration.
+    expect(notice!.detail).toContain('member');
+    expect(notice!.detail).toContain('confidential');
+    expect(notice!.detail).toContain('public');
+  });
+
+  it('applies the audience the federation configures, and only to who holds it', async () => {
+    const policy = { documentClassificationRequires: { member: 'content:read' as const } };
+
+    const editor = await search(db, national, 'Handbook', {
+      kinds: ['document'], newsProvider, policy,
+    });
+    expect(titles(editor.hits)).toEqual(['Officials Handbook']);
+    // The rule is configured now, so nothing is being withheld unexplained.
+    expect(editor.notices).toHaveLength(0);
+
+    // An anonymous caller holds no action at all, so the same configuration
+    // gives them nothing — the map names a requirement, not a switch.
+    const guest = await search(db, anonymous, 'Handbook', {
+      kinds: ['document'], newsProvider, policy,
+    });
+    expect(guest.hits).toHaveLength(0);
+  });
+
+  it('opening one classification does not open the others', async () => {
+    const r = await search(db, superAdmin, 'Constitution', {
+      kinds: ['document'], newsProvider,
+      policy: { documentClassificationRequires: { member: 'content:read' as const } },
+    });
+    // `confidential` is still unconfigured, so the confidential minutes stay out
+    // even for SUPER_ADMIN with a policy in hand.
+    expect(titles(r.hits)).not.toContain('Constitution Review Panel — confidential minutes');
+  });
+
+  it('cannot be used to hand a classification to someone who lacks the action', async () => {
+    // MEMBER holds content:read but not content:write. A configuration keyed on
+    // content:write must not reach them.
+    const r = await search(db, member, 'Handbook', {
+      kinds: ['document'], newsProvider,
+      policy: { documentClassificationRequires: { member: 'content:write' as const } },
+    });
+    expect(r.hits).toHaveLength(0);
+
+    const editor = await search(db, national, 'Handbook', {
+      kinds: ['document'], newsProvider,
+      policy: { documentClassificationRequires: { member: 'content:write' as const } },
+    });
+    expect(titles(editor.hits)).toEqual(['Officials Handbook']);
+  });
+});
+
+// ─── The scope filter is in the query, not in the result set ────────────────
+
+describe('scope is applied in SQL, provably', () => {
+  beforeAll(async () => {
+    // Thirty out-of-state people whose names sort BEFORE the in-state one. If
+    // the scope filter ran after the fetch, a small limit would be consumed
+    // entirely by these and the Jharkhand admin would be shown an empty page
+    // for a member who is plainly theirs.
+    const bulk: any[] = [];
+    for (let i = 1; i <= 30; i++) {
+      bulk.push({
+        federationId: `MMAKF-MEM-2026-1000${String(i).padStart(2, '0')}`,
+        fullName: `Aabir Banerjee ${String(i).padStart(2, '0')}`,
+        city: 'Kolkata', stateUnitId: WB, dojoId: WB_DOJO, status: 'active',
+      });
+    }
+    bulk.push({
+      federationId: 'MMAKF-MEM-2026-100099',
+      fullName: 'Zubin Banerjee', city: 'Patratu',
+      stateUnitId: JH, districtUnitId: RMG, dojoId: HOMBU, status: 'active',
+    });
+    await db.insert(s.persons).values(bulk);
+  });
+
+  it('a one-row page for a state admin is their row, not a page spent on other states', async () => {
+    const r = await search(db, stateAdminJH, 'Banerjee', {
+      kinds: ['person'], newsProvider, limit: 1,
+    });
+    expect(titles(r.hits)).toEqual(['Zubin Banerjee']);
+    // One row is all there is inside their state, so nothing was withheld.
+    expect(r.truncated).toBe(false);
+  });
+
+  it('raising the limit past the whole out-of-state cohort still shows none of it', async () => {
+    const r = await search(db, stateAdminJH, 'Banerjee', {
+      kinds: ['person'], newsProvider, limit: 50,
+    });
+    expect(titles(r.hits)).toEqual(['Zubin Banerjee']);
+
+    const nat = await search(db, national, 'Banerjee', {
+      kinds: ['person'], newsProvider, limit: 50,
+    });
+    expect(nat.hits.length).toBeGreaterThan(30);
+  });
+
+  it('an identifier PREFIX cannot walk the register outside the caller state', async () => {
+    // Federation ids are sequential, so a prefix is the cheapest enumeration
+    // there is. It has to be scoped exactly as a name search is.
+    const r = await search(db, stateAdminJH, 'MMAKF-MEM-2026-', {
+      kinds: ['person'], newsProvider, limit: 50,
+    });
+    expect(r.hits.length).toBeGreaterThan(0);
+    for (const hit of r.hits) {
+      const row = (await db.select().from(s.persons).where(eq(s.persons.id, Number(hit.id))))[0];
+      expect(row.stateUnitId).toBe(JH);
+    }
+  });
+
+  it('a dojo-bound principal reaches their dojo and no further', async () => {
+    const dojoAdmin: Principal = {
+      userId: 7, label: 'wb-dojo-admin',
+      bindings: [{ role: 'DOJO_ADMIN', scopeType: 'dojo', scopeId: WB_DOJO }],
+    };
+    const r = await search(db, dojoAdmin, 'Banerjee', {
+      kinds: ['person'], newsProvider, limit: 50,
+    });
+    expect(r.hits.length).toBe(30);
+    expect(titles(r.hits)).not.toContain('Zubin Banerjee');
+  });
+
+  it('a binding at a scope the table cannot express reaches nothing at all', async () => {
+    // districtUnits carries no dojo column, so a dojo-scoped unit:read has
+    // nothing to resolve against. An unresolvable scope grants nothing and says
+    // which — it must not fall through to unfiltered.
+    const dojoBound: Principal = {
+      userId: 8, label: 'dojo-instructor',
+      bindings: [{ role: 'DISTRICT_ADMIN', scopeType: 'dojo', scopeId: HOMBU }],
+    };
+    const r = await search(db, dojoBound, 'Ramgarh', {
+      kinds: ['district_unit'], newsProvider,
+    });
+    expect(r.hits).toHaveLength(0);
+    expect(r.skipped.find((x) => x.kind === 'district_unit')?.reason).toBe('no_visible_scope');
+  });
+});
+
+// ─── Constants restated from another module must not drift ──────────────────
+
+describe('the duplicated event status list', () => {
+  it('still matches PUBLIC_STATUSES in src/db/competition.ts', () => {
+    // search.ts may not import from competition.ts (owned by another workflow),
+    // so the two lists are duplicated. A comment asking for them to be kept in
+    // step is not an enforcement mechanism; this is. If competition.ts changes
+    // which statuses are public and search.ts does not, unpublished events
+    // become visible — so the drift is a leak, not an inconsistency.
+    const competitionSource = readFileSync('src/db/competition.ts', 'utf8');
+    const block = competitionSource.match(
+      /const PUBLIC_STATUSES: readonly EventStatus\[\] = \[([\s\S]*?)\];/
+    );
+    expect(block).not.toBeNull();
+    const theirs = [...block![1]!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+    expect(theirs.length).toBeGreaterThan(0);
+    expect([...PUBLIC_EVENT_STATUSES].sort()).toEqual(theirs);
+  });
+});
+
+// ─── Every response accounts for itself ─────────────────────────────────────
+
+describe('the response is self-describing', () => {
+  it('carries notices, kinds and skipped on every path', async () => {
+    const r = await search(db, anonymous, 'Shotokan', { newsProvider, limit: 50 });
+    expect(Object.keys(r).sort())
+      .toEqual(['hits', 'kinds', 'notices', 'query', 'skipped', 'truncated']);
+    expect(Array.isArray(r.notices)).toBe(true);
+    expect(r.kinds.length + r.skipped.length).toBe(KIND_ORDER.length);
+  });
+
+  it('records the notices in the audit row, so a narrow result is explainable later', async () => {
+    const before = await db.select().from(s.auditEvents);
+    await search(db, national, 'Handbook', {
+      kinds: ['document'], newsProvider,
+      audit: { principal: national, reason: 'governance review' },
+    });
+    const after = await db.select().from(s.auditEvents);
+    expect(after.length).toBe(before.length + 1);
+    const row = after[after.length - 1]!;
+    expect((row.newValue as any).returned).toBe(0);
+    expect((row.newValue as any).notices.map((n: any) => n.code))
+      .toContain('document_classification_audience_not_configured');
   });
 });

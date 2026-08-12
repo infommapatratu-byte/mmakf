@@ -1,0 +1,569 @@
+---
+/**
+ * THE AFFILIATED UNITS DIRECTORY — /dojos
+ *
+ * The question this page exists to answer is a parent's: *is the club my child
+ * trains at actually affiliated to this federation, today?*
+ *
+ * Three decisions follow from that question and none of them is cosmetic:
+ *
+ *  1. A LAPSED UNIT IS LISTED, NOT HIDDEN. The person most in need of this page
+ *     is the parent of a child already training somewhere. If a lapsed charter
+ *     simply vanished from the directory they would conclude they had mistyped
+ *     the name, not that the affiliation had expired. `includeFormer` is
+ *     therefore always on, and standing is stated in words on every row.
+ *
+ *  2. CHARTER VALIDITY TRAVELS WITH EVERY ROW. `affiliated` is a derived
+ *     boolean from the module; the date it was derived from is printed beside
+ *     it so a reader can check the federation's arithmetic instead of trusting
+ *     a badge.
+ *
+ *  3. NOTHING IS COMPUTED HERE. Standing, the affiliated flag, the expiry
+ *     comparison and the explanatory note all come from
+ *     `publicDirectory()` in src/db/affiliation.ts. A second copy of that logic
+ *     on a page would drift from the register it claims to describe, and the
+ *     drift would show up as a club being told it is affiliated when it is not.
+ *
+ * The module already refuses to publish anything that never reached at least
+ * provisional affiliation, and returns no address line, telephone number or
+ * email. This page adds no field of its own.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { isConfigured, db } from '@/db';
+import { publicDirectory, type DirectoryEntry, type UnitKind } from '@/db/affiliation';
+
+export const prerender = false;
+
+const KINDS: Array<{ key: UnitKind; label: string; singular: string; blurb: string }> = [
+  {
+    key: 'dojo',
+    label: 'Dojos & clubs',
+    singular: 'dojo',
+    blurb:
+      'Clubs, dojos and training centres chartered through their district or state unit. This is where training actually happens.',
+  },
+  {
+    key: 'district',
+    label: 'District associations',
+    singular: 'district association',
+    blurb:
+      'District associations affiliated through their state association. A district unit charters the clubs beneath it.',
+  },
+  {
+    key: 'state',
+    label: 'State associations',
+    singular: 'state association',
+    blurb:
+      'State associations affiliated directly to the national federation. A state unit charters the districts beneath it.',
+  },
+];
+
+const q = Astro.url.searchParams;
+const requested = (q.get('kind') || 'dojo').toLowerCase();
+const kind: UnitKind = requested === 'district' || requested === 'state' ? requested : 'dojo';
+const activeKind = KINDS.find((k) => k.key === kind)!;
+
+/** Registry states are distinguished so an outage is never reported as "empty". */
+type RegistryState = 'ready' | 'not_configured' | 'unavailable';
+
+let entries: DirectoryEntry[] = [];
+let state: RegistryState = 'not_configured';
+
+if (isConfigured()) {
+  try {
+    // includeFormer is deliberately hard-coded on. See note 1 above.
+    entries = await publicDirectory(db(), { kind, includeFormer: true, limit: 500 });
+    state = 'ready';
+  } catch (err) {
+    // A read failure must never render as "no units are affiliated" — that is a
+    // claim about the federation, made on the strength of a broken query.
+    console.error('[dojos] directory read failed', err);
+    state = 'unavailable';
+  }
+}
+
+const currentCount = entries.filter((e) => e.affiliated).length;
+const formerCount = entries.length - currentCount;
+
+const asAt = new Date();
+const fmtDate = (iso: string | null): string => {
+  if (!iso) return '';
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+};
+const today = asAt.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+
+const STANDING_LABEL: Record<DirectoryEntry['standing'], string> = {
+  chartered: 'Chartered',
+  provisional: 'Provisional',
+  lapsed: 'Lapsed',
+  suspended: 'Suspended',
+  revoked: 'Revoked',
+};
+
+const where = (e: DirectoryEntry): string =>
+  [e.city, e.district, e.state].filter(Boolean).join(' · ') || 'Location not recorded';
+
+const pills: string[] =
+  state === 'ready'
+    ? entries.length
+      ? [`${currentCount} currently affiliated`, `${formerCount} former or suspended`, `Checked ${today}`]
+      : ['Register open — no units recorded yet']
+    : ['Register not available'];
+---
+
+<Base
+  title={`${activeKind.label} — Affiliated Units Register — MMAKF`}
+  description="The MMAKF register of affiliated dojos, district associations and state associations, showing the standing and charter validity of each. Units whose charter has lapsed remain listed and are shown as lapsed."
+>
+  <PageHero
+    eyebrow="Public register"
+    title={`Affiliated <em class="r">units</em>.`}
+    lead="Every dojo, district association and state association the federation has chartered — with the standing of each, and the date its charter runs to. A unit whose charter has lapsed is not removed from this page; it is shown as lapsed, so a member training there can find that out."
+    pills={pills}
+  />
+
+  {/* ═══════ HOW TO READ THIS DIRECTORY ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Read this first</div>
+        <h2 class="display-2">What a listing <em class="r">does</em> and does not say.</h2>
+        <div class="rule"></div>
+      </div>
+
+      <div class="dir-key fade">
+        <div class="card dir-key-card dir-key-yes">
+          <div class="card-eyebrow">What it means</div>
+          <h3 class="card-title">A standing, on a date</h3>
+          <p class="card-body">
+            Each row states the unit’s affiliation standing as recorded in the federation’s register,
+            and the date its charter or provisional term runs to. Both are read from the register at
+            the moment you load this page. Where the federation has recorded no validity date, the
+            row says so rather than implying an open-ended charter.
+          </p>
+        </div>
+        <div class="card dir-key-card dir-key-no">
+          <div class="card-eyebrow">What it does not mean</div>
+          <h3 class="card-title">Not a quality rating, not a full list of clubs</h3>
+          <p class="card-body">
+            This register lists units the federation has chartered. It is not a rating of teaching, and
+            a club’s absence from it is not a statement that the club is unaffiliated to anything — only
+            that MMAKF has no affiliation recorded for it here. Applications that were never granted at
+            least provisional affiliation are never listed. No address, telephone number or email
+            appears on this page.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE REGISTER ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">The register</div>
+        <h2 class="display-2">{activeKind.label}.</h2>
+        <div class="rule"></div>
+        <p class="lead">{activeKind.blurb}</p>
+      </div>
+
+      <nav class="dir-tabs fade" aria-label="Choose a unit level">
+        {KINDS.map((k) => (
+          <a
+            href={`/dojos?kind=${k.key}`}
+            class="dir-tab"
+            class:list={[{ active: k.key === kind }]}
+            aria-current={k.key === kind ? 'page' : undefined}
+          >
+            {k.label}
+          </a>
+        ))}
+      </nav>
+
+      {state === 'not_configured' && (
+        <div class="dir-state fade" role="note">
+          <h3 class="dir-state-h">The affiliation register is not available in this environment</h3>
+          <p class="body-txt">
+            The federation records database is not configured for this deployment, so this page cannot
+            read the affiliation register. <strong>This is a deployment state, not an empty
+            register</strong> — nothing on this page should be read as a statement that no unit is
+            affiliated. The federation office holds the register and can confirm the standing of any
+            unit.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href="/contact" class="btn btn-gold">Ask the federation office</a>
+            <a href="/affiliation" class="btn btn-ghost">How affiliation works</a>
+          </div>
+        </div>
+      )}
+
+      {state === 'unavailable' && (
+        <div class="dir-state dir-state-err fade" role="alert">
+          <h3 class="dir-state-h">The register could not be read just now</h3>
+          <p class="body-txt">
+            The federation records service did not answer this request.
+            <strong> This is not a result about any unit</strong> — it is a fault on our side. Please
+            try again shortly, or ask the federation office to confirm a unit’s standing directly.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href={`/dojos?kind=${kind}`} class="btn btn-primary">Try again</a>
+            <a href="/contact" class="btn btn-ghost">Ask the federation office</a>
+          </div>
+        </div>
+      )}
+
+      {state === 'ready' && entries.length === 0 && (
+        <div class="dir-state fade" role="note">
+          <h3 class="dir-state-h">No {activeKind.singular} has been entered in this register yet</h3>
+          <p class="body-txt">
+            The federation is building this register. This page shows what MMAKF has recorded in this
+            system and nothing else, so an empty table here means <strong>no {activeKind.singular} has
+            yet been recorded</strong> — it is not a finding that none exists, and it is not a
+            statement about any particular club. Units appear here as the office enters and charters
+            them.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href="/affiliation" class="btn btn-gold">Apply to affiliate a unit</a>
+            <a href="/contact" class="btn btn-ghost">Ask the federation office</a>
+          </div>
+        </div>
+      )}
+
+      {state === 'ready' && entries.length > 0 && (
+        <div class="fade">
+          <div class="dir-controls">
+            <div class="dir-search">
+              <label class="input-label" for="dir-q">Find a unit by name, code or town</label>
+              <input
+                id="dir-q"
+                class="input"
+                type="search"
+                autocomplete="off"
+                placeholder="e.g. Patratu, or MMAKF-DOJO"
+                aria-describedby="dir-count"
+              />
+            </div>
+            <fieldset class="dir-standing">
+              <legend class="input-label">Show</legend>
+              <div class="dir-chips">
+                <button type="button" class="dir-chip active" data-show="all" aria-pressed="true">
+                  All {entries.length}
+                </button>
+                <button type="button" class="dir-chip" data-show="current" aria-pressed="false">
+                  Currently affiliated {currentCount}
+                </button>
+                <button type="button" class="dir-chip" data-show="former" aria-pressed="false">
+                  Lapsed, suspended or revoked {formerCount}
+                </button>
+              </div>
+            </fieldset>
+          </div>
+
+          <p class="dir-count" id="dir-count" role="status" aria-live="polite">
+            Showing all {entries.length} recorded {entries.length === 1 ? 'unit' : 'units'}.
+          </p>
+
+          <ul class="dir-list" id="dir-list">
+            {entries.map((e) => (
+              <li
+                class="dir-row"
+                data-search={`${e.name} ${e.code} ${where(e)}`.toLowerCase()}
+                data-group={e.affiliated ? 'current' : 'former'}
+              >
+                <div class="dir-main">
+                  <h3 class="dir-name">{e.name}</h3>
+                  <div class="dir-code">{e.code}</div>
+                  <div class="dir-where">{where(e)}</div>
+                </div>
+
+                <div class="dir-standing-cell">
+                  <span
+                    class="pill dir-pill"
+                    class:list={[`st-${e.standing}`]}
+                  >
+                    <span class="pill-dot"></span>{STANDING_LABEL[e.standing]}
+                  </span>
+                  <div class="dir-affil" class:list={[{ no: !e.affiliated }]}>
+                    {e.affiliated ? 'Affiliated today' : 'Not affiliated today'}
+                  </div>
+                </div>
+
+                <dl class="dir-meta">
+                  <div class="dir-meta-row">
+                    <dt>Affiliated since</dt>
+                    <dd>{e.affiliatedSince ? fmtDate(e.affiliatedSince) : 'Not recorded'}</dd>
+                  </div>
+                  <div class="dir-meta-row">
+                    <dt>Charter valid to</dt>
+                    <dd>
+                      {e.charterValidUntil ? (
+                        <Fragment>
+                          {fmtDate(e.charterValidUntil)}
+                          {e.charterCurrent === false && <span class="dir-expired"> — passed</span>}
+                        </Fragment>
+                      ) : (
+                        'No validity date recorded'
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+
+                {e.note && <p class="dir-note">{e.note}</p>}
+              </li>
+            ))}
+          </ul>
+          <p class="dir-empty" id="dir-empty" hidden role="status">
+            No recorded unit matches that search. Try part of the town name, or clear the filter — a
+            club the federation has never chartered will not appear here at all.
+          </p>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ WHAT TO DO WITH A LAPSED UNIT ═══════ */}
+  {state === 'ready' && formerCount > 0 && (
+    <section>
+      <div class="container">
+        <div class="dir-adv fade" role="note">
+          <div class="eyebrow">If your club shows as lapsed</div>
+          <h2 class="dir-adv-h">A lapsed charter is a renewal, not an accusation.</h2>
+          <div class="rule"></div>
+          <p class="body-txt">
+            A charter runs to a date. When that date passes without a renewal being recorded, the unit
+            shows here as lapsed — which is exactly what the register says and no more. It is not a
+            finding of wrongdoing, and it does not say anything about the instruction at that club. It
+            does mean the federation cannot presently confirm the unit as affiliated, and members
+            training there should ask the club and the office where the renewal stands.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href="/affiliation" class="btn btn-gold">Affiliation &amp; renewal</a>
+            <a href="/contact" class="btn btn-ghost">Contact the federation office</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  )}
+</Base>
+
+<script>
+  // Client-side narrowing only. Every row was already rendered by the server, so
+  // with JavaScript off the full register is still readable — the controls just
+  // do nothing rather than hiding the page's content behind a script.
+  const list = document.getElementById('dir-list');
+  const box = document.getElementById('dir-q') as HTMLInputElement | null;
+  const count = document.getElementById('dir-count');
+  const empty = document.getElementById('dir-empty');
+
+  if (list && count) {
+    const rows = Array.from(list.querySelectorAll<HTMLElement>('.dir-row'));
+    const chips = Array.from(document.querySelectorAll<HTMLButtonElement>('.dir-chip'));
+    let group = 'all';
+
+    const apply = () => {
+      const term = (box?.value || '').trim().toLowerCase();
+      let shown = 0;
+      for (const row of rows) {
+        const matchesText = !term || (row.dataset.search || '').includes(term);
+        const matchesGroup = group === 'all' || row.dataset.group === group;
+        const visible = matchesText && matchesGroup;
+        row.hidden = !visible;
+        if (visible) shown++;
+      }
+      count.textContent =
+        shown === rows.length
+          ? `Showing all ${rows.length} recorded ${rows.length === 1 ? 'unit' : 'units'}.`
+          : `Showing ${shown} of ${rows.length} recorded units.`;
+      if (empty) empty.hidden = shown !== 0;
+    };
+
+    box?.addEventListener('input', apply);
+    for (const chip of chips) {
+      chip.addEventListener('click', () => {
+        group = chip.dataset.show || 'all';
+        for (const c of chips) {
+          const on = c === chip;
+          c.classList.toggle('active', on);
+          c.setAttribute('aria-pressed', String(on));
+        }
+        apply();
+      });
+    }
+  }
+</script>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+
+  /* ── Key cards ── */
+  .dir-key { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 780px) { .dir-key { grid-template-columns: 1fr; } }
+  .dir-key-card { border-top: 3px solid var(--border-2); }
+  .dir-key-yes { border-top-color: var(--gold-dim); }
+  .dir-key-no { border-top-color: var(--red); }
+
+  /* ── Level tabs ── */
+  .dir-tabs { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 28px; }
+  .dir-tab {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 10px 20px;
+    border: 1px solid var(--border-2);
+    background: var(--card);
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--off-white);
+    border-radius: var(--radius);
+  }
+  .dir-tab:hover { border-color: var(--gold-dim); color: var(--gold-2); }
+  .dir-tab.active { background: var(--red); border-color: var(--red); color: #fff; }
+
+  /* ── State panels ── */
+  .dir-state {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    padding: 28px 30px;
+    max-width: 78ch;
+  }
+  .dir-state-err { border-left-color: var(--red); }
+  @media (max-width: 520px) { .dir-state { padding: 22px 18px; } }
+  .dir-state-h {
+    font-family: var(--font-display);
+    font-size: 1.08rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-bottom: 10px;
+  }
+
+  /* ── Controls ── */
+  .dir-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+    gap: 18px 28px;
+    align-items: end;
+    margin-bottom: 18px;
+  }
+  @media (max-width: 780px) { .dir-controls { grid-template-columns: 1fr; align-items: stretch; } }
+  .dir-standing { border: 0; padding: 0; margin: 0; min-width: 0; }
+  .dir-standing legend { padding: 0; }
+  .dir-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .dir-chip {
+    min-height: 44px;
+    padding: 8px 16px;
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--off-white);
+  }
+  .dir-chip:hover { border-color: var(--gold-dim); color: var(--gold-2); }
+  .dir-chip.active { background: var(--red); border-color: var(--red); color: #fff; }
+
+  .dir-count, .dir-empty {
+    font-size: 0.84rem;
+    color: var(--muted);
+    margin-bottom: 16px;
+  }
+  .dir-empty { margin-top: 18px; max-width: 70ch; }
+
+  /* ── Rows ── */
+  .dir-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+  .dir-row {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border-2);
+    padding: 20px 22px;
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.7fr) minmax(0, 1fr);
+    gap: 16px 28px;
+    align-items: start;
+  }
+  .dir-row:has(.st-chartered) { border-left-color: var(--gold-dim); }
+  .dir-row:has(.st-provisional) { border-left-color: var(--border-2); }
+  .dir-row:has(.st-lapsed), .dir-row:has(.st-suspended), .dir-row:has(.st-revoked) {
+    border-left-color: var(--red);
+  }
+  @media (max-width: 860px) {
+    .dir-row { grid-template-columns: 1fr; gap: 12px; padding: 18px 16px; }
+  }
+  .dir-main { min-width: 0; }
+  .dir-name {
+    font-family: var(--font-display);
+    font-size: 1.06rem;
+    font-weight: 600;
+    color: var(--white);
+    line-height: 1.3;
+  }
+  .dir-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.76rem;
+    color: var(--gold-2);
+    margin-top: 6px;
+    overflow-wrap: anywhere;
+  }
+  .dir-where { font-size: 0.85rem; color: var(--off-white); margin-top: 6px; }
+
+  .dir-standing-cell { min-width: 0; }
+  .dir-pill { white-space: nowrap; }
+  .dir-pill.st-chartered { color: var(--gold-2); border-color: var(--gold-dim); }
+  .dir-pill.st-provisional { color: var(--off-white); }
+  .dir-pill.st-lapsed,
+  .dir-pill.st-suspended,
+  .dir-pill.st-revoked { color: var(--red-2); border-color: rgba(142, 18, 18, 0.32); }
+  .dir-affil {
+    margin-top: 8px;
+    font-size: 0.8rem;
+    color: var(--off-white);
+  }
+  .dir-affil.no { color: var(--red-2); font-weight: 600; }
+
+  .dir-meta { margin: 0; display: grid; gap: 8px; min-width: 0; }
+  .dir-meta-row { display: grid; grid-template-columns: 13ch minmax(0, 1fr); gap: 10px; align-items: baseline; }
+  @media (max-width: 420px) { .dir-meta-row { grid-template-columns: 1fr; gap: 2px; } }
+  .dir-meta dt {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .dir-meta dd { margin: 0; font-size: 0.84rem; color: var(--off-white); overflow-wrap: anywhere; }
+  .dir-expired { color: var(--red-2); font-weight: 600; }
+
+  .dir-note {
+    grid-column: 1 / -1;
+    font-size: 0.83rem;
+    line-height: 1.7;
+    color: var(--off-white);
+    padding-left: 12px;
+    border-left: 2px solid var(--border-2);
+    max-width: 78ch;
+  }
+
+  /* ── Advice ── */
+  .dir-adv {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    padding: 36px 40px;
+    max-width: 860px;
+  }
+  @media (max-width: 560px) { .dir-adv { padding: 26px 20px; } }
+  .dir-adv-h {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-top: 14px;
+  }
+</style>

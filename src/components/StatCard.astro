@@ -1,0 +1,208 @@
+---
+// One figure from the register, with the query that produced it attached.
+//
+// THE REASON THIS COMPONENT EXISTS AND IS NOT JUST A <div>: every number on a
+// federation dashboard has to be defensible. src/db/analytics.ts already
+// travels a `Source` alongside each count — the table, the column and the
+// filter — and this card is what puts that in front of the reader instead of
+// leaving it in a JSON payload nobody sees.
+//
+// THREE STATES, AND ONLY THREE:
+//
+//   value = 0    a MEASURED ZERO. Rendered as a full-contrast "0", never
+//                dimmed away and never hidden. An empty federation shows zeros
+//                and that is the honest answer on day one.
+//   value = n    a measured count.
+//   value = null the figure was NOT produced — withheld for want of authority,
+//                or not narrowable to this scope. Rendered as "—" WITH the
+//                reason. A null must never fall through to 0: a 0 the reader
+//                takes as a measurement is the single worst defect a dashboard
+//                can ship.
+//
+// `unavailable` is therefore mandatory whenever `value` is null, and the
+// component says so on the page rather than failing silently, because a card
+// reading "—" with no explanation is indistinguishable from a bug.
+
+interface Source {
+  table: string;
+  column?: string;
+  filter: string;
+}
+
+interface Props {
+  /** What was counted, in plain words. */
+  label: string;
+  /** The count. null ONLY when no count was produced — see `unavailable`. */
+  value?: number | null;
+  /** Why there is no value. Required when `value` is null. */
+  unavailable?: string | null;
+  /** Provenance from analytics.ts, rendered under "How this was counted". */
+  source?: Source | null;
+  /** A qualification the reader needs to read the number correctly. */
+  note?: string | null;
+  /** `attention` marks a figure that represents outstanding work. */
+  tone?: 'plain' | 'attention';
+  /** Where this figure is worked, if it is workable somewhere. */
+  href?: string | null;
+  /** Link text, when `href` is given. */
+  hrefLabel?: string | null;
+  /** Denominator, for a gap figure: "142 of 1,908 rows examined". */
+  outOf?: number | null;
+}
+
+const {
+  label,
+  value = null,
+  unavailable = null,
+  source = null,
+  note = null,
+  tone = 'plain',
+  href = null,
+  hrefLabel = null,
+  outOf = null,
+} = Astro.props;
+
+const NUM = new Intl.NumberFormat('en-IN');
+
+const measured = typeof value === 'number' && Number.isFinite(value);
+const shown = measured ? NUM.format(value as number) : '—';
+
+// A null with no stated reason is a defect in the CALLER, and the card says so
+// rather than presenting an unexplained dash the reader will read as zero.
+const reason = measured
+  ? null
+  : (unavailable && unavailable.trim())
+    ? unavailable.trim()
+    : 'This figure was not produced, and no reason was recorded. Report this — the dashboard should never show an unexplained blank.';
+---
+
+<div class="stat" class:list={[{ 'stat-attention': tone === 'attention' && measured && (value as number) > 0, 'stat-void': !measured }]}>
+  <div class="stat-label">{label}</div>
+  <div class="stat-value" aria-hidden={!measured ? 'true' : undefined}>{shown}</div>
+
+  {measured && outOf != null && (
+    <div class="stat-of">of {NUM.format(outOf)} rows examined</div>
+  )}
+
+  {!measured && (
+    <p class="stat-reason">{reason}</p>
+  )}
+
+  {note && <p class="stat-note">{note}</p>}
+
+  {href && (
+    <a class="stat-link" href={href}>{hrefLabel || 'Work this'} →</a>
+  )}
+
+  {source && (
+    <details class="stat-src">
+      <summary>How this was counted</summary>
+      <dl>
+        <dt>Table</dt><dd><code>{source.table}</code></dd>
+        {source.column && (<Fragment><dt>Column</dt><dd><code>{source.column}</code></dd></Fragment>)}
+        <dt>Filter</dt><dd><code>{source.filter}</code></dd>
+      </dl>
+    </details>
+  )}
+</div>
+
+<style is:global>
+  .stat {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 18px 14px;
+    box-shadow: var(--shadow-1);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .stat-attention { border-left: 3px solid var(--red); }
+  .stat-void { background: var(--card-2); }
+
+  .stat-label {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .stat-value {
+    font-family: var(--font-display);
+    font-size: 2.1rem;
+    font-weight: 600;
+    line-height: 1.1;
+    margin-top: 8px;
+    color: var(--white);
+    overflow-wrap: anywhere;
+  }
+  .stat-attention .stat-value { color: var(--red-2); }
+  .stat-void .stat-value { color: var(--muted-2); font-size: 1.6rem; }
+
+  .stat-of {
+    font-size: 0.74rem;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .stat-reason {
+    font-size: 0.78rem;
+    line-height: 1.6;
+    color: var(--off-white);
+    margin-top: 8px;
+  }
+  .stat-note {
+    font-size: 0.76rem;
+    line-height: 1.6;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+  .stat-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    margin-top: 4px;
+  }
+  .stat-link:hover { color: var(--gold-3); }
+
+  .stat-src { margin-top: auto; padding-top: 10px; }
+  .stat-src summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .stat-src summary:hover { color: var(--gold-2); }
+  .stat-src dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 12px;
+    font-size: 0.74rem;
+    line-height: 1.55;
+    padding-bottom: 6px;
+  }
+  .stat-src dt {
+    font-family: var(--font-display);
+    font-size: 0.58rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: 2px;
+  }
+  .stat-src dd { color: var(--off-white); min-width: 0; }
+  .stat-src code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    overflow-wrap: anywhere;
+  }
+</style>

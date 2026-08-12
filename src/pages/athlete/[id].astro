@@ -1,0 +1,758 @@
+---
+/**
+ * THE PUBLIC REGISTER ENTRY FOR ONE PERSON — /athlete/:federationId
+ *
+ * Everything on this page comes from `publicAthleteProfile()` in
+ * src/db/athletes.ts. That function is the PUBLIC projection — a separate
+ * function from `athletePassport()`, not the same function with a flag, exactly
+ * so a flag defaulting the wrong way can never leak personal data here.
+ *
+ * WHAT IT WILL NOT GIVE THIS PAGE, AND SO THIS PAGE CANNOT PRINT:
+ *   no email, no telephone number, no address, no gender, and no date of birth.
+ *   Birth YEAR only — because an age category is a competition fact, and
+ *   withholding the year while publishing the category it implies is theatre.
+ *
+ * WHAT IT DOES GIVE, AND WHY EACH IS SHOWN THE WAY IT IS:
+ *
+ *  · GRADE + PROVENANCE. A grade traced to a recorded examination and a grade
+ *    carried over from paper records are both real and are NOT the same claim.
+ *    The page states which, in the federation's own words — the identical
+ *    wording /api/verify returns, so the website and the verification service
+ *    can never tell an employer two different stories about one grade.
+ *
+ *  · FINAL RESULTS ONLY. The module selects `status = 'final'`. A provisional
+ *    result is one the federation has not yet stood behind, and it must never
+ *    reach a public profile. The page says so out loud, because a competitor
+ *    who placed last weekend needs to know why they cannot see it yet.
+ *
+ *  · NO ZERO PRESENTED AS A MEASUREMENT. Where there are no final results the
+ *    page says there are none. It does not render a 0–0–0 medal tally, which
+ *    reads as a measured outcome rather than an empty register.
+ */
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db, schema as s } from '@/db';
+import { publicAthleteProfile, type PublicAthleteProfile, type Provenance } from '@/db/athletes';
+import { eq } from 'drizzle-orm';
+
+export const prerender = false;
+
+const raw = (Astro.params.id ?? '').trim();
+// The federation id is the whole key. Anything absurd is rejected before it
+// reaches a query rather than being normalised into a lookup for something else.
+const federationId = raw.slice(0, 60).toUpperCase();
+const looksLikeId = /^[A-Z0-9][A-Z0-9-]{2,59}$/.test(federationId);
+
+type PageState = 'found' | 'not_found' | 'not_configured' | 'unavailable' | 'bad_id';
+
+let state: PageState = 'not_configured';
+let profile: PublicAthleteProfile | null = null;
+let stateName: string | null = null;
+let dojoName: string | null = null;
+let dojoCode: string | null = null;
+
+if (!looksLikeId) {
+  state = 'bad_id';
+} else if (isConfigured()) {
+  try {
+    const database = db();
+    profile = await publicAthleteProfile(database, federationId);
+    if (!profile) {
+      state = 'not_found';
+    } else {
+      state = 'found';
+      // Unit names, so the entry reads as a place rather than a foreign key.
+      if (profile.stateUnitId != null) {
+        const u = (await database
+          .select({ stateName: s.stateUnits.state })
+          .from(s.stateUnits)
+          .where(eq(s.stateUnits.id, profile.stateUnitId))
+          .limit(1))[0];
+        stateName = u?.stateName ?? null;
+      }
+      if (profile.dojoId != null) {
+        const d = (await database
+          .select({ name: s.dojos.name, code: s.dojos.code, status: s.dojos.status })
+          .from(s.dojos)
+          .where(eq(s.dojos.id, profile.dojoId))
+          .limit(1))[0];
+        // A club that never reached affiliation is not advertised from a public
+        // profile — the affiliated directory is the place that decides what may
+        // be listed, and 'draft' means an application, not an affiliation.
+        if (d && d.status !== 'draft') {
+          dojoName = d.name;
+          dojoCode = d.code;
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[athlete] profile read failed', err);
+    state = 'unavailable';
+  }
+}
+
+// A missing record is a 404 for crawlers and monitoring, not a 200 with an
+// apology in the body.
+if (state === 'not_found' || state === 'bad_id') Astro.response.status = 404;
+if (state === 'unavailable') Astro.response.status = 503;
+
+/**
+ * The federation's own wording for what a provenance means. Copied from the
+ * public verification service deliberately: two different explanations of the
+ * same word, on two surfaces of one federation, is how an employer ends up
+ * believing whichever was more flattering.
+ */
+const PROVENANCE_NOTE: Record<Provenance, string> = {
+  examined:
+    'This credential is traced to a recorded examination held by the federation.',
+  unverified_legacy:
+    'This grade predates the federation’s digital examination records. The federation holds evidence for it, but it is not backed by an examination scorecard in this system.',
+};
+const PROVENANCE_LABEL: Record<Provenance, string> = {
+  examined: 'Examined',
+  unverified_legacy: 'Legacy record',
+};
+
+const fmtDate = (iso: string | null): string => {
+  if (!iso) return 'Not recorded';
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+};
+
+const ordinal = (n: number): string => {
+  const suffix = n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th';
+  return `${n}${suffix}`;
+};
+
+const medalTotal = profile ? profile.medals.gold + profile.medals.silver + profile.medals.bronze : 0;
+const where = profile
+  ? [profile.city, stateName].filter(Boolean).join(', ')
+  : '';
+
+const pageTitle =
+  state === 'found' && profile
+    ? `${profile.fullName} — Public Register Entry — MMAKF`
+    : 'Public Register Entry — MMAKF';
+---
+
+<Base
+  title={pageTitle}
+  description="A public register entry from the MMAKF federation register: grade with its provenance, final competition results, certificates and published squad selections. No personal contact details are published."
+>
+  {state === 'found' && profile && (
+    <Fragment>
+      {/* ═══════ IDENTITY ═══════ */}
+      <section class="ath-head">
+        <div class="container">
+          <a href="/athletes" class="ath-back">← Athlete register</a>
+          <div class="eyebrow">Public register entry</div>
+          <h1 class="display-1 ath-name">{profile.fullName}</h1>
+          <div class="rule"></div>
+
+          <dl class="ath-ident">
+            <div class="ath-ident-row">
+              <dt>Federation ID</dt>
+              <dd class="ath-fid">{profile.federationId}</dd>
+            </div>
+            <div class="ath-ident-row">
+              <dt>Based</dt>
+              <dd>{where || 'Not recorded'}</dd>
+            </div>
+            <div class="ath-ident-row">
+              <dt>Dojo</dt>
+              <dd>
+                {dojoName ? (
+                  <Fragment>
+                    {dojoName}
+                    {dojoCode && <span class="ath-sub"> · {dojoCode}</span>}
+                  </Fragment>
+                ) : (
+                  'Not recorded'
+                )}
+              </dd>
+            </div>
+            <div class="ath-ident-row">
+              <dt>Year of birth</dt>
+              <dd>
+                {profile.birthYear ?? 'Not recorded'}
+                <span class="ath-sub"> — the federation publishes the year only, never a full date of birth.</span>
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      {/* ═══════ GRADE ═══════ */}
+      <section>
+        <div class="container">
+          <div class="section-head fade">
+            <div class="eyebrow">Grade</div>
+            <h2 class="display-2">Current <em class="r">grade</em>, and how it is known.</h2>
+            <div class="rule"></div>
+          </div>
+
+          {profile.currentGrade ? (
+            <div class="ath-grade fade" class:list={[`prov-${profile.currentGrade.provenance}`]}>
+              <div class="ath-grade-main">
+                <div class="ath-grade-label">{profile.currentGrade.label}</div>
+                <div class="ath-grade-kind">{profile.currentGrade.kind === 'dan' ? 'Dan grade' : 'Kyu grade'}</div>
+              </div>
+              <dl class="ath-grade-meta">
+                <div class="ath-meta-row">
+                  <dt>Awarded</dt>
+                  <dd>{fmtDate(profile.currentGrade.awardedOn)}</dd>
+                </div>
+                <div class="ath-meta-row">
+                  <dt>Provenance</dt>
+                  <dd>
+                    <span class="pill ath-prov" class:list={[`prov-${profile.currentGrade.provenance}`]}>
+                      <span class="pill-dot"></span>{PROVENANCE_LABEL[profile.currentGrade.provenance]}
+                    </span>
+                  </dd>
+                </div>
+              </dl>
+              <p class="ath-prov-note">{PROVENANCE_NOTE[profile.currentGrade.provenance]}</p>
+            </div>
+          ) : (
+            <div class="ath-none fade" role="note">
+              <h3 class="ath-none-h">No active grade is recorded</h3>
+              <p class="body-txt">
+                The federation register holds no active grade for this member. That is a statement
+                about this register only. It does not mean the member holds no grade — a grade awarded
+                before the federation kept digital records appears here once the office has entered it.
+              </p>
+            </div>
+          )}
+
+          <div class="ath-verify fade mt-8">
+            <p class="body-txt">
+              Anyone can check this record independently — an employer, a school, a tournament
+              organiser — using the federation ID above.
+            </p>
+            <div class="flex flex-wrap gap-3 mt-4">
+              <a href={`/registration#verify`} class="btn btn-gold">Verify this member ID</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ═══════ COMPETITION RECORD ═══════ */}
+      <section class="bg2">
+        <div class="container">
+          <div class="section-head fade">
+            <div class="eyebrow">Competition record</div>
+            <h2 class="display-2">Final <em class="r">results</em> only.</h2>
+            <div class="rule"></div>
+            <p class="lead">
+              A result appears here once the federation has finalised it. Results still marked
+              provisional — including anything from an event whose results are under correction or
+              protest — are deliberately absent, because a provisional result is one the federation has
+              not yet stood behind.
+            </p>
+          </div>
+
+          {profile.results.length === 0 ? (
+            <div class="ath-none fade" role="note">
+              <h3 class="ath-none-h">No final competition result is recorded</h3>
+              <p class="body-txt">
+                The register holds no finalised result for this member.
+                <strong> This is not a medal count of zero</strong> — it is an empty register entry.
+                It may mean the member has not competed, or that results from events they entered have
+                not yet been finalised and entered into this system.
+              </p>
+            </div>
+          ) : (
+            <Fragment>
+              <div class="ath-medals fade" role="group" aria-label="Medals from final results">
+                <div class="ath-medal">
+                  <div class="ath-medal-n">{profile.medals.gold}</div>
+                  <div class="ath-medal-l">Gold</div>
+                </div>
+                <div class="ath-medal">
+                  <div class="ath-medal-n">{profile.medals.silver}</div>
+                  <div class="ath-medal-l">Silver</div>
+                </div>
+                <div class="ath-medal">
+                  <div class="ath-medal-n">{profile.medals.bronze}</div>
+                  <div class="ath-medal-l">Bronze</div>
+                </div>
+                <div class="ath-medal ath-medal-total">
+                  <div class="ath-medal-n">{profile.results.length}</div>
+                  <div class="ath-medal-l">Final results</div>
+                </div>
+              </div>
+              <p class="ath-medal-note fade">
+                {medalTotal === 0
+                  ? 'No medal is recorded against these results. Every finalised entry is listed below regardless of placing.'
+                  : 'Counted from the finalised results listed below and from nothing else.'}
+              </p>
+
+              <div
+                class="tbl-scroll fade mt-6"
+                tabindex="0"
+                role="region"
+                aria-label="Final competition results"
+              >
+                <table class="ath-tbl">
+                  <caption class="sr-only">
+                    Finalised competition results recorded for {profile.fullName}.
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Event</th>
+                      <th scope="col">Category</th>
+                      <th scope="col">Date</th>
+                      <th scope="col">Placing</th>
+                      <th scope="col">Medal</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {profile.results.map((r) => (
+                      <tr>
+                        <th scope="row" class="ath-ev">
+                          {r.eventTitle}
+                          <span class="ath-sub ath-block">{r.eventCode}</span>
+                        </th>
+                        <td>{r.category}</td>
+                        <td class="nowrap">{r.date ? fmtDate(r.date) : 'Not recorded'}</td>
+                        <td class="nowrap">{ordinal(r.placing)}</td>
+                        <td>
+                          {r.medal && r.medal !== 'participation' ? (
+                            <span class="pill ath-medal-pill" class:list={[`m-${r.medal}`]}>
+                              <span class="pill-dot"></span>{r.medal}
+                            </span>
+                          ) : (
+                            <span class="text-muted">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div class="tbl-hint">Scroll the table sideways to see every column</div>
+            </Fragment>
+          )}
+        </div>
+      </section>
+
+      {/* ═══════ CERTIFICATES ═══════ */}
+      <section>
+        <div class="container">
+          <div class="section-head fade">
+            <div class="eyebrow">Certificates</div>
+            <h2 class="display-2">Issued <em class="r">certificates</em>.</h2>
+            <div class="rule"></div>
+            <p class="lead">
+              Certificates the federation has issued and not withdrawn. A revoked certificate is
+              removed from this list — checking a certificate number against the verification service
+              is the way to establish whether a certificate someone is holding is still good.
+            </p>
+          </div>
+
+          {profile.certificates.length === 0 ? (
+            <div class="ath-none fade" role="note">
+              <h3 class="ath-none-h">No certificate is recorded</h3>
+              <p class="body-txt">
+                The register holds no issued certificate for this member. A paper certificate the
+                member already holds is not evidence that this register is wrong — it means the
+                certificate has not been entered into this system. The federation office can confirm.
+              </p>
+            </div>
+          ) : (
+            <ul class="ath-certs fade">
+              {profile.certificates.map((c) => (
+                <li class="ath-cert" class:list={[`prov-${c.provenance}`]}>
+                  <div class="ath-cert-main">
+                    <h3 class="ath-cert-title">{c.title}</h3>
+                    <div class="ath-cert-no">{c.certificateNo}</div>
+                  </div>
+                  <dl class="ath-meta">
+                    <div class="ath-meta-row">
+                      <dt>Issued</dt>
+                      <dd>{fmtDate(c.issuedOn)}</dd>
+                    </div>
+                    <div class="ath-meta-row">
+                      <dt>Provenance</dt>
+                      <dd>
+                        <span class="pill ath-prov" class:list={[`prov-${c.provenance}`]}>
+                          <span class="pill-dot"></span>{PROVENANCE_LABEL[c.provenance]}
+                        </span>
+                      </dd>
+                    </div>
+                  </dl>
+                  <p class="ath-prov-note">{PROVENANCE_NOTE[c.provenance]}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+
+      {/* ═══════ SQUADS ═══════ */}
+      {profile.squads.length > 0 && (
+        <section class="bg2">
+          <div class="container">
+            <div class="section-head fade">
+              <div class="eyebrow">Selection</div>
+              <h2 class="display-2">Published <em class="r">squads</em>.</h2>
+              <div class="rule"></div>
+              <p class="lead">
+                Squad selections the federation has published. A squad still in draft never appears
+                here — a selection is not a selection until the federation has announced it.
+              </p>
+            </div>
+            <ul class="ath-squads fade">
+              {profile.squads.map((sq) => (
+                <li class="ath-squad">
+                  <h3 class="ath-squad-t">{sq.title}</h3>
+                  <div class="ath-squad-m">{sq.season} · {sq.role}</div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
+
+      {/* ═══════ WHAT THIS PAGE DOES NOT PUBLISH ═══════ */}
+      <section>
+        <div class="container">
+          <div class="ath-privacy fade" role="note">
+            <div class="eyebrow">Privacy</div>
+            <h2 class="ath-privacy-h">What this entry deliberately omits.</h2>
+            <div class="rule"></div>
+            <p class="body-txt">
+              This is the public projection of a federation record. It carries no email address, no
+              telephone number, no postal address, and no full date of birth — the year of birth alone
+              is published, because an age category is a competition fact. The member’s own full record
+              — every grade ever held, every grading, every licence, and results not yet final — is
+              private to the member and to the officers responsible for them.
+            </p>
+            <p class="body-txt mt-4">
+              If something on this page is wrong, the federation office corrects the register rather
+              than the page: results and certificates lock, and a correction creates a new version
+              rather than editing the old one in place.
+            </p>
+            <div class="flex flex-wrap gap-3 mt-6">
+              <a href="/contact" class="btn btn-gold">Report an error in this entry</a>
+              <a href="/athletes" class="btn btn-ghost">Back to the register</a>
+            </div>
+          </div>
+        </div>
+      </section>
+    </Fragment>
+  )}
+
+  {/* ═══════ NOT FOUND / UNAVAILABLE ═══════ */}
+  {state !== 'found' && (
+    <section class="ath-head">
+      <div class="container">
+        <a href="/athletes" class="ath-back">← Athlete register</a>
+        <div class="eyebrow">Public register entry</div>
+
+        {state === 'bad_id' && (
+          <Fragment>
+            <h1 class="display-1 ath-name">Not a federation ID.</h1>
+            <div class="rule"></div>
+            <p class="lead" role="alert">
+              That address does not contain something the federation could read as a member ID. A
+              federation ID looks like <span class="ath-fid">MMAKF-MEM-2026-000001</span> and is
+              printed on a membership card and on a certificate.
+            </p>
+          </Fragment>
+        )}
+
+        {state === 'not_found' && (
+          <Fragment>
+            <h1 class="display-1 ath-name">No public entry for that ID.</h1>
+            <div class="rule"></div>
+            <p class="lead" role="alert">
+              The federation register holds no <strong>public</strong> entry for
+              <span class="ath-fid"> {federationId}</span>.
+            </p>
+            <div class="ath-none mt-6">
+              <h3 class="ath-none-h">What that does and does not mean</h3>
+              <p class="body-txt">
+                It means one of three things, and this page cannot tell you which: the ID was mistyped;
+                the member has not been entered into this system; or the record exists but is not
+                active, and inactive records are not published. It does <strong>not</strong> mean the
+                federation has found that the person is not a member. Ask the office rather than
+                treating this page as a finding.
+              </p>
+            </div>
+            <div class="flex flex-wrap gap-3 mt-6">
+              <a href="/athletes" class="btn btn-gold">Search the register</a>
+              <a href="/registration#verify" class="btn btn-ghost">Verify a member ID</a>
+              <a href="/contact" class="btn btn-ghost">Ask the federation office</a>
+            </div>
+          </Fragment>
+        )}
+
+        {state === 'not_configured' && (
+          <Fragment>
+            <h1 class="display-1 ath-name">The register is not available here.</h1>
+            <div class="rule"></div>
+            <p class="lead">
+              The federation records database is not configured for this deployment, so no register
+              entry can be read. <strong>This is a deployment state, not an empty register</strong> —
+              nothing here should be read as a statement about any member. The federation office holds
+              the register.
+            </p>
+            <div class="flex flex-wrap gap-3 mt-6">
+              <a href="/contact" class="btn btn-gold">Ask the federation office</a>
+              <a href="/registration" class="btn btn-ghost">Member registration</a>
+            </div>
+          </Fragment>
+        )}
+
+        {state === 'unavailable' && (
+          <Fragment>
+            <h1 class="display-1 ath-name">The register could not be read.</h1>
+            <div class="rule"></div>
+            <p class="lead" role="alert">
+              The federation records service did not answer this request.
+              <strong> This is not a result about that member</strong> — it is a fault on our side.
+              Please try again shortly.
+            </p>
+            <div class="flex flex-wrap gap-3 mt-6">
+              <a href={`/athlete/${encodeURIComponent(federationId)}`} class="btn btn-primary">Try again</a>
+              <a href="/contact" class="btn btn-ghost">Ask the federation office</a>
+            </div>
+          </Fragment>
+        )}
+      </div>
+    </section>
+  )}
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .nowrap { white-space: nowrap; }
+  .ath-block { display: block; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
+  /* ── Head ── */
+  .ath-head {
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
+    padding: 72px 0 56px;
+  }
+  @media (max-width: 640px) { .ath-head { padding: 48px 0 40px; } }
+  .ath-back {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  .ath-back:hover { color: var(--gold-2); }
+  .ath-name { margin-top: 14px; font-size: clamp(2.1rem, 5.4vw, 3.6rem); }
+
+  .ath-ident { margin: 0; display: grid; gap: 12px; max-width: 72ch; }
+  .ath-ident-row {
+    display: grid;
+    grid-template-columns: 15ch minmax(0, 1fr);
+    gap: 14px;
+    align-items: baseline;
+  }
+  @media (max-width: 520px) { .ath-ident-row { grid-template-columns: 1fr; gap: 2px; } }
+  .ath-ident dt {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .ath-ident dd { margin: 0; font-size: 0.92rem; color: var(--off-white); overflow-wrap: anywhere; }
+  .ath-fid {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.86em;
+    color: var(--gold-2);
+    overflow-wrap: anywhere;
+  }
+  .ath-sub { color: var(--muted); font-size: 0.8rem; }
+
+  /* ── Grade ── */
+  .ath-grade {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    padding: 28px 30px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 18px 32px;
+    max-width: 860px;
+  }
+  .ath-grade.prov-unverified_legacy { border-left-color: var(--red); }
+  @media (max-width: 700px) { .ath-grade { grid-template-columns: 1fr; padding: 22px 18px; } }
+  .ath-grade-label {
+    font-family: var(--font-display);
+    font-size: clamp(1.7rem, 4.4vw, 2.4rem);
+    font-weight: 600;
+    color: var(--white);
+    line-height: 1.1;
+  }
+  .ath-grade-kind {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+  .ath-grade-meta { margin: 0; display: grid; gap: 10px; align-content: start; }
+  .ath-prov-note {
+    grid-column: 1 / -1;
+    font-size: 0.85rem;
+    line-height: 1.7;
+    color: var(--off-white);
+    padding-left: 12px;
+    border-left: 2px solid var(--border-2);
+    max-width: 74ch;
+  }
+  .ath-prov.prov-examined { color: var(--gold-2); border-color: var(--gold-dim); }
+  .ath-prov.prov-unverified_legacy { color: var(--red-2); border-color: rgba(142, 18, 18, 0.32); }
+
+  .ath-meta, .ath-grade-meta { margin: 0; }
+  .ath-meta-row {
+    display: grid;
+    grid-template-columns: 13ch minmax(0, 1fr);
+    gap: 12px;
+    align-items: baseline;
+  }
+  @media (max-width: 480px) { .ath-meta-row { grid-template-columns: 1fr; gap: 2px; } }
+  .ath-meta-row dt {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .ath-meta-row dd { margin: 0; font-size: 0.86rem; color: var(--off-white); }
+
+  /* ── Empty / note blocks ── */
+  .ath-none, .ath-verify, .ath-privacy {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    padding: 26px 28px;
+    max-width: 80ch;
+  }
+  .ath-privacy { background: var(--card-2); max-width: 880px; padding: 36px 40px; }
+  @media (max-width: 560px) {
+    .ath-none, .ath-verify { padding: 20px 18px; }
+    .ath-privacy { padding: 26px 20px; }
+  }
+  .ath-none-h {
+    font-family: var(--font-display);
+    font-size: 1.04rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-bottom: 10px;
+  }
+  .ath-privacy-h {
+    font-family: var(--font-display);
+    font-size: clamp(1.4rem, 3.4vw, 1.9rem);
+    font-weight: 600;
+    color: var(--white);
+    margin-top: 14px;
+  }
+
+  /* ── Medals ── */
+  .ath-medals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; max-width: 720px; }
+  @media (max-width: 600px) { .ath-medals { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .ath-medal {
+    background: var(--card);
+    border: 1px solid var(--border);
+    padding: 20px 18px;
+    text-align: center;
+  }
+  .ath-medal-total { border-color: var(--border-2); background: var(--card-2); }
+  .ath-medal-n {
+    font-family: var(--font-display);
+    font-size: 2.2rem;
+    font-weight: 600;
+    color: var(--white);
+    line-height: 1;
+  }
+  .ath-medal-l {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+  .ath-medal-note { font-size: 0.82rem; color: var(--muted); margin-top: 12px; max-width: 72ch; }
+
+  /* ── Results table ── */
+  .ath-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    min-width: 720px;
+  }
+  .ath-tbl th, .ath-tbl td {
+    padding: 13px 16px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.86rem;
+    color: var(--off-white);
+  }
+  .ath-tbl thead th {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    background: var(--card-2);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .ath-tbl tbody tr:last-child th, .ath-tbl tbody tr:last-child td { border-bottom: 0; }
+  .ath-ev { font-family: var(--font-display); font-weight: 600; font-size: 0.93rem; color: var(--white); max-width: 30ch; }
+  .ath-medal-pill { text-transform: capitalize; white-space: nowrap; }
+  .ath-medal-pill.m-gold { color: var(--gold-2); border-color: var(--gold-dim); }
+  .ath-medal-pill.m-silver { color: var(--off-white); }
+  .ath-medal-pill.m-bronze { color: var(--red-2); border-color: rgba(142, 18, 18, 0.32); }
+
+  /* ── Certificates ── */
+  .ath-certs { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; max-width: 900px; }
+  .ath-cert {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    padding: 20px 22px;
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+    gap: 14px 28px;
+  }
+  .ath-cert.prov-unverified_legacy { border-left-color: var(--red); }
+  @media (max-width: 700px) { .ath-cert { grid-template-columns: 1fr; padding: 18px 16px; } }
+  .ath-cert-title { font-family: var(--font-display); font-size: 1rem; font-weight: 600; color: var(--white); }
+  .ath-cert-no {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.76rem;
+    color: var(--gold-2);
+    margin-top: 6px;
+    overflow-wrap: anywhere;
+  }
+
+  /* ── Squads ── */
+  .ath-squads { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; max-width: 760px; }
+  .ath-squad { background: var(--card); border: 1px solid var(--border); padding: 18px 22px; }
+  .ath-squad-t { font-family: var(--font-display); font-size: 1rem; font-weight: 600; color: var(--white); }
+  .ath-squad-m { font-size: 0.84rem; color: var(--muted); margin-top: 6px; text-transform: capitalize; }
+</style>

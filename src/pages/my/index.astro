@@ -1,0 +1,582 @@
+---
+// /my — the member's own landing page.
+//
+// THE WHOLE SURFACE IS BUILT AROUND ONE STRUCTURAL FACT: this page reads the
+// CALLER's record and takes no identifier of any kind. There is no id in the
+// path, none in the query string and none in a form. A member area that accepts
+// "whose record?" as input is a member area that will eventually be sent
+// somebody else's, and no amount of checking afterwards undoes that shape.
+//
+// Four honest states before any data is shown, each with its own reason:
+//   · no database configured   — the member area cannot work, and says why
+//   · not signed in            — a sign-in form
+//   · a SHARED credential      — attributable to no person, so it has no record
+//   · an account with no person record linked — a clear explanation, not a crash
+//
+// Nothing on this page is computed locally. The grade, the memberships, the
+// licences and the results all come from athletePassport(); the course progress
+// comes from courseProgress(), which DERIVES the percentage rather than reading
+// the cached column. Where the federation has recorded nothing, the section
+// says so — an empty table is never dressed up as a measurement.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { and, desc, eq, inArray } from 'drizzle-orm';
+import { athletePassport, type AthletePassport } from '@/db/athletes';
+import { courseProgress, type CourseProgressReport } from '@/db/academy';
+import { liveNow, upcomingClasses } from '@/lib/youtube';
+
+export const prerender = false;
+
+const configured = isConfigured();
+
+// identify() is the only way this page learns who the caller is. A user cookie
+// that no longer resolves — disabled account, bumped epoch, revoked bindings —
+// returns null rather than falling back to a shared credential.
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+type Gate = 'no_database' | 'signed_out' | 'shared_credential' | 'no_person' | 'ok';
+
+let gate: Gate = 'ok';
+let person: any = null;
+let loadError: string | null = null;
+
+let passport: AthletePassport | null = null;
+let entries: any[] = [];
+let courses: Array<{ enrolment: any; course: any; progress: CourseProgressReport | null; error: string | null }> = [];
+let live: any[] = [];
+let upcoming: any[] = [];
+
+if (!configured) {
+  gate = 'no_database';
+} else if (!identity) {
+  gate = 'signed_out';
+} else if (identity.userId == null) {
+  gate = 'shared_credential';
+} else {
+  const user = (
+    await db().select({ personId: s.users.personId }).from(s.users).where(eq(s.users.id, identity.userId)).limit(1)
+  )[0];
+  if (!user?.personId) {
+    gate = 'no_person';
+  } else {
+    person = (await db().select().from(s.persons).where(eq(s.persons.id, user.personId)).limit(1))[0] ?? null;
+    if (!person) {
+      gate = 'no_person';
+    } else {
+      try {
+        // The caller's own federation id, read from their own person row. It is
+        // never accepted from the request.
+        passport = await athletePassport(db(), identity.principal, person.federationId);
+
+        // Own entries only, keyed on the caller's own person id — so there is
+        // no scope to leak. Withdrawn entries are excluded because this list
+        // answers "what am I entered for", not "what did I ever enter".
+        entries = await db()
+          .select({
+            entryNo: s.eventEntries.entryNo,
+            status: s.eventEntries.status,
+            checkedInAt: s.eventEntries.checkedInAt,
+            category: s.eventCategories.label,
+            eventCode: s.competitionEvents.code,
+            eventTitle: s.competitionEvents.title,
+            eventStatus: s.competitionEvents.status,
+            startsOn: s.competitionEvents.startsOn,
+            venue: s.competitionEvents.venue,
+            city: s.competitionEvents.city,
+          })
+          .from(s.eventEntries)
+          .innerJoin(s.competitionEvents, eq(s.eventEntries.eventId, s.competitionEvents.id))
+          .innerJoin(s.eventCategories, eq(s.eventEntries.categoryId, s.eventCategories.id))
+          .where(
+            and(
+              eq(s.eventEntries.personId, person.id),
+              inArray(s.competitionEvents.status, [
+                'published',
+                'registration_open',
+                'registration_closed',
+                'check_in',
+                'live',
+                'results_pending',
+              ])
+            )
+          )
+          .orderBy(s.competitionEvents.startsOn)
+          .limit(25);
+
+        const enrolments = await db()
+          .select({ enrolment: s.enrolments, course: s.courses })
+          .from(s.enrolments)
+          .innerJoin(s.courses, eq(s.enrolments.courseId, s.courses.id))
+          .where(eq(s.enrolments.personId, person.id))
+          .orderBy(desc(s.enrolments.enrolledAt))
+          .limit(12);
+
+        courses = await Promise.all(
+          enrolments.map(async (row: any) => {
+            try {
+              return {
+                enrolment: row.enrolment,
+                course: row.course,
+                progress: await courseProgress(db(), { principal: identity.principal }, row.enrolment.id),
+                error: null,
+              };
+            } catch (err: any) {
+              return { enrolment: row.enrolment, course: row.course, progress: null, error: String(err?.message ?? err) };
+            }
+          })
+        );
+
+        live = await liveNow(db());
+        upcoming = await upcomingClasses(db(), 5);
+      } catch (err: any) {
+        loadError = String(err?.message ?? err);
+      }
+    }
+  }
+}
+
+const fmt = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? String(v)
+    : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+const fmtTime = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? String(v)
+    : d.toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+};
+
+const titleCase = (v: string) => v.replace(/_/g, ' ');
+
+// A membership is only "current" when the federation's own dates say so. No
+// grace period is invented here.
+const today = new Date().toISOString().slice(0, 10);
+const currentMembership =
+  passport?.memberships.find(
+    (m) => m.status === 'active' && m.validFrom <= today && (m.validTo == null || m.validTo >= today)
+  ) ?? null;
+
+const inProgress = courses.filter((c) => c.enrolment.status === 'active');
+const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
+---
+
+<Base
+  title="My MMAKF — member area"
+  description="The MMAKF member area: your grade, your membership standing, your event entries, your courses and the live classroom."
+>
+  <section>
+    <div class="container">
+      {gate === 'no_database' && (
+        <div class="card">
+          <div class="eyebrow">Member area</div>
+          <h1 class="display-2" style="margin-top:14px">Not available on this deployment.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            The member area reads the federation's system of record, and no federation database is configured for this
+            deployment. Nothing can be shown — not an empty record, and not a placeholder one.
+          </p>
+          <p class="body-txt" style="margin-top:14px">
+            The office can reach the federation at <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a>.
+          </p>
+        </div>
+      )}
+
+      {gate === 'signed_out' && (
+        <div style="max-width:440px;margin:0 auto">
+          <div style="text-align:center;margin-bottom:28px">
+            <div class="eyebrow center" style="justify-content:center">Member area</div>
+            <h1 class="display-2" style="margin-top:14px">Sign in.</h1>
+          </div>
+          <form id="signInForm" class="card" style="padding:28px">
+            <label class="input-label" for="member-email">Email address</label>
+            <input
+              class="input"
+              type="email"
+              id="member-email"
+              name="email"
+              autocomplete="username"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              required
+              placeholder="you@example.com"
+            />
+
+            <label class="input-label" for="member-password" style="margin-top:14px">Password</label>
+            <input class="input" type="password" id="member-password" name="password" autocomplete="current-password" required />
+
+            <div id="signInErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
+
+            <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;min-height:44px">Sign in</button>
+
+            <p class="text-muted" style="margin-top:18px;font-size:.78rem;line-height:1.7">
+              Member accounts are created by the federation office and linked to your member record. If you have no
+              account, write to <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a> quoting your member
+              ID.
+            </p>
+          </form>
+        </div>
+      )}
+
+      {gate === 'shared_credential' && (
+        <div class="card">
+          <div class="eyebrow">Member area</div>
+          <h1 class="display-2" style="margin-top:14px">This credential belongs to no person.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            You are signed in with a shared office credential. A shared credential cannot identify an individual, so it
+            has no grade, no membership and no learning record of its own — there is nothing here for it to show.
+          </p>
+          <p class="body-txt" style="margin-top:14px">
+            Sign in with your own account to see your own record. The <a class="text-gold" href="/admin">administration
+            area</a> is where a shared credential belongs.
+          </p>
+        </div>
+      )}
+
+      {gate === 'no_person' && (
+        <div class="card">
+          <div class="eyebrow">Member area</div>
+          <h1 class="display-2" style="margin-top:14px">Your account is not linked to a member record.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            Your sign-in works. What it is not yet attached to is a person in the federation's register, and everything
+            in the member area — grade, membership, entries, courses — is read from that record.
+          </p>
+          <p class="body-txt" style="margin-top:14px">
+            The federation office makes the link. Write to <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a>
+            with your member ID and the email address you signed in with. Nothing is lost in the meantime; the record
+            exists, this account simply does not point at it yet.
+          </p>
+        </div>
+      )}
+
+      {gate === 'ok' && (
+        <>
+          <div class="section-head" style="margin-bottom:36px">
+            <div class="eyebrow">Member area</div>
+            <h1 class="display-2" style="margin-top:14px">{person.fullName}</h1>
+            <div class="rule"></div>
+            <p class="lead">
+              Member ID <strong>{person.federationId}</strong>. Everything below is read from the federation's system of
+              record at the moment you loaded this page.
+            </p>
+          </div>
+
+          {loadError && (
+            <div class="card" role="alert" style="border-left:3px solid var(--red);margin-bottom:24px">
+              <div class="card-title" style="font-size:.95rem">Your record could not be read in full</div>
+              <div class="card-body">{loadError}</div>
+            </div>
+          )}
+
+          {/* ── Standing ─────────────────────────────────────────────── */}
+          <div class="grid grid-3">
+            <div class="card">
+              <div class="card-eyebrow">Current grade</div>
+              {passport?.currentGrade ? (
+                <>
+                  <div class="card-title" style="margin-bottom:8px">{passport.currentGrade.label}</div>
+                  <div class="card-body">
+                    Awarded {fmt(passport.currentGrade.awardedOn)}.
+                    <br />
+                    <span class="pill" style="margin-top:10px">
+                      {passport.currentGrade.provenance === 'examined' ? 'Traced to an examination' : 'Legacy record'}
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <div class="card-body">
+                  The federation holds no active grade record against your name. If you hold a grade awarded before the
+                  register was digitised, the office can record it.
+                </div>
+              )}
+            </div>
+
+            <div class="card">
+              <div class="card-eyebrow">Membership</div>
+              {currentMembership ? (
+                <>
+                  <div class="card-title" style="margin-bottom:8px">{titleCase(currentMembership.category)}</div>
+                  <div class="card-body">
+                    Valid from {fmt(currentMembership.validFrom)}
+                    {currentMembership.validTo ? ` to ${fmt(currentMembership.validTo)}` : ' — no end date recorded'}.
+                  </div>
+                </>
+              ) : passport && passport.memberships.length > 0 ? (
+                <div class="card-body">
+                  No membership is current today. {passport.memberships.length}{' '}
+                  {passport.memberships.length === 1 ? 'membership record is' : 'membership records are'} held —
+                  see your <a class="text-gold" href="/my/passport">passport</a> for their dates and status.
+                </div>
+              ) : (
+                <div class="card-body">No membership record is held against your name.</div>
+              )}
+            </div>
+
+            <div class="card">
+              <div class="card-eyebrow">Licences</div>
+              {passport && passport.licences.length > 0 ? (
+                <div class="card-body">
+                  {passport.licences.map((l) => (
+                    <div style="margin-bottom:6px">
+                      {titleCase(l.registry)}
+                      {l.level ? ` · ${l.level}` : ''} — {titleCase(l.status)}
+                      {l.expiresOn ? `, expires ${fmt(l.expiresOn)}` : ', no expiry recorded'}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div class="card-body">
+                  You hold no instructor, examiner or officiating licence in the federation's registers.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div style="margin-top:22px">
+            <a class="btn btn-gold" href="/my/passport">Open my athlete passport</a>
+            <a class="btn btn-ghost" href="/my/courses" style="margin-left:10px">My courses</a>
+            <a class="btn btn-ghost" href="/live" style="margin-left:10px">Live classroom</a>
+          </div>
+        </>
+      )}
+    </div>
+  </section>
+
+  {gate === 'ok' && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Competition</div>
+          <h2 class="display-2">Events you have <em class="r">entered</em>.</h2>
+          <div class="rule"></div>
+        </div>
+
+        {entries.length === 0 ? (
+          <div class="card">
+            <div class="card-body">
+              No entries are recorded against your name for any event that is currently open, published or under way.
+              Entries appear here as soon as the office records them.
+            </div>
+          </div>
+        ) : (
+          <div class="card" style="padding:0">
+            <div class="tbl-scroll">
+              <table class="my-tbl">
+                <thead>
+                  <tr>
+                    <th>Event</th>
+                    <th>Category</th>
+                    <th>Dates</th>
+                    <th>Where</th>
+                    <th>Entry</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {entries.map((e: any) => (
+                    <tr>
+                      <td>
+                        <strong>{e.eventTitle}</strong>
+                        <div class="text-muted" style="font-size:.74rem">{e.eventCode}</div>
+                      </td>
+                      <td>{e.category}</td>
+                      <td>{fmt(e.startsOn)}</td>
+                      <td>{[e.venue, e.city].filter(Boolean).join(', ') || '—'}</td>
+                      <td class="text-muted" style="font-size:.78rem">{e.entryNo}</td>
+                      <td>
+                        <span class="pill">{titleCase(e.status)}</span>
+                        {e.checkedInAt && <div class="text-muted" style="font-size:.72rem;margin-top:6px">Checked in</div>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        <p class="tbl-hint">Scroll the table sideways</p>
+      </div>
+    </section>
+  )}
+
+  {gate === 'ok' && (
+    <section>
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Academy</div>
+          <h2 class="display-2">Courses in <em class="r">progress</em>.</h2>
+          <div class="rule"></div>
+        </div>
+
+        {courses.length === 0 ? (
+          <div class="card">
+            <div class="card-body">
+              You are not enrolled on any course. Published courses, and the enrolment control for them, are on
+              <a class="text-gold" href="/my/courses"> my courses</a>.
+            </div>
+          </div>
+        ) : (
+          <div class="grid grid-2">
+            {[...inProgress, ...otherCourses].map((c) => (
+              <div class="card">
+                <div class="card-eyebrow">{c.course.category ? titleCase(c.course.category) : 'Course'}</div>
+                <div class="card-title" style="margin-bottom:10px">{c.course.title}</div>
+                <div style="margin-bottom:10px">
+                  <span class="pill">{titleCase(c.enrolment.status)}</span>
+                </div>
+                {c.progress ? (
+                  <div class="card-body">
+                    <div class="bar" aria-hidden="true">
+                      <div class="bar-fill" style={`width:${c.progress.progressPercent}%`}></div>
+                    </div>
+                    <div style="margin-top:8px">
+                      {c.progress.completedLessons} of {c.progress.totalLessons} lessons complete
+                      {c.progress.totalLessons > 0 ? ` — ${c.progress.progressPercent}%` : ''}.
+                    </div>
+                    <div class="text-muted" style="font-size:.78rem;margin-top:8px">{c.progress.note}</div>
+                  </div>
+                ) : (
+                  <div class="card-body">{c.error ?? 'Progress could not be read for this enrolment.'}</div>
+                )}
+                <div style="margin-top:14px">
+                  <a class="btn btn-ghost" href="/my/courses">Open</a>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  )}
+
+  {gate === 'ok' && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Classroom</div>
+          <h2 class="display-2">Live <em class="r">now</em>.</h2>
+          <div class="rule"></div>
+        </div>
+
+        {live.length === 0 && upcoming.length === 0 ? (
+          <div class="card">
+            <div class="card-body">
+              No class is live and none is scheduled. The <a class="text-gold" href="/live">live classroom</a> lists
+              classes as the federation publishes them.
+            </div>
+          </div>
+        ) : (
+          <div class="grid grid-2">
+            {live.map((c: any) => (
+              <div class="card">
+                <div style="margin-bottom:10px"><span class="pill live"><span class="pill-dot"></span>Live now</span></div>
+                <div class="card-title">{c.title}</div>
+                <div class="card-body">Started {fmtTime(c.startedAt)}.</div>
+                <div style="margin-top:14px"><a class="btn btn-primary" href="/live">Join the class</a></div>
+              </div>
+            ))}
+            {upcoming.map((c: any) => (
+              <div class="card">
+                <div style="margin-bottom:10px"><span class="pill upcoming">Scheduled</span></div>
+                <div class="card-title">{c.title}</div>
+                <div class="card-body">{fmtTime(c.scheduledStartAt)}</div>
+                <div style="margin-top:14px"><a class="btn btn-ghost" href="/live">Details</a></div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  )}
+</Base>
+
+<style>
+  .my-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 720px;
+    font-size: 0.86rem;
+  }
+  .my-tbl th {
+    text-align: left;
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .my-tbl td {
+    padding: 15px 18px;
+    border-bottom: 1px solid var(--border);
+    color: var(--off-white);
+    vertical-align: top;
+  }
+  .my-tbl tr:last-child td { border-bottom: 0; }
+
+  .bar {
+    height: 6px;
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-radius: 100px;
+    overflow: hidden;
+  }
+  .bar-fill { height: 100%; background: var(--red); }
+
+  @media (max-width: 640px) {
+    .btn { width: 100%; margin-left: 0 !important; margin-top: 10px; }
+  }
+</style>
+
+<script>
+  // Sign-in. Posts JSON so the CSRF middleware accepts it, and repeats exactly
+  // what the server said rather than guessing at the reason.
+  const form = document.getElementById('signInForm') as HTMLFormElement | null;
+  if (form) {
+    const err = document.getElementById('signInErr') as HTMLElement;
+    const button = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      err.style.display = 'none';
+      button.disabled = true;
+      button.textContent = 'Signing in…';
+
+      const email = (document.getElementById('member-email') as HTMLInputElement).value.trim();
+      const password = (document.getElementById('member-password') as HTMLInputElement).value;
+
+      try {
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.ok) {
+          window.location.reload();
+          return;
+        }
+        err.textContent = data.error || 'Sign-in failed.';
+        err.style.display = 'block';
+      } catch {
+        err.textContent = 'The sign-in request could not be sent. Check your connection and try again.';
+        err.style.display = 'block';
+      }
+      button.disabled = false;
+      button.textContent = 'Sign in';
+    });
+  }
+</script>

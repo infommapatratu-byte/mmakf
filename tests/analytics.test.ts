@@ -370,8 +370,23 @@ describe('nationalDashboard: every figure is a count of rows that exist', () => 
     expect(c.enrolmentsCompleted).toBe(1);
 
     // T3 was raised by nobody on the register; it is still an open ticket.
-    expect(c.openSupportTickets).toBe(2);
-    expect(d.openCasesByKind.disciplinary).toBe(1);
+    expect(c.supportTicketsNotClosed).toBe(2);
+    expect(d.casesNotClosedByKind.disciplinary).toBe(1);
+  });
+
+  // The federation has not said which case statuses close a case, so the module
+  // must not publish one of the answers as though it had been measured.
+  it('names the fact it counted, not an "open case" rule nobody set', async () => {
+    const d = await nationalDashboard(db, federationAdmin, { asAt: AS_AT, now: NOW });
+    expect('openCasesByKind' in d).toBe(false);
+    expect('openSupportTickets' in d.counts).toBe(false);
+
+    // 'decided' and 'appealed' sit between the start and 'closed'. Whichever
+    // side of "open" the federation puts them, the filter states them verbatim.
+    const f = d.sources['casesNotClosed.disciplinary'].filter;
+    for (const st of s.caseStatus.enumValues) {
+      expect(f.includes(`'${st}'`), `${st} unaccounted for`).toBe(st !== 'closed' && st !== 'withdrawn');
+    }
   });
 
   it('reports every status the enum allows, zero included, never a gap', async () => {
@@ -412,10 +427,10 @@ describe('nationalDashboard: every figure is a count of rows that exist', () => 
 describe('safeguarding counts are withheld, not merely hidden', () => {
   it('withholds the count from a national admin who cannot read the cases', async () => {
     const d = await nationalDashboard(db, federationAdmin, { asAt: AS_AT, now: NOW });
-    expect(d.openCasesByKind.safeguarding).toBeUndefined();
-    expect('openCases.safeguarding' in d.counts).toBe(false);
+    expect(d.casesNotClosedByKind.safeguarding).toBeUndefined();
+    expect('casesNotClosed.safeguarding' in d.counts).toBe(false);
 
-    const w = d.withheld.find((x) => x.key === 'openCases.safeguarding');
+    const w = d.withheld.find((x) => x.key === 'casesNotClosed.safeguarding');
     expect(w).toBeTruthy();
     expect(w!.reason).toBe('not_authorised');
     expect(w!.detail).toMatch(/safeguarding:read/);
@@ -423,8 +438,8 @@ describe('safeguarding counts are withheld, not merely hidden', () => {
 
   it('reports it to a principal who may read safeguarding casework', async () => {
     const d = await nationalDashboard(db, superAdmin, { asAt: AS_AT, now: NOW });
-    expect(d.openCasesByKind.safeguarding).toBe(1);
-    expect(d.withheld.find((x) => x.key === 'openCases.safeguarding')).toBeUndefined();
+    expect(d.casesNotClosedByKind.safeguarding).toBe(1);
+    expect(d.withheld.find((x) => x.key === 'casesNotClosed.safeguarding')).toBeUndefined();
   });
 });
 
@@ -454,7 +469,7 @@ describe('a total leaks as quietly as a row', () => {
     expect(d.counts.matches).toBe(2);
     expect(d.counts.resultsFinal).toBe(2);
     expect(d.counts.enrolments).toBe(1);
-    expect(d.counts.openSupportTickets).toBe(1);   // the anonymous ticket is not theirs
+    expect(d.counts.supportTicketsNotClosed).toBe(1);   // the anonymous ticket is not theirs
     expect(d.dojosByStatus).toMatchObject({ active: 1, provisional: 1, revoked: 0 });
   });
 
@@ -483,17 +498,60 @@ describe('a total leaks as quietly as a row', () => {
     expect(d.counts.instructors).toBe(0);   // P3 is in the state but no district
   });
 
-  it('gives a dojo admin and an instructor the same view of their own dojo', async () => {
+  it('gives a dojo admin and an instructor their own dojo’s register figures', async () => {
     const a = await dojoDashboard(db, d1Admin, D1, { asAt: AS_AT, now: NOW });
     const b = await dojoDashboard(db, d1Instructor, D1, { asAt: AS_AT, now: NOW });
-    expect(a.counts).toEqual(b.counts);
 
+    for (const k of ['people', 'entries', 'gradingEvents', 'certificates', 'dojos', 'districtUnits']) {
+      expect(a.counts[k], k).toBe(b.counts[k]);
+    }
     expect(a.counts.people).toBe(2);
     expect(a.counts.entries).toBe(2);
     expect(a.counts.gradingEvents).toBe(1);
     expect(a.counts.certificates).toBe(2);
     expect(a.counts.dojos).toBe(1);
     expect(a.counts.districtUnits).toBe(1);
+  });
+
+  // THE LEAK THIS REPLACES: both principals used to receive an identical
+  // dashboard including a count of open disciplinary cases. D1 has two people
+  // on the register and one of them is under investigation, so "1" names them.
+  it('ATTACK: a dojo instructor cannot learn that a student is under investigation', async () => {
+    const b = await dojoDashboard(db, d1Instructor, D1, { asAt: AS_AT, now: NOW });
+
+    expect(b.casesNotClosedByKind.disciplinary).toBeUndefined();
+    expect('casesNotClosed.disciplinary' in b.counts).toBe(false);
+    expect(b.withheld.find((x) => x.key === 'casesNotClosed.disciplinary')).toMatchObject({
+      reason: 'not_authorised',
+    });
+
+    // Nor through the support desk, whose rows carry a contact email and phone.
+    expect('supportTicketsNotClosed' in b.counts).toBe(false);
+    expect(b.withheld.find((x) => x.key === 'supportTicketsNotClosed')!.detail)
+      .toMatch(/person:read_pii/);
+
+    // A dojo ADMIN holds person:read_pii, so the support figure reaches them —
+    // and disciplinary casework still does not.
+    const a = await dojoDashboard(db, d1Admin, D1, { asAt: AS_AT, now: NOW });
+    expect(a.counts.supportTicketsNotClosed).toBe(1);   // P1's open ticket
+    expect('casesNotClosed.disciplinary' in a.counts).toBe(false);
+
+    // AND THE FIGURE IS REALLY THERE. The same dojo, read by a principal who
+    // holds membership:revoke, reports 1 — so what the instructor met was an
+    // authorisation gate, not an empty table. Without this assertion the two
+    // above would pass just as well if the query were simply broken.
+    const f = await dojoDashboard(db, federationAdmin, D1, { asAt: AS_AT, now: NOW });
+    expect(f.counts['casesNotClosed.disciplinary']).toBe(1);
+    expect(f.casesNotClosedByKind.disciplinary).toBe(1);
+  });
+
+  // A state administrator is no closer to disciplinary authority than an
+  // instructor: cases.ts admits membership:revoke holders and nobody else.
+  it('ATTACK: a state admin cannot count disciplinary cases in their own state', async () => {
+    const d = await stateDashboard(db, jhAdmin, JH, { asAt: AS_AT, now: NOW });
+    expect('casesNotClosed.disciplinary' in d.counts).toBe(false);
+    expect(d.withheld.find((x) => x.key === 'casesNotClosed.disciplinary')!.detail)
+      .toMatch(/membership:revoke/);
   });
 
   it('measures a dojo with no district as a real zero from the database', async () => {
@@ -631,6 +689,85 @@ describe('growthOverTime returns a series with no gaps', () => {
     })).rejects.toThrow(/cannot be reported for a dojo/);
   });
 
+  // A SERIES IS MORE DISCLOSIVE THAN A COUNT. Before this gate existed, scope
+  // was the only check on growthOverTime, so the dojo instructor who could not
+  // be told THAT a student was under investigation could ask for a daily series
+  // and be told the DAY the case was opened.
+  it('ATTACK: a dojo instructor cannot date a disciplinary case to the day', async () => {
+    await expect(growthOverTime(db, d1Instructor, {
+      metric: 'disciplinary_cases', fromDate: '2026-01-01', toDate: '2026-12-31',
+      granularity: 'day', scope: { kind: 'dojo', id: D1 },
+    })).rejects.toBeInstanceOf(ForbiddenError);
+
+    // Nor at any other granularity, nor at any other scope they hold.
+    await expect(growthOverTime(db, d1Admin, {
+      metric: 'disciplinary_cases', fromDate: '2026-01-01', toDate: '2026-12-31',
+      granularity: 'year', scope: { kind: 'dojo', id: D1 },
+    })).rejects.toBeInstanceOf(ForbiddenError);
+
+    await expect(growthOverTime(db, jhAdmin, {
+      metric: 'support_tickets', fromDate: '2026-01-01', toDate: '2026-12-31',
+      granularity: 'month', scope: { kind: 'state', id: JH },
+    })).resolves.toBeTruthy();   // STATE_ADMIN holds person:read_pii
+
+    await expect(growthOverTime(db, d1Instructor, {
+      metric: 'support_tickets', fromDate: '2026-01-01', toDate: '2026-12-31',
+      granularity: 'month', scope: { kind: 'dojo', id: D1 },
+    })).rejects.toBeInstanceOf(ForbiddenError);
+
+    // The gate holds for a national reader too: national reach is not
+    // disciplinary authority.
+    await expect(growthOverTime(db, technicalDirector, {
+      metric: 'disciplinary_cases', fromDate: '2026-01-01', toDate: '2026-12-31',
+      granularity: 'month',
+    })).rejects.toBeInstanceOf(ForbiddenError);
+
+    const ok = await growthOverTime(db, federationAdmin, {
+      metric: 'disciplinary_cases', fromDate: '2026-01-01', toDate: '2026-12-31',
+      granularity: 'year',
+    });
+    expect(ok.total).toBe(2);
+
+    // The series the instructor was refused is real, and it does date the case
+    // to the day: this is what the gate is keeping from them, not an empty set.
+    const daily = await growthOverTime(db, federationAdmin, {
+      metric: 'disciplinary_cases', fromDate: '2026-01-01', toDate: '2026-12-31',
+      granularity: 'day', scope: { kind: 'dojo', id: D1 },
+    });
+    expect(daily.total).toBe(1);
+    expect(daily.buckets.find((b) => b.count > 0)!.bucket).toBe('2026-02-01');
+  });
+
+  it('there is no safeguarding metric to ask for at all', async () => {
+    await expect(growthOverTime(db, superAdmin, {
+      metric: 'safeguarding_cases' as any, fromDate: '2026-01-01', toDate: '2026-12-31',
+      granularity: 'month',
+    })).rejects.toThrow(/Unknown metric/);
+  });
+
+  // The refusal must name the limit as an implementation bound, so nobody reads
+  // it as a federation rule about how long a report may cover.
+  it('refuses a range it would have to materialise a million buckets for', async () => {
+    try {
+      await growthOverTime(db, federationAdmin, {
+        metric: 'persons', fromDate: '1900-01-01', toDate: '2999-12-31', granularity: 'day',
+      });
+      throw new Error('should have thrown');
+    } catch (e: any) {
+      expect(e).toBeInstanceOf(AnalyticsError);
+      expect(e.code).toBe('range_too_large');
+      expect(e.message).toMatch(/implementation limit, not a federation rule/);
+    }
+
+    // The same span at a coarser granularity is fine — the limit is on buckets,
+    // not on how far back the federation may look.
+    const g = await growthOverTime(db, federationAdmin, {
+      metric: 'persons', fromDate: '1900-01-01', toDate: '2999-12-31', granularity: 'year',
+    });
+    expect(g.buckets.length).toBe(1100);
+    expect(g.total).toBe(5);
+  });
+
   it('rejects bad input with a machine-readable code instead of guessing', async () => {
     const bad = async (input: any) => {
       try {
@@ -662,7 +799,7 @@ describe('annualReport: every figure carries the query that produced it', () => 
 
     expect(value(r, 'membership', 'newRegistrations')).toBe(5);
     expect(value(r, 'membership', 'membershipsBeginning')).toBe(4);
-    expect(value(r, 'membership', 'membershipsActiveAtYearEnd')).toBe(4);
+    expect(value(r, 'membership', 'membershipsCoveringYearEnd')).toBe(4);
     expect(value(r, 'membership', 'membershipsLapsingInYear')).toBe(3);
 
     expect(value(r, 'units', 'stateUnitsChartered')).toBe(1);
@@ -694,10 +831,28 @@ describe('annualReport: every figure carries the query that produced it', () => 
     expect(value(r, 'education', 'enrolments')).toBe(2);
     expect(value(r, 'education', 'completions')).toBe(1);
 
-    expect(value(r, 'cases', 'disciplinaryReceived')).toBe(2);
-    expect(value(r, 'cases', 'disciplinaryClosed')).toBe(1);
-    expect(value(r, 'cases', 'supportTicketsRaised')).toBe(3);
-    expect(value(r, 'cases', 'supportTicketsResolved')).toBe(1);
+    expect(value(r, 'discipline', 'disciplinaryReceived')).toBe(2);
+    expect(value(r, 'discipline', 'disciplinaryClosed')).toBe(1);
+    expect(value(r, 'support', 'supportTicketsRaised')).toBe(3);
+    expect(value(r, 'support', 'supportTicketsResolved')).toBe(1);
+  });
+
+  // A figure built from a column that records CURRENT state cannot answer a
+  // question about a past year: regenerate the report and the answer moves.
+  it('ATTACK: a past year’s membership figure does not drift with current status', async () => {
+    const r = await annualReport(db, superAdmin, 2025, { now: NOW });
+
+    // P1's dojo membership ran 2025-01-01 → 2025-12-31 and its status today
+    // reads 'expired'. It was nonetheless valid at the end of 2025, and the
+    // 2025 report must keep saying so however the status is later corrected.
+    expect(value(r, 'membership', 'membershipsCoveringYearEnd')).toBe(1);
+
+    const f = section(r, 'membership').figures.find((x: any) => x.key === 'membershipsCoveringYearEnd')!;
+    // No status predicate at all, and the filter says why it is absent.
+    expect(f.source.filter).not.toMatch(/status\s*=/);
+    expect(f.source.filter).toMatch(/no status predicate/);
+    expect(f.source.column).toBe('valid_from / valid_to');
+    expect(f.label).toMatch(/recorded validity/);
   });
 
   it('attributes medals to the state the entry declared', async () => {
@@ -735,6 +890,14 @@ describe('annualReport: every figure carries the query that produced it', () => 
     expect(value(r, 'finance', 'entries')).toBe(3);
     expect(Number.isInteger(value(r, 'finance', 'creditsPaise'))).toBe(true);
 
+    // Every figure and every row is an exact integer, never a rounded float.
+    for (const f of section(r, 'finance').figures) {
+      expect(Number.isSafeInteger(f.value), `${f.key} is not an exact integer`).toBe(true);
+    }
+    for (const row of section(r, 'finance').rows as any[]) {
+      expect(Number.isSafeInteger(row.amountPaise)).toBe(true);
+    }
+
     expect(section(r, 'finance').rows).toEqual([
       { account: 'gateway_fees', direction: 'debit', amountPaise: 1_180, entries: 1 },
       { account: 'membership_income', direction: 'credit', amountPaise: 50_000, entries: 1 },
@@ -755,6 +918,26 @@ describe('annualReport: every figure carries the query that produced it', () => 
     expect(sg.status).toBe('withheld');
     expect(sg.note).toMatch(/safeguarding:read/);
     expect(sg.figures.every((f: any) => f.value === null)).toBe(true);
+
+    // THE LEAK THIS REPLACES: discipline and member support used to share one
+    // "cases" section with no gate, so a technical director — national reach,
+    // no disciplinary or PII authority — was handed both.
+    const disc = section(r, 'discipline');
+    expect(disc.status).toBe('withheld');
+    expect(disc.note).toMatch(/membership:revoke/);
+    expect(disc.figures.every((f: any) => f.value === null)).toBe(true);
+
+    const sup = section(r, 'support');
+    expect(sup.status).toBe('withheld');
+    expect(sup.note).toMatch(/person:read_pii/);
+    expect(sup.figures.every((f: any) => f.value === null)).toBe(true);
+
+    // A withheld section is still named, with its sources, so the reader knows
+    // a figure exists and what to ask for. It is not silently dropped.
+    expect(r.sections.find((x: any) => x.key === 'cases')).toBeUndefined();
+    for (const sec of [disc, sup]) {
+      expect(sec.figures.every((f: any) => f.source.table && f.source.column)).toBe(true);
+    }
 
     // The rest of the report is unaffected.
     expect(value(r, 'certificates', 'issued')).toBe(3);

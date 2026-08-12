@@ -16,7 +16,7 @@ import * as s from '../src/db/schema';
 import { createPerson } from '../src/db/federation';
 import {
   createCourse, addModule, addLesson, addQuiz, addQuizQuestion, publishCourse,
-  withdrawCourse, courseOutline, enrol, markLessonComplete, courseProgress,
+  withdrawCourse, courseOutline, enrol, activateEnrolment, markLessonComplete, courseProgress,
   quizForStudent, startAttempt, submitAttempt, attemptResult,
   completionCheck, completeEnrolment,
   scheduleLiveClass, joinLiveClass, liveClassAttendanceReport,
@@ -814,7 +814,7 @@ describe('questions are moderated, never destroyed', () => {
 
     await hideQuestion(db, admin, { questionId: hidden.id, reason: 'Abusive language' });
 
-    const publicList = await liveClassQuestions(db, cls.id);
+    const publicList = await liveClassQuestions(db, admin, cls.id);
     expect(publicList.map((r: any) => r.id)).toEqual([kept.id]);
 
     // Still there, with its text intact, for anyone who has to account for it.
@@ -862,7 +862,7 @@ describe('resources resolve before they are stored', () => {
     await attachResource(db, admin, { liveClassId: cls.id, title: 'Mae-geri', kind: 'technique', techniqueId: technique.id });
     await attachResource(db, admin, { liveClassId: cls.id, title: 'Heian Shodan', kind: 'kata', kataId: kata.id, displayOrder: 1 });
 
-    const resources = await liveClassResources(db, cls.id);
+    const resources = await liveClassResources(db, admin, cls.id);
     expect(resources.map((r: any) => r.kind)).toEqual(['technique', 'kata']);
   });
 
@@ -891,6 +891,438 @@ describe('resources resolve before they are stored', () => {
     const cls = await scheduleLiveClass(db, admin, { title: 'Links' }, NOW);
     await expect(attachResource(db, admin, { liveClassId: cls.id, title: 'Somewhere', kind: 'link' }))
       .rejects.toThrow(/needs a URL/i);
+  });
+});
+
+// ─── Attacks ────────────────────────────────────────────────────────────────
+//
+// Each of these reproduces something the module actually did wrong. They are
+// written from the attacker's side: a student who wants the course without
+// paying, an editor who wants to declare that payment arrived, a dojo admin who
+// wants the national register, a candidate who wants the answer key before the
+// attempt that counts.
+
+describe('a learner cannot enrol themselves past the fee', () => {
+  async function paidCourse() {
+    const course = await createCourse(db, admin, {
+      slug: nextSlug('fee'), title: 'Fee-bearing', feeCode: 'ACADEMY-BASIC',
+    });
+    const mod = await addModule(db, admin, { courseId: course.id, title: 'M1' });
+    const lesson = await addLesson(db, admin, { moduleId: mod.id, kind: 'reading', title: 'L', body: 'x' });
+    await publishCourse(db, admin, course.id, NOW);
+    return { course, lesson };
+  }
+
+  it('ignores a status the caller supplies for themselves', async () => {
+    const { course, lesson } = await paidCourse();
+    // The attack: self-service enrolment asking for 'active' on a fee-bearing
+    // course. `assertSelfOrAuthority` says 'self', so nothing else was looking.
+    const e = await enrol(db, { principal: student }, {
+      courseId: course.id, personId: STUDENT, status: 'active',
+    } as any, NOW);
+
+    expect(e.status).toBe('pending_payment');
+    const stored = (await db.select().from(s.enrolments).where(eq(s.enrolments.id, e.id)))[0];
+    expect(stored.status).toBe('pending_payment');
+    await expect(markLessonComplete(db, { principal: student }, { enrolmentId: e.id, lessonId: lesson.id }))
+      .rejects.toThrow(/pending payment/i);
+  });
+
+  it('refuses to activate a fee-bearing enrolment with no order behind it', async () => {
+    const { course } = await paidCourse();
+    const e = await enrol(db, admin, { courseId: course.id, personId: STUDENT }, NOW);
+    // content:write is an EDITORIAL permission. It is not the power to say a
+    // student paid.
+    const err = await activateEnrolment(db, admin, e.id).catch((x) => x);
+    expect(err).toBeInstanceOf(AcademyError);
+    expect(err.code).toBe('no_order');
+  });
+
+  it('refuses an unpaid order, and one that does not cover this course', async () => {
+    const { course } = await paidCourse();
+
+    const [unpaid] = await db.insert(s.orders).values({
+      orderNo: nextSlug('ORD'), personId: STUDENT, status: 'awaiting_payment', totalPaise: 50000,
+    }).returning();
+    const e = await enrol(db, admin, { courseId: course.id, personId: STUDENT, orderId: unpaid.id }, NOW);
+    let err = await activateEnrolment(db, admin, e.id).catch((x) => x);
+    expect(err.code).toBe('order_not_paid');
+
+    // Now it is paid — but for a T-shirt, not for this course.
+    await db.update(s.orders)
+      .set({ status: 'paid', paidAt: NOW })
+      .where(eq(s.orders.id, unpaid.id));
+    await db.insert(s.orderLines).values({
+      orderId: unpaid.id, kind: 'product', description: 'Dojo t-shirt',
+      unitPricePaise: 50000, totalPaise: 50000,
+    });
+    err = await activateEnrolment(db, admin, e.id).catch((x) => x);
+    expect(err.code).toBe('order_does_not_cover_this_course');
+
+    // And with a real course line, it activates and the audit says on what.
+    await db.insert(s.orderLines).values({
+      orderId: unpaid.id, kind: 'course', refType: 'course', refId: course.id,
+      description: 'Fee-bearing', unitPricePaise: 50000, totalPaise: 50000,
+    });
+    const active = await activateEnrolment(db, admin, e.id);
+    expect(active.status).toBe('active');
+
+    const audit = await db.select().from(s.auditEvents)
+      .where(and(eq(s.auditEvents.entityType, 'enrolment'), eq(s.auditEvents.entityId, String(e.id))));
+    const activation = audit.find((a: any) => a.newValue?.status === 'active');
+    expect(activation.newValue.evidence.basis).toBe('captured payment');
+    expect(activation.newValue.evidence.orderNo).toBe(
+      (await db.select().from(s.orders).where(eq(s.orders.id, unpaid.id)))[0].orderNo
+    );
+  });
+
+  it('refuses an order raised for somebody else', async () => {
+    const { course } = await paidCourse();
+    const [order] = await db.insert(s.orders).values({
+      orderNo: nextSlug('ORD'), personId: OTHER, status: 'paid', paidAt: NOW, totalPaise: 50000,
+    }).returning();
+    await db.insert(s.orderLines).values({
+      orderId: order.id, kind: 'course', refType: 'course', refId: course.id,
+      description: 'Fee-bearing', unitPricePaise: 50000, totalPaise: 50000,
+    });
+    const e = await enrol(db, admin, { courseId: course.id, personId: STUDENT, orderId: order.id }, NOW);
+    const err = await activateEnrolment(db, admin, e.id).catch((x) => x);
+    expect(err.code).toBe('order_belongs_to_another_person');
+  });
+});
+
+describe('an expired enrolment is not a live one', () => {
+  const LATER = new Date('2026-09-01T10:00:00Z');
+
+  it('refuses learning and refuses a certificate once the expiry has passed', async () => {
+    const course = await createCourse(db, admin, {
+      slug: nextSlug('expiring'), title: 'Expiring', certificateOnCompletion: true,
+      leadTeacherPersonId: TEACHER,
+    });
+    const mod = await addModule(db, admin, { courseId: course.id, title: 'M1' });
+    const lesson = await addLesson(db, admin, { moduleId: mod.id, kind: 'reading', title: 'L', body: 'x' });
+    await publishCourse(db, admin, course.id, NOW);
+
+    const e = await enrol(db, admin, {
+      courseId: course.id, personId: STUDENT, expiresAt: new Date('2026-08-20T00:00:00Z'),
+    }, NOW);
+
+    // Inside the window: fine.
+    await markLessonComplete(db, admin, { enrolmentId: e.id, lessonId: lesson.id }, {}, NOW);
+
+    // Past it: the date was stored and never read, so the enrolment stayed
+    // fully learnable — and, with every lesson ticked, fully certifiable.
+    await expect(markLessonComplete(db, admin, { enrolmentId: e.id, lessonId: lesson.id }, {}, LATER))
+      .rejects.toThrow(/expired on 2026-08-20/i);
+    await expect(completeEnrolment(db, admin, e.id, LATER))
+      .rejects.toThrow(/expired on 2026-08-20/i);
+
+    const certs = await db.select().from(s.certificates).where(eq(s.certificates.personId, STUDENT));
+    expect(certs.filter((c: any) => c.title.startsWith('Expiring'))).toHaveLength(0);
+  });
+
+  it('refuses to complete an enrolment that was withdrawn after the work was done', async () => {
+    const { course, lesson } = await makeSimpleCourse({ certificateOnCompletion: true });
+    const e = await enrol(db, admin, { courseId: course.id, personId: STUDENT }, NOW);
+    await markLessonComplete(db, admin, { enrolmentId: e.id, lessonId: lesson.id }, {}, NOW);
+    await db.update(s.enrolments).set({ status: 'withdrawn' }).where(eq(s.enrolments.id, e.id));
+
+    await expect(completeEnrolment(db, admin, e.id, NOW)).rejects.toThrow(/withdrawn, so it cannot be completed/i);
+  });
+
+  it('completes a course with no certificate exactly once', async () => {
+    const { course, lesson } = await makeSimpleCourse({ certificateOnCompletion: false });
+    const e = await enrol(db, admin, { courseId: course.id, personId: STUDENT }, NOW);
+    await markLessonComplete(db, admin, { enrolmentId: e.id, lessonId: lesson.id }, {}, NOW);
+
+    const first = await completeEnrolment(db, admin, e.id, NOW);
+    expect(first.issued).toBe(false);
+    // No certificate row means nothing to be idempotent against — the status is
+    // the guard, and without it the whole completion ran a second time.
+    const again = await completeEnrolment(db, admin, e.id, new Date('2026-08-13T10:00:00Z'));
+    expect(again.alreadyIssued).toBe(true);
+
+    const stored = (await db.select().from(s.enrolments).where(eq(s.enrolments.id, e.id)))[0];
+    expect(new Date(stored.completedAt).toISOString()).toBe(NOW.toISOString());
+    const audit = await db.select().from(s.auditEvents).where(and(
+      eq(s.auditEvents.entityType, 'enrolment'), eq(s.auditEvents.entityId, String(e.id))
+    ));
+    expect(audit.filter((a: any) => a.action === 'finalize')).toHaveLength(1);
+  });
+});
+
+describe('marking is decided in whole marks, and a limit that is set is honoured', () => {
+  /** Two questions worth 3 and 4 marks: 3 of 7 is 42.86%, which ROUNDS to 43. */
+  async function unevenQuiz(passMarkPercent: number, timeLimitMinutes: number | null = null) {
+    const course = await createCourse(db, admin, { slug: nextSlug('round'), title: 'Rounding' });
+    const mod = await addModule(db, admin, { courseId: course.id, title: 'M1' });
+    const lesson = await addLesson(db, admin, { moduleId: mod.id, kind: 'quiz', title: 'Q' });
+    const quiz = await addQuiz(db, admin, {
+      courseId: course.id, lessonId: lesson.id, title: 'Uneven', passMarkPercent, timeLimitMinutes,
+    });
+    const q1 = await addQuizQuestion(db, admin, {
+      quizId: quiz.id, prompt: 'Three marks', kind: 'single',
+      options: ['a', 'b'], correctAnswer: '1', marks: 3, displayOrder: 1,
+    });
+    const q2 = await addQuizQuestion(db, admin, {
+      quizId: quiz.id, prompt: 'Four marks', kind: 'single',
+      options: ['a', 'b'], correctAnswer: '1', marks: 4, displayOrder: 2,
+    });
+    await publishCourse(db, admin, course.id, NOW);
+    const enrolment = await enrol(db, admin, { courseId: course.id, personId: STUDENT }, NOW);
+    return { quiz, q1, q2, enrolment };
+  }
+
+  it('does not round a candidate up over the pass mark', async () => {
+    const { quiz, q1, enrolment } = await unevenQuiz(43);
+    const a = await startAttempt(db, { principal: student }, { quizId: quiz.id, enrolmentId: enrolment.id }, NOW);
+    const r = await submitAttempt(db, { principal: student }, {
+      attemptId: a.attempt.id, responses: { [q1.id]: '1' },
+    }, NOW);
+
+    // The displayed integer is 43, which reads as a pass against a 43% mark.
+    expect(r.scorePercent).toBe(43);
+    // 3 marks of 7 is 42.86% and is NOT 43%.
+    expect(r.result).toBe('failed');
+    expect(r.attempt.passed).toBe(false);
+  });
+
+  it('records an attempt handed in after a configured time limit as ungraded, not as a pass', async () => {
+    const { quiz, q1, q2, enrolment } = await unevenQuiz(50, 30);
+    const a = await startAttempt(db, { principal: student }, { quizId: quiz.id, enrolmentId: enrolment.id }, NOW);
+    const late = new Date(NOW.getTime() + 4 * 60 * 60 * 1000);
+    const r = await submitAttempt(db, { principal: student }, {
+      attemptId: a.attempt.id, responses: { [q1.id]: '1', [q2.id]: '1' },
+    }, late);
+
+    expect(r.scorePercent).toBe(100);
+    expect(r.withinTimeLimit).toBe(false);
+    expect(r.result).toBe('ungraded');
+    expect(r.ungradedReason).toMatch(/outside the configured time limit of 30 minute/i);
+    // Not failed either — MMAKF has said nothing about late work.
+    expect(r.attempt.passed).toBeNull();
+  });
+
+  it('cannot pass an attempt whose questions have all been removed', async () => {
+    const { quiz, enrolment } = await unevenQuiz(50);
+    const a = await startAttempt(db, { principal: student }, { quizId: quiz.id, enrolmentId: enrolment.id }, NOW);
+    await db.delete(s.quizQuestions).where(eq(s.quizQuestions.quizId, quiz.id));
+
+    const r = await submitAttempt(db, { principal: student }, { attemptId: a.attempt.id, responses: {} }, NOW);
+    // 0 marks awarded of 0 available clears any threshold by arithmetic.
+    expect(r.result).toBe('ungraded');
+    expect(r.ungradedReason).toMatch(/no marks/i);
+    expect(r.attempt.passed).toBeNull();
+  });
+});
+
+describe('the answer key does not decide the attempt that has not happened yet', () => {
+  it('withholds the marked detail while a configured attempt limit still has attempts left', async () => {
+    const { quiz, q1, q2, enrolment } = await quizCourse({ passMarkPercent: 50, attemptsAllowed: 2 });
+    const first = await startAttempt(db, { principal: student }, { quizId: quiz.id, enrolmentId: enrolment.id }, NOW);
+    const submitted = await submitAttempt(db, { principal: student }, {
+      attemptId: first.attempt.id, responses: { [q1.id]: 'b', [q2.id]: 'a' },
+    }, NOW);
+
+    // The score is owed to the candidate. The key is not — one attempt remains.
+    expect(submitted.scorePercent).toBe(0);
+    expect(submitted.answerKey.released).toBe(false);
+    expect(submitted.attempt.answers).toBeNull();
+
+    const review = await attemptResult(db, { principal: student }, first.attempt.id);
+    expect(review.answerKey.released).toBe(false);
+    expect(review.answerKey.reason).toMatch(/1 of 2 permitted attempt/i);
+    for (const q of review.questions) {
+      expect(q).not.toHaveProperty('correctAnswer');
+      expect(q).not.toHaveProperty('explanation');
+      expect(q).not.toHaveProperty('correct');
+    }
+    // Not through the attempt row either, which carries the same breakdown.
+    expect(JSON.stringify(review)).not.toContain('Mae travels straight ahead');
+    expect(JSON.stringify(review)).not.toContain('marking');
+
+    // An instructor with authority over the learner sees everything, always.
+    const staff = await attemptResult(db, admin, first.attempt.id);
+    expect(staff.answerKey.released).toBe(true);
+    expect(staff.questions.find((q: any) => q.id === q1.id).correctAnswer).toBe('a');
+
+    // And once the last attempt is spent there is nothing left to protect.
+    const second = await startAttempt(db, { principal: student }, { quizId: quiz.id, enrolmentId: enrolment.id }, NOW);
+    const done = await submitAttempt(db, { principal: student }, {
+      attemptId: second.attempt.id, responses: { [q1.id]: 'b' },
+    }, NOW);
+    expect(done.answerKey.released).toBe(true);
+    const after = await attemptResult(db, { principal: student }, second.attempt.id);
+    expect(after.questions.find((q: any) => q.id === q1.id).correctAnswer).toBe('a');
+
+    // The record itself never lost the breakdown — only the reply did.
+    const stored = (await db.select().from(s.quizAttempts).where(eq(s.quizAttempts.id, first.attempt.id)))[0];
+    expect(stored.answers.marking).toHaveLength(2);
+  });
+
+  it('strips an answer-bearing option written straight into the table', async () => {
+    const { quiz, enrolment } = await quizCourse({ passMarkPercent: 50 });
+    // A seed, an import or a migration — anything that is not addQuizQuestion().
+    await db.insert(s.quizQuestions).values({
+      quizId: quiz.id, prompt: 'Imported question', kind: 'single',
+      options: [{ id: 'a', text: 'Right one', correct: true }, { id: 'b', text: 'Wrong one' }],
+      correctAnswer: 'a', explanation: 'Because.', marks: 1, displayOrder: 9,
+    });
+
+    const view = await quizForStudent(db, { principal: student }, { quizId: quiz.id, enrolmentId: enrolment.id });
+    const imported = view.questions.find((q: any) => q.prompt === 'Imported question')!;
+    for (const o of imported.options ?? []) expect(Object.keys(o).sort()).toEqual(['id', 'text']);
+    expect(JSON.stringify(view)).not.toContain('correct":true');
+    expect(JSON.stringify(view)).not.toContain('"correct"');
+  });
+});
+
+describe('a live class is not readable just because its id is known', () => {
+  it('refuses a private class to a member, and to nobody at all', async () => {
+    const cls = await scheduleLiveClass(db, admin, {
+      title: 'Instructors only', visibility: 'private', published: true,
+    }, NOW);
+    await askQuestion(db, admin, { liveClassId: cls.id, personId: STUDENT, question: 'A private question' }, NOW);
+    await attachResource(db, admin, { liveClassId: cls.id, title: 'Notes', kind: 'link', url: 'https://example.test/n' });
+
+    const anonymous = { principal: { userId: null, label: 'anonymous', bindings: [] } as Principal };
+    await expect(liveClassQuestions(db, anonymous, cls.id)).rejects.toThrow(/Forbidden/);
+    await expect(liveClassQuestions(db, { principal: student }, cls.id)).rejects.toThrow(/Forbidden/);
+    await expect(liveClassResources(db, { principal: student }, cls.id)).rejects.toThrow(/Forbidden/);
+
+    // The moderator still sees it — hiding it from everyone would be its own bug.
+    expect(await liveClassQuestions(db, admin, cls.id)).toHaveLength(1);
+  });
+
+  it('keeps a course-only class to its students and an unpublished one to editors', async () => {
+    const { course } = await makeSimpleCourse();
+    const cls = await scheduleLiveClass(db, admin, {
+      title: 'Course only', visibility: 'course', courseId: course.id, published: true,
+    }, NOW);
+    await askQuestion(db, admin, { liveClassId: cls.id, personId: STUDENT, question: 'Enrolled question' }, NOW);
+
+    await expect(liveClassQuestions(db, { principal: outsider }, cls.id)).rejects.toThrow(/enrolled/i);
+    await enrol(db, admin, { courseId: course.id, personId: STUDENT }, NOW);
+    expect(await liveClassQuestions(db, { principal: student }, cls.id)).toHaveLength(1);
+
+    const draft = await scheduleLiveClass(db, admin, { title: 'Not yet', visibility: 'members' }, NOW);
+    await expect(liveClassQuestions(db, { principal: student }, draft.id))
+      .rejects.toThrow(/has not been published/i);
+  });
+
+  it('does not name the asker on a class the whole internet can read', async () => {
+    const cls = await scheduleLiveClass(db, admin, {
+      title: 'Open day', visibility: 'public', published: true,
+    }, NOW);
+    await askQuestion(db, admin, { liveClassId: cls.id, personId: STUDENT, question: 'Public question' }, NOW);
+
+    const anonymous = { principal: { userId: null, label: 'anonymous', bindings: [] } as Principal };
+    const rows = await liveClassQuestions(db, anonymous, cls.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).not.toHaveProperty('personId');
+    expect(Object.keys(rows[0]).sort())
+      .toEqual(['answer', 'answeredAt', 'askedAt', 'id', 'question', 'status', 'upvotes']);
+
+    // A member of the federation sees who asked; the public page does not.
+    expect((await liveClassQuestions(db, { principal: student }, cls.id))[0].personId).toBe(STUDENT);
+  });
+});
+
+describe('an attendance register is not a national export', () => {
+  it('restricts attendees to the caller’s own scope, in SQL, and says it did', async () => {
+    const [kl] = await db.insert(s.stateUnits)
+      .values({ code: 'ST-KL', state: 'Kerala', name: 'KL', status: 'active' })
+      .returning({ id: s.stateUnits.id });
+    const [klDojo] = await db.insert(s.dojos)
+      .values({ code: 'DJ-KL', name: 'Kochi', stateUnitId: kl.id, status: 'active' })
+      .returning({ id: s.dojos.id });
+    const klStudent = await createPerson(db, admin, {
+      fullName: 'Kerala Student', stateUnitId: kl.id, dojoId: klDojo.id,
+    } as any);
+
+    const cls = await scheduleLiveClass(db, admin, { title: 'National kihon' }, NOW);
+    await joinLiveClass(db, admin, { liveClassId: cls.id, personId: STUDENT, watchedSeconds: 60 }, {}, NOW);
+    await joinLiveClass(db, admin, { liveClassId: cls.id, personId: klStudent.id, watchedSeconds: 60 }, {}, NOW);
+
+    const nationalView = await liveClassAttendanceReport(db, admin, cls.id);
+    expect(nationalView.present).toBe(2);
+    expect(nationalView.scope.kind).toBe('all');
+
+    // A Jharkhand administrator holds person:read — but only over Jharkhand.
+    const jhAdmin = {
+      principal: {
+        userId: null, label: 'jh-admin',
+        bindings: [{ role: 'STATE_ADMIN', scopeType: 'state', scopeId: JH }],
+      } as Principal,
+    };
+    const scoped = await liveClassAttendanceReport(db, jhAdmin, cls.id);
+    expect(scoped.scope.kind).toBe('scoped');
+    expect(scoped.attendees.map((a: any) => a.personId)).toEqual([STUDENT]);
+    expect(scoped.present).toBe(1);
+    expect(JSON.stringify(scoped)).not.toContain('Kerala Student');
+
+    // A binding that resolves to no scope at all passes the gate and must still
+    // grant nothing.
+    const unscoped = {
+      principal: {
+        userId: null, label: 'stateless-admin',
+        bindings: [{ role: 'STATE_ADMIN', scopeType: 'state', scopeId: null }],
+      } as Principal,
+    };
+    const none = await liveClassAttendanceReport(db, unscoped, cls.id);
+    expect(none.scope.kind).toBe('none');
+    expect(none.attendees).toHaveLength(0);
+    expect(none.present).toBe(0);
+  });
+});
+
+describe('accumulated watch time is not thrown away', () => {
+  it('measures a configured minimum against the total, not against the last visit', async () => {
+    const course = await createCourse(db, admin, { slug: nextSlug('watch'), title: 'Watch' });
+    const mod = await addModule(db, admin, { courseId: course.id, title: 'M1' });
+    const lesson = await addLesson(db, admin, {
+      moduleId: mod.id, kind: 'video', title: 'Mae-geri', mediaAssetId: ASSET_OK,
+    });
+    await publishCourse(db, admin, course.id, NOW);
+    const e = await enrol(db, admin, { courseId: course.id, personId: STUDENT }, NOW);
+    const policy = { lessonWatchMinSeconds: 300 };
+
+    await markLessonComplete(db, admin, { enrolmentId: e.id, lessonId: lesson.id, watchedSeconds: 320 }, policy, NOW);
+    // Coming back and clicking again reports this visit, not the whole history.
+    // Refusing here contradicts the record the module itself stored.
+    const again = await markLessonComplete(db, admin, {
+      enrolmentId: e.id, lessonId: lesson.id, watchedSeconds: 5,
+    }, policy, NOW);
+    expect(again.watchTime.reportedSeconds).toBe(320);
+    expect(again.watchTime.minimum.detail).toMatch(/320s watched in total/);
+
+    // Someone who genuinely has not watched it is still refused.
+    const fresh = await enrol(db, admin, { courseId: course.id, personId: OTHER }, NOW);
+    await expect(markLessonComplete(db, admin, {
+      enrolmentId: fresh.id, lessonId: lesson.id, watchedSeconds: 10,
+    }, policy, NOW)).rejects.toThrow(/requires 300s of viewing/i);
+  });
+});
+
+describe('a published answer cannot be rewritten without trace', () => {
+  it('audits the superseded answer, and refuses an answerer who does not exist', async () => {
+    const cls = await scheduleLiveClass(db, admin, { title: 'Answers' }, NOW);
+    const q = await askQuestion(db, { principal: student }, {
+      liveClassId: cls.id, personId: STUDENT, question: 'Which foot leads?',
+    }, NOW);
+
+    await expect(answerQuestion(db, admin, {
+      questionId: q.id, answeredByPersonId: 999999, answer: 'Anything',
+    }, NOW)).rejects.toThrow(/Unknown person/i);
+
+    await answerQuestion(db, admin, { questionId: q.id, answeredByPersonId: TEACHER, answer: 'The left.' }, NOW);
+    await answerQuestion(db, admin, { questionId: q.id, answeredByPersonId: TEACHER, answer: 'The right.' }, NOW);
+
+    const audit = await db.select().from(s.auditEvents).where(and(
+      eq(s.auditEvents.entityType, 'live_class_question'), eq(s.auditEvents.entityId, String(q.id))
+    ));
+    const rewrite = audit.find((a: any) => a.oldValue?.answer === 'The left.');
+    expect(rewrite.newValue.answer).toBe('The right.');
   });
 });
 

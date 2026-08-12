@@ -1,0 +1,640 @@
+---
+/**
+ * THE ATHLETE REGISTER — /athletes
+ *
+ * Two routes into one register, and the difference between them is not
+ * decoration — it is the authorisation model made visible.
+ *
+ *  1. LOOKUP BY FEDERATION ID — open to anyone. `publicAthleteProfile()` takes
+ *     no principal because a single public register entry is public: that is how
+ *     an employer or a tournament organiser checks a grade. The form below is a
+ *     plain GET that redirects to /athlete/<id>, so it works with JavaScript off
+ *     and every "not found" state is answered by the one page that owns it.
+ *
+ *  2. BROWSING AND FILTERING THE REGISTER — not open to anyone.
+ *     `searchAthletes()` asserts `person:read` and then filters rows to the
+ *     caller's own scopes IN SQL, because a search endpoint is precisely where a
+ *     scope leak becomes a bulk export of a membership list.
+ *
+ * SO THIS PAGE DOES NOT RENDER A SEARCH BOX IT CANNOT HONOUR (§70). An anonymous
+ * visitor is shown the ID lookup, which works, and is told plainly why the
+ * browse does not exist for them — rather than being given filters that would
+ * return "Forbidden" on submit. A disabled control with a reason is right; one
+ * that silently fails is a defect.
+ *
+ * No authorisation decision is taken here. `canAnywhere()` from src/lib/rbac.ts
+ * decides whether to offer the browse, and `searchAthletes()` decides again, in
+ * the query, what may be returned. The page never filters rows itself.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { isConfigured, db, schema as s } from '@/db';
+import { searchAthletes } from '@/db/athletes';
+import { identify } from '@/lib/session';
+import { canAnywhere } from '@/lib/rbac';
+import { asc, inArray, ne } from 'drizzle-orm';
+
+export const prerender = false;
+
+// ─── 1. The public lookup: redirect straight to the entry that owns the answer ──
+const params = Astro.url.searchParams;
+const lookup = (params.get('id') || '').trim();
+if (lookup) {
+  return Astro.redirect(`/athlete/${encodeURIComponent(lookup.slice(0, 60))}`, 302);
+}
+
+// The page's content varies with who is asking, so it must never be cached by a
+// shared cache (MASTER-SPEC: no-store on anything that depends on identity).
+Astro.response.headers.set('Cache-Control', 'no-store');
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const mayBrowse = canAnywhere(principal, 'person:read');
+
+// ─── 2. The scoped browse, for callers who hold person:read ──────────────────
+type BrowseState = 'off' | 'ready' | 'not_configured' | 'unavailable' | 'forbidden';
+
+interface Row {
+  federationId: string;
+  fullName: string;
+  city: string | null;
+  stateUnitId: number | null;
+  dojoId: number | null;
+  birthYear: number | null;
+  currentGrade: { label: string; kind: string; provenance: string } | null;
+}
+
+const LIMIT = 100;
+
+let browse: BrowseState = mayBrowse ? 'not_configured' : 'off';
+let rows: Row[] = [];
+let searched = false;
+
+const stateOptions: Array<{ id: number; name: string }> = [];
+const dojoOptions: Array<{ id: number; name: string }> = [];
+const stateNames = new Map<number, string>();
+const dojoNames = new Map<number, string>();
+
+// Criteria, read back out of the URL so a filtered register is a shareable link.
+const rawState = params.get('state') || '';
+const rawDojo = params.get('dojo') || '';
+const rawGrade = (params.get('grade') || '').toLowerCase();
+const rawFrom = params.get('from') || '';
+const rawTo = params.get('to') || '';
+
+const num = (v: string): number | undefined => {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+};
+const year = (v: string): number | undefined => {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 1900 && n <= 2200 ? n : undefined;
+};
+
+const selState = num(rawState);
+const selDojo = num(rawDojo);
+const selGrade: 'kyu' | 'dan' | undefined =
+  rawGrade === 'kyu' || rawGrade === 'dan' ? rawGrade : undefined;
+const fromYear = year(rawFrom);
+const toYear = year(rawTo);
+// A range typed backwards would silently return nothing and look like an empty
+// register, so it is reported as a mistake instead.
+const rangeInverted = fromYear != null && toYear != null && fromYear > toYear;
+
+if (mayBrowse && isConfigured()) {
+  try {
+    const database = db();
+
+    // Option lists for the filters, and the name maps the result rows need.
+    // 'draft' units are applications, not affiliations, and are never named on a
+    // public surface — /dojos is the register that decides what may be listed.
+    const states = await database
+      .select({ id: s.stateUnits.id, name: s.stateUnits.state })
+      .from(s.stateUnits)
+      .where(ne(s.stateUnits.status, 'draft'))
+      .orderBy(asc(s.stateUnits.state));
+    for (const u of states) {
+      stateOptions.push({ id: u.id, name: u.name });
+      stateNames.set(u.id, u.name);
+    }
+
+    const dojos = await database
+      .select({ id: s.dojos.id, name: s.dojos.name })
+      .from(s.dojos)
+      .where(ne(s.dojos.status, 'draft'))
+      .orderBy(asc(s.dojos.name))
+      .limit(500);
+    for (const d of dojos) {
+      dojoOptions.push({ id: d.id, name: d.name });
+      dojoNames.set(d.id, d.name);
+    }
+
+    if (!rangeInverted) {
+      // Scope filtering happens inside searchAthletes, in SQL. Nothing is
+      // filtered here — a second filter on the page is a second thing to get
+      // wrong, and the one on the page is the one nobody tests.
+      rows = (await searchAthletes(
+        database,
+        principal!,
+        {
+          ...(selState ? { stateUnitId: selState } : {}),
+          ...(selDojo ? { dojoId: selDojo } : {}),
+          ...(selGrade ? { gradeKind: selGrade } : {}),
+          ...(fromYear ? { bornOnOrAfter: `${fromYear}-01-01` } : {}),
+          ...(toYear ? { bornOnOrBefore: `${toYear}-12-31` } : {}),
+        },
+        LIMIT
+      )) as Row[];
+      searched = true;
+    }
+
+    // Names for units the register references but the option lists dropped —
+    // otherwise an athlete at a unit still in draft would render a blank cell
+    // with no explanation of why.
+    const missingStates = [...new Set(rows.map((r) => r.stateUnitId)
+      .filter((v): v is number => v != null && !stateNames.has(v)))];
+    if (missingStates.length) {
+      const extra = await database
+        .select({ id: s.stateUnits.id, name: s.stateUnits.state })
+        .from(s.stateUnits)
+        .where(inArray(s.stateUnits.id, missingStates));
+      for (const u of extra) stateNames.set(u.id, u.name);
+    }
+
+    rows.sort((a, b) => a.fullName.localeCompare(b.fullName));
+    browse = 'ready';
+  } catch (err) {
+    // ForbiddenError from the module lands here too: canAnywhere() and
+    // searchAthletes() are two independent checks and the module's is final.
+    const forbidden = err instanceof Error && err.name === 'ForbiddenError';
+    if (!forbidden) console.error('[athletes] register search failed', err);
+    browse = forbidden ? 'forbidden' : 'unavailable';
+  }
+}
+
+const PROVENANCE_LABEL: Record<string, string> = {
+  examined: 'Examined',
+  unverified_legacy: 'Legacy record',
+};
+
+const filtered = Boolean(selState || selDojo || selGrade || fromYear || toYear);
+const atLimit = rows.length === LIMIT;
+
+const pills: string[] = mayBrowse
+  ? browse === 'ready'
+    ? [`${rows.length}${atLimit ? '+' : ''} in view`, identity?.shared ? 'Shared office credential' : 'Signed in']
+    : ['Register browse unavailable']
+  : ['Open lookup by federation ID'];
+---
+
+<Base
+  title="Athlete Register — MMAKF"
+  description="The MMAKF athlete register. Look up any member's public register entry by federation ID — name, city, state and current grade with its provenance. No contact details and no date of birth are published."
+>
+  <PageHero
+    eyebrow="Public register"
+    title={`The athlete <em class="r">register</em>.`}
+    lead="Every member the federation has entered has a public register entry: name, federation ID, city and state, and the current grade together with how that grade is known. Look one up by federation ID below. No contact details are published, and never a full date of birth — the year of birth alone."
+    pills={pills}
+  />
+
+  {/* ═══════ LOOKUP BY FEDERATION ID ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Open to anyone</div>
+        <h2 class="display-2">Look up a <em class="r">federation ID</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          The federation ID is printed on a membership card and on every certificate. Entering it
+          opens that member’s public register entry — the same record an employer, a school or a
+          tournament organiser would see.
+        </p>
+      </div>
+
+      <form class="ath-lookup fade" method="get" action="/athletes" role="search">
+        <div class="ath-lookup-field">
+          <label class="input-label" for="ath-id">Federation ID</label>
+          <input
+            id="ath-id"
+            name="id"
+            class="input"
+            type="text"
+            inputmode="text"
+            autocomplete="off"
+            spellcheck="false"
+            maxlength="60"
+            required
+            placeholder="MMAKF-MEM-2026-000001"
+            aria-describedby="ath-id-help"
+          />
+          <p class="ath-help" id="ath-id-help">
+            Case does not matter. If nothing matches, the next page says so plainly rather than
+            guessing at a near miss.
+          </p>
+        </div>
+        <button type="submit" class="btn btn-primary ath-lookup-go">Open the entry</button>
+      </form>
+
+      <div class="ath-alt fade mt-8">
+        <p class="body-txt">
+          Checking a certificate rather than a member? The verification service takes a certificate
+          number as well as a member ID, and tells you which record it answered from.
+        </p>
+        <div class="flex flex-wrap gap-3 mt-4">
+          <a href="/registration#verify" class="btn btn-gold">Verify a member ID or certificate</a>
+          <a href="/dojos" class="btn btn-ghost">Affiliated dojos</a>
+          <a href="/officials" class="btn btn-ghost">Licensed officials</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ REGISTER BROWSE ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Register browse</div>
+        <h2 class="display-2">Searching the <em class="r">whole</em> register.</h2>
+        <div class="rule"></div>
+      </div>
+
+      {!mayBrowse && (
+        <div class="ath-state fade" role="note">
+          <h3 class="ath-state-h">The register cannot be browsed in bulk, and that is deliberate</h3>
+          <p class="body-txt">
+            A single register entry is public — that is what the lookup above is for, and it is how a
+            grade gets checked. A <strong>list</strong> of members is a different thing: it is the
+            federation’s membership roll, and a page that let anyone page through it by state, club
+            and age would be an export of children’s data with a search box on top.
+          </p>
+          <p class="body-txt mt-4">
+            So browsing is available to federation officers within their own scope only — a state
+            officer sees their own state, a dojo officer their own dojo — and that restriction is
+            enforced in the database query, not on this page. If you hold such a role, sign in and this
+            section becomes a filterable register.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href="/admin" class="btn btn-gold">Sign in to the federation office</a>
+            <a href="/contact" class="btn btn-ghost">Ask the federation office</a>
+          </div>
+        </div>
+      )}
+
+      {mayBrowse && browse === 'not_configured' && (
+        <div class="ath-state fade" role="note">
+          <h3 class="ath-state-h">The member register is not available in this environment</h3>
+          <p class="body-txt">
+            The federation records database is not configured for this deployment, so the register
+            cannot be read. <strong>This is a deployment state, not an empty register.</strong>
+          </p>
+        </div>
+      )}
+
+      {mayBrowse && browse === 'forbidden' && (
+        <div class="ath-state ath-state-err fade" role="alert">
+          <h3 class="ath-state-h">Your account may not read the member register</h3>
+          <p class="body-txt">
+            The register refused this search. Roles are resolved from the database on every request,
+            so an authority that has been withdrawn stops working immediately — if you held this
+            access recently, that is the likely reason.
+          </p>
+        </div>
+      )}
+
+      {mayBrowse && browse === 'unavailable' && (
+        <div class="ath-state ath-state-err fade" role="alert">
+          <h3 class="ath-state-h">The register could not be read just now</h3>
+          <p class="body-txt">
+            The federation records service did not answer this request.
+            <strong> This is not a result about any member</strong> — it is a fault on our side.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href="/athletes" class="btn btn-primary">Try again</a>
+          </div>
+        </div>
+      )}
+
+      {mayBrowse && browse === 'ready' && (
+        <div class="fade">
+          <form class="ath-filters" method="get" action="/athletes">
+            <div class="ath-filter">
+              <label class="input-label" for="f-state">State unit</label>
+              <select id="f-state" name="state" class="input">
+                <option value="">Any state unit</option>
+                {stateOptions.map((o) => (
+                  <option value={String(o.id)} selected={selState === o.id}>{o.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div class="ath-filter">
+              <label class="input-label" for="f-dojo">Dojo</label>
+              <select id="f-dojo" name="dojo" class="input">
+                <option value="">Any dojo</option>
+                {dojoOptions.map((o) => (
+                  <option value={String(o.id)} selected={selDojo === o.id}>{o.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div class="ath-filter">
+              <label class="input-label" for="f-grade">Grade kind</label>
+              <select id="f-grade" name="grade" class="input">
+                <option value="">Kyu or Dan</option>
+                <option value="kyu" selected={selGrade === 'kyu'}>Kyu grades only</option>
+                <option value="dan" selected={selGrade === 'dan'}>Dan grades only</option>
+              </select>
+            </div>
+
+            <div class="ath-filter">
+              <label class="input-label" for="f-from">Born from (year)</label>
+              <input
+                id="f-from" name="from" class="input" type="number"
+                min="1900" max="2200" step="1" inputmode="numeric"
+                value={rawFrom} placeholder="e.g. 2008"
+              />
+            </div>
+
+            <div class="ath-filter">
+              <label class="input-label" for="f-to">Born to (year)</label>
+              <input
+                id="f-to" name="to" class="input" type="number"
+                min="1900" max="2200" step="1" inputmode="numeric"
+                value={rawTo} placeholder="e.g. 2012"
+              />
+            </div>
+
+            <div class="ath-filter-actions">
+              <button type="submit" class="btn btn-primary">Apply filters</button>
+              {filtered && <a href="/athletes" class="btn btn-ghost">Clear</a>}
+            </div>
+          </form>
+
+          {rangeInverted && (
+            <p class="ath-invalid" role="alert">
+              The “born from” year is later than the “born to” year, so no search was run. Swap them —
+              an impossible range would otherwise have returned an empty table that looked like a
+              finding about the register.
+            </p>
+          )}
+
+          {searched && (
+            <Fragment>
+              <p class="ath-count" role="status" aria-live="polite">
+                {rows.length === 0
+                  ? filtered
+                    ? 'No member in your scope matches these filters.'
+                    : 'No member is recorded in your scope.'
+                  : `${rows.length}${atLimit ? '+' : ''} ${rows.length === 1 ? 'member' : 'members'} in view${filtered ? ', matching these filters' : ''}. You see only the members within your own scope.`}
+              </p>
+
+              {rows.length === 0 ? (
+                <div class="ath-state" role="note">
+                  <h3 class="ath-state-h">
+                    {filtered ? 'Nothing matches those filters' : 'No member is recorded in your scope yet'}
+                  </h3>
+                  <p class="body-txt">
+                    {filtered
+                      ? 'Widen the filters, or clear them to see everything within your scope. An empty table here is the result of a filter, not a finding about the federation.'
+                      : 'The federation is building this register, and no member has yet been entered within the scope your role covers. That is a statement about this register only — it is not a count of the federation’s members.'}
+                  </p>
+                </div>
+              ) : (
+                <Fragment>
+                  <div
+                    class="tbl-scroll"
+                    tabindex="0"
+                    role="region"
+                    aria-label="Members in the register within your scope"
+                  >
+                    <table class="ath-tbl">
+                      <caption class="sr-only">
+                        Members of the federation register within your scope. Public fields only —
+                        no contact details, and year of birth rather than a full date.
+                      </caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">Member</th>
+                          <th scope="col">Federation ID</th>
+                          <th scope="col">City</th>
+                          <th scope="col">State unit</th>
+                          <th scope="col">Dojo</th>
+                          <th scope="col">Born</th>
+                          <th scope="col">Current grade</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((r) => (
+                          <tr>
+                            <th scope="row" class="ath-cell-name">
+                              <a href={`/athlete/${encodeURIComponent(r.federationId)}`}>{r.fullName}</a>
+                            </th>
+                            <td class="ath-cell-fid">{r.federationId}</td>
+                            <td>{r.city || <span class="text-muted">Not recorded</span>}</td>
+                            <td>
+                              {r.stateUnitId != null
+                                ? (stateNames.get(r.stateUnitId) ?? <span class="text-muted">Not recorded</span>)
+                                : <span class="text-muted">Not recorded</span>}
+                            </td>
+                            <td>
+                              {r.dojoId != null
+                                ? (dojoNames.get(r.dojoId) ?? <span class="text-muted">Not listed</span>)
+                                : <span class="text-muted">Not recorded</span>}
+                            </td>
+                            <td class="nowrap">{r.birthYear ?? <span class="text-muted">Not recorded</span>}</td>
+                            <td>
+                              {r.currentGrade ? (
+                                <Fragment>
+                                  <span class="ath-grade-label">{r.currentGrade.label}</span>
+                                  <span
+                                    class="pill ath-prov"
+                                    class:list={[`prov-${r.currentGrade.provenance}`]}
+                                  >
+                                    <span class="pill-dot"></span>
+                                    {PROVENANCE_LABEL[r.currentGrade.provenance] ?? r.currentGrade.provenance}
+                                  </span>
+                                </Fragment>
+                              ) : (
+                                <span class="text-muted">No active grade</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="tbl-hint">Scroll the table sideways to see every column</div>
+
+                  {atLimit && (
+                    <p class="ath-limit" role="note">
+                      This view stops at {LIMIT} members. There may be more within your scope — narrow
+                      the filters rather than reading this as the total.
+                    </p>
+                  )}
+                </Fragment>
+              )}
+            </Fragment>
+          )}
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ PROVENANCE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Reading a grade</div>
+        <h2 class="display-2">Two grades, two different <em class="r">claims</em>.</h2>
+        <div class="rule"></div>
+      </div>
+
+      <div class="ath-prov-key fade">
+        <div class="card ath-prov-card ath-prov-ex">
+          <div class="card-eyebrow">Examined</div>
+          <h3 class="card-title">Traced to a recorded examination</h3>
+          <p class="card-body">
+            The grade is backed by a grading held by the federation, with examiner scores and a
+            decision behind it in this system. This is the strongest claim the register can make about
+            a grade.
+          </p>
+        </div>
+        <div class="card ath-prov-card ath-prov-lg">
+          <div class="card-eyebrow">Legacy record</div>
+          <h3 class="card-title">A real grade that predates digital records</h3>
+          <p class="card-body">
+            The grade predates the federation’s digital examination records. The federation holds
+            evidence for it, but it is not backed by an examination scorecard in this system. It is
+            labelled rather than quietly presented as the same thing — a register that cannot say how
+            it knows is not a register.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .nowrap { white-space: nowrap; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
+  /* ── Lookup ── */
+  .ath-lookup {
+    display: grid;
+    grid-template-columns: minmax(0, 420px) auto;
+    gap: 16px 18px;
+    align-items: start;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    padding: 28px 30px;
+    max-width: 780px;
+  }
+  @media (max-width: 640px) {
+    .ath-lookup { grid-template-columns: 1fr; padding: 22px 18px; }
+  }
+  .ath-lookup-field { min-width: 0; }
+  .ath-lookup-go { margin-top: 26px; min-height: 48px; }
+  @media (max-width: 640px) { .ath-lookup-go { margin-top: 0; width: 100%; } }
+  .ath-help { font-size: 0.8rem; color: var(--muted); margin-top: 8px; line-height: 1.6; max-width: 52ch; }
+
+  .ath-alt { max-width: 780px; }
+
+  /* ── State panels ── */
+  .ath-state {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    padding: 28px 30px;
+    max-width: 80ch;
+  }
+  .ath-state-err { border-left-color: var(--red); }
+  @media (max-width: 520px) { .ath-state { padding: 22px 18px; } }
+  .ath-state-h {
+    font-family: var(--font-display);
+    font-size: 1.06rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-bottom: 10px;
+  }
+
+  /* ── Filters ── */
+  .ath-filters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px 18px;
+    align-items: end;
+    background: var(--card);
+    border: 1px solid var(--border);
+    padding: 22px 24px;
+    margin-bottom: 20px;
+  }
+  @media (max-width: 560px) { .ath-filters { grid-template-columns: 1fr; padding: 18px 16px; } }
+  .ath-filter { min-width: 0; }
+  .ath-filter-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .ath-filter-actions .btn { min-height: 46px; }
+
+  .ath-count, .ath-limit, .ath-invalid {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 16px;
+    max-width: 78ch;
+    line-height: 1.7;
+  }
+  .ath-invalid { color: var(--red-2); font-weight: 500; }
+  .ath-limit { margin-top: 14px; margin-bottom: 0; }
+
+  /* ── Table ── */
+  .ath-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    min-width: 900px;
+  }
+  .ath-tbl th, .ath-tbl td {
+    padding: 13px 16px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.86rem;
+    color: var(--off-white);
+  }
+  .ath-tbl thead th {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    background: var(--card-2);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .ath-tbl tbody tr:last-child th, .ath-tbl tbody tr:last-child td { border-bottom: 0; }
+  .ath-cell-name { font-family: var(--font-display); font-weight: 600; font-size: 0.94rem; color: var(--white); }
+  .ath-cell-name a { display: inline-flex; align-items: center; min-height: 44px; }
+  .ath-cell-name a:hover, .ath-cell-name a:focus-visible { color: var(--gold-2); }
+  .ath-cell-fid {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    color: var(--gold-2);
+    white-space: nowrap;
+  }
+  .ath-grade-label { display: block; font-weight: 600; color: var(--white); margin-bottom: 6px; }
+  .ath-prov { white-space: nowrap; }
+  .ath-prov.prov-examined { color: var(--gold-2); border-color: var(--gold-dim); }
+  .ath-prov.prov-unverified_legacy { color: var(--red-2); border-color: rgba(142, 18, 18, 0.32); }
+
+  /* ── Provenance key ── */
+  .ath-prov-key { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 780px) { .ath-prov-key { grid-template-columns: 1fr; } }
+  .ath-prov-card { border-top: 3px solid var(--border-2); }
+  .ath-prov-ex { border-top-color: var(--gold-dim); }
+  .ath-prov-lg { border-top-color: var(--red); }
+</style>

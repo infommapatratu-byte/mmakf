@@ -1,0 +1,554 @@
+---
+/**
+ * THE LICENSED OFFICIALS REGISTER — /officials
+ *
+ * Written for a tournament organiser standing in front of a draw sheet asking
+ * one question: *is this person licensed to do that, today?*
+ *
+ * `publicOfficialsDirectory()` in src/db/officials.ts answers it. It returns
+ * only ACTIVE qualifications whose expiry has not passed as at a date, and it
+ * returns no contact details of any kind. This page adds neither.
+ *
+ * TWO THINGS THIS PAGE IS CAREFUL ABOUT:
+ *
+ *  1. THE DATE IS PART OF THE ANSWER. The module never asks "is it valid now" —
+ *     it asks "is it valid as at this date", because appointing an official for
+ *     a championship three months out must be checked against the day of the
+ *     event. This page can only ever answer for TODAY, so it says so plainly
+ *     and prints the date it answered for, rather than implying a licence
+ *     shown here will still be current on the day of a future event.
+ *
+ *  2. "NO EXPIRY RECORDED" IS NOT "VALID FOREVER". A licence row with no expiry
+ *     date may be deliberate or may be an omission in the register, and only the
+ *     office can tell. It is labelled as what it is rather than being rendered
+ *     as an unqualified tick.
+ *
+ * No licence level, duration, renewal window or CPD requirement is described
+ * anywhere on this page: those are federation policy and the federation has not
+ * published them. The page prints the level string the register holds and
+ * nothing about what it entitles the holder to do.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { isConfigured, db, schema as s } from '@/db';
+import { publicOfficialsDirectory, type Registry } from '@/db/officials';
+import { inArray } from 'drizzle-orm';
+
+export const prerender = false;
+
+const REGISTRIES: Array<{ key: Registry; label: string; who: string; blurb: string }> = [
+  {
+    key: 'official',
+    label: 'Match officials',
+    who: 'referees, judges and technical delegates',
+    blurb:
+      'The people licensed by the federation to officiate a bout or a kata performance — referees, judges and technical delegates.',
+  },
+  {
+    key: 'examiner',
+    label: 'Examiners',
+    who: 'grading examiners',
+    blurb:
+      'The people licensed by the federation to examine candidates at a kyu or Dan grading.',
+  },
+  {
+    key: 'instructor',
+    label: 'Instructors',
+    who: 'instructors and coaches',
+    blurb:
+      'The people licensed by the federation to instruct and to coach in an affiliated dojo.',
+  },
+];
+
+const q = Astro.url.searchParams;
+const requested = (q.get('registry') || 'official').toLowerCase();
+const registry: Registry =
+  requested === 'examiner' || requested === 'instructor' ? requested : 'official';
+const active = REGISTRIES.find((r) => r.key === registry)!;
+
+type RegistryState = 'ready' | 'not_configured' | 'unavailable';
+
+interface Row {
+  fullName: string;
+  federationId: string;
+  stateUnitId: number | null;
+  level: string | null;
+  grantedOn: string | null;
+  expiresOn: string | null;
+}
+
+const asAtIso = new Date().toISOString().slice(0, 10);
+const asAtLabel = new Date(`${asAtIso}T00:00:00Z`).toLocaleDateString('en-IN', {
+  day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
+});
+
+let state: RegistryState = 'not_configured';
+let rows: Row[] = [];
+const counts: Record<Registry, number | null> = { official: null, examiner: null, instructor: null };
+const stateNames = new Map<number, string>();
+
+if (isConfigured()) {
+  try {
+    const database = db();
+
+    // All three registries are read so the tab labels can carry true counts. A
+    // tab showing no number would leave a reader unable to tell an empty
+    // register from one they have not opened yet.
+    for (const r of REGISTRIES) {
+      const list = (await publicOfficialsDirectory(database, r.key, asAtIso)) as Row[];
+      counts[r.key] = list.length;
+      if (r.key === registry) rows = list;
+    }
+
+    // State names, so a row reads as a place rather than a foreign key. This is
+    // a lookup of published unit names only — nothing is derived here.
+    const ids = [...new Set(rows.map((r) => r.stateUnitId).filter((v): v is number => v != null))];
+    if (ids.length) {
+      const units = await database
+        .select({ id: s.stateUnits.id, stateName: s.stateUnits.state })
+        .from(s.stateUnits)
+        .where(inArray(s.stateUnits.id, ids));
+      for (const u of units) stateNames.set(u.id, u.stateName);
+    }
+
+    state = 'ready';
+  } catch (err) {
+    // An outage is reported as an outage. Rendering it as an empty register
+    // would tell an organiser that nobody is licensed, which is a claim this
+    // page has no evidence for.
+    console.error('[officials] directory read failed', err);
+    state = 'unavailable';
+  }
+}
+
+// Sort for a human: by state, then by name. The module does not promise an order.
+rows.sort((a, b) => {
+  const sa = a.stateUnitId ? (stateNames.get(a.stateUnitId) ?? '') : '';
+  const sb = b.stateUnitId ? (stateNames.get(b.stateUnitId) ?? '') : '';
+  return sa.localeCompare(sb) || a.fullName.localeCompare(b.fullName);
+});
+
+const fmtDate = (iso: string | null): string => {
+  if (!iso) return '';
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+};
+
+const openEnded = rows.filter((r) => !r.expiresOn).length;
+
+const pills: string[] =
+  state === 'ready'
+    ? rows.length
+      ? [`${rows.length} current ${rows.length === 1 ? 'licence' : 'licences'}`, `As at ${asAtLabel}`]
+      : ['Register open — no current licences recorded']
+    : ['Register not available'];
+---
+
+<Base
+  title={`${active.label} — Licensed Officials Register — MMAKF`}
+  description="The MMAKF register of currently licensed match officials, examiners and instructors, so a tournament organiser can check who is licensed. Current licences only; no contact details are published."
+>
+  <PageHero
+    eyebrow="Public register"
+    title={`Licensed <em class="r">officials</em>.`}
+    lead="Who the federation licenses to officiate, to examine and to instruct — checked against the register at the moment you load this page. Only current licences appear. Nothing here is a contact directory: no telephone number, email or address is published for any official."
+    pills={pills}
+  />
+
+  {/* ═══════ THE DATE IS PART OF THE ANSWER ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Read this first</div>
+        <h2 class="display-2">A licence is valid <em class="r">on a date</em>.</h2>
+        <div class="rule"></div>
+      </div>
+
+      <div class="off-key fade">
+        <div class="card off-key-card off-key-yes">
+          <div class="card-eyebrow">What this page answers</div>
+          <h3 class="card-title">Licensed as at {asAtLabel}</h3>
+          <p class="card-body">
+            Every row below was checked against the register for <strong>today’s date</strong>. A
+            qualification that is withdrawn, suspended or already expired does not appear. If you are
+            appointing an official for an event in the future, this page cannot answer for that day —
+            a licence current today may lapse before the event. Ask the office to confirm validity
+            <strong> on the day of the event</strong>, which is the check the federation’s own
+            appointment process makes.
+          </p>
+        </div>
+        <div class="card off-key-card off-key-no">
+          <div class="card-eyebrow">What this page does not say</div>
+          <h3 class="card-title">What a level entitles anyone to do</h3>
+          <p class="card-body">
+            Where the register records a level for a licence it is printed exactly as recorded. MMAKF
+            has not published its certification regulation — the levels, their scope, the
+            re-certification cycle and the continuing-education requirement — so this page states none
+            of them. Do not infer from a level string what an official may or may not be appointed to.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE REGISTER ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">The register</div>
+        <h2 class="display-2">{active.label}.</h2>
+        <div class="rule"></div>
+        <p class="lead">{active.blurb}</p>
+      </div>
+
+      <nav class="off-tabs fade" aria-label="Choose a register">
+        {REGISTRIES.map((r) => (
+          <a
+            href={`/officials?registry=${r.key}`}
+            class="off-tab"
+            class:list={[{ active: r.key === registry }]}
+            aria-current={r.key === registry ? 'page' : undefined}
+          >
+            {r.label}
+            {counts[r.key] !== null && <span class="off-tab-n">{counts[r.key]}</span>}
+          </a>
+        ))}
+      </nav>
+
+      {state === 'not_configured' && (
+        <div class="off-state fade" role="note">
+          <h3 class="off-state-h">The officials register is not available in this environment</h3>
+          <p class="body-txt">
+            The federation records database is not configured for this deployment, so this page cannot
+            read the licence register. <strong>This is a deployment state, not an empty
+            register</strong> — do not read it as a finding that nobody is licensed. Until it is
+            configured, the federation office is the only authority on whether a person is licensed,
+            and an organiser should ask the office in writing before appointing anyone.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href="/contact" class="btn btn-gold">Ask the federation office</a>
+            <a href="/regulations" class="btn btn-ghost">Refereeing rules</a>
+          </div>
+        </div>
+      )}
+
+      {state === 'unavailable' && (
+        <div class="off-state off-state-err fade" role="alert">
+          <h3 class="off-state-h">The register could not be read just now</h3>
+          <p class="body-txt">
+            The federation records service did not answer this request.
+            <strong> This is not a result about any official</strong> — it is a fault on our side, and
+            an absence here right now proves nothing either way. Try again shortly, or ask the office
+            to confirm a licence directly.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href={`/officials?registry=${registry}`} class="btn btn-primary">Try again</a>
+            <a href="/contact" class="btn btn-ghost">Ask the federation office</a>
+          </div>
+        </div>
+      )}
+
+      {state === 'ready' && rows.length === 0 && (
+        <div class="off-state fade" role="note">
+          <h3 class="off-state-h">No current licence is recorded in this register</h3>
+          <p class="body-txt">
+            The federation is building this register. As at {asAtLabel} it holds no current licence
+            for {active.who}. That is a statement about <strong>this register</strong> and nothing
+            more: it is not a finding that no such person exists, and it is not a judgement about
+            anybody. Licences appear here as the office records them.
+          </p>
+          <p class="body-txt mt-4">
+            Until an entry appears, an organiser should ask the federation office to confirm in
+            writing that a person is licensed before appointing them — an appointment made on an
+            invalid licence puts every result that official touches in doubt.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a href="/contact" class="btn btn-gold">Ask the federation office</a>
+            <a href="/affiliation" class="btn btn-ghost">Certification pathways</a>
+          </div>
+        </div>
+      )}
+
+      {state === 'ready' && rows.length > 0 && (
+        <div class="fade">
+          <div class="off-search">
+            <label class="input-label" for="off-q">Find an official by name, member ID or state</label>
+            <input
+              id="off-q"
+              class="input"
+              type="search"
+              autocomplete="off"
+              placeholder="e.g. a surname, or MMAKF-MEM"
+              aria-describedby="off-count"
+            />
+          </div>
+
+          <p class="off-count" id="off-count" role="status" aria-live="polite" data-as-at={asAtLabel}>
+            Showing all {rows.length} current {rows.length === 1 ? 'licence' : 'licences'}, as at {asAtLabel}.
+          </p>
+
+          <div
+            class="tbl-scroll"
+            tabindex="0"
+            role="region"
+            aria-label={`Currently licensed ${active.label.toLowerCase()}`}
+          >
+            <table class="off-tbl" id="off-tbl">
+              <caption class="sr-only">
+                Officials holding a current licence in the {active.label.toLowerCase()} register as at {asAtLabel}.
+                No contact details are published.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Official</th>
+                  <th scope="col">Member ID</th>
+                  <th scope="col">State unit</th>
+                  <th scope="col">Level as recorded</th>
+                  <th scope="col">Licensed from</th>
+                  <th scope="col">Valid to</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr data-search={`${r.fullName} ${r.federationId} ${r.stateUnitId ? (stateNames.get(r.stateUnitId) ?? '') : ''}`.toLowerCase()}>
+                    <th scope="row" class="off-name">
+                      <a href={`/athlete/${encodeURIComponent(r.federationId)}`}>{r.fullName}</a>
+                    </th>
+                    <td class="off-fid">{r.federationId}</td>
+                    <td>{r.stateUnitId ? (stateNames.get(r.stateUnitId) ?? 'Not recorded') : 'Not recorded'}</td>
+                    <td>{r.level || <span class="text-muted">None recorded</span>}</td>
+                    <td class="nowrap">{r.grantedOn ? fmtDate(r.grantedOn) : <span class="text-muted">Not recorded</span>}</td>
+                    <td class="nowrap">
+                      {r.expiresOn
+                        ? fmtDate(r.expiresOn)
+                        : <span class="off-open">No expiry recorded</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div class="tbl-hint">Scroll the table sideways to see every column</div>
+
+          <p class="off-empty" id="off-empty" hidden role="status">
+            No current licence matches that search. A person whose licence has lapsed, been withdrawn
+            or been suspended does not appear on this page at all — ask the office rather than reading
+            the absence as an answer.
+          </p>
+
+          {openEnded > 0 && (
+            <div class="off-note mt-8" role="note">
+              <h3 class="off-note-h">
+                {openEnded === 1
+                  ? 'One licence above carries no expiry date'
+                  : `${openEnded} licences above carry no expiry date`}
+              </h3>
+              <p class="body-txt">
+                Where the register records no expiry, the row says <strong>“No expiry
+                recorded”</strong> rather than presenting the licence as valid indefinitely. A missing
+                expiry may be deliberate or it may be an omission in the register, and only the
+                federation office can tell you which. It is shown rather than hidden so the question
+                can be asked.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ FOR ORGANISERS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="off-adv fade">
+        <div class="eyebrow">If you are appointing officials</div>
+        <h2 class="off-adv-h">Check the licence against the <em class="r">day of the event</em>.</h2>
+        <div class="rule"></div>
+        <p class="body-txt">
+          An expired licence must never quietly produce a valid official act. A referee whose licence
+          lapsed in March scoring a final in June is not a paperwork problem: every result they touched
+          becomes challengeable, and the federation cannot defend any of them. That is why the
+          federation’s own appointment process freezes the licence it relied on at the moment of
+          appointment, and why this page prints the date it answered for.
+        </p>
+        <p class="body-txt mt-4">
+          This page answers for today only. For an event in the future, ask the office to confirm
+          validity on the event date.
+        </p>
+        <div class="flex flex-wrap gap-3 mt-6">
+          <a href="/contact" class="btn btn-primary">Ask the federation office</a>
+          <a href="/regulations" class="btn btn-ghost">Referee &amp; judging rules</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<script>
+  // Narrowing only; the server already rendered every row, so the table is
+  // complete with JavaScript off.
+  const table = document.getElementById('off-tbl');
+  const box = document.getElementById('off-q') as HTMLInputElement | null;
+  const count = document.getElementById('off-count');
+  const empty = document.getElementById('off-empty');
+
+  if (table && box && count) {
+    const rows = Array.from(table.querySelectorAll<HTMLTableRowElement>('tbody tr'));
+    const total = rows.length;
+    // Read from a data attribute rather than parsed back out of the sentence:
+    // re-parsing our own prose breaks the moment the wording changes.
+    const asAt = count.dataset.asAt || '';
+
+    box.addEventListener('input', () => {
+      const term = box.value.trim().toLowerCase();
+      let shown = 0;
+      for (const row of rows) {
+        const visible = !term || (row.dataset.search || '').includes(term);
+        // `hidden` alone loses to the UA's `display: table-row`, so the row is
+        // hidden with both — otherwise a filtered-out official stays on screen.
+        row.hidden = !visible;
+        row.style.display = visible ? '' : 'none';
+        if (visible) shown++;
+      }
+      count.textContent =
+        shown === total
+          ? `Showing all ${total} current ${total === 1 ? 'licence' : 'licences'}, as at ${asAt}.`
+          : `Showing ${shown} of ${total} current licences, as at ${asAt}.`;
+      if (empty) empty.hidden = shown !== 0;
+    });
+  }
+</script>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .nowrap { white-space: nowrap; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
+  .off-key { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 780px) { .off-key { grid-template-columns: 1fr; } }
+  .off-key-card { border-top: 3px solid var(--border-2); }
+  .off-key-yes { border-top-color: var(--gold-dim); }
+  .off-key-no { border-top-color: var(--red); }
+
+  .off-tabs { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 28px; }
+  .off-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    padding: 10px 20px;
+    border: 1px solid var(--border-2);
+    background: var(--card);
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--off-white);
+    border-radius: var(--radius);
+  }
+  .off-tab:hover { border-color: var(--gold-dim); color: var(--gold-2); }
+  .off-tab.active { background: var(--red); border-color: var(--red); color: #fff; }
+  .off-tab-n {
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    border-left: 1px solid var(--border-2);
+    padding-left: 10px;
+  }
+  .off-tab.active .off-tab-n { color: rgba(255, 255, 255, 0.82); border-left-color: rgba(255, 255, 255, 0.32); }
+
+  .off-state {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    padding: 28px 30px;
+    max-width: 78ch;
+  }
+  .off-state-err { border-left-color: var(--red); }
+  @media (max-width: 520px) { .off-state { padding: 22px 18px; } }
+  .off-state-h {
+    font-family: var(--font-display);
+    font-size: 1.08rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-bottom: 10px;
+  }
+
+  .off-search { max-width: 380px; margin-bottom: 16px; }
+  .off-count, .off-empty { font-size: 0.84rem; color: var(--muted); margin-bottom: 16px; }
+  .off-empty { margin-top: 18px; max-width: 72ch; }
+
+  .off-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    min-width: 780px;
+  }
+  .off-tbl th, .off-tbl td {
+    padding: 13px 16px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.86rem;
+    color: var(--off-white);
+  }
+  .off-tbl thead th {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    background: var(--card-2);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .off-tbl tbody tr:last-child th,
+  .off-tbl tbody tr:last-child td { border-bottom: 0; }
+  .off-name { font-family: var(--font-display); font-weight: 600; font-size: 0.95rem; color: var(--white); }
+  .off-name a { display: inline-flex; align-items: center; min-height: 44px; }
+  .off-name a:hover, .off-name a:focus-visible { color: var(--gold-2); }
+  .off-fid {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.76rem;
+    color: var(--gold-2);
+    white-space: nowrap;
+  }
+  .off-open { color: var(--red-2); font-weight: 600; }
+
+  .off-note {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--red);
+    padding: 24px 26px;
+    max-width: 78ch;
+  }
+  .off-note-h {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-bottom: 10px;
+  }
+
+  .off-adv {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    padding: 36px 40px;
+    max-width: 880px;
+  }
+  @media (max-width: 560px) { .off-adv { padding: 26px 20px; } }
+  .off-adv-h {
+    font-family: var(--font-display);
+    font-size: clamp(1.4rem, 3.4vw, 1.9rem);
+    font-weight: 600;
+    color: var(--white);
+    margin-top: 14px;
+  }
+  .off-adv-h em { font-family: var(--font-accent); font-style: italic; color: var(--red-2); }
+</style>

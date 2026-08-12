@@ -28,6 +28,13 @@
 //     unit, so a district dashboard says so rather than quietly reporting the
 //     whole federation's entries under a district heading.
 //
+//  5. A COUNT IS A READ, AND A SERIES IS A CLOSER READ THAN A COUNT. Scope says
+//     WHICH rows may be counted; it does not say whether this caller may count
+//     them at all. Where the module that owns a table refuses to show its rows,
+//     the figure derived from them carries that same gate — otherwise the
+//     dashboard becomes the way round it. "Two of my four students are under
+//     investigation" identifies them; a daily series dates it.
+//
 // This module WRITES NOTHING — no audit row, no cache, no materialised total.
 // It cannot corrupt the record it reports on, and every call re-derives from
 // the authoritative tables, so a corrected result or a revoked certificate is
@@ -288,9 +295,20 @@ const currentCredential = (t: any, asAt: string) => [
 const CREDENTIAL_FILTER =
   "status = 'active' and granted_on <= the as-at date and (expires_on is null or expires_on >= it), distinct person_id";
 
-/** Case statuses that are not an ending. Read off the case_status enum. */
-const OPEN_CASE_STATUSES = s.caseStatus.enumValues.filter((v) => v !== 'closed' && v !== 'withdrawn');
-const OPEN_TICKET_STATUSES = s.ticketStatus.enumValues.filter((v) => v !== 'resolved' && v !== 'closed');
+/**
+ * MMAKF HAS NOT DEFINED WHEN A CASE IS "OPEN", so this module does not decide.
+ *
+ * The enum has `decided`, `appealed` and `appeal_heard` between the start and
+ * `closed`. Whether a decided case with a sanction still running counts as open
+ * is a federation lifecycle judgement, and publishing one of the answers under
+ * the heading "open cases" would be reporting a rule nobody set as though it
+ * were a measurement. What the database can state without judgement is the
+ * ABSENCE of an ending, so that is what is counted and what the key is called.
+ * When the federation supplies the definition, it belongs in configuration and
+ * an "open" figure can be added beside this one.
+ */
+const NOT_CLOSED_CASE_STATUSES = s.caseStatus.enumValues.filter((v) => v !== 'closed' && v !== 'withdrawn');
+const NOT_CLOSED_TICKET_STATUSES = s.ticketStatus.enumValues.filter((v) => v !== 'resolved' && v !== 'closed');
 
 const SPECS: CountSpec[] = [
   {
@@ -469,32 +487,39 @@ const SPECS: CountSpec[] = [
     table: 'enrolments', filter: "status = 'completed'",
   },
   {
-    key: 'openSupportTickets', base: s.supportTickets,
-    cond: () => [inArray(s.supportTickets.status, OPEN_TICKET_STATUSES)],
+    key: 'supportTicketsNotClosed', base: s.supportTickets,
+    cond: () => [inArray(s.supportTickets.status, NOT_CLOSED_TICKET_STATUSES)],
     scope: (sc) => byPerson(sc, s.supportTickets.raisedByPersonId),
     table: 'support_tickets',
-    filter: `status in (${OPEN_TICKET_STATUSES.map((v) => `'${v}'`).join(', ')})`,
+    filter: `status in (${NOT_CLOSED_TICKET_STATUSES.map((v) => `'${v}'`).join(', ')})`,
+    // A ticket is personal data (contact email and phone) and cases.ts refuses
+    // to list one without this. A COUNT of them must not be the way round it.
+    requires: SUPPORT_DESK_READ,
   },
 ];
 
-/** Open casework, kept out of SPECS because each kind is authorised separately. */
+/** Casework, kept out of SPECS because each kind is authorised separately. */
 const CASE_SPECS: CountSpec[] = [
   {
     key: 'disciplinary', base: s.disciplinaryCases,
-    cond: () => [inArray(s.disciplinaryCases.status, OPEN_CASE_STATUSES)],
+    cond: () => [inArray(s.disciplinaryCases.status, NOT_CLOSED_CASE_STATUSES)],
     scope: (sc) => byPerson(sc, s.disciplinaryCases.subjectPersonId),
     table: 'disciplinary_cases',
-    filter: `status in (${OPEN_CASE_STATUSES.map((v) => `'${v}'`).join(', ')}), scoped by the subject person`,
+    filter: `status in (${NOT_CLOSED_CASE_STATUSES.map((v) => `'${v}'`).join(', ')}), scoped by the subject person`,
+    // "Two of my four students are under investigation" names them as surely as
+    // the case file does. cases.ts admits nobody but membership:revoke holders
+    // to disciplinary casework; a dashboard tile is not an exception to that.
+    requires: DISCIPLINE_READ,
   },
   {
     key: 'safeguarding', base: s.safeguardingCases,
-    cond: () => [inArray(s.safeguardingCases.status, OPEN_CASE_STATUSES)],
+    cond: () => [inArray(s.safeguardingCases.status, NOT_CLOSED_CASE_STATUSES)],
     scope: (sc) => byPerson(sc, s.safeguardingCases.subjectPersonId),
     table: 'safeguarding_cases',
-    filter: `status in (${OPEN_CASE_STATUSES.map((v) => `'${v}'`).join(', ')}), scoped by the subject person`,
+    filter: `status in (${NOT_CLOSED_CASE_STATUSES.map((v) => `'${v}'`).join(', ')}), scoped by the subject person`,
     // A count of child-protection cases in a single dojo is itself disclosive.
     // It is withheld from anyone who could not read the cases themselves.
-    requires: 'safeguarding:read',
+    requires: SAFEGUARDING_READ,
   },
 ];
 
@@ -508,7 +533,12 @@ export interface Dashboard {
   counts: Record<string, number>;
   dojosByStatus: Record<string, number>;
   eventsByStatus: Record<string, number>;
-  openCasesByKind: Record<string, number>;
+  /**
+   * Cases with no recorded ending, by kind. NOT "open cases" — see
+   * NOT_CLOSED_CASE_STATUSES: the federation has not defined which statuses
+   * close a case, so this reports the fact rather than the judgement.
+   */
+  casesNotClosedByKind: Record<string, number>;
   sources: Record<string, Source>;
   withheld: Withheld[];
 }
@@ -529,7 +559,7 @@ async function buildDashboard(
 
   for (const spec of [...SPECS, ...CASE_SPECS]) {
     const isCase = CASE_SPECS.includes(spec);
-    const key = isCase ? `openCases.${spec.key}` : spec.key;
+    const key = isCase ? `casesNotClosed.${spec.key}` : spec.key;
 
     if (spec.requires && !canAnywhere(principal, spec.requires)) {
       withheld.push({
@@ -559,10 +589,10 @@ async function buildDashboard(
     sources[key] = { table: spec.table, filter: spec.filter };
   }
 
-  const openCasesByKind: Record<string, number> = {};
+  const casesNotClosedByKind: Record<string, number> = {};
   for (const spec of CASE_SPECS) {
-    const key = `openCases.${spec.key}`;
-    if (key in counts) openCasesByKind[spec.key] = counts[key];
+    const key = `casesNotClosed.${spec.key}`;
+    if (key in counts) casesNotClosedByKind[spec.key] = counts[key];
   }
 
   // Grouped breakdowns. Both zero-fill every value the enum permits, so a status
@@ -596,7 +626,7 @@ async function buildDashboard(
 
   return {
     scope, asAt, generatedAt: now.toISOString(),
-    counts, dojosByStatus, eventsByStatus, openCasesByKind, sources, withheld,
+    counts, dojosByStatus, eventsByStatus, casesNotClosedByKind, sources, withheld,
   };
 }
 
@@ -634,6 +664,16 @@ interface MetricSpec {
   column: string;
   table: string;
   scope: (sc: ScopeRef) => ScopeClause;
+  /**
+   * An action the caller must hold beyond the scope gate, for the same reason a
+   * dashboard figure carries one.
+   *
+   * A SERIES IS MORE DISCLOSIVE THAN A COUNT, not less: a monthly total of
+   * disciplinary cases in one dojo is bad, and the same series at daily
+   * granularity dates the case to the day, which anyone who trains there can
+   * match to the student who stopped coming. Scope alone is not the gate.
+   */
+  requires?: Action;
 }
 
 const METRICS: Record<GrowthMetric, MetricSpec> = {
@@ -695,12 +735,28 @@ const METRICS: Record<GrowthMetric, MetricSpec> = {
   support_tickets: {
     base: s.supportTickets, ts: s.supportTickets.createdAt, column: 'created_at', table: 'support_tickets',
     scope: (sc) => byPerson(sc, s.supportTickets.raisedByPersonId),
+    requires: SUPPORT_DESK_READ,
   },
   disciplinary_cases: {
     base: s.disciplinaryCases, ts: s.disciplinaryCases.createdAt, column: 'created_at', table: 'disciplinary_cases',
     scope: (sc) => byPerson(sc, s.disciplinaryCases.subjectPersonId),
+    requires: DISCIPLINE_READ,
   },
+  // There is deliberately NO safeguarding metric. A dated series of child
+  // protection concerns has no reporting use that outweighs re-identifying the
+  // child, and cases.ts is the only place that material may be read.
 };
+
+/**
+ * The most buckets one call will build.
+ *
+ * AN IMPLEMENTATION LIMIT, NOT A FEDERATION RULE — nothing about MMAKF says a
+ * report may not span a century. It exists because the bucket list is
+ * materialised in memory and `1900-01-01 → 2999-12-31` at daily granularity is
+ * 400,000 objects per call. The refusal names the limit so the caller can widen
+ * the granularity rather than guess why the call failed.
+ */
+const MAX_BUCKETS = 5000;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -778,6 +834,27 @@ export async function growthOverTime(
   const to = assertDate(input.toDate, 'toDate');
   if (from > to) throw new AnalyticsError('bad_range', 'fromDate must not be after toDate.');
 
+  // Before the database is touched: this metric's own gate, if it has one. It
+  // does not depend on the scope, and refusing here means a caller who may not
+  // read the rows never causes them to be read.
+  if (spec.requires) assertCanAnywhere(principal, spec.requires);
+
+  // The bucket list is built in memory, so it is bounded BEFORE the query runs
+  // rather than after the process has already allocated for it.
+  const gran = input.granularity;
+  const keys: string[] = [];
+  const lastBucket = bucketStart(to, gran);
+  for (let b = bucketStart(from, gran); b <= lastBucket; b = nextBucket(b, gran)) {
+    if (keys.length >= MAX_BUCKETS) {
+      throw new AnalyticsError(
+        'range_too_large',
+        `That range is more than ${MAX_BUCKETS} ${gran} buckets. This is an implementation limit, ` +
+        'not a federation rule — widen the granularity or narrow the range.'
+      );
+    }
+    keys.push(b);
+  }
+
   const scope = await resolveScope(db, principal, input.scope ?? { kind: 'national' });
   const sc = spec.scope(scope);
   if (!sc.scopable) {
@@ -790,7 +867,6 @@ export async function growthOverTime(
   // The upper bound is EXCLUSIVE at the start of the day after toDate, so a row
   // created at 23:59 on toDate is counted. A `<=` on a timestamp would drop it.
   const toExclusive = nextBucket(to, 'day');
-  const gran = input.granularity;
   const bucketExpr = sql<string>`to_char(date_trunc(${gran}::text, (${spec.ts} AT TIME ZONE 'UTC')), 'YYYY-MM-DD')`;
 
   const rows = await db
@@ -815,11 +891,7 @@ export async function growthOverTime(
   const observed = new Map<string, number>();
   for (const r of rows) observed.set(String(r.bucket), Number(r.n ?? 0));
 
-  const buckets: GrowthSeries['buckets'] = [];
-  const last = bucketStart(to, gran);
-  for (let b = bucketStart(from, gran); b <= last; b = nextBucket(b, gran)) {
-    buckets.push({ bucket: b, count: observed.get(b) ?? 0 });
-  }
+  const buckets: GrowthSeries['buckets'] = keys.map((b) => ({ bucket: b, count: observed.get(b) ?? 0 }));
 
   return {
     metric: input.metric,
@@ -958,14 +1030,21 @@ export async function annualReport(
     fig('membershipsBeginning', 'Memberships beginning during the year',
       await scalar(db, s.memberships, [inYearDate(s.memberships.validFrom)]),
       'memberships', 'valid_from', `valid_from within ${year}`),
-    fig('membershipsActiveAtYearEnd', `Memberships active on ${to}`,
+    // NO `status` PREDICATE, deliberately, and this is the same reason
+    // `dojos.status` is not reported at all: `memberships.status` records the
+    // membership's state TODAY and keeps no history. Combining it with a
+    // historical date would produce a figure that changes every time the report
+    // is regenerated — a member whose card lapsed in 2027 would retrospectively
+    // vanish from the 2026 report. The recorded validity dates ARE history, so
+    // the figure is built from those alone and the label says which question it
+    // answers.
+    fig('membershipsCoveringYearEnd', `Memberships whose recorded validity covered ${to}`,
       await scalar(db, s.memberships, [
-        eq(s.memberships.status, 'active'),
         sql`${s.memberships.validFrom} <= ${to}::date`,
         sql`(${s.memberships.validTo} IS NULL OR ${s.memberships.validTo} >= ${to}::date)`,
       ]),
       'memberships', 'valid_from / valid_to',
-      `status = 'active' and valid_from <= ${to} and (valid_to is null or valid_to >= ${to})`),
+      `valid_from <= ${to} and (valid_to is null or valid_to >= ${to}); no status predicate — status is current state and would make this figure drift`),
     fig('membershipsLapsingInYear', 'Memberships whose validity ended during the year',
       await scalar(db, s.memberships, [inYearDate(s.memberships.validTo)]),
       'memberships', 'valid_to', `valid_to within ${year}`),
@@ -1097,10 +1176,15 @@ export async function annualReport(
     (a, b) => Number(b.total) - Number(a.total) || String(a.state).localeCompare(String(b.state))
   );
   sections.push(seal('medalsByState', 'Medals by state unit', [
-    fig('medalsCounted', 'Medals attributed to a state unit',
+    // The total spans EVERY row of the table below, including the unattributed
+    // one. Calling it "attributed to a state unit" while summing the
+    // unattributed row too is the sort of quiet mislabel that makes a report
+    // fail to reconcile with itself — this figure must equal the medal figures
+    // in the results section, and the label has to say so.
+    fig('medalsCounted', 'Medals in the table below, attributed and unattributed',
       medalTable.reduce((acc, r) => acc + Number(r.total), 0),
       'competition_results', 'finalised_at',
-      `finalised_at within ${year}, status = 'final', medal in ('gold','silver','bronze'), grouped by event_entries.state_unit_id`),
+      `finalised_at within ${year}, status = 'final', medal in ('gold','silver','bronze'), grouped by event_entries.state_unit_id including rows where it is null`),
   ], medalTable));
 
   // ── Education ─────────────────────────────────────────────────────────────
@@ -1116,21 +1200,44 @@ export async function annualReport(
       'enrolments', 'completed_at', `completed_at within ${year}`),
   ]));
 
-  // ── Cases handled ─────────────────────────────────────────────────────────
-  sections.push(seal('cases', 'Cases and member support', [
-    fig('disciplinaryReceived', 'Disciplinary cases received',
-      await scalar(db, s.disciplinaryCases, [inYearDate(s.disciplinaryCases.receivedOn)]),
+  // ── Discipline ────────────────────────────────────────────────────────────
+  //
+  // Split out of the old combined "cases and member support" section, and for
+  // the same reason finance and safeguarding are separate: a section is the
+  // unit that can be withheld, so two domains with two different gates cannot
+  // share one. National reach is not disciplinary authority — PRESIDENT and
+  // TECHNICAL_DIRECTOR clear the report's own gate and hold no disciplinary
+  // action at all — and cases.ts refuses them the underlying rows.
+  const disciplineFigures = (received: number, closed: number): ReportFigure[] => [
+    fig('disciplinaryReceived', 'Disciplinary cases received', received,
       'disciplinary_cases', 'received_on', `received_on within ${year}`),
-    fig('disciplinaryClosed', 'Disciplinary cases closed',
-      await scalar(db, s.disciplinaryCases, [inYearDate(s.disciplinaryCases.closedOn)]),
+    fig('disciplinaryClosed', 'Disciplinary cases closed', closed,
       'disciplinary_cases', 'closed_on', `closed_on within ${year}`),
-    fig('supportTicketsRaised', 'Support tickets raised',
-      await scalar(db, s.supportTickets, [inYearTs(s.supportTickets.createdAt)]),
+  ];
+  if (canAnywhere(principal, DISCIPLINE_READ)) {
+    sections.push(seal('discipline', 'Discipline', disciplineFigures(
+      await scalar(db, s.disciplinaryCases, [inYearDate(s.disciplinaryCases.receivedOn)]),
+      await scalar(db, s.disciplinaryCases, [inYearDate(s.disciplinaryCases.closedOn)]),
+    )));
+  } else {
+    sections.push(withheldSection('discipline', 'Discipline', DISCIPLINE_READ, disciplineFigures(0, 0)));
+  }
+
+  // ── Member support ────────────────────────────────────────────────────────
+  const supportFigures = (raised: number, resolved: number): ReportFigure[] => [
+    fig('supportTicketsRaised', 'Support tickets raised', raised,
       'support_tickets', 'created_at', `created_at within ${year}`),
-    fig('supportTicketsResolved', 'Support tickets resolved',
-      await scalar(db, s.supportTickets, [inYearTs(s.supportTickets.resolvedAt)]),
+    fig('supportTicketsResolved', 'Support tickets resolved', resolved,
       'support_tickets', 'resolved_at', `resolved_at within ${year}`),
-  ]));
+  ];
+  if (canAnywhere(principal, SUPPORT_DESK_READ)) {
+    sections.push(seal('support', 'Member support', supportFigures(
+      await scalar(db, s.supportTickets, [inYearTs(s.supportTickets.createdAt)]),
+      await scalar(db, s.supportTickets, [inYearTs(s.supportTickets.resolvedAt)]),
+    )));
+  } else {
+    sections.push(withheldSection('support', 'Member support', SUPPORT_DESK_READ, supportFigures(0, 0)));
+  }
 
   // ── Safeguarding ──────────────────────────────────────────────────────────
   //
@@ -1146,14 +1253,14 @@ export async function annualReport(
     fig('referredToAuthority', 'Concerns referred to an external authority', referred,
       'safeguarding_cases', 'referred_on', `referred_on within ${year}`),
   ];
-  if (canAnywhere(principal, 'safeguarding:read')) {
+  if (canAnywhere(principal, SAFEGUARDING_READ)) {
     sections.push(seal('safeguarding', 'Safeguarding', safeguardingFigures(
       await scalar(db, s.safeguardingCases, [inYearDate(s.safeguardingCases.receivedOn)]),
       await scalar(db, s.safeguardingCases, [inYearDate(s.safeguardingCases.closedOn)]),
       await scalar(db, s.safeguardingCases, [inYearDate(s.safeguardingCases.referredOn)]),
     )));
   } else {
-    sections.push(withheldSection('safeguarding', 'Safeguarding', 'safeguarding:read', safeguardingFigures(0, 0, 0)));
+    sections.push(withheldSection('safeguarding', 'Safeguarding', SAFEGUARDING_READ, safeguardingFigures(0, 0, 0)));
   }
 
   // ── Finance ───────────────────────────────────────────────────────────────
@@ -1171,12 +1278,33 @@ export async function annualReport(
   ];
   if (canAnywhere(principal, 'finance:read')) {
     const ledgerInYear = inYearDate(s.ledgerEntries.occurredOn);
+
+    /**
+     * Postgres sums bigint and hands it back as a STRING, precisely so it does
+     * not lose digits. `Number()` puts it into a float64, which silently rounds
+     * above 2^53 - 1 paise. That ceiling is ~90,000 crore and the federation
+     * will not reach it, but a rounded total is a WRONG number that still looks
+     * like a measurement, which is the one thing this module may never emit. So
+     * the conversion is checked rather than assumed.
+     */
+    const toPaise = (raw: unknown): number => {
+      const n = Number(raw ?? 0);
+      if (!Number.isSafeInteger(n)) {
+        throw new AnalyticsError(
+          'amount_out_of_range',
+          `A ledger total (${String(raw)} paise) is too large to report exactly as a JavaScript number. ` +
+          'Refusing rather than publishing a rounded figure.'
+        );
+      }
+      return n;
+    };
+
     const sumPaise = async (direction: string) => {
       const rows = await db
         .select({ n: sql<number>`COALESCE(sum(${s.ledgerEntries.amountPaise}), 0)::bigint` })
         .from(s.ledgerEntries)
         .where(and(ledgerInYear, eq(s.ledgerEntries.direction, direction)));
-      return Number(rows[0]?.n ?? 0);
+      return toPaise(rows[0]?.n);
     };
     const accounts = await db
       .select({
@@ -1200,7 +1328,7 @@ export async function annualReport(
         .map((r: any) => ({
           account: r.account,
           direction: r.direction,
-          amountPaise: Number(r.amountPaise ?? 0),
+          amountPaise: toPaise(r.amountPaise),
           entries: Number(r.entries ?? 0),
         }))
         .sort((a: any, b: any) => a.account.localeCompare(b.account) || a.direction.localeCompare(b.direction))

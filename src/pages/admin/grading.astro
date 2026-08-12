@@ -1,0 +1,1371 @@
+---
+// The examiner and office console for the grading chain.
+//
+// This screen is the human end of src/db/grading.ts. It renders four things the
+// federation cannot examine without, and it renders them from the record rather
+// than from anything computed here:
+//
+//  1. THE EVIDENCE, not the verdict. An ineligible candidate shows every rule
+//     that was checked, whether it passed, and the value the rule actually saw,
+//     read back from the stored eligibility result. "Ineligible" on its own is
+//     not an answer anybody can act on or appeal.
+//  2. THE SCORECARD, generated from the syllabus. Where MMAKF has recorded the
+//     requirements for a grade, each one is a row. Where it has not, the page
+//     says so and lets the panel name the component themselves - it does not
+//     invent a syllabus to fill the gap.
+//  3. THE LOCK, visibly. A locked grading disables its controls and states the
+//     date and the reason they are disabled.
+//  4. THE CERTIFICATE, only for a recorded pass. Anything else shows why no
+//     certificate is offered.
+//
+// Authority is asked of rbac, never assumed from being signed in, and the row
+// filter comes from visibleScopes() so a state officer sees their own state's
+// gradings and no others. A control the server would refuse is not rendered.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import { isConfigured, db } from '@/db';
+import { summariseScores, type ScoreSummary } from '@/db/grading';
+import * as s from '@/db/schema';
+import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
+
+export const prerender = false;
+
+// identify() is the only way this page learns who the caller is. A user cookie
+// that no longer resolves returns null rather than falling back to a shared
+// credential, so a revoked account lands on the sign-in prompt.
+const identity = await identify(Astro.request.headers.get('cookie'));
+const configured = isConfigured();
+
+let mayRead = false;
+let mayScore = false;
+let mayApprove = false;
+let mayIssue = false;
+let mayRevoke = false;
+
+let loadError: string | null = null;
+let gradings: any[] = [];
+let counts = new Map<number, Record<string, number>>();
+let selected: any = null;
+let panel: any[] = [];
+let candidates: any[] = [];
+let requirementsByGrade = new Map<number, any[]>();
+let scoresByCandidate = new Map<number, any[]>();
+let summaryByCandidate = new Map<number, ScoreSummary>();
+let certificatesById = new Map<number, any>();
+let examinerPool: any[] = [];
+let myPersonId: number | null = null;
+let scopeNote: string | null = null;
+
+const selectedId = Number(Astro.url.searchParams.get('g') || '') || null;
+
+if (identity && configured) {
+  mayRead = canAnywhere(identity.principal, 'grading:read');
+  mayScore = canAnywhere(identity.principal, 'grading:score');
+  mayApprove = canAnywhere(identity.principal, 'grading:approve');
+  mayIssue = canAnywhere(identity.principal, 'certificate:issue');
+  mayRevoke = canAnywhere(identity.principal, 'certificate:revoke');
+
+  if (mayRead) {
+    try {
+      const database = db();
+
+      // Scope is applied in the query, not by filtering afterwards, so a
+      // grading outside the caller's units is never loaded in the first place.
+      const scopes = visibleScopes(identity.principal, 'grading:read');
+      let where: any = undefined;
+      if (scopes.kind === 'none') {
+        where = sql`false`;
+        scopeNote = 'Your credential carries no unit scope, so no gradings are visible to it.';
+      } else if (scopes.kind === 'scoped') {
+        const parts: any[] = [];
+        if (scopes.states.length) parts.push(inArray(s.gradingEvents.stateUnitId, scopes.states));
+        if (scopes.districts.length) {
+          parts.push(inArray(s.gradingEvents.districtUnitId, scopes.districts));
+        }
+        if (scopes.dojos.length) parts.push(inArray(s.gradingEvents.dojoId, scopes.dojos));
+        where = parts.length === 1 ? parts[0] : or(...parts);
+        scopeNote =
+          'You are seeing the gradings inside your own units only. A grading held elsewhere ' +
+          'is not listed here and cannot be opened from this screen.';
+      }
+
+      const base = database
+        .select({
+          id: s.gradingEvents.id,
+          code: s.gradingEvents.code,
+          title: s.gradingEvents.title,
+          status: s.gradingEvents.status,
+          heldOn: s.gradingEvents.heldOn,
+          venue: s.gradingEvents.venue,
+          lockedAt: s.gradingEvents.lockedAt,
+          notes: s.gradingEvents.notes,
+          syllabusVersionId: s.gradingEvents.syllabusVersionId,
+          syllabusCode: s.syllabusVersions.code,
+          syllabusTitle: s.syllabusVersions.title,
+          syllabusStatus: s.syllabusVersions.status,
+        })
+        .from(s.gradingEvents)
+        .leftJoin(s.syllabusVersions, eq(s.syllabusVersions.id, s.gradingEvents.syllabusVersionId));
+
+      gradings = await (where ? base.where(where) : base)
+        .orderBy(desc(s.gradingEvents.heldOn), desc(s.gradingEvents.id))
+        .limit(120);
+
+      const ids = gradings.map((g) => g.id);
+      if (ids.length) {
+        const grouped = await database
+          .select({
+            gradingEventId: s.gradingCandidates.gradingEventId,
+            status: s.gradingCandidates.status,
+            n: sql<number>`count(*)::int`,
+          })
+          .from(s.gradingCandidates)
+          .where(inArray(s.gradingCandidates.gradingEventId, ids))
+          .groupBy(s.gradingCandidates.gradingEventId, s.gradingCandidates.status);
+        for (const row of grouped as any[]) {
+          const entry = counts.get(row.gradingEventId) ?? {};
+          entry[row.status] = Number(row.n);
+          counts.set(row.gradingEventId, entry);
+        }
+      }
+
+      // The selected grading must be one of the rows the scope filter already
+      // returned. Knowing an id is never enough.
+      selected = selectedId ? gradings.find((g) => g.id === selectedId) ?? null : null;
+
+      // Which person the signed-in account is, so an examiner scores as
+      // themselves by default rather than picking their own name off a list.
+      if (identity.userId) {
+        const u = (
+          await database
+            .select({ personId: s.users.personId })
+            .from(s.users)
+            .where(eq(s.users.id, identity.userId))
+            .limit(1)
+        )[0];
+        myPersonId = u?.personId ?? null;
+      }
+
+      if (selected) {
+        panel = await database
+          .select({
+            id: s.gradingPanel.id,
+            personId: s.gradingPanel.personId,
+            role: s.gradingPanel.role,
+            assignedAt: s.gradingPanel.assignedAt,
+            qualificationSnapshot: s.gradingPanel.qualificationSnapshot,
+            fullName: s.persons.fullName,
+            federationId: s.persons.federationId,
+          })
+          .from(s.gradingPanel)
+          .innerJoin(s.persons, eq(s.persons.id, s.gradingPanel.personId))
+          .where(eq(s.gradingPanel.gradingEventId, selected.id))
+          .orderBy(s.gradingPanel.id);
+
+        candidates = await database
+          .select({
+            id: s.gradingCandidates.id,
+            personId: s.gradingCandidates.personId,
+            status: s.gradingCandidates.status,
+            outcome: s.gradingCandidates.outcome,
+            overallScore: s.gradingCandidates.overallScore,
+            referredComponents: s.gradingCandidates.referredComponents,
+            examinerNotes: s.gradingCandidates.examinerNotes,
+            candidateFeedback: s.gradingCandidates.candidateFeedback,
+            decidedAt: s.gradingCandidates.decidedAt,
+            certificateId: s.gradingCandidates.certificateId,
+            eligibilityResult: s.gradingCandidates.eligibilityResult,
+            eligibilityCheckedAt: s.gradingCandidates.eligibilityCheckedAt,
+            ineligibleReason: s.gradingCandidates.ineligibleReason,
+            gradeDefinitionId: s.gradingCandidates.gradeDefinitionId,
+            gradeLabel: s.gradeDefinitions.label,
+            gradeKind: s.gradeDefinitions.kind,
+            fullName: s.persons.fullName,
+            federationId: s.persons.federationId,
+          })
+          .from(s.gradingCandidates)
+          .innerJoin(s.persons, eq(s.persons.id, s.gradingCandidates.personId))
+          .innerJoin(
+            s.gradeDefinitions,
+            eq(s.gradeDefinitions.id, s.gradingCandidates.gradeDefinitionId)
+          )
+          .where(eq(s.gradingCandidates.gradingEventId, selected.id))
+          .orderBy(s.persons.fullName);
+
+        const gradeIds = [...new Set(candidates.map((c) => c.gradeDefinitionId))];
+        if (gradeIds.length) {
+          const reqs = await database
+            .select()
+            .from(s.gradeRequirements)
+            .where(inArray(s.gradeRequirements.gradeDefinitionId, gradeIds))
+            .orderBy(s.gradeRequirements.displayOrder, s.gradeRequirements.id);
+          for (const r of reqs as any[]) {
+            const list = requirementsByGrade.get(r.gradeDefinitionId) ?? [];
+            list.push(r);
+            requirementsByGrade.set(r.gradeDefinitionId, list);
+          }
+        }
+
+        const candidateIds = candidates.map((c) => c.id);
+        if (candidateIds.length) {
+          const rows = await database
+            .select({
+              id: s.gradingScores.id,
+              candidateId: s.gradingScores.candidateId,
+              examinerPersonId: s.gradingScores.examinerPersonId,
+              gradeRequirementId: s.gradingScores.gradeRequirementId,
+              component: s.gradingScores.component,
+              score: s.gradingScores.score,
+              maxScore: s.gradingScores.maxScore,
+              comment: s.gradingScores.comment,
+              recordedAt: s.gradingScores.recordedAt,
+              examinerName: s.persons.fullName,
+            })
+            .from(s.gradingScores)
+            .innerJoin(s.persons, eq(s.persons.id, s.gradingScores.examinerPersonId))
+            .where(inArray(s.gradingScores.candidateId, candidateIds))
+            .orderBy(s.gradingScores.component, s.gradingScores.id);
+          for (const r of rows as any[]) {
+            const list = scoresByCandidate.get(r.candidateId) ?? [];
+            list.push(r);
+            scoresByCandidate.set(r.candidateId, list);
+          }
+
+          // Aggregation comes from the module, so the console can never show a
+          // total the certificate would disagree with.
+          for (const id of candidateIds) {
+            summaryByCandidate.set(id, await summariseScores(database, id));
+          }
+        }
+
+        const certIds = candidates.map((c) => c.certificateId).filter(Boolean) as number[];
+        if (certIds.length) {
+          const certs = await database
+            .select({
+              id: s.certificates.id,
+              certificateNo: s.certificates.certificateNo,
+              status: s.certificates.status,
+              issuedOn: s.certificates.issuedOn,
+              revokedOn: s.certificates.revokedOn,
+              revokedReason: s.certificates.revokedReason,
+            })
+            .from(s.certificates)
+            .where(inArray(s.certificates.id, certIds));
+          for (const c of certs as any[]) certificatesById.set(c.id, c);
+        }
+
+        // People who hold an examiner qualification record. assignExaminer()
+        // decides whether the licence is valid on the day; this list only
+        // decides who can be named.
+        if (mayApprove) {
+          examinerPool = await database
+            .select({
+              personId: s.persons.id,
+              fullName: s.persons.fullName,
+              federationId: s.persons.federationId,
+              level: s.examinerQuals.level,
+              scope: s.examinerQuals.scope,
+              status: s.examinerQuals.status,
+              expiresOn: s.examinerQuals.expiresOn,
+            })
+            .from(s.examinerQuals)
+            .innerJoin(s.persons, eq(s.persons.id, s.examinerQuals.personId))
+            .orderBy(s.persons.fullName)
+            .limit(400);
+        }
+      }
+    } catch (err) {
+      console.error('[admin/grading] load failed', err);
+      loadError =
+        'The federation database could not be read. Nothing below is a statement about the ' +
+        'grading records themselves — the console simply could not reach them.';
+      gradings = [];
+      selected = null;
+    }
+  }
+}
+
+const locked = Boolean(selected?.lockedAt);
+const lockReason = locked
+  ? `This grading was locked on ${String(selected.lockedAt).slice(0, 10)}. Scores and decisions are ` +
+    'immutable from that moment. A correction is made by creating a new record, never by editing this one.'
+  : null;
+
+const signedInAs = identity
+  ? identity.shared
+    ? `${identity.principal.label} — shared credential (${identity.via}), not attributable to a person`
+    : `${identity.principal.label} — personal account #${identity.userId}`
+  : '';
+
+function ts(v: any): string {
+  if (!v) return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  if (Number.isNaN(d.getTime())) return String(v);
+  return d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+}
+
+function checksOf(candidate: any): Array<{ rule: string; passed: boolean; detail: string }> {
+  const r = candidate?.eligibilityResult;
+  if (!r || typeof r !== 'object' || !Array.isArray(r.checks)) return [];
+  return r.checks as any[];
+}
+
+const STATUS_TONE: Record<string, string> = {
+  passed: 'ok',
+  failed: 'bad',
+  ineligible: 'bad',
+  withdrawn: 'bad',
+  absent: 'bad',
+  referred: 'warn',
+};
+---
+
+<Base title="MMAKF Admin — Grading" showNav={false} showFooter={false}>
+  {!identity ? (
+    <section style="min-height:90vh;display:flex;align-items:center;justify-content:center;padding:64px 24px">
+      <div style="width:100%;max-width:420px">
+        <div style="text-align:center;margin-bottom:36px">
+          <div style="font-family:var(--font-display);font-size:1.8rem;font-weight:700;letter-spacing:.06em">MMAKF</div>
+          <div style="font-family:var(--font-display);font-size:.7rem;letter-spacing:.22em;text-transform:uppercase;color:var(--gold);margin-top:6px">Grading Console</div>
+        </div>
+        <form id="loginForm" class="card" style="padding:32px">
+          <h1 class="card-title" style="font-size:1.2rem;margin-bottom:24px">Sign in</h1>
+
+          <label class="input-label" for="login-email">Email address</label>
+          <input class="input" type="email" id="login-email" name="email" autocomplete="username"
+                 autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="you@mmakf.in" />
+
+          <label class="input-label" for="login-password" style="margin-top:14px">Password</label>
+          <input class="input" type="password" id="login-password" name="password"
+                 autocomplete="current-password" required />
+
+          <div id="loginErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
+          <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;justify-content:center;min-height:44px">Sign in</button>
+
+          <p style="margin-top:20px;font-size:.75rem;color:var(--muted);text-align:center;line-height:1.6">
+            Authorised personnel only. Every score and decision is recorded against the credential used to take it.
+          </p>
+        </form>
+      </div>
+    </section>
+  ) : (
+    <div class="admin-wrap">
+      <aside class="admin-side">
+        <div class="admin-brand">
+          <div class="admin-brand-1">MMAKF</div>
+          <div class="admin-brand-2">Grading</div>
+        </div>
+        <nav class="admin-nav" aria-label="Gradings">
+          {gradings.length === 0 && (
+            <span class="g-nav-empty">No gradings visible</span>
+          )}
+          {gradings.map((g) => (
+            <a href={`/admin/grading?g=${g.id}`} class:list={[{ active: selected && selected.id === g.id }]}>
+              <span class="g-nav-line">
+                <span class="g-nav-title">{g.title}</span>
+                <span class="g-nav-meta">
+                  {g.heldOn ?? 'date not set'} · {String(g.status).replace(/_/g, ' ')}
+                  {g.lockedAt ? ' · locked' : ''}
+                </span>
+              </span>
+            </a>
+          ))}
+          <a href="/admin/queue" style="margin-top:12px">← Approval queue</a>
+          <a href="/admin">← Content admin</a>
+        </nav>
+        <div style="padding:16px;border-top:1px solid var(--border)">
+          <button class="btn btn-ghost" style="width:100%;justify-content:center;min-height:44px" id="logoutBtn">Logout</button>
+          <a href="/verify" target="_blank" rel="noopener" class="btn-link" style="display:flex;align-items:center;justify-content:center;min-height:44px;margin-top:6px">Public verification →</a>
+        </div>
+      </aside>
+
+      <main class="admin-main">
+        <header class="admin-panel" style="padding-top:0">
+          <h1 class="admin-h">Grading console</h1>
+          <p class="admin-sub">
+            The examination record: who was entered, what the eligibility rules saw, what each
+            examiner marked, what the panel decided, and what was issued. Nothing on this screen is
+            calculated here — every figure is read back from the record, and every decision is sent
+            to the grading module, which is what refuses an unlawful one.
+          </p>
+          <p class="g-signed">Signed in as {signedInAs}</p>
+
+          {!configured && (
+            <div class="g-warn" role="alert">
+              <strong>The federation database is not configured on this deployment.</strong>
+              Gradings, candidates, scorecards and certificates all live in it, so there is nothing
+              to show and nothing that can be recorded. This is a missing <code>DATABASE_URL</code>,
+              not an empty register. No control on this page would work, so none is offered.
+            </div>
+          )}
+
+          {configured && !mayRead && (
+            <div class="g-warn" role="alert">
+              <strong>Your credential does not carry grading access.</strong>
+              Reading a grading record requires <code>grading:read</code>. Ask the federation office
+              to bind the appropriate role to your account.
+            </div>
+          )}
+
+          {loadError && <div class="g-warn" role="alert"><strong>Could not read the records.</strong> {loadError}</div>}
+
+          {configured && mayRead && !loadError && (
+            <div class="g-caps">
+              <span class:list={['g-cap', mayScore ? 'yes' : 'no']}>{mayScore ? 'May record scores' : 'May not record scores'}</span>
+              <span class:list={['g-cap', mayApprove ? 'yes' : 'no']}>{mayApprove ? 'May decide and lock' : 'May not decide or lock'}</span>
+              <span class:list={['g-cap', mayIssue ? 'yes' : 'no']}>{mayIssue ? 'May issue certificates' : 'May not issue certificates'}</span>
+              <span class:list={['g-cap', mayRevoke ? 'yes' : 'no']}>{mayRevoke ? 'May revoke certificates' : 'May not revoke certificates'}</span>
+            </div>
+          )}
+
+          {scopeNote && <p class="g-scope">{scopeNote}</p>}
+        </header>
+
+        {configured && mayRead && !loadError && gradings.length === 0 && (
+          <section class="admin-panel">
+            <h2 class="admin-h" style="font-size:1.15rem">No grading events</h2>
+            <p class="admin-sub">
+              No grading event is recorded in the federation database within your scope. When one is
+              created it appears here with its candidates, panel and scorecards.
+            </p>
+          </section>
+        )}
+
+        {configured && mayRead && !loadError && gradings.length > 0 && !selected && (
+          <section class="admin-panel">
+            <h2 class="admin-h" style="font-size:1.15rem">Choose a grading</h2>
+            <p class="admin-sub">Select a grading from the list to open its panel and scorecards.</p>
+            <div class="tbl-scroll" style="margin-top:18px">
+              <table class="g-table">
+                <thead>
+                  <tr><th>Grading</th><th>Held on</th><th>Status</th><th>Candidates</th></tr>
+                </thead>
+                <tbody>
+                  {gradings.map((g) => (
+                    <tr>
+                      <td>
+                        <a class="g-link" href={`/admin/grading?g=${g.id}`}>{g.title}</a>
+                        <div class="g-mono">{g.code}</div>
+                      </td>
+                      <td>{g.heldOn ?? '—'}</td>
+                      <td>{String(g.status).replace(/_/g, ' ')}{g.lockedAt ? ' · locked' : ''}</td>
+                      <td>
+                        {Object.entries(counts.get(g.id) ?? {}).length === 0
+                          ? 'none entered'
+                          : Object.entries(counts.get(g.id) ?? {})
+                              .map(([k, n]) => `${n} ${k}`)
+                              .join(', ')}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p class="tbl-hint">Scroll the table sideways for the rest of the columns.</p>
+          </section>
+        )}
+
+        {selected && (
+          <section class="admin-panel" id="grading">
+            <h2 class="admin-h" style="font-size:1.25rem">{selected.title}</h2>
+            <p class="g-mono" style="margin-top:6px">{selected.code}</p>
+
+            <dl class="g-facts">
+              <div><dt>Status</dt><dd>{String(selected.status).replace(/_/g, ' ')}</dd></div>
+              <div><dt>Held on</dt><dd>{selected.heldOn ?? 'not set'}</dd></div>
+              <div><dt>Venue</dt><dd>{selected.venue ?? 'not recorded'}</dd></div>
+              <div>
+                <dt>Syllabus</dt>
+                <dd>
+                  {selected.syllabusCode
+                    ? `${selected.syllabusCode} (${selected.syllabusStatus})`
+                    : 'no syllabus version linked'}
+                </dd>
+              </div>
+              <div><dt>Locked</dt><dd>{selected.lockedAt ? ts(selected.lockedAt) : 'no'}</dd></div>
+            </dl>
+
+            {locked && (
+              <div class="g-locked" role="status">
+                <strong>This grading is locked.</strong> {lockReason}
+              </div>
+            )}
+
+            {selected.notes && <p class="admin-sub" style="margin-top:14px">{selected.notes}</p>}
+          </section>
+        )}
+
+        {selected && (
+          <section class="admin-panel" id="panel">
+            <h2 class="admin-h" style="font-size:1.15rem">Panel</h2>
+            <p class="admin-sub">
+              The authority each examiner held on the day, frozen at appointment. A licence that
+              lapses afterwards does not change what this record says about the examination.
+            </p>
+
+            {panel.length === 0 ? (
+              <p class="g-empty">No examiner has been appointed to this grading.</p>
+            ) : (
+              <div class="tbl-scroll" style="margin-top:18px">
+                <table class="g-table">
+                  <thead>
+                    <tr><th>Examiner</th><th>Role</th><th>Qualification as at appointment</th><th>Appointed</th></tr>
+                  </thead>
+                  <tbody>
+                    {panel.map((p) => {
+                      const snap: any = p.qualificationSnapshot ?? {};
+                      const quals: any[] = Array.isArray(snap.qualifications) ? snap.qualifications : [];
+                      return (
+                        <tr>
+                          <td>{p.fullName}<div class="g-mono">{p.federationId}</div></td>
+                          <td>{p.role}</td>
+                          <td>
+                            {p.role === 'observer' && quals.length === 0
+                              ? 'observer — carries no examining authority'
+                              : quals.length === 0
+                                ? 'no qualification recorded in the snapshot'
+                                : quals
+                                    .map(
+                                      (q: any) =>
+                                        `level ${q.level}, scope ${q.scope}` +
+                                        (q.expiresOn ? `, expires ${q.expiresOn}` : ', no expiry')
+                                    )
+                                    .join('; ')}
+                            {snap.asAt && <div class="g-mono">as at {snap.asAt}</div>}
+                          </td>
+                          <td>{ts(p.assignedAt)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p class="tbl-hint">Scroll the table sideways for the rest of the columns.</p>
+
+            {mayApprove && !locked && (
+              examinerPool.length === 0 ? (
+                <p class="g-empty" style="margin-top:18px">
+                  No person in the database holds an examiner qualification record, so there is
+                  nobody this screen can appoint. Examiner qualifications are recorded against a
+                  person before they can sit on a panel.
+                </p>
+              ) : (
+                <form class="g-form g-appoint" data-action="assign-examiner" style="margin-top:22px">
+                  <input type="hidden" name="gradingEventId" value={selected.id} />
+                  <div class="g-row">
+                    <div>
+                      <label class="input-label" for="appoint-person">Person</label>
+                      <select class="input" id="appoint-person" name="personId" required>
+                        <option value="">Choose a person…</option>
+                        {examinerPool.map((e) => (
+                          <option value={e.personId}>
+                            {e.fullName} — level {e.level}, {e.scope}, {e.status}
+                            {e.expiresOn ? `, expires ${e.expiresOn}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label class="input-label" for="appoint-role">Panel role</label>
+                      <select class="input" id="appoint-role" name="role" required>
+                        <option value="examiner">Examiner</option>
+                        <option value="chief">Chief examiner</option>
+                        <option value="assessor">Assessor</option>
+                        <option value="observer">Observer (no scoring)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <p class="g-note">
+                    Only people who hold an examiner qualification record appear in this list. Whether
+                    that qualification was valid on the day of the grading is decided by the grading
+                    module, not by this list — an expired or suspended licence is refused with the reason.
+                  </p>
+                  <div class="g-actions">
+                    <button type="submit" class="btn btn-primary g-submit">Appoint to panel</button>
+                  </div>
+                  <p class="g-ok" role="status" hidden></p>
+                  <p class="g-err" role="alert" hidden></p>
+                </form>
+              )
+            )}
+          </section>
+        )}
+
+        {selected && (
+          <section class="admin-panel" id="candidates">
+            <h2 class="admin-h" style="font-size:1.15rem">Candidates</h2>
+            <p class="admin-sub">
+              {candidates.length === 0
+                ? 'Nobody is entered for this grading.'
+                : `${candidates.length} entered. Each card shows the eligibility evidence stored when the candidate was entered, the scorecard, and the decision.`}
+            </p>
+
+            {candidates.map((c) => {
+              const checks = checksOf(c);
+              const failed = checks.filter((x) => !x.passed);
+              const reqs = requirementsByGrade.get(c.gradeDefinitionId) ?? [];
+              const scores = scoresByCandidate.get(c.id) ?? [];
+              const summary = summaryByCandidate.get(c.id);
+              const certificate = c.certificateId ? certificatesById.get(c.certificateId) : null;
+              const scorers = panel.filter((p) => p.role !== 'observer');
+              const mySeat = scorers.find((p) => p.personId === myPersonId) ?? null;
+              const componentNames = [
+                ...new Set([
+                  ...reqs.map((r: any) => String(r.component)),
+                  ...scores.map((r: any) => String(r.component)),
+                ]),
+              ];
+              const canScoreThis = mayScore && !locked && c.status !== 'ineligible' && scorers.length > 0;
+              const canDecideThis = mayApprove && !locked && c.status !== 'ineligible';
+              return (
+                <article class="g-cand" id={`candidate-${c.id}`}>
+                  <header class="g-cand-head">
+                    <div>
+                      <h3 class="g-cand-name">{c.fullName}</h3>
+                      <div class="g-mono">{c.federationId} · candidate #{c.id}</div>
+                    </div>
+                    <div class="g-cand-tags">
+                      <span class="g-tag">{c.gradeLabel} ({c.gradeKind})</span>
+                      <span class:list={['g-tag', STATUS_TONE[c.status] ?? '']}>{String(c.status).replace(/_/g, ' ')}</span>
+                    </div>
+                  </header>
+
+                  {/* ── Eligibility evidence ─────────────────────────────── */}
+                  <section class="g-block">
+                    <h4 class="g-block-h">Eligibility evidence</h4>
+                    {checks.length === 0 ? (
+                      <p class="g-empty">
+                        No eligibility check is stored against this entry, so there is no evidence to
+                        show. The status above is what the record says; it is not explained by
+                        anything this console can display.
+                      </p>
+                    ) : (
+                      <>
+                        {c.status === 'ineligible' && (
+                          <div class="g-warn" role="alert" style="margin-bottom:14px">
+                            <strong>Found ineligible.</strong>{' '}
+                            {c.ineligibleReason ??
+                              'The stored reason is empty; the failed rules below are the evidence.'}
+                          </div>
+                        )}
+                        <div class="tbl-scroll">
+                          <table class="g-table">
+                            <thead>
+                              <tr><th>Rule</th><th>Result</th><th>What the rule saw</th></tr>
+                            </thead>
+                            <tbody>
+                              {checks.map((k) => (
+                                <tr class:list={[{ 'g-failrow': !k.passed }]}>
+                                  <td class="g-mono">{k.rule}</td>
+                                  <td>{k.passed ? 'met' : 'not met'}</td>
+                                  <td>{k.detail}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <p class="g-note">
+                          Checked {ts(c.eligibilityCheckedAt)}. {failed.length === 0
+                            ? 'Every rule the syllabus sets for this grade was met.'
+                            : `${failed.length} of ${checks.length} rules were not met.`}{' '}
+                          A rule shown as "not set by the syllabus" was not checked, because MMAKF has
+                          not configured it — it is not a threshold this system chose.
+                        </p>
+                      </>
+                    )}
+                  </section>
+
+                  {/* ── Scorecard ────────────────────────────────────────── */}
+                  <section class="g-block">
+                    <h4 class="g-block-h">Scorecard</h4>
+
+                    {scores.length === 0 ? (
+                      <p class="g-empty">No score has been recorded for this candidate.</p>
+                    ) : (
+                      <div class="tbl-scroll">
+                        <table class="g-table">
+                          <thead>
+                            <tr><th>Component</th><th>Examiner</th><th>Score</th><th>Comment</th><th>Recorded</th></tr>
+                          </thead>
+                          <tbody>
+                            {scores.map((r: any) => (
+                              <tr>
+                                <td>{r.component}</td>
+                                <td>{r.examinerName}</td>
+                                <td class="g-num">{r.score} / {r.maxScore}</td>
+                                <td>{r.comment ?? '—'}</td>
+                                <td>{ts(r.recordedAt)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {summary && summary.examinersScoring > 0 && (
+                      <div class="g-summary">
+                        <div class="g-summary-h">
+                          Aggregate across {summary.examinersScoring}{' '}
+                          {summary.examinersScoring === 1 ? 'examiner' : 'examiners'}
+                        </div>
+                        <ul class="g-summary-list">
+                          {summary.components.map((k) => (
+                            <li><span>{k.component}</span><span class="g-num">{k.total} / {k.max} · {k.percent}%</span></li>
+                          ))}
+                          <li class="g-summary-total"><span>Overall</span><span class="g-num">{summary.overallPercent}%</span></li>
+                        </ul>
+                        <p class="g-note">
+                          A plain mean across examiners, unweighted. MMAKF has not published a
+                          component weighting or a pass mark, so this figure is arithmetic on the
+                          marks recorded — it is not a verdict, and the panel's decision below is
+                          what determines the outcome.
+                        </p>
+                      </div>
+                    )}
+
+                    {c.status === 'ineligible' && (
+                      <p class="g-empty" style="margin-top:14px">
+                        No scorecard is offered: this candidate was found ineligible and cannot be
+                        examined at this grading.
+                      </p>
+                    )}
+
+                    {locked && c.status !== 'ineligible' && (
+                      <p class="g-empty" style="margin-top:14px">
+                        Scoring is closed — {lockReason}
+                      </p>
+                    )}
+
+                    {!locked && c.status !== 'ineligible' && !mayScore && (
+                      <p class="g-empty" style="margin-top:14px">
+                        Your credential does not carry <code>grading:score</code>, so no scoring
+                        controls are shown.
+                      </p>
+                    )}
+
+                    {!locked && c.status !== 'ineligible' && mayScore && scorers.length === 0 && (
+                      <p class="g-empty" style="margin-top:14px">
+                        No examiner with scoring authority is appointed to this grading, so a score
+                        cannot be attributed to anybody. Appoint the panel first.
+                      </p>
+                    )}
+
+                    {canScoreThis && (
+                      <div class="g-scoreblock">
+                        {reqs.length === 0 && (
+                          <p class="g-note" style="margin-top:0">
+                            MMAKF has not recorded the examined requirements for {c.gradeLabel} under
+                            this syllabus version, so a scorecard cannot be generated from it. The
+                            panel names the component being marked below. Nothing here supplies a
+                            syllabus the federation has not published.
+                          </p>
+                        )}
+
+                        {reqs.length > 0 &&
+                          reqs.map((r: any, i: number) => (
+                            <form class="g-form g-scorerow" data-action="score">
+                              <input type="hidden" name="candidateId" value={c.id} />
+                              <input type="hidden" name="gradeRequirementId" value={r.id} />
+                              <input type="hidden" name="component" value={r.component} />
+                              <div class="g-scorerow-head">
+                                <span class="g-tag">{r.component}</span>
+                                <span class="g-req">{r.requirement}{r.mandatory ? '' : ' (optional)'}</span>
+                              </div>
+                              {r.detail && <p class="g-req-detail">{r.detail}</p>}
+                              <div class="g-row g-row-4">
+                                <div>
+                                  <label class="input-label" for={`ex-${c.id}-${i}`}>Examiner</label>
+                                  <select class="input" id={`ex-${c.id}-${i}`} name="examinerPersonId" required>
+                                    {!mySeat && <option value="">Choose the examiner…</option>}
+                                    {scorers.map((p) => (
+                                      <option value={p.personId} selected={mySeat ? p.personId === mySeat.personId : false}>
+                                        {p.fullName} ({p.role})
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label class="input-label" for={`sc-${c.id}-${i}`}>Mark</label>
+                                  <input class="input g-score-input" id={`sc-${c.id}-${i}`} name="score"
+                                         type="number" inputmode="numeric" min="0" step="1" required />
+                                </div>
+                                <div>
+                                  <label class="input-label" for={`mx-${c.id}-${i}`}>Out of</label>
+                                  <input class="input g-score-input" id={`mx-${c.id}-${i}`} name="maxScore"
+                                         type="number" inputmode="numeric" min="1" step="1" value="100" />
+                                </div>
+                                <div>
+                                  <label class="input-label" for={`cm-${c.id}-${i}`}>Comment</label>
+                                  <input class="input" id={`cm-${c.id}-${i}`} name="comment" type="text" maxlength="2000" />
+                                </div>
+                              </div>
+                              <div class="g-actions">
+                                <button type="submit" class="btn btn-ghost g-submit">Record mark</button>
+                              </div>
+                              <p class="g-ok" role="status" hidden></p>
+                              <p class="g-err" role="alert" hidden></p>
+                            </form>
+                          ))}
+
+                        {reqs.length === 0 && (
+                          <form class="g-form g-scorerow" data-action="score">
+                            <input type="hidden" name="candidateId" value={c.id} />
+                            <div class="g-row g-row-4">
+                              <div>
+                                <label class="input-label" for={`ex-${c.id}-free`}>Examiner</label>
+                                <select class="input" id={`ex-${c.id}-free`} name="examinerPersonId" required>
+                                  {!mySeat && <option value="">Choose the examiner…</option>}
+                                  {scorers.map((p) => (
+                                    <option value={p.personId} selected={mySeat ? p.personId === mySeat.personId : false}>
+                                      {p.fullName} ({p.role})
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label class="input-label" for={`cp-${c.id}-free`}>Component</label>
+                                <input class="input" id={`cp-${c.id}-free`} name="component" type="text"
+                                       maxlength="120" required placeholder="as the panel is examining it" />
+                              </div>
+                              <div>
+                                <label class="input-label" for={`sc-${c.id}-free`}>Mark</label>
+                                <input class="input g-score-input" id={`sc-${c.id}-free`} name="score"
+                                       type="number" inputmode="numeric" min="0" step="1" required />
+                              </div>
+                              <div>
+                                <label class="input-label" for={`mx-${c.id}-free`}>Out of</label>
+                                <input class="input g-score-input" id={`mx-${c.id}-free`} name="maxScore"
+                                       type="number" inputmode="numeric" min="1" step="1" value="100" />
+                              </div>
+                            </div>
+                            <div>
+                              <label class="input-label" for={`cm-${c.id}-free`}>Comment</label>
+                              <input class="input" id={`cm-${c.id}-free`} name="comment" type="text" maxlength="2000" />
+                            </div>
+                            <div class="g-actions">
+                              <button type="submit" class="btn btn-ghost g-submit">Record mark</button>
+                            </div>
+                            <p class="g-ok" role="status" hidden></p>
+                            <p class="g-err" role="alert" hidden></p>
+                          </form>
+                        )}
+
+                        <p class="g-note">
+                          "Out of" is the maximum the panel is marking this component against. It is
+                          prefilled with 100 because that is the system's own default when none is
+                          given — MMAKF has not published a mark scheme, and this field does not
+                          assert one. Re-recording a mark replaces that examiner's own entry and
+                          never touches another examiner's.
+                          {mySeat
+                            ? ' The examiner defaults to your own seat on this panel.'
+                            : ' Your account is not on this panel, so the examiner whose mark you are recording must be named explicitly — it will be stored against them.'}
+                        </p>
+                      </div>
+                    )}
+                  </section>
+
+                  {/* ── Decision ─────────────────────────────────────────── */}
+                  <section class="g-block">
+                    <h4 class="g-block-h">Decision</h4>
+
+                    {c.decidedAt ? (
+                      <dl class="g-facts">
+                        <div><dt>Outcome</dt><dd>{c.outcome ?? String(c.status)}</dd></div>
+                        <div><dt>Decided</dt><dd>{ts(c.decidedAt)}</dd></div>
+                        <div><dt>Recorded aggregate</dt><dd>{c.overallScore == null ? 'none' : `${c.overallScore}%`}</dd></div>
+                        {Array.isArray(c.referredComponents) && c.referredComponents.length > 0 && (
+                          <div><dt>Referred components</dt><dd>{c.referredComponents.join(', ')}</dd></div>
+                        )}
+                        {c.examinerNotes && <div><dt>Examiner notes</dt><dd>{c.examinerNotes}</dd></div>}
+                        {c.candidateFeedback && <div><dt>Feedback to candidate</dt><dd>{c.candidateFeedback}</dd></div>}
+                      </dl>
+                    ) : (
+                      <p class="g-empty">No decision is recorded for this candidate.</p>
+                    )}
+
+                    {c.status === 'ineligible' && (
+                      <p class="g-empty" style="margin-top:14px">
+                        No decision can be recorded: an ineligible candidate is not examined.
+                      </p>
+                    )}
+                    {locked && c.status !== 'ineligible' && (
+                      <p class="g-empty" style="margin-top:14px">Decisions are closed — {lockReason}</p>
+                    )}
+                    {!locked && c.status !== 'ineligible' && !mayApprove && (
+                      <p class="g-empty" style="margin-top:14px">
+                        Your credential does not carry <code>grading:approve</code>, so the decision
+                        controls are not shown. An examiner scores; the approving authority decides.
+                      </p>
+                    )}
+
+                    {canDecideThis && (
+                      <form class="g-form" data-action="decide" style="margin-top:16px">
+                        <input type="hidden" name="candidateId" value={c.id} />
+                        <fieldset class="g-fieldset">
+                          <legend class="input-label" style="margin-bottom:10px">Outcome</legend>
+                          <div class="g-choices">
+                            <label class="g-choice" for={`out-${c.id}-pass`}>
+                              <input type="radio" id={`out-${c.id}-pass`} name="outcome" value="pass" required />
+                              <span>Pass</span>
+                            </label>
+                            <label class="g-choice" for={`out-${c.id}-fail`}>
+                              <input type="radio" id={`out-${c.id}-fail`} name="outcome" value="fail" />
+                              <span>Fail</span>
+                            </label>
+                            <label class="g-choice" for={`out-${c.id}-refer`}>
+                              <input type="radio" id={`out-${c.id}-refer`} name="outcome" value="refer" />
+                              <span>Refer</span>
+                            </label>
+                          </div>
+                        </fieldset>
+
+                        {componentNames.length > 0 ? (
+                          <fieldset class="g-fieldset">
+                            <legend class="input-label" style="margin-bottom:10px">
+                              Components to re-examine (a referral must name at least one)
+                            </legend>
+                            <div class="g-choices">
+                              {componentNames.map((name, i) => (
+                                <label class="g-choice" for={`ref-${c.id}-${i}`}>
+                                  <input type="checkbox" id={`ref-${c.id}-${i}`} name="referredComponents" value={name} />
+                                  <span>{name}</span>
+                                </label>
+                              ))}
+                            </div>
+                          </fieldset>
+                        ) : (
+                          <p class="g-note">
+                            No component has been named for this candidate yet, so no referral list
+                            can be offered. Record at least one mark first.
+                          </p>
+                        )}
+
+                        <div>
+                          <label class="input-label" for={`notes-${c.id}`}>Examiner notes (internal)</label>
+                          <textarea class="input" id={`notes-${c.id}`} name="examinerNotes" rows="2" maxlength="4000"></textarea>
+                        </div>
+                        <div style="margin-top:12px">
+                          <label class="input-label" for={`fb-${c.id}`}>Feedback to the candidate</label>
+                          <textarea class="input" id={`fb-${c.id}`} name="candidateFeedback" rows="2" maxlength="4000"></textarea>
+                          <p class="g-note">This is the only text the candidate sees.</p>
+                        </div>
+
+                        <div class="g-actions">
+                          <button type="submit" class="btn btn-primary g-submit">Record decision</button>
+                        </div>
+                        <p class="g-ok" role="status" hidden></p>
+                        <p class="g-err" role="alert" hidden></p>
+                      </form>
+                    )}
+                  </section>
+
+                  {/* ── Certificate ──────────────────────────────────────── */}
+                  <section class="g-block">
+                    <h4 class="g-block-h">Certificate</h4>
+
+                    {certificate ? (
+                      <>
+                        <dl class="g-facts">
+                          <div><dt>Number</dt><dd class="g-mono">{certificate.certificateNo}</dd></div>
+                          <div><dt>Status</dt><dd>{certificate.status}</dd></div>
+                          <div><dt>Issued</dt><dd>{certificate.issuedOn}</dd></div>
+                          {certificate.revokedOn && <div><dt>Revoked</dt><dd>{certificate.revokedOn}</dd></div>}
+                          {certificate.revokedReason && <div><dt>Reason</dt><dd>{certificate.revokedReason}</dd></div>}
+                        </dl>
+                        <p class="g-note">
+                          <a class="g-link" href={`/verify?id=${encodeURIComponent(certificate.certificateNo)}`} target="_blank" rel="noopener">
+                            Check this number on the public verification page →
+                          </a>
+                        </p>
+
+                        {mayRevoke && certificate.status !== 'revoked' && (
+                          <form class="g-form" data-action="revoke-certificate" style="margin-top:16px">
+                            <input type="hidden" name="certificateId" value={certificate.id} />
+                            <label class="input-label" for={`rev-${certificate.id}`}>Reason for revocation (published)</label>
+                            <textarea class="input" id={`rev-${certificate.id}`} name="reason" rows="2" maxlength="1000" required></textarea>
+                            <p class="g-note">
+                              Revocation never deletes. The certificate reports as REVOKED with this
+                              reason on every public check, and the rank it evidenced is revoked with it.
+                            </p>
+                            <div class="g-actions">
+                              <button type="submit" class="btn btn-primary g-submit">Revoke certificate</button>
+                            </div>
+                            <p class="g-ok" role="status" hidden></p>
+                            <p class="g-err" role="alert" hidden></p>
+                          </form>
+                        )}
+                      </>
+                    ) : c.outcome === 'pass' ? (
+                      mayIssue ? (
+                        <form class="g-form" data-action="issue-certificate">
+                          <input type="hidden" name="candidateId" value={c.id} />
+                          <p class="g-note" style="margin-top:0">
+                            Issuing awards the rank, supersedes the previous active rank of this kind,
+                            and freezes what the certificate says. Retrying returns the certificate
+                            already issued rather than issuing a second one.
+                          </p>
+                          <div class="g-actions">
+                            <button type="submit" class="btn btn-primary g-submit">Issue certificate</button>
+                          </div>
+                          <p class="g-ok" role="status" hidden></p>
+                          <p class="g-err" role="alert" hidden></p>
+                        </form>
+                      ) : (
+                        <p class="g-empty">
+                          A pass is recorded, but your credential does not carry
+                          <code> certificate:issue</code>, so the control is not shown.
+                        </p>
+                      )
+                    ) : (
+                      <p class="g-empty">
+                        No certificate is offered. A certificate is issued only for a recorded pass,
+                        and this candidate has {c.outcome ? `a recorded outcome of "${c.outcome}"` : 'no decision on record'}.
+                      </p>
+                    )}
+                  </section>
+                </article>
+              );
+            })}
+          </section>
+        )}
+
+        {selected && (
+          <section class="admin-panel" id="lock">
+            <h2 class="admin-h" style="font-size:1.15rem">Lock this grading</h2>
+            {locked ? (
+              <p class="g-empty">{lockReason}</p>
+            ) : !mayApprove ? (
+              <p class="g-empty">
+                Locking requires <code>grading:approve</code>. Your credential does not carry it, so
+                the control is not shown.
+              </p>
+            ) : (
+              <form class="g-form" data-action="lock" style="margin-top:14px">
+                <input type="hidden" name="gradingEventId" value={selected.id} />
+                <p class="admin-sub" style="margin-top:0">
+                  Locking is the point of no return: scores and decisions become immutable, and a
+                  correction afterwards creates a new record rather than editing this one. Every
+                  candidate must have a decision recorded or be withdrawn first — the grading module
+                  refuses the lock otherwise and names how many are outstanding.
+                </p>
+                <div>
+                  <label class="input-label" for="lock-reason">Reason for the record (optional)</label>
+                  <input class="input" id="lock-reason" name="reason" type="text" maxlength="1000" />
+                </div>
+                <div class="g-actions">
+                  <button type="submit" class="btn btn-primary g-submit">Lock grading</button>
+                </div>
+                <p class="g-ok" role="status" hidden></p>
+                <p class="g-err" role="alert" hidden></p>
+              </form>
+            )}
+          </section>
+        )}
+      </main>
+    </div>
+  )}
+</Base>
+
+<script>
+  // Sign-in — only present when the caller is unauthenticated.
+  const loginForm = document.getElementById('loginForm');
+  if (loginForm instanceof HTMLFormElement) {
+    const loginErr = document.getElementById('loginErr');
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (loginErr) loginErr.style.display = 'none';
+      const btn = loginForm.querySelector('button[type=submit]');
+      const fd = new FormData(loginForm);
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      if (btn instanceof HTMLButtonElement) { btn.disabled = true; btn.textContent = 'Signing in…'; }
+
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(email ? { email, password } : { password }),
+      }).catch(() => null);
+
+      if (btn instanceof HTMLButtonElement) { btn.disabled = false; btn.textContent = 'Sign in'; }
+      if (r && r.ok) { location.reload(); return; }
+
+      let message = 'Sign-in failed. Check your details and try again.';
+      if (r) {
+        const b = await r.json().catch(() => null);
+        if (b && b.error) message = String(b.error);
+        else if (r.status === 429) message = 'Too many attempts. Wait a minute and try again.';
+      } else {
+        message = 'Could not reach the server. Check your connection.';
+      }
+      if (loginErr) { loginErr.textContent = message; loginErr.style.display = 'block'; }
+    });
+  }
+
+  document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
+    location.reload();
+  });
+
+  // ─── Every grading action goes through the one endpoint ──────────────────
+  //
+  // The page never claims a result. It repeats what the server said, including
+  // a refusal, and offers a reload so the record is re-read rather than
+  // re-imagined here.
+  document.addEventListener('submit', async (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.classList.contains('g-form')) return;
+    event.preventDefault();
+
+    const action = form.getAttribute('data-action') || '';
+    const ok = form.querySelector('.g-ok');
+    const err = form.querySelector('.g-err');
+    const button = form.querySelector('.g-submit');
+    if (!(ok instanceof HTMLElement) || !(err instanceof HTMLElement)) return;
+
+    // Unhidden BEFORE the text is written: a role="alert" whose content changes
+    // while still `hidden` is not reliably announced.
+    const fail = (msg: string) => { err.hidden = false; err.textContent = msg; };
+    ok.hidden = true; ok.textContent = '';
+    err.hidden = true; err.textContent = '';
+
+    const fd = new FormData(form);
+    const body: Record<string, unknown> = {};
+    for (const key of new Set(fd.keys())) {
+      const values = fd.getAll(key).map((v) => String(v)).filter((v) => v !== '');
+      if (key === 'referredComponents') { body[key] = values; continue; }
+      if (!values.length) continue;
+      body[key] = values[values.length - 1];
+    }
+
+    const label = button instanceof HTMLButtonElement ? button.textContent : '';
+    if (button instanceof HTMLButtonElement) { button.disabled = true; button.textContent = 'Recording…'; }
+
+    const response = await fetch('/api/grading/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).catch(() => null);
+
+    if (button instanceof HTMLButtonElement) { button.disabled = false; button.textContent = label; }
+
+    if (!response) {
+      fail('Could not reach the server. NOTHING was recorded. Check your connection and try again.');
+      return;
+    }
+
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      const reason = payload && payload.error ? String(payload.error) : `The server refused this (HTTP ${response.status}).`;
+      fail(reason + ' Nothing was changed.');
+      return;
+    }
+
+    ok.hidden = false;
+    if (action === 'score' && payload && payload.summary) {
+      ok.textContent =
+        'Recorded. The server now aggregates ' + payload.summary.overallPercent + '% overall across ' +
+        payload.summary.examinersScoring + ' examiner(s). Reload to re-read the full record.';
+    } else if (action === 'decide' && payload) {
+      ok.textContent = 'Recorded by the server as "' + payload.status + '". Reload to re-read the record.';
+    } else if (action === 'issue-certificate' && payload) {
+      ok.textContent = 'Certificate ' + payload.certificateNo + ' issued. Reload to see it on this card.';
+    } else if (action === 'revoke-certificate') {
+      ok.textContent = 'Revoked. Public verification will now report this certificate as REVOKED with the reason. Reload to re-read the record.';
+    } else if (action === 'lock') {
+      ok.textContent = 'This grading is now locked. Reload to see the controls close.';
+    } else {
+      ok.textContent = 'Recorded. Reload to re-read the record.';
+    }
+
+    const again = document.createElement('button');
+    again.type = 'button';
+    again.className = 'btn btn-ghost g-reload';
+    again.style.marginTop = '10px';
+    again.textContent = 'Reload the record';
+    again.addEventListener('click', () => location.reload());
+    ok.appendChild(document.createElement('br'));
+    ok.appendChild(again);
+  });
+</script>
+
+{/* Top level, not inside an expression: Astro only extracts and bundles a
+    <style> tag that sits in the template proper. */}
+<style is:global>
+  body { background: var(--bg); }
+  .admin-wrap { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
+  @media (max-width: 900px) { .admin-wrap { grid-template-columns: 1fr; } }
+
+  .admin-side {
+    background: var(--bg-2);
+    border-right: 1px solid var(--border);
+    padding: 24px 0;
+    display: flex; flex-direction: column;
+    position: sticky; top: 0; align-self: start;
+    height: 100vh;
+  }
+  @media (max-width: 900px) { .admin-side { position: static; height: auto; } }
+  .admin-brand { padding: 0 24px 24px; border-bottom: 1px solid var(--border); }
+  .admin-brand-1 { font-family: var(--font-display); font-size: 1.4rem; font-weight: 700; letter-spacing: 0.06em; }
+  .admin-brand-2 { font-family: var(--font-display); font-size: 0.66rem; letter-spacing: 0.22em; text-transform: uppercase; color: var(--gold); margin-top: 4px; }
+  .admin-nav { flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .admin-nav a {
+    padding: 10px 14px;
+    min-height: 44px;
+    display: flex; align-items: center;
+    font-family: var(--font-display);
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    color: var(--off-white);
+    border-radius: var(--radius);
+    transition: background 0.18s, color 0.18s;
+  }
+  .admin-nav a:hover, .admin-nav a.active { background: var(--card); color: var(--gold-3); }
+  .g-nav-line { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .g-nav-title { overflow-wrap: anywhere; }
+  .g-nav-meta { font-family: var(--font-body); font-size: 0.68rem; letter-spacing: 0.02em; color: var(--muted); text-transform: lowercase; }
+  .g-nav-empty { padding: 12px 14px; font-size: 0.78rem; color: var(--muted); }
+
+  .admin-main { padding: 32px 36px 64px; max-width: 1180px; }
+  @media (max-width: 640px) { .admin-main { padding: 22px 16px 48px; } }
+
+  .admin-panel { padding: 34px 0; border-bottom: 1px solid var(--border); scroll-margin-top: 20px; }
+  .admin-panel:first-of-type { padding-top: 0; }
+  .admin-h { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; letter-spacing: 0.02em; }
+  .admin-sub { color: var(--muted); font-size: 0.88rem; margin-top: 6px; line-height: 1.7; max-width: 78ch; }
+
+  .g-signed { margin-top: 14px; font-size: 0.76rem; color: var(--off-white); overflow-wrap: anywhere; }
+  .g-scope { margin-top: 12px; font-size: 0.8rem; color: var(--muted); line-height: 1.65; max-width: 78ch; }
+  .g-mono { font-family: var(--font-display); font-size: 0.72rem; letter-spacing: 0.08em; color: var(--muted); overflow-wrap: anywhere; }
+  .g-link { color: var(--gold-3); text-decoration: underline; text-underline-offset: 3px; }
+  .g-link:hover { color: var(--red-2); }
+  .g-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  .g-warn {
+    margin-top: 16px;
+    background: rgba(142, 18, 18, 0.05);
+    border: 1px solid var(--red-3);
+    border-left: 3px solid var(--red);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    font-size: 0.85rem; line-height: 1.65; color: var(--off-white);
+  }
+  .g-warn strong { color: var(--red-2); }
+  .g-locked {
+    margin-top: 16px;
+    background: var(--card-2);
+    border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    font-size: 0.85rem; line-height: 1.65; color: var(--off-white);
+  }
+  .g-locked strong { color: var(--gold-3); }
+  .g-empty { margin-top: 12px; font-size: 0.85rem; color: var(--muted); line-height: 1.7; max-width: 78ch; }
+  .g-note { margin-top: 10px; font-size: 0.78rem; color: var(--muted); line-height: 1.65; max-width: 78ch; }
+
+  .g-caps { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .g-cap {
+    font-family: var(--font-display); font-size: 0.6rem; letter-spacing: 0.16em;
+    text-transform: uppercase; padding: 6px 12px; border-radius: 100px;
+    border: 1px solid var(--border-2); color: var(--muted);
+  }
+  .g-cap.yes { color: var(--gold-3); border-color: var(--gold-dim); }
+  .g-cap.no { color: var(--muted); text-decoration: line-through; }
+
+  .g-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; min-width: 540px; }
+  .g-table th, .g-table td {
+    text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border);
+    vertical-align: top; line-height: 1.6;
+  }
+  .g-table th {
+    font-family: var(--font-display); font-size: 0.62rem; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--muted); font-weight: 500;
+    background: var(--card-2); border-bottom: 1px solid var(--border-2);
+  }
+  .g-table tr.g-failrow td { background: rgba(142, 18, 18, 0.045); }
+  .g-table tr.g-failrow td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+
+  .g-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px 22px; margin-top: 16px; }
+  .g-facts dt {
+    font-family: var(--font-display); font-size: 0.6rem; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 4px;
+  }
+  .g-facts dd { font-size: 0.9rem; color: var(--white); line-height: 1.6; overflow-wrap: anywhere; }
+
+  .g-cand {
+    margin-top: 24px; background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow-1);
+  }
+  @media (max-width: 640px) { .g-cand { padding: 16px; } }
+  .g-cand-head { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: flex-start; }
+  .g-cand-name { font-family: var(--font-display); font-size: 1.05rem; font-weight: 600; letter-spacing: 0.02em; }
+  .g-cand-tags { display: flex; flex-wrap: wrap; gap: 8px; }
+  .g-tag {
+    font-family: var(--font-display); font-size: 0.6rem; letter-spacing: 0.16em;
+    text-transform: uppercase; padding: 6px 12px; border-radius: 100px;
+    border: 1px solid var(--border-2); color: var(--off-white); white-space: nowrap;
+  }
+  .g-tag.ok { color: var(--gold-3); border-color: var(--gold-dim); }
+  .g-tag.bad { color: var(--red-2); border-color: var(--red-3); }
+  .g-tag.warn { color: var(--gold-2); border-color: var(--gold-dim); }
+
+  .g-block { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); }
+  .g-block-h {
+    font-family: var(--font-display); font-size: 0.66rem; letter-spacing: 0.24em;
+    text-transform: uppercase; color: var(--gold-3); font-weight: 600;
+  }
+
+  .g-summary { margin-top: 16px; background: var(--card-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .g-summary-h { font-family: var(--font-display); font-size: 0.62rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); }
+  .g-summary-list { list-style: none; margin-top: 10px; }
+  .g-summary-list li { display: flex; justify-content: space-between; gap: 16px; padding: 6px 0; font-size: 0.86rem; border-bottom: 1px dashed var(--border); }
+  .g-summary-list li:last-child { border-bottom: 0; }
+  .g-summary-total { font-weight: 600; color: var(--white); }
+
+  .g-scoreblock { margin-top: 16px; }
+  .g-scorerow {
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px; margin-top: 12px;
+  }
+  .g-scorerow-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .g-req { font-size: 0.9rem; color: var(--white); }
+  .g-req-detail { font-size: 0.8rem; color: var(--muted); margin-top: 6px; line-height: 1.6; }
+
+  .g-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+  .g-row-4 { grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.7fr) minmax(0, 0.7fr) minmax(0, 1.4fr); }
+  @media (max-width: 900px) { .g-row-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 520px) { .g-row, .g-row-4 { grid-template-columns: 1fr; } }
+
+  /* A scorecard is filled in standing up, on a tablet, with a thumb. */
+  .g-form .input { min-height: 46px; }
+  .g-form textarea.input { min-height: 68px; }
+  .g-score-input { font-size: 1.15rem; font-variant-numeric: tabular-nums; text-align: center; }
+
+  .g-fieldset { border: 0; margin-top: 14px; }
+  .g-choices { display: flex; flex-wrap: wrap; gap: 10px; }
+  .g-choice {
+    display: inline-flex; align-items: center; gap: 10px;
+    min-height: 46px; padding: 8px 16px;
+    border: 1px solid var(--border-2); border-radius: var(--radius);
+    background: #fff; font-size: 0.88rem; cursor: pointer;
+  }
+  .g-choice:hover { border-color: var(--gold-dim); }
+  .g-choice input { width: 20px; height: 20px; accent-color: var(--red); }
+
+  .g-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+  .g-actions .btn { min-height: 46px; }
+
+  .g-ok, .g-err {
+    margin-top: 12px; font-size: 0.84rem; line-height: 1.6;
+    border-radius: var(--radius); padding: 11px 13px;
+  }
+  .g-ok { background: var(--card-2); border: 1px solid var(--border-2); border-left: 3px solid var(--gold); color: var(--off-white); }
+  .g-err { background: rgba(142, 18, 18, 0.05); border: 1px solid var(--red-3); border-left: 3px solid var(--red); color: var(--red-2); }
+  .g-ok[hidden], .g-err[hidden] { display: none; }
+
+  .g-appoint { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+</style>

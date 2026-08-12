@@ -116,13 +116,21 @@ No React, no client framework.
 
 | Document | For |
 |---|---|
+| `docs/MASTER-SPECIFICATION.md` | **The canonical specification.** Invariants, domains, definition of done |
 | `docs/MMAKF-SYSTEM-AUDIT.md` | What exists, what is fake, what is missing — classified |
 | `docs/IMPLEMENTATION-STATUS.md` | Per-subsystem state |
 | `docs/IMPLEMENTATION-QUEUE.md` | What to build next, in dependency order |
 | `docs/FEDERATION-ARCHITECTURE.md` | Storage decision, ID scheme, provisioning runbook |
 | `docs/AUDIT-REGISTER.md` | Every defect found, with evidence and fix |
 | `docs/CLAIMS-AUDIT.md` | Every public claim checked against evidence |
-| `docs/MASTER-SPEC.md` | The governing engineering directive |
+| `docs/MASTER-SPEC.md` | The original governing engineering directive |
+| `docs/SECURITY-ARCHITECTURE.md` | Threat model, every control, and every gap |
+| `docs/DATA-ARCHITECTURE.md` | The 87 tables and the five rules that shape them |
+| `docs/TESTING-STRATEGY.md` | Why the tests look the way they do, and what is not covered |
+| `docs/DEPLOYMENT.md` | Every variable, and the sequence for going live |
+| `docs/BACKUP-RESTORE.md` | Proven cycle, with the transcript |
+| `docs/DISASTER-RECOVERY.md` | What breaks, what it costs, what to do |
+| `docs/PRIVACY.md` | Children's data, DPDP, and what MMAKF must supply |
 
 ---
 

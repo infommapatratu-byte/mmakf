@@ -1,0 +1,535 @@
+---
+// /my/passport — YOUR athlete passport, and structurally nobody else's.
+//
+// THIS PAGE TAKES NO IDENTIFIER. Not in the path, not in the query string, not
+// in a header. The federation id handed to athletePassport() is read from the
+// caller's own person row, which is reached from the session. There is no input
+// an attacker could change to ask for a different passport, which is a stronger
+// guarantee than any check made after the fact — the request cannot express the
+// question. (The admin surfaces are where a passport is opened BY id, and
+// athletePassport() enforces scope there.)
+//
+// The passport shows what a member is owed and what a federation must be able
+// to produce: every grade ever held INCLUDING superseded and revoked ones, the
+// candidate-facing feedback from every grading, every certificate with its
+// provenance, every licence, and results including provisional ones — because
+// the athlete may see what is not yet public about themselves.
+//
+// Examiner notes are NOT here. athletePassport() selects `candidateFeedback`
+// and never the internal scoring commentary; this page renders what it is
+// given and asks for nothing more.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { eq } from 'drizzle-orm';
+import { athletePassport, type AthletePassport } from '@/db/athletes';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+type Gate = 'no_database' | 'signed_out' | 'shared_credential' | 'no_person' | 'ok';
+
+let gate: Gate = 'ok';
+let person: any = null;
+let passport: AthletePassport | null = null;
+let loadError: string | null = null;
+
+if (!configured) {
+  gate = 'no_database';
+} else if (!identity) {
+  gate = 'signed_out';
+} else if (identity.userId == null) {
+  gate = 'shared_credential';
+} else {
+  const user = (
+    await db().select({ personId: s.users.personId }).from(s.users).where(eq(s.users.id, identity.userId)).limit(1)
+  )[0];
+  if (!user?.personId) {
+    gate = 'no_person';
+  } else {
+    person = (await db().select().from(s.persons).where(eq(s.persons.id, user.personId)).limit(1))[0] ?? null;
+    if (!person) {
+      gate = 'no_person';
+    } else {
+      try {
+        passport = await athletePassport(db(), identity.principal, person.federationId);
+      } catch (err: any) {
+        loadError = String(err?.message ?? err);
+      }
+    }
+  }
+}
+
+const fmt = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? String(v)
+    : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+const titleCase = (v: string | null | undefined) => (v ? v.replace(/_/g, ' ') : '—');
+
+const provenanceLabel = (p: string) =>
+  p === 'examined'
+    ? 'Traced to a recorded examination'
+    : 'Legacy record — real, but not backed by an examination scorecard in this system';
+
+// Sorted so a revocation is never buried below a later award.
+const grades = passport ? [...passport.gradeHistory] : [];
+const revoked = grades.filter((g) => g.status === 'revoked');
+const medals = passport?.medals ?? { gold: 0, silver: 0, bronze: 0 };
+---
+
+<Base
+  title="My athlete passport — MMAKF"
+  description="Your MMAKF athlete passport: every grade, grading, certificate, licence and result the federation holds against your name."
+>
+  <section>
+    <div class="container">
+      {gate === 'no_database' && (
+        <div class="card">
+          <div class="eyebrow">Athlete passport</div>
+          <h1 class="display-2" style="margin-top:14px">Not available on this deployment.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            The passport is derived from the federation's system of record at the moment it is asked for. No federation
+            database is configured for this deployment, so there is nothing to derive it from.
+          </p>
+        </div>
+      )}
+
+      {gate === 'signed_out' && (
+        <div class="card">
+          <div class="eyebrow">Athlete passport</div>
+          <h1 class="display-2" style="margin-top:14px">Sign in to see your passport.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            This page shows the record of whoever is signed in, and it accepts no identifier — there is no way to ask it
+            for anybody else's.
+          </p>
+          <p style="margin-top:18px"><a class="btn btn-primary" href="/my">Go to the member area</a></p>
+        </div>
+      )}
+
+      {gate === 'shared_credential' && (
+        <div class="card">
+          <div class="eyebrow">Athlete passport</div>
+          <h1 class="display-2" style="margin-top:14px">A shared credential has no passport.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            You are signed in with a shared office credential. It is attributable to no individual, so it holds no
+            grade, no grading history and no results of its own. Sign in with your own account.
+          </p>
+        </div>
+      )}
+
+      {gate === 'no_person' && (
+        <div class="card">
+          <div class="eyebrow">Athlete passport</div>
+          <h1 class="display-2" style="margin-top:14px">Your account is not linked to a member record.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            A passport is a person's record, and this account is not yet attached to a person in the federation's
+            register. The office makes the link — write to
+            <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a> with your member ID.
+          </p>
+        </div>
+      )}
+
+      {gate === 'ok' && loadError && (
+        <div class="card" role="alert" style="border-left:3px solid var(--red)">
+          <div class="card-title" style="font-size:1rem">Your passport could not be read</div>
+          <div class="card-body">{loadError}</div>
+        </div>
+      )}
+
+      {gate === 'ok' && !loadError && !passport && (
+        <div class="card">
+          <div class="card-body">
+            No person record was found for member ID {person.federationId}. This is a record-keeping fault, not a
+            permissions one — please tell the office.
+          </div>
+        </div>
+      )}
+
+      {gate === 'ok' && passport && (
+        <>
+          <div class="section-head" style="margin-bottom:32px">
+            <div class="eyebrow">Athlete passport</div>
+            <h1 class="display-2" style="margin-top:14px">{passport.fullName}</h1>
+            <div class="rule"></div>
+            <p class="lead">
+              Member ID <strong>{passport.federationId}</strong>. Every line below is derived from the federation's
+              authoritative tables when this page loads — nothing here is a stored copy, so it cannot drift from the
+              register.
+            </p>
+          </div>
+
+          {/* ── Identity ─────────────────────────────────────────────── */}
+          <div class="card" style="padding:0;margin-bottom:24px">
+            <div class="tbl-scroll">
+              <table class="pp-tbl">
+                <caption class="pp-cap">Personal details</caption>
+                <tbody>
+                  <tr><th scope="row">Date of birth</th><td>{fmt(passport.dob)}</td></tr>
+                  <tr><th scope="row">Gender</th><td>{titleCase(passport.gender)}</td></tr>
+                  <tr><th scope="row">City</th><td>{passport.city ?? '—'}</td></tr>
+                  <tr><th scope="row">Email</th><td>{passport.email ?? '—'}</td></tr>
+                  <tr><th scope="row">Telephone</th><td>{passport.phone ?? '—'}</td></tr>
+                  <tr>
+                    <th scope="row">Training sessions attended</th>
+                    <td>
+                      {passport.attendanceCount}
+                      <div class="text-muted" style="font-size:.74rem;margin-top:4px">
+                        A count of sessions marked present. It is not an assessment and confers no grade.
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  </section>
+
+  {gate === 'ok' && passport && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Grades</div>
+          <h2 class="display-2">Every grade you have <em class="r">ever held</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            Superseded and revoked entries are shown. A passport that displayed only the current grade would hide a
+            revocation, which is precisely what it must not do.
+          </p>
+        </div>
+
+        {revoked.length > 0 && (
+          <div class="card" role="note" style="border-left:3px solid var(--red);margin-bottom:20px">
+            <div class="card-title" style="font-size:.95rem">
+              {revoked.length} {revoked.length === 1 ? 'grade has' : 'grades have'} been revoked
+            </div>
+            <div class="card-body">
+              A revoked grade stays on the record permanently, with the reason the federation gave. Nothing here is
+              deleted.
+            </div>
+          </div>
+        )}
+
+        {grades.length === 0 ? (
+          <div class="card"><div class="card-body">No grade record is held against your name.</div></div>
+        ) : (
+          <div class="card" style="padding:0">
+            <div class="tbl-scroll">
+              <table class="pp-tbl wide">
+                <thead>
+                  <tr>
+                    <th>Grade</th>
+                    <th>Awarded</th>
+                    <th>Status</th>
+                    <th>Provenance</th>
+                    <th>Syllabus</th>
+                    <th>Reason for revocation</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {grades.map((g) => (
+                    <tr class={g.status === 'revoked' ? 'is-revoked' : ''}>
+                      <td><strong>{g.label}</strong><div class="text-muted" style="font-size:.74rem">{titleCase(g.kind)}</div></td>
+                      <td>{fmt(g.awardedOn)}</td>
+                      <td><span class="pill">{titleCase(g.status)}</span></td>
+                      <td style="font-size:.8rem">{provenanceLabel(g.provenance)}</td>
+                      <td>{g.syllabusVersion ?? '—'}</td>
+                      <td>{g.revokedReason ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        <p class="tbl-hint">Scroll the table sideways</p>
+      </div>
+    </section>
+  )}
+
+  {gate === 'ok' && passport && (
+    <section>
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Examinations</div>
+          <h2 class="display-2">Your <em class="r">gradings</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            The feedback shown is the feedback written for you. Examiners' internal notes are not part of a passport and
+            are not read by this page.
+          </p>
+        </div>
+
+        {passport.gradings.length === 0 ? (
+          <div class="card"><div class="card-body">You have no grading record in this system.</div></div>
+        ) : (
+          <div class="grid grid-2">
+            {passport.gradings.map((g) => (
+              <div class="card">
+                <div class="card-eyebrow">{g.eventCode} · {fmt(g.heldOn)}</div>
+                <div class="card-title" style="margin-bottom:10px">{g.grade}</div>
+                <div style="margin-bottom:12px">
+                  <span class="pill">{titleCase(g.status)}</span>
+                  {g.outcome && <span class="pill" style="margin-left:8px">{titleCase(g.outcome)}</span>}
+                </div>
+                <div class="card-body">
+                  {g.feedback ? g.feedback : <span class="text-muted">No candidate feedback has been recorded for this grading.</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  )}
+
+  {gate === 'ok' && passport && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Credentials</div>
+          <h2 class="display-2">Certificates and <em class="r">licences</em>.</h2>
+          <div class="rule"></div>
+        </div>
+
+        <div class="grid grid-2">
+          <div class="card" style="padding:0">
+            <div class="tbl-scroll">
+              <table class="pp-tbl">
+                <caption class="pp-cap">Certificates</caption>
+                {passport.certificates.length === 0 ? (
+                  <tbody><tr><td>No certificate has been issued to you.</td></tr></tbody>
+                ) : (
+                  <tbody>
+                    {passport.certificates.map((c) => (
+                      <tr>
+                        <td>
+                          <strong>{c.title}</strong>
+                          <div class="text-muted" style="font-size:.76rem;margin-top:4px">
+                            {c.certificateNo} · issued {fmt(c.issuedOn)} · {titleCase(c.status)}
+                          </div>
+                          <div class="text-muted" style="font-size:.76rem;margin-top:4px">
+                            {provenanceLabel(c.provenance)}
+                          </div>
+                          <div style="margin-top:8px">
+                            <a class="text-gold" href={`/api/verify?id=${encodeURIComponent(c.certificateNo)}`} rel="nofollow">
+                              Verification record →
+                            </a>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                )}
+              </table>
+            </div>
+          </div>
+
+          <div class="card" style="padding:0">
+            <div class="tbl-scroll">
+              <table class="pp-tbl">
+                <caption class="pp-cap">Licences</caption>
+                {passport.licences.length === 0 ? (
+                  <tbody><tr><td>You hold no instructor, examiner or officiating licence.</td></tr></tbody>
+                ) : (
+                  <tbody>
+                    {passport.licences.map((l) => (
+                      <tr>
+                        <td>
+                          <strong>{titleCase(l.registry)}{l.level ? ` · ${l.level}` : ''}</strong>
+                          <div class="text-muted" style="font-size:.76rem;margin-top:4px">
+                            {titleCase(l.status)} ·{' '}
+                            {l.expiresOn
+                              ? `expires ${fmt(l.expiresOn)}`
+                              : 'the federation has recorded no expiry for this licence'}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                )}
+              </table>
+            </div>
+          </div>
+        </div>
+
+        {passport.memberships.length > 0 && (
+          <div class="card" style="padding:0;margin-top:22px">
+            <div class="tbl-scroll">
+              <table class="pp-tbl wide">
+                <caption class="pp-cap">Membership history</caption>
+                <thead>
+                  <tr><th>Category</th><th>Status</th><th>From</th><th>To</th></tr>
+                </thead>
+                <tbody>
+                  {passport.memberships.map((m) => (
+                    <tr>
+                      <td>{titleCase(m.category)}</td>
+                      <td><span class="pill">{titleCase(m.status)}</span></td>
+                      <td>{fmt(m.validFrom)}</td>
+                      <td>{m.validTo ? fmt(m.validTo) : 'no end date recorded'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  )}
+
+  {gate === 'ok' && passport && (
+    <section>
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Competition</div>
+          <h2 class="display-2">Your <em class="r">record</em>.</h2>
+          <div class="rule"></div>
+        </div>
+
+        <div class="grid grid-3" style="margin-bottom:24px">
+          <div class="card"><div class="card-eyebrow">Gold</div><div class="stat">{medals.gold}</div></div>
+          <div class="card"><div class="card-eyebrow">Silver</div><div class="stat">{medals.silver}</div></div>
+          <div class="card"><div class="card-eyebrow">Bronze</div><div class="stat">{medals.bronze}</div></div>
+        </div>
+
+        {passport.results.length === 0 ? (
+          <div class="card"><div class="card-body">No final competition result is recorded against your name.</div></div>
+        ) : (
+          <div class="card" style="padding:0">
+            <div class="tbl-scroll">
+              <table class="pp-tbl wide">
+                <caption class="pp-cap">Final results</caption>
+                <thead>
+                  <tr><th>Event</th><th>Category</th><th>Date</th><th>Placing</th><th>Medal</th></tr>
+                </thead>
+                <tbody>
+                  {passport.results.map((r) => (
+                    <tr>
+                      <td><strong>{r.eventTitle}</strong><div class="text-muted" style="font-size:.74rem">{r.eventCode}</div></td>
+                      <td>{r.category}</td>
+                      <td>{fmt(r.date)}</td>
+                      <td>{r.placing}</td>
+                      <td>{r.medal ? titleCase(r.medal) : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {passport.provisionalResults.length > 0 && (
+          <div class="card" style="padding:0;margin-top:22px;border-left:3px solid var(--gold)">
+            <div class="tbl-scroll">
+              <table class="pp-tbl wide">
+                <caption class="pp-cap">
+                  Provisional results — not yet published by the federation
+                </caption>
+                <thead>
+                  <tr><th>Event</th><th>Category</th><th>Placing</th></tr>
+                </thead>
+                <tbody>
+                  {passport.provisionalResults.map((r) => (
+                    <tr>
+                      <td>{r.eventTitle}</td>
+                      <td>{r.category}</td>
+                      <td>{r.placing}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div class="card-body" style="padding:16px 18px;border-top:1px solid var(--border)">
+              These results have not been finalised. They do not appear on your public profile, they may change on
+              review or protest, and they should not be quoted as a federation result until they are final.
+            </div>
+          </div>
+        )}
+
+        {passport.squads.length > 0 && (
+          <div class="card" style="margin-top:22px">
+            <div class="card-eyebrow">National squads</div>
+            <div class="card-body">
+              {passport.squads.map((q) => (
+                <div style="margin-bottom:6px">{q.title} · {q.season} · {titleCase(q.role)}</div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <p style="margin-top:28px">
+          <a class="btn btn-ghost" href="/my">Back to the member area</a>
+        </p>
+      </div>
+    </section>
+  )}
+</Base>
+
+<style>
+  .pp-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.87rem;
+  }
+  .pp-tbl.wide { min-width: 720px; }
+  .pp-cap {
+    caption-side: top;
+    text-align: left;
+    font-family: var(--font-display);
+    font-size: 0.64rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 18px 18px 12px;
+  }
+  .pp-tbl th {
+    text-align: left;
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    vertical-align: top;
+  }
+  .pp-tbl td {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    color: var(--off-white);
+    vertical-align: top;
+  }
+  .pp-tbl tbody tr:last-child td,
+  .pp-tbl tbody tr:last-child th { border-bottom: 0; }
+  .pp-tbl tr.is-revoked td { background: rgba(142, 18, 18, 0.04); }
+
+  .stat {
+    font-family: var(--font-display);
+    font-size: 2.4rem;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--white);
+  }
+
+  @media (max-width: 640px) {
+    .btn { width: 100%; }
+  }
+</style>

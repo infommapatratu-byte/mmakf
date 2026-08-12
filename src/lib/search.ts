@@ -28,6 +28,14 @@
 //    a search that cannot say why it returned a row cannot be debugged, audited
 //    or trusted (invariant 4). If the SQL matched but the same rules re-applied
 //    in JS cannot name a field, the row does not survive.
+//
+// AND ONE RULE THIS MODULE REFUSES TO WRITE. Which document classification is
+// readable by whom is a FEDERATION decision, not a guess derivable from the
+// action list — `official` means whoever the federation says it means. It lives
+// in SearchPolicy; unconfigured, only `public` is searched, for everyone
+// including SUPER_ADMIN, and `response.notices` says the rule was never set
+// (invariant 1). The same applies to anything added to the classification enum
+// later: absent from the map, absent from the results.
 
 import { and, asc, eq, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 import * as s from '@/db/schema';
@@ -123,11 +131,26 @@ export type SkipReason =
   | 'not_a_certificate_number'
   | 'store_unavailable';
 
+/**
+ * A federation rule this search DID NOT apply, because the federation has not
+ * supplied it. Invariant 1: an unset rule is not applied AND the result says so
+ * — a caller must never read an empty or narrow result as "there is nothing
+ * here" when the true answer is "nobody has told this system what the rule is".
+ */
+export type NoticeCode = 'document_classification_audience_not_configured';
+
+export interface SearchNotice {
+  code: NoticeCode;
+  detail: string;
+}
+
 export interface SearchResponse {
   /** The normalised query actually executed, not the raw input. */
   query: string;
   kinds: SearchKind[];
   skipped: Array<{ kind: SearchKind; reason: SkipReason }>;
+  /** Rules that were not applied because they are not configured. */
+  notices: SearchNotice[];
   hits: SearchHit[];
   /**
    * True when more matched than `limit` allowed through, so a caller can say
@@ -155,10 +178,39 @@ export interface NewsItem {
   body?: string;
 }
 
+export type DataClassification = (typeof s.dataClass.enumValues)[number];
+
+/**
+ * Federation-supplied configuration. Nothing here has a default that grants
+ * anything: every unset rule narrows the search and is reported in `notices`.
+ */
+export interface SearchPolicy {
+  /**
+   * The action a caller must hold for search to return a document of each
+   * classification.
+   *
+   * THIS MODULE MUST NOT GUESS THIS MAP. `public` is the one classification
+   * whose audience is settled by its own name. `member`, `official`,
+   * `confidential`, `restricted` and `highly_restricted` name groups whose
+   * membership is a federation decision — "official" does not mean "holds
+   * content:write", it means whoever the federation says it means. Deriving the
+   * map from the action list is the tempting mistake and the wrong one. A
+   * classification absent from this map is NOT SEARCHED, whoever is asking,
+   * including SUPER_ADMIN.
+   */
+  documentClassificationRequires?: Partial<Record<DataClassification, Action>>;
+}
+
 export interface SearchOptions {
-  /** Restrict to these domains. Omitted means every domain the caller may reach. */
+  /**
+   * Restrict to these domains. OMITTED means every domain the caller may reach;
+   * an EMPTY ARRAY means none of them. The difference matters: a caller that
+   * computes this list and comes up empty is asking for nothing, and treating
+   * that as "everything" is the fail-open reading.
+   */
   kinds?: SearchKind[];
-  /** Total hits returned, 1..MAX_LIMIT. */
+  policy?: SearchPolicy;
+  /** Total hits returned, clamped to 1..MAX_LIMIT. A non-finite value is refused. */
   limit?: number;
   url?: UrlResolver;
   /**
@@ -225,6 +277,44 @@ function normalise(raw: unknown): string {
  */
 function escapeLike(q: string): string {
   return q.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Bound the page size.
+ *
+ * A non-finite limit is REFUSED, not clamped. `Math.min(Math.max(1, NaN), 50)`
+ * is NaN, `.limit(NaN)` fetches whatever the driver feels like, and
+ * `hits.slice(0, NaN)` is `[]` — so an accidental NaN used to return "no
+ * results, and that is all of them" over a register that was full of matches.
+ * Silence that looks like an answer is the worst failure mode this module has.
+ */
+function boundLimit(raw: unknown): number {
+  if (raw === undefined) return DEFAULT_LIMIT;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    throw new SearchError('limit_invalid', 'Search limit must be a finite number.');
+  }
+  return Math.min(Math.max(1, Math.trunc(raw)), MAX_LIMIT);
+}
+
+/**
+ * Resolve the requested domain list.
+ *
+ * An unknown kind is refused rather than ignored. Silently dropping it would
+ * mean a caller asking for a domain this module does not have gets an empty
+ * result that reads as "nothing matched" instead of "you asked for something
+ * that does not exist".
+ */
+function requestedKinds(kinds: SearchKind[] | undefined): readonly SearchKind[] {
+  if (kinds === undefined) return KIND_ORDER;
+  if (!Array.isArray(kinds)) {
+    throw new SearchError('kinds_invalid', 'Search kinds must be an array when supplied.');
+  }
+  for (const k of kinds) {
+    if (!KIND_ORDER.includes(k)) {
+      throw new SearchError('unknown_kind', `Unknown search domain: ${String(k)}`);
+    }
+  }
+  return kinds;
 }
 
 // ─── Relevance ──────────────────────────────────────────────────────────────
@@ -445,7 +535,15 @@ export const DEFAULT_URL: UrlResolver = (hit) => {
 // Each returns either its hits or the reason it contributed none. They share one
 // shape so the dispatcher cannot treat any domain specially.
 
-type DomainResult = { hits: SearchHit[] } | { skip: SkipReason };
+/**
+ * `saturated` means the domain filled its fetch window, so rows it could have
+ * returned were left behind. It is tracked SEPARATELY from the hit count
+ * because a row can be dropped after the fetch (an unexplainable match), and
+ * counting only survivors would let a page that is genuinely incomplete report
+ * `truncated: false` — a claim of completeness the query never established
+ * (invariant 2).
+ */
+type DomainResult = { hits: SearchHit[]; saturated: boolean } | { skip: SkipReason };
 
 interface DomainContext {
   db: DB;
@@ -462,6 +560,9 @@ interface DomainContext {
   fetch: number;
   url: UrlResolver;
   newsProvider: () => Promise<NewsItem[]>;
+  policy: SearchPolicy;
+  /** Shared sink: a searcher records here any rule it could not apply. */
+  notices: SearchNotice[];
 }
 
 /** Assemble a hit, dropping rows whose match cannot be explained. */
@@ -522,10 +623,11 @@ async function searchPeople(c: DomainContext): Promise<DomainResult> {
     })
     .from(s.persons)
     .where(and(...conds))
-    .orderBy(rankExpression(c.q, fields), asc(s.persons.id))
+    .orderBy(rankExpression(c.q, fields), asc(s.persons.fullName), asc(s.persons.id))
     .limit(c.fetch);
 
   return {
+    saturated: rows.length >= c.fetch,
     hits: rows
       .map((r: any) =>
         toHit(
@@ -588,10 +690,11 @@ async function searchDojos(c: DomainContext): Promise<DomainResult> {
     })
     .from(s.dojos)
     .where(and(...conds))
-    .orderBy(rankExpression(c.q, fields), asc(s.dojos.id))
+    .orderBy(rankExpression(c.q, fields), asc(s.dojos.name), asc(s.dojos.id))
     .limit(c.fetch);
 
   return {
+    saturated: rows.length >= c.fetch,
     hits: rows
       .map((r: any) =>
         toHit(
@@ -637,10 +740,11 @@ async function searchStateUnits(c: DomainContext): Promise<DomainResult> {
     .select()
     .from(s.stateUnits)
     .where(and(...conds))
-    .orderBy(rankExpression(c.q, fields), asc(s.stateUnits.id))
+    .orderBy(rankExpression(c.q, fields), asc(s.stateUnits.name), asc(s.stateUnits.id))
     .limit(c.fetch);
 
   return {
+    saturated: rows.length >= c.fetch,
     hits: rows
       .map((r: any) =>
         toHit(
@@ -683,10 +787,11 @@ async function searchDistrictUnits(c: DomainContext): Promise<DomainResult> {
     .select()
     .from(s.districtUnits)
     .where(and(...conds))
-    .orderBy(rankExpression(c.q, fields), asc(s.districtUnits.id))
+    .orderBy(rankExpression(c.q, fields), asc(s.districtUnits.name), asc(s.districtUnits.id))
     .limit(c.fetch);
 
   return {
+    saturated: rows.length >= c.fetch,
     hits: rows
       .map((r: any) =>
         toHit(
@@ -716,7 +821,7 @@ async function searchDistrictUnits(c: DomainContext): Promise<DomainResult> {
 // to a domain module's evolution. If the federation changes which statuses are
 // public, both lists must move together — hence this note.
 
-const PUBLIC_EVENT_STATUSES = [
+export const PUBLIC_EVENT_STATUSES = [
   'published', 'registration_open', 'registration_closed',
   'check_in', 'live', 'results_pending', 'results_final', 'archived',
 ] as const;
@@ -763,10 +868,11 @@ async function searchCompetitionEvents(c: DomainContext): Promise<DomainResult> 
     .select()
     .from(s.competitionEvents)
     .where(and(...conds))
-    .orderBy(rankExpression(c.q, fields), asc(s.competitionEvents.id))
+    .orderBy(rankExpression(c.q, fields), asc(s.competitionEvents.title), asc(s.competitionEvents.id))
     .limit(c.fetch);
 
   return {
+    saturated: rows.length >= c.fetch,
     hits: rows
       .map((r: any) =>
         toHit(
@@ -836,6 +942,7 @@ async function searchCertificates(c: DomainContext): Promise<DomainResult> {
     .limit(c.fetch);
 
   return {
+    saturated: rows.length >= c.fetch,
     hits: rows
       .map((r: any) =>
         toHit(
@@ -878,10 +985,11 @@ async function searchCourses(c: DomainContext): Promise<DomainResult> {
     .select()
     .from(s.courses)
     .where(and(...conds))
-    .orderBy(rankExpression(c.q, fields), asc(s.courses.id))
+    .orderBy(rankExpression(c.q, fields), asc(s.courses.title), asc(s.courses.id))
     .limit(c.fetch);
 
   return {
+    saturated: rows.length >= c.fetch,
     hits: rows
       .map((r: any) =>
         toHit(
@@ -909,16 +1017,39 @@ async function searchCourses(c: DomainContext): Promise<DomainResult> {
 // Two independent gates, both required, because a governance document is where
 // classification errors do the most damage:
 //
-//  · CLASSIFICATION. Only `public` is ever searchable anonymously; national
-//    content:read additionally reaches `member` and `official`. Anything
-//    confidential or above is excluded by an allow-list, so a new, more
-//    sensitive classification added to the enum later is excluded by default
-//    rather than included by omission.
+//  · CLASSIFICATION. `public` only, unless the federation has configured which
+//    action each other classification requires. An unconfigured classification
+//    is excluded for everyone including SUPER_ADMIN, and the response SAYS the
+//    rule was never set. A new, more sensitive classification added to the enum
+//    later is therefore excluded by default rather than included by omission.
 //  · PUBLICATION. A document is only public once its CURRENT version is
 //    published — a draft revision of the constitution is not the constitution.
 
-const PUBLIC_DOC_CLASSES = ['public'] as const;
-const INTERNAL_DOC_CLASSES = ['public', 'member', 'official'] as const;
+/**
+ * The classifications this search may return, and the notice it owes the caller
+ * when the federation has not said.
+ *
+ * `public` is unconditional: a document the federation itself classified as
+ * public is public. Everything else needs `policy.documentClassificationRequires`
+ * — see SearchPolicy for why this module refuses to invent that mapping.
+ */
+function documentClassifications(c: DomainContext): DataClassification[] {
+  const map = c.policy.documentClassificationRequires;
+  const configured = map ? (Object.keys(map) as DataClassification[]).filter((k) => k !== 'public' && map[k]) : [];
+
+  if (!configured.length) {
+    c.notices.push({
+      code: 'document_classification_audience_not_configured',
+      detail:
+        'The federation has not configured which action each document classification requires, '
+        + 'so only documents it classified as `public` were searched. Documents classified '
+        + s.dataClass.enumValues.filter((v) => v !== 'public').map((v) => `\`${v}\``).join(', ')
+        + ' were not searched for anyone, including SUPER_ADMIN.',
+    });
+    return ['public'];
+  }
+  return ['public', ...configured.filter((k) => canAnywhere(c.principal, map![k]!))];
+}
 
 async function searchDocuments(c: DomainContext): Promise<DomainResult> {
   const editorial = mayReadUnpublished(c.principal);
@@ -932,10 +1063,7 @@ async function searchDocuments(c: DomainContext): Promise<DomainResult> {
   const conds: SQL[] = [
     matchPredicate(c.q, fields),
     eq(s.officialDocuments.active, true) as SQL,
-    inArray(
-      s.officialDocuments.classification,
-      [...(editorial ? INTERNAL_DOC_CLASSES : PUBLIC_DOC_CLASSES)]
-    ) as SQL,
+    inArray(s.officialDocuments.classification, documentClassifications(c)) as SQL,
   ];
   if (!editorial) conds.push(eq(s.documentVersions.status, 'published') as SQL);
 
@@ -954,10 +1082,11 @@ async function searchDocuments(c: DomainContext): Promise<DomainResult> {
     // publish, and surfacing its title would advertise a rule nobody can read.
     .innerJoin(s.documentVersions, eq(s.documentVersions.id, s.officialDocuments.currentVersionId))
     .where(and(...conds))
-    .orderBy(rankExpression(c.q, fields), asc(s.officialDocuments.id))
+    .orderBy(rankExpression(c.q, fields), asc(s.officialDocuments.title), asc(s.officialDocuments.id))
     .limit(c.fetch);
 
   return {
+    saturated: rows.length >= c.fetch,
     hits: rows
       .map((r: any) =>
         toHit(
@@ -1006,10 +1135,11 @@ async function searchTechniques(c: DomainContext): Promise<DomainResult> {
     .select()
     .from(s.techniques)
     .where(and(...conds))
-    .orderBy(rankExpression(c.q, fields), asc(s.techniques.id))
+    .orderBy(rankExpression(c.q, fields), asc(s.techniques.nameRomaji), asc(s.techniques.id))
     .limit(c.fetch);
 
   return {
+    saturated: rows.length >= c.fetch,
     hits: rows
       .map((r: any) =>
         toHit(
@@ -1052,10 +1182,11 @@ async function searchKata(c: DomainContext): Promise<DomainResult> {
     .select()
     .from(s.kata)
     .where(and(...conds))
-    .orderBy(rankExpression(c.q, fields), asc(s.kata.id))
+    .orderBy(rankExpression(c.q, fields), asc(s.kata.nameRomaji), asc(s.kata.id))
     .limit(c.fetch);
 
   return {
+    saturated: rows.length >= c.fetch,
     hits: rows
       .map((r: any) =>
         toHit(
@@ -1124,8 +1255,13 @@ async function searchNews(c: DomainContext): Promise<DomainResult> {
     if (hit) hits.push(hit);
   }
   // Deterministic before the cap, so the same query keeps the same items.
-  hits.sort((a, b) => a.matchedOn.rank - b.matchedOn.rank || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return { hits: hits.slice(0, c.fetch) };
+  hits.sort(
+    (a, b) =>
+      a.matchedOn.rank - b.matchedOn.rank ||
+      (a.title < b.title ? -1 : a.title > b.title ? 1 : 0) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
+  return { saturated: hits.length > c.fetch, hits: hits.slice(0, c.fetch) };
 }
 
 // ─── The registry ───────────────────────────────────────────────────────────
@@ -1154,10 +1290,17 @@ const DOMAINS: Record<SearchKind, (c: DomainContext) => Promise<DomainResult>> =
  * active predicate, so the restriction survives someone later adding a domain to
  * the public list by mistake.
  *
- * Every domain that returns nothing says why, in `skipped`. An empty result with
- * no explanation is indistinguishable from a broken query, and the difference
- * between "you may not see this" and "there is nothing here" is exactly what a
- * member asking why their record cannot be found needs to be told.
+ * Every domain that returns nothing says why, in `skipped`, and every rule that
+ * could not be applied because the federation has not configured it says so in
+ * `notices`. An empty result with no explanation is indistinguishable from a
+ * broken query, and the difference between "you may not see this", "there is
+ * nothing here" and "nobody has told this system what the rule is" is exactly
+ * what a member asking why their record cannot be found needs to be told.
+ *
+ * Malformed input is REFUSED rather than coerced: an unknown domain, a
+ * non-finite limit, a non-string query. A coerced input produces an answer
+ * nobody asked for, and in this module those answers were "the whole federation"
+ * and "nothing, and that is all of it".
  */
 export async function search(
   db: DB,
@@ -1166,23 +1309,40 @@ export async function search(
   opts: SearchOptions = {}
 ): Promise<SearchResponse> {
   const q = normalise(query);
-  const limit = Math.min(Math.max(1, Math.trunc(opts.limit ?? DEFAULT_LIMIT)), MAX_LIMIT);
-  const anonymous = !principal || !Array.isArray(principal.bindings) || principal.bindings.length === 0;
+  const limit = boundLimit(opts.limit);
 
-  const requested = opts.kinds?.length ? opts.kinds : KIND_ORDER;
+  // A principal whose bindings are not an array is a BROKEN principal, not a
+  // powerful one. rbac.visibleScopes() iterates `bindings` directly and would
+  // throw a TypeError out of the middle of a search; reducing it to anonymous
+  // here means an unresolvable caller reaches the public surface and nothing
+  // else (invariant 3), and the failure is a result rather than a stack trace.
+  const caller: Principal | null =
+    principal && Array.isArray(principal.bindings) ? principal : null;
+  const anonymous = !caller || caller.bindings.length === 0;
+
+  // OMITTED means every domain; an EMPTY ARRAY means none. Reading `[]` as
+  // "everything" is how a caller that narrowed its domain list down to nothing
+  // ends up searching the whole federation.
+  const requested = requestedKinds(opts.kinds);
   const skipped: Array<{ kind: SearchKind; reason: SkipReason }> = [];
+  const notices: SearchNotice[] = [];
 
   const ctx: DomainContext = {
     db,
-    principal: principal ?? null,
+    principal: caller,
     q,
     fetch: limit + 1,
     url: opts.url ?? DEFAULT_URL,
     newsProvider: opts.newsProvider ?? (() => storageGet<NewsItem[]>('news')),
+    policy: opts.policy ?? {},
+    notices,
   };
 
   const searched: SearchKind[] = [];
   const hits: SearchHit[] = [];
+  // True as soon as ANY domain filled its fetch window, independently of how
+  // many of its rows survived to become hits.
+  let saturated = false;
 
   for (const kind of KIND_ORDER) {
     if (!requested.includes(kind)) {
@@ -1200,6 +1360,7 @@ export async function search(
       continue;
     }
     searched.push(kind);
+    if (result.saturated) saturated = true;
     hits.push(...result.hits);
   }
 
@@ -1214,16 +1375,30 @@ export async function search(
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
   );
 
-  const truncated = hits.length > limit;
+  // Either more survived than the page holds, or a domain left rows behind at
+  // its window. Saying `false` here is a claim that the caller is looking at
+  // everything, and that claim has to be earned.
+  const truncated = hits.length > limit || saturated;
   const response: SearchResponse = {
     query: q,
     kinds: searched,
     skipped,
+    notices,
     hits: hits.slice(0, limit),
     truncated,
   };
 
   if (opts.audit) {
+    // An audit row naming someone other than the caller is worse than none:
+    // it is a false record of who read the register. The context carries its
+    // own Principal for ip/reason, so this is a real mismatch to guard.
+    const actor = opts.audit.principal;
+    if (!caller || !actor || actor.userId !== caller.userId || actor.label !== caller.label) {
+      throw new SearchError(
+        'audit_actor_mismatch',
+        'The audit context names a different principal than the one that searched.'
+      );
+    }
     // Recorded as an export: the register leaving the system a page at a time is
     // still the register leaving the system. The query is stored so a later
     // review can see what was asked, not merely that something was.
@@ -1235,6 +1410,7 @@ export async function search(
         query: q,
         kinds: searched,
         skipped,
+        notices,
         returned: response.hits.length,
         // Candidates seen, NOT a total: each domain stops at `fetch` rows, so
         // this is what the ranking chose from. Recording it as a match count
