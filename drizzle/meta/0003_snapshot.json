@@ -1,5 +1,5 @@
 {
-  "id": "fb0495a1-002e-49a7-bdeb-ac123c84dda0",
+  "id": "e8226efe-cab2-4d63-9105-0967dd650c2d",
   "prevId": "9d9f4cbe-1351-4d04-a8ed-696cea695b7e",
   "version": "7",
   "dialect": "postgresql",
@@ -4672,8 +4672,8 @@
           "method": "btree",
           "with": {}
         },
-        "grading_scores_uk": {
-          "name": "grading_scores_uk",
+        "grading_scores_component_uk": {
+          "name": "grading_scores_component_uk",
           "columns": [
             {
               "expression": "candidate_id",
@@ -4692,6 +4692,28 @@
               "isExpression": false,
               "asc": true,
               "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "grade_requirement_id IS NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "grading_scores_requirement_uk": {
+          "name": "grading_scores_requirement_uk",
+          "columns": [
+            {
+              "expression": "candidate_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "examiner_person_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
             },
             {
               "expression": "grade_requirement_id",
@@ -4701,6 +4723,7 @@
             }
           ],
           "isUnique": true,
+          "where": "grade_requirement_id IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

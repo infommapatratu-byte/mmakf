@@ -1192,7 +1192,8 @@ CREATE INDEX "grading_events_status_idx" ON "grading_events" USING btree ("statu
 CREATE INDEX "grading_events_date_idx" ON "grading_events" USING btree ("held_on");--> statement-breakpoint
 CREATE UNIQUE INDEX "grading_panel_uk" ON "grading_panel" USING btree ("grading_event_id","person_id");--> statement-breakpoint
 CREATE INDEX "grading_scores_candidate_idx" ON "grading_scores" USING btree ("candidate_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "grading_scores_uk" ON "grading_scores" USING btree ("candidate_id","examiner_person_id","component","grade_requirement_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "grading_scores_component_uk" ON "grading_scores" USING btree ("candidate_id","examiner_person_id","component") WHERE grade_requirement_id IS NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "grading_scores_requirement_uk" ON "grading_scores" USING btree ("candidate_id","examiner_person_id","grade_requirement_id") WHERE grade_requirement_id IS NOT NULL;--> statement-breakpoint
 CREATE UNIQUE INDEX "kata_slug_uk" ON "kata" USING btree ("slug");--> statement-breakpoint
 CREATE UNIQUE INDEX "kumite_forms_slug_uk" ON "kumite_forms" USING btree ("slug");--> statement-breakpoint
 CREATE UNIQUE INDEX "syllabus_versions_code_uk" ON "syllabus_versions" USING btree ("code");--> statement-breakpoint

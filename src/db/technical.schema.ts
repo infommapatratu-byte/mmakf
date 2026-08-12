@@ -20,6 +20,7 @@ import {
   pgTable, serial, text, integer, timestamp, date, boolean,
   uniqueIndex, index, jsonb, pgEnum,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { persons, dojos, stateUnits, districtUnits } from './schema';
 
 // ─── Enums ──────────────────────────────────────────────────────────────────
@@ -323,7 +324,23 @@ export const gradingScores = pgTable('grading_scores', {
   recordedAt: timestamp('recorded_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   candidateIdx: index('grading_scores_candidate_idx').on(t.candidateId),
-  uniqueScore: uniqueIndex('grading_scores_uk').on(t.candidateId, t.examinerPersonId, t.component, t.gradeRequirementId),
+  // TWO partial indexes, not one, and the reason is load-bearing.
+  //
+  // grade_requirement_id is nullable — NULL means the score is for a whole
+  // component rather than one listed requirement. Postgres treats NULLs as
+  // DISTINCT in a unique index, so a single index over all four columns never
+  // matched an existing component-level row: re-scoring inserted a duplicate
+  // and double-counted that examiner in summariseScores().
+  //
+  // NULLS NOT DISTINCT would fix it but this Drizzle version cannot express it,
+  // and a hand-written index would drift from the schema. Splitting into two
+  // partial indexes is fully modelled here and gives the same guarantee.
+  uniqueComponentScore: uniqueIndex('grading_scores_component_uk')
+    .on(t.candidateId, t.examinerPersonId, t.component)
+    .where(sql`grade_requirement_id IS NULL`),
+  uniqueRequirementScore: uniqueIndex('grading_scores_requirement_uk')
+    .on(t.candidateId, t.examinerPersonId, t.gradeRequirementId)
+    .where(sql`grade_requirement_id IS NOT NULL`),
 }));
 
 // ─── Certificates ───────────────────────────────────────────────────────────
