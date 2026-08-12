@@ -74,8 +74,9 @@ const beltColors = ['#e8e8e8', '#e6c619', '#e07820', '#2e8b3a', '#2456b0', '#6a3
       </div>
       <div class="syllabus-wrap tbl-scroll fade">
         <table class="syllabus-tbl">
+          <caption class="sr-only">Kihon, kata and kumite examined at each grading</caption>
           <thead>
-            <tr><th>Grading</th><th>Belt</th><th>Kihon</th><th>Kata</th><th>Kumite</th></tr>
+            <tr><th scope="col">Grading</th><th scope="col">Belt</th><th scope="col">Kihon</th><th scope="col">Kata</th><th scope="col">Kumite</th></tr>
           </thead>
           <tbody>
             {syllabus.map((s: any) => (
@@ -112,7 +113,7 @@ const beltColors = ['#e8e8e8', '#e6c619', '#e07820', '#2e8b3a', '#2456b0', '#6a3
           { num: '03', t: 'Character counts', d: 'Attendance, etiquette and conduct in the dojo weigh as much as technique on grading day.' },
         ].map((p) => (
           <div class="card fade">
-            <div style="font-family:var(--font-display);font-size:2rem;font-weight:600;color:var(--red-3);line-height:1;margin-bottom:14px">{p.num}</div>
+            <div style="font-family:var(--font-display);font-size:2rem;font-weight:600;color:var(--numeral);line-height:1;margin-bottom:14px">{p.num}</div>
             <div class="card-title" style="font-size:1rem">{p.t}</div>
             <div class="card-body">{p.d}</div>
           </div>

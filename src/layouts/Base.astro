@@ -1,5 +1,8 @@
 ---
 import '@/styles/global.css';
+// Loaded AFTER global.css so the audit utilities (.sr-only, .skip-link) are
+// defined once for every surface. See docs/ACCESSIBILITY.md.
+import '@/styles/a11y.css';
 import Crest from '@/components/Crest.astro';
 import { get } from '@/lib/storage';
 
@@ -104,6 +107,10 @@ const orgSchema = {
     </script>
   </head>
   <body>
+    <!-- WCAG 2.4.1 Bypass Blocks. First thing in the tab order on every
+         surface; visible only while focused. -->
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
     {showNav && (
       <nav id="mainNav">
         <div class="nav-inner container">
@@ -121,6 +128,12 @@ const orgSchema = {
                 {item.label}
               </a>
             ))}
+            <a href="/search" class="nav-search" aria-label="Search the federation" title="Search the federation">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path>
+              </svg>
+              <span class="nav-search-word">Search</span>
+            </a>
             <a href="/contact#enroll" class="nav-enroll">Enroll</a>
           </div>
 
@@ -131,7 +144,7 @@ const orgSchema = {
       </nav>
     )}
 
-    <main>
+    <main id="main-content" tabindex="-1">
       <slot />
     </main>
 
@@ -174,6 +187,8 @@ const orgSchema = {
 
             <div class="ft-col">
               <div class="ft-h">Federation</div>
+              <a href="/search">Search the federation</a>
+              <a href="/calendar">Federation calendar</a>
               <a href="/governance">Governance & Officials</a>
               <a href="/governance#documents">Documents & Policies</a>
               <a href="/registration">Member Registration</a>
@@ -264,6 +279,15 @@ const orgSchema = {
         height: 2px;
         background: var(--gold-2);
       }
+      .nav-search {
+        display: inline-flex; align-items: center; gap: 7px;
+        margin-left: 6px; padding: 8px 12px;
+        border: 1px solid var(--border-2); border-radius: 999px;
+      }
+      .nav-search:hover { border-color: var(--gold-dim); }
+      @media (min-width: 861px) and (max-width: 1080px) {
+        .nav-search-word { display: none; }
+      }
       .nav-links .nav-enroll {
         border: 1px solid var(--red-2);
         background: var(--red);
@@ -298,9 +322,17 @@ const orgSchema = {
           padding: 12px 18px 24px;
           border-bottom: 1px solid var(--border);
           transform: translateY(-120%);
-          transition: transform .3s;
+          /* WCAG 2.4.7 / 2.4.3 (Q-28): `transform` alone hides the closed menu
+             visually but leaves every link in the tab order. Measured at 375px:
+             ten links took focus at y = -632 to -115 — off-screen, with a focus
+             ring nobody can see, and the hamburger that is supposed to open
+             them came AFTER them. `visibility: hidden` takes them out of the
+             tab order and the accessibility tree; it is delayed by the length
+             of the slide so the closing animation still plays. */
+          visibility: hidden;
+          transition: transform .3s, visibility 0s .3s;
         }
-        .nav-links.open { transform: none; }
+        .nav-links.open { transform: none; visibility: visible; transition: transform .3s, visibility 0s; }
         .nav-links a {
           padding: 14px 4px;
           border-bottom: 1px solid var(--border);
@@ -308,6 +340,7 @@ const orgSchema = {
         }
         .nav-links a:last-of-type { border: 0; }
         .nav-links a.active::after { display: none; }
+        .nav-search { border: 0; border-radius: 0; margin-left: 0; padding: 0; }
         .nav-links .nav-enroll { text-align: center; margin: 12px 0 0; }
         .nav-hamburger { display: flex; }
       }
@@ -395,6 +428,18 @@ const orgSchema = {
         links?.classList.remove('open');
         ham?.setAttribute('aria-expanded', 'false');
       }));
+
+      // WCAG 2.1.2: an open panel must be dismissible from the keyboard, and
+      // focus has to come back to the control that opened it — otherwise the
+      // next Tab resumes from a menu that is no longer on screen.
+      document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if (!links?.classList.contains('open')) return;
+        ham?.classList.remove('open');
+        links.classList.remove('open');
+        ham?.setAttribute('aria-expanded', 'false');
+        ham?.focus();
+      });
 
       // Notif toast
       window.showNotif = (msg) => {

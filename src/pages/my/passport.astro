@@ -232,12 +232,12 @@ const medals = passport?.medals ?? { gold: 0, silver: 0, bronze: 0 };
               <table class="pp-tbl wide">
                 <thead>
                   <tr>
-                    <th>Grade</th>
-                    <th>Awarded</th>
-                    <th>Status</th>
-                    <th>Provenance</th>
-                    <th>Syllabus</th>
-                    <th>Reason for revocation</th>
+                    <th scope="col">Grade</th>
+                    <th scope="col">Awarded</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Provenance</th>
+                    <th scope="col">Syllabus</th>
+                    <th scope="col">Reason for revocation</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -373,7 +373,7 @@ const medals = passport?.medals ?? { gold: 0, silver: 0, bronze: 0 };
               <table class="pp-tbl wide">
                 <caption class="pp-cap">Membership history</caption>
                 <thead>
-                  <tr><th>Category</th><th>Status</th><th>From</th><th>To</th></tr>
+                  <tr><th scope="col">Category</th><th scope="col">Status</th><th scope="col">From</th><th scope="col">To</th></tr>
                 </thead>
                 <tbody>
                   {passport.memberships.map((m) => (
@@ -416,7 +416,7 @@ const medals = passport?.medals ?? { gold: 0, silver: 0, bronze: 0 };
               <table class="pp-tbl wide">
                 <caption class="pp-cap">Final results</caption>
                 <thead>
-                  <tr><th>Event</th><th>Category</th><th>Date</th><th>Placing</th><th>Medal</th></tr>
+                  <tr><th scope="col">Event</th><th scope="col">Category</th><th scope="col">Date</th><th scope="col">Placing</th><th scope="col">Medal</th></tr>
                 </thead>
                 <tbody>
                   {passport.results.map((r) => (
@@ -442,7 +442,7 @@ const medals = passport?.medals ?? { gold: 0, silver: 0, bronze: 0 };
                   Provisional results — not yet published by the federation
                 </caption>
                 <thead>
-                  <tr><th>Event</th><th>Category</th><th>Placing</th></tr>
+                  <tr><th scope="col">Event</th><th scope="col">Category</th><th scope="col">Placing</th></tr>
                 </thead>
                 <tbody>
                   {passport.provisionalResults.map((r) => (

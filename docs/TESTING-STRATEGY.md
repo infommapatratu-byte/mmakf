@@ -129,7 +129,7 @@ Stated plainly, because an untested area presented as tested is worse than an un
 | **No browser tests** | Rendering is verified by fetching routes and asserting on the HTML. Real interaction — clicking through a grading scorecard, a checkout, a live-scoring flow — has not been driven by a browser. |
 | **No visual regression** | A CSS change can silently break a layout. Earlier work found a 143px overflow on `/about` that screenshots had mis-attributed. |
 | **No load testing** | Every suite runs against tens of rows. Query performance at federation scale — 10,000 members, 200 events — is unmeasured. |
-| **No accessibility automation** | Specific issues fixed by hand; no axe pass, no screen-reader testing. |
+| **No accessibility audit tooling** | `tests/accessibility.test.ts` guards the WCAG 2.2 AA audit at source level — contrast computed from the tokens, focus suppression, label association, table headers, landmarks, target size (see `docs/ACCESSIBILITY.md`). There is still **no axe/Lighthouse/pa11y pass and no screen-reader testing**: nothing in that audit was ever *heard*. |
 | **No mutation testing** | Coverage says lines ran, not that assertions would catch a change. |
 | **Payment provider not integration-tested** | Signature verification is tested against real HMACs, but no call has been made to Razorpay's sandbox — no merchant account exists. |
 | **YouTube integration not integration-tested** | Same reason: no OAuth credentials. Token encryption and idempotency are tested; the API calls are not. |

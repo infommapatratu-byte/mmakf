@@ -163,7 +163,7 @@ const gallery = (data.gallery || []).filter((g: any) => g.img);
             <div class="event-body">
               <div class="event-type">{e.type}</div>
               <div class="event-title">{e.t}</div>
-              <div class="event-loc"><svg width="13" height="13" viewBox="0 0 32 32" fill="none" stroke="var(--gold)" stroke-width="2" style="display:inline-block;vertical-align:-2px;margin-right:4px"><path d="M16 28s10-10 10-17a10 10 0 00-20 0c0 7 10 17 10 17z"/><circle cx="16" cy="11" r="3.5"/></svg>{e.loc}</div>
+              <div class="event-loc"><svg aria-hidden="true" width="13" height="13" viewBox="0 0 32 32" fill="none" stroke="var(--gold)" stroke-width="2" style="display:inline-block;vertical-align:-2px;margin-right:4px"><path d="M16 28s10-10 10-17a10 10 0 00-20 0c0 7 10 17 10 17z"/><circle cx="16" cy="11" r="3.5"/></svg>{e.loc}</div>
             </div>
             <div class="event-right">
               <div class="event-fee">{e.fee}</div>
@@ -674,7 +674,7 @@ const gallery = (data.gallery || []).filter((g: any) => g.img);
   .explore-d { font-size: 0.8rem; color: var(--muted); margin-top: 5px; line-height: 1.55; }
   .explore-arrow {
     margin-left: auto;
-    color: var(--muted-2);
+    color: var(--muted); /* was --muted-2: 1.87:1 (WCAG 1.4.3, Q-28) */
     transition: color 0.25s, transform 0.25s;
   }
   .explore-item:hover .explore-arrow { color: var(--gold-2); transform: translateX(3px); }
@@ -719,7 +719,7 @@ const gallery = (data.gallery || []).filter((g: any) => g.img);
     right: 24px; top: 50%;
     transform: translateY(-50%);
     font-size: 1.3rem;
-    color: var(--muted-2);
+    color: var(--muted); /* was --muted-2: 1.87:1 (WCAG 1.4.3, Q-28) */
     transition: color 0.25s, transform 0.25s;
   }
   .ms-card:hover .ms-arrow { color: var(--gold-2); transform: translateY(-50%) translateX(4px); }
@@ -749,7 +749,7 @@ const gallery = (data.gallery || []).filter((g: any) => g.img);
     font-family: var(--font-display);
     font-size: 2.4rem;
     font-weight: 600;
-    color: var(--red-3);
+    color: var(--numeral);
     line-height: 1;
     margin-bottom: 16px;
   }

@@ -48,7 +48,7 @@ const programs = await get<any[]>('programs');
               <div class="event-type">{e.type}</div>
               <div class="event-title">{e.t}</div>
               <div class="event-loc">
-                <svg width="13" height="13" viewBox="0 0 32 32" fill="none" stroke="var(--gold)" stroke-width="2" style="display:inline-block;vertical-align:-2px;margin-right:4px"><path d="M16 28s10-10 10-17a10 10 0 00-20 0c0 7 10 17 10 17z"/><circle cx="16" cy="11" r="3.5"/></svg>
+                <svg aria-hidden="true" width="13" height="13" viewBox="0 0 32 32" fill="none" stroke="var(--gold)" stroke-width="2" style="display:inline-block;vertical-align:-2px;margin-right:4px"><path d="M16 28s10-10 10-17a10 10 0 00-20 0c0 7 10 17 10 17z"/><circle cx="16" cy="11" r="3.5"/></svg>
                 {e.loc}
               </div>
             </div>
@@ -130,7 +130,8 @@ const programs = await get<any[]>('programs');
         </div>
         <div class="arch-wrap tbl-scroll fade">
           <table class="arch-tbl">
-            <thead><tr><th>Date</th><th>Event</th><th>Type</th><th>Venue</th></tr></thead>
+            <caption class="sr-only">Concluded events</caption>
+            <thead><tr><th scope="col">Date</th><th scope="col">Event</th><th scope="col">Type</th><th scope="col">Venue</th></tr></thead>
             <tbody>
               {concluded.map((e: any) => (
                 <tr>

@@ -608,9 +608,10 @@ const isFull = (f: FieldDef) =>
   /* Checkboxes: 44px minimum target, label bound with `for` */
   .check-row { display: flex; align-items: flex-start; gap: 12px; min-height: 44px; padding: 4px 0; }
   .check-box {
-    width: 22px; height: 22px;
-    flex: 0 0 22px;
-    margin-top: 11px;
+    /* WCAG 2.5.8 Target Size (Minimum) is 24x24 CSS px; this was 22. */
+    width: 24px; height: 24px;
+    flex: 0 0 24px;
+    margin-top: 10px;
     accent-color: var(--red);
     cursor: pointer;
   }

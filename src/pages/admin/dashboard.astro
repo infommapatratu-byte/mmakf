@@ -384,7 +384,9 @@ const heading = scopeRef ? scopeRef.label : 'Dashboard';
         </div>
       </aside>
 
-      <main class="admin-main">
+      <!-- WCAG 1.3.1: Base.astro already renders the page's main landmark.
+           A second one nested inside it is invalid and ambiguous. -->
+      <div class="admin-main">
         <header class="admin-panel" style="padding-top:0">
           <h1 class="admin-h">{heading}</h1>
           <p class="admin-sub">
@@ -698,7 +700,7 @@ const heading = scopeRef ? scopeRef.label : 'Dashboard';
             )}
           </Fragment>
         )}
-      </main>
+      </div>
     </div>
   )}
 </Base>
@@ -748,6 +750,10 @@ const heading = scopeRef ? scopeRef.label : 'Dashboard';
 <style is:global>
   body { background: var(--bg); }
   .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  /* WCAG 1.4.10: a grid item defaults to min-width:auto, so it cannot shrink
+     below its content and the whole console scrolled sideways at 320px
+     (measured 461px on /admin/approvals). */
+  .admin-wrap > * { min-width: 0; }
   @media (max-width: 800px) { .admin-wrap { grid-template-columns: 1fr; } }
 
   .admin-side {

@@ -221,8 +221,10 @@ const heroPills = orderable
       )}
 
       <div class="flex flex-wrap gap-3 fade" style="margin-bottom:32px">
-        <button type="button" class="sfilter active" data-cat="all">All</button>
-        {cats.map((c) => <button type="button" class="sfilter" data-cat={c}>{c}</button>)}
+        {/* WCAG 4.1.2: `.active` was a class only — the pressed state was
+            visible but not programmatically determinable. */}
+        <button type="button" class="sfilter active" data-cat="all" aria-pressed="true">All</button>
+        {cats.map((c) => <button type="button" class="sfilter" data-cat={c} aria-pressed="false">{c}</button>)}
       </div>
 
       {items.length === 0 ? (
@@ -280,7 +282,11 @@ const heroPills = orderable
                       </select>
                     </div>
 
-                    <button type="button" class="btn btn-gold prod-btn">Add to basket</button>
+                    {/* WCAG 4.1.2: every product carried the identical name
+                        "Add to basket". The visible text is kept as the first
+                        words of the accessible name so 2.5.3 Label in Name
+                        still holds for speech control. */}
+                    <button type="button" class="btn btn-gold prod-btn" aria-label={`Add to basket: ${i.name}`}>Add to basket</button>
                   </div>
                 )}
               </div>
@@ -382,7 +388,8 @@ const heroPills = orderable
   .prod-badge {
     position: absolute; top: 12px; right: 12px;
     background: var(--gold);
-    color: #000;
+    /* WCAG 1.4.3: black on the accessible gold is 3.97:1; white is 5.29:1. */
+    color: #FFFFFF;
     font-family: var(--font-display);
     font-size: 0.58rem;
     font-weight: 700;
@@ -519,8 +526,9 @@ const heroPills = orderable
   const prods = document.querySelectorAll<HTMLElement>('.prod');
   filters.forEach((btn) => {
     btn.addEventListener('click', () => {
-      filters.forEach((b) => b.classList.remove('active'));
+      filters.forEach((b) => { b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); });
       btn.classList.add('active');
+      btn.setAttribute('aria-pressed', 'true');
       const cat = btn.dataset.cat;
       prods.forEach((p) => {
         const show = cat === 'all' || p.dataset.cat === cat;

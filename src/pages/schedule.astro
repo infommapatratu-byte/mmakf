@@ -38,8 +38,9 @@ const etiquette = [
     <div class="container">
       <div class="schedule-wrap tbl-scroll fade">
         <table class="schedule-tbl">
+          <caption class="sr-only">Weekly class timetable</caption>
           <thead>
-            <tr><th>Day</th><th>Time</th><th>Discipline</th><th>Level</th><th>Instructor</th><th>Mode</th></tr>
+            <tr><th scope="col">Day</th><th scope="col">Time</th><th scope="col">Discipline</th><th scope="col">Level</th><th scope="col">Instructor</th><th scope="col">Mode</th></tr>
           </thead>
           <tbody>
             {schedule.map((s: any) => (

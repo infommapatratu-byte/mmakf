@@ -151,7 +151,9 @@ function scopeText(scope: Record<string, any>): string {
         </div>
       </aside>
 
-      <main class="admin-main">
+      <!-- WCAG 1.3.1: Base.astro already renders the page's main landmark.
+           A second one nested inside it is invalid and ambiguous. -->
+      <div class="admin-main">
         <header class="admin-panel admin-panel-first">
           <h1 class="admin-h">Two-person control</h1>
           <p class="admin-sub">
@@ -389,6 +391,7 @@ function scopeText(scope: Record<string, any>): string {
             </p>
             <div class="tbl-scroll">
               <table class="a-tbl">
+                <caption class="sr-only">Acts under dual control, and the authority each approver must independently hold</caption>
                 <thead><tr><th scope="col">Act</th><th scope="col">Authority each person must independently hold</th></tr></thead>
                 <tbody>
                   {APPROVAL_ACTION_NAMES.map((name) => (
@@ -408,7 +411,7 @@ function scopeText(scope: Record<string, any>): string {
           </section>
           </>
         )}
-      </main>
+      </div>
     </div>
   )}
 </Base>
@@ -527,6 +530,14 @@ function scopeText(scope: Record<string, any>): string {
   .signin-note { margin-top: 20px; font-size: .75rem; color: var(--muted); text-align: center; line-height: 1.6; }
 
   .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+
+  /* WCAG 1.4.10: a grid item defaults to min-width:auto, so it cannot shrink
+
+     below its content and the whole console scrolled sideways at 320px
+
+     (measured 461px on /admin/approvals). */
+
+  .admin-wrap > * { min-width: 0; }
   @media (max-width: 800px) { .admin-wrap { grid-template-columns: 1fr; } }
   .admin-side {
     background: var(--bg-2); border-right: 1px solid var(--border); padding: 24px 0;

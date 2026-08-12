@@ -51,7 +51,11 @@ if (session) {
             Access codes are issued by the federation office.
           </p>
           <label class="input-label" for="unit-code">Unit access code</label>
-          <input class="input" type="password" id="unit-code" name="code" required autofocus autocomplete="off" />
+          {/* WCAG 3.3.8 Accessible Authentication (Minimum): signing in must not
+              depend on recalling and retyping a secret. Paste is not blocked, and
+              autocomplete="off" was the one thing telling password managers to
+              stay out of the only field on the page. */}
+          <input class="input" type="password" id="unit-code" name="code" required autofocus autocomplete="current-password" />
           <div id="unitLoginErr" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none">Invalid or disabled access code</div>
           <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;justify-content:center">Enter Portal</button>
           <p style="margin-top:20px;font-size:.75rem;color:var(--muted);text-align:center">
@@ -134,7 +138,7 @@ if (session) {
         <div class="card" style="margin-top:18px;padding:0;overflow:hidden">
           <div style="overflow-x:auto">
             <table class="up-tbl">
-              <thead><tr><th>Document</th><th>Category</th><th>Reference</th><th>Access</th></tr></thead>
+              <thead><tr><th scope="col">Document</th><th scope="col">Category</th><th scope="col">Reference</th><th scope="col">Access</th></tr></thead>
               <tbody>
                 {documents.map((d: any) => (
                   <tr>
@@ -186,7 +190,7 @@ if (session) {
           <div class="card" style="margin-top:18px;padding:0;overflow:hidden">
             <div style="overflow-x:auto">
               <table class="up-tbl">
-                <thead><tr><th>When</th><th>Type</th><th>Title</th><th>Status</th></tr></thead>
+                <thead><tr><th scope="col">When</th><th scope="col">Type</th><th scope="col">Title</th><th scope="col">Status</th></tr></thead>
                 <tbody>
                   {mySubmissions.map((s: any) => (
                     <tr>
@@ -222,7 +226,7 @@ if (session) {
           ) : (
             <div style="overflow-x:auto">
               <table class="up-tbl">
-                <thead><tr><th>App No.</th><th>Name</th><th>Phone</th><th>Type</th><th>District</th><th>Grade</th></tr></thead>
+                <thead><tr><th scope="col">App No.</th><th scope="col">Name</th><th scope="col">Phone</th><th scope="col">Type</th><th scope="col">District</th><th scope="col">Grade</th></tr></thead>
                 <tbody>
                   {applications.map((r: any) => (
                     <tr>
@@ -251,7 +255,7 @@ if (session) {
           ) : (
             <div style="overflow-x:auto">
               <table class="up-tbl">
-                <thead><tr><th>Member ID</th><th>Name</th><th>Type</th><th>Grade</th><th>Unit</th><th>Status</th></tr></thead>
+                <thead><tr><th scope="col">Member ID</th><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Grade</th><th scope="col">Unit</th><th scope="col">Status</th></tr></thead>
                 <tbody>
                   {members.map((m: any) => (
                     <tr>

@@ -340,7 +340,7 @@ const keep = (k: string, v: string) => {
   .search-form input[type='search']:focus-visible {
     outline: 2px solid var(--gold); outline-offset: 2px; border-color: var(--gold);
   }
-  .search-form input::placeholder { color: var(--muted-2); }
+  .search-form input::placeholder { color: var(--muted); } /* was --muted-2: 1.87:1 (WCAG 1.4.3, Q-28) */
 
   .kind-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
   .kind-chip {
@@ -388,7 +388,7 @@ const keep = (k: string, v: string) => {
   .hit-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .hit-why {
     font-family: var(--font-display); font-size: .64rem;
-    letter-spacing: .14em; text-transform: uppercase; color: var(--muted-2);
+    letter-spacing: .14em; text-transform: uppercase; color: var(--muted); /* was --muted-2: 1.87:1 (WCAG 1.4.3, Q-28) */
   }
   .hit-why.muted { opacity: .7; }
 

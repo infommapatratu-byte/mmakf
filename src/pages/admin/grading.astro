@@ -387,7 +387,9 @@ const STATUS_TONE: Record<string, string> = {
         </div>
       </aside>
 
-      <main class="admin-main">
+      <!-- WCAG 1.3.1: Base.astro already renders the page's main landmark.
+           A second one nested inside it is invalid and ambiguous. -->
+      <div class="admin-main">
         <header class="admin-panel" style="padding-top:0">
           <h1 class="admin-h">Grading console</h1>
           <p class="admin-sub">
@@ -446,7 +448,7 @@ const STATUS_TONE: Record<string, string> = {
             <div class="tbl-scroll" style="margin-top:18px">
               <table class="g-table">
                 <thead>
-                  <tr><th>Grading</th><th>Held on</th><th>Status</th><th>Candidates</th></tr>
+                  <tr><th scope="col">Grading</th><th scope="col">Held on</th><th scope="col">Status</th><th scope="col">Candidates</th></tr>
                 </thead>
                 <tbody>
                   {gradings.map((g) => (
@@ -517,7 +519,7 @@ const STATUS_TONE: Record<string, string> = {
               <div class="tbl-scroll" style="margin-top:18px">
                 <table class="g-table">
                   <thead>
-                    <tr><th>Examiner</th><th>Role</th><th>Qualification as at appointment</th><th>Appointed</th></tr>
+                    <tr><th scope="col">Examiner</th><th scope="col">Role</th><th scope="col">Qualification as at appointment</th><th scope="col">Appointed</th></tr>
                   </thead>
                   <tbody>
                     {panel.map((p) => {
@@ -660,7 +662,7 @@ const STATUS_TONE: Record<string, string> = {
                         <div class="tbl-scroll">
                           <table class="g-table">
                             <thead>
-                              <tr><th>Rule</th><th>Result</th><th>What the rule saw</th></tr>
+                              <tr><th scope="col">Rule</th><th scope="col">Result</th><th scope="col">What the rule saw</th></tr>
                             </thead>
                             <tbody>
                               {checks.map((k) => (
@@ -694,7 +696,7 @@ const STATUS_TONE: Record<string, string> = {
                       <div class="tbl-scroll">
                         <table class="g-table">
                           <thead>
-                            <tr><th>Component</th><th>Examiner</th><th>Score</th><th>Comment</th><th>Recorded</th></tr>
+                            <tr><th scope="col">Component</th><th scope="col">Examiner</th><th scope="col">Score</th><th scope="col">Comment</th><th scope="col">Recorded</th></tr>
                           </thead>
                           <tbody>
                             {scores.map((r: any) => (
@@ -1070,7 +1072,7 @@ const STATUS_TONE: Record<string, string> = {
             )}
           </section>
         )}
-      </main>
+      </div>
     </div>
   )}
 </Base>
@@ -1206,6 +1208,10 @@ const STATUS_TONE: Record<string, string> = {
 <style is:global>
   body { background: var(--bg); }
   .admin-wrap { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
+  /* WCAG 1.4.10: a grid item defaults to min-width:auto, so it cannot shrink
+     below its content and the whole console scrolled sideways at 320px
+     (measured 461px on /admin/approvals). */
+  .admin-wrap > * { min-width: 0; }
   @media (max-width: 900px) { .admin-wrap { grid-template-columns: 1fr; } }
 
   .admin-side {

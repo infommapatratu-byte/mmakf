@@ -230,7 +230,9 @@ const matBoard = detail
         </div>
       </aside>
 
-      <main class="admin-main">
+      <!-- WCAG 1.3.1: Base.astro already renders the page's main landmark.
+           A second one nested inside it is invalid and ambiguous. -->
+      <div class="admin-main">
         <header class="admin-panel" style="padding-top:0">
           <h1 class="admin-h">Competition</h1>
           <p class="admin-sub">
@@ -274,7 +276,7 @@ const matBoard = detail
                   <div class="c-group-h">{words(g.status)} <span class="c-count">{g.rows.length}</span></div>
                   <div class="tbl-scroll">
                     <table class="c-tbl">
-                      <thead><tr><th>Reference</th><th>Title</th><th>Kind</th><th>Dates</th><th>Place</th><th>Sanction</th><th></th></tr></thead>
+                      <thead><tr><th scope="col">Reference</th><th scope="col">Title</th><th scope="col">Kind</th><th scope="col">Dates</th><th scope="col">Place</th><th scope="col">Sanction</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
                       <tbody>
                         {g.rows.map((e: any) => (
                           <tr>
@@ -450,7 +452,7 @@ const matBoard = detail
                     {detail.ruleset.stored.authority ? ` under ${detail.ruleset.stored.authority}` : ''}.</p>
                   <div class="tbl-scroll" style="margin-top:12px">
                     <table class="c-tbl">
-                      <thead><tr><th>Action</th><th>Points</th><th>Awarded to</th><th>Penalty</th><th>Ends bout</th></tr></thead>
+                      <thead><tr><th scope="col">Action</th><th scope="col">Points</th><th scope="col">Awarded to</th><th scope="col">Penalty</th><th scope="col">Ends bout</th></tr></thead>
                       <tbody>
                         {scoringActions.map((a: any) => (
                           <tr>
@@ -500,7 +502,7 @@ const matBoard = detail
               ) : (
                 <div class="tbl-scroll">
                   <table class="c-tbl">
-                    <thead><tr><th>Code</th><th>Category</th><th>Discipline</th><th>Entries</th><th>Draw</th><th>Actions</th></tr></thead>
+                    <thead><tr><th scope="col">Code</th><th scope="col">Category</th><th scope="col">Discipline</th><th scope="col">Entries</th><th scope="col">Draw</th><th scope="col">Actions</th></tr></thead>
                     <tbody>
                       {detail.categories.map((c: any) => {
                         const live = c.draws.filter((d: any) => !d.superseded);
@@ -610,7 +612,7 @@ const matBoard = detail
                 ) : (
                   <div class="tbl-scroll">
                     <table class="c-tbl">
-                      <thead><tr><th>Entry</th><th>Competitor</th><th>Status</th><th>Seed</th><th>Weigh-in</th><th>Notes</th><th>Actions</th></tr></thead>
+                      <thead><tr><th scope="col">Entry</th><th scope="col">Competitor</th><th scope="col">Status</th><th scope="col">Seed</th><th scope="col">Weigh-in</th><th scope="col">Notes</th><th scope="col">Actions</th></tr></thead>
                       <tbody>
                         {categoryView.entries.map((e: any) => (
                           <tr>
@@ -686,7 +688,7 @@ const matBoard = detail
                     <div class="c-group-h">{m.mat ? `Mat ${m.mat}` : 'No mat assigned'} <span class="c-count">{m.rows.length}</span></div>
                     <div class="tbl-scroll">
                       <table class="c-tbl">
-                        <thead><tr><th>Bout</th><th>Category</th><th>Round</th><th>Red (aka)</th><th>Blue (ao)</th><th>Score</th><th>State</th><th>Mat / time</th><th></th></tr></thead>
+                        <thead><tr><th scope="col">Bout</th><th scope="col">Category</th><th scope="col">Round</th><th scope="col">Red (aka)</th><th scope="col">Blue (ao)</th><th scope="col">Score</th><th scope="col">State</th><th scope="col">Mat / time</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
                         <tbody>
                           {m.rows.map((mt: any) => (
                             <tr>
@@ -732,7 +734,7 @@ const matBoard = detail
               ) : (
                 <div class="tbl-scroll">
                   <table class="c-tbl">
-                    <thead><tr><th>Person</th><th>Federation id</th><th>Role</th><th>Mat</th></tr></thead>
+                    <thead><tr><th scope="col">Person</th><th scope="col">Federation id</th><th scope="col">Role</th><th scope="col">Mat</th></tr></thead>
                     <tbody>
                       {detail.officials.map((o: any) => (
                         <tr>
@@ -870,7 +872,7 @@ const matBoard = detail
             </p>
             <div class="tbl-scroll">
               <table class="c-tbl" id="logTable">
-                <thead><tr><th>#</th><th>Side</th><th>Action</th><th>Points</th><th>Clock</th><th>Official</th><th>Note</th><th></th></tr></thead>
+                <thead><tr><th scope="col">#</th><th scope="col">Side</th><th scope="col">Action</th><th scope="col">Points</th><th scope="col">Clock</th><th scope="col">Official</th><th scope="col">Note</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
                 <tbody id="logBody">
                   {matchView.log.events.length === 0 && (
                     <tr><td colspan="8" class="c-dim">No action has been recorded in this bout.</td></tr>
@@ -907,7 +909,7 @@ const matBoard = detail
             )}
           </section>
         )}
-      </main>
+      </div>
     </div>
   )}
 </Base>
@@ -1146,6 +1148,10 @@ const matBoard = detail
 <style is:global>
   body { background: var(--bg); }
   .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  /* WCAG 1.4.10: a grid item defaults to min-width:auto, so it cannot shrink
+     below its content and the whole console scrolled sideways at 320px
+     (measured 461px on /admin/approvals). */
+  .admin-wrap > * { min-width: 0; }
   @media (max-width: 900px) { .admin-wrap { grid-template-columns: 1fr; } }
 
   .admin-side {

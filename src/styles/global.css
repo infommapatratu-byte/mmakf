@@ -17,21 +17,40 @@
   --card-2:    #F1EEE7;
   --border:    #E6E2D8;
   --border-2:  #D5D0C3;
+  /* A11Y-1.4.11 (Q-28): --border-2 is 1.54:1 on white. That is fine for a card
+     edge (decoration), but a text input has no other visible boundary, so its
+     border IS the information that identifies the control and must reach 3:1.
+     #8C867A is 3.62:1 on --card and 3.29:1 on --bg. */
+  --control-border: #8C867A;
 
   --red:       #8E1212;
   --red-2:     #A61616;
-  --red-3:     #E5CFCB;   /* pale — decorative numerals */
+  /* A11Y-1.4.3 (Q-28): #E5CFCB measured 1.49:1 on --card in Chrome. It is a
+     hairline colour for borders and rules — NEVER text. The large ordinal
+     numerals it used to paint now use --numeral. */
+  --red-3:     #E5CFCB;   /* pale hairline — borders only */
+  --numeral:   #95564F;   /* card ordinals: 5.64:1 on --card, 4.87:1 on --card-2 */
   --red-glow:  rgba(142, 18, 18, 0.16);
 
-  --gold:      #A07C1E;
+  /* A11Y-1.4.3 (Q-28): #A07C1E measured 3.89:1 on --card and 3.54:1 on --bg as
+     TEXT, and it is used as text in 86 places. On this paper ground there is
+     exactly one gold that clears 4.5:1, so --gold and --gold-2 now hold it
+     (5.29:1 on --card, 4.81:1 on --bg, 4.57:1 on --card-2). --gold-3 remains
+     the darker hover tone; --gold-dim stays decorative and must never carry
+     text or identify a control on its own. */
+  --gold:      #86671A;
   --gold-2:    #86671A;
   --gold-3:    #6B5213;
   --gold-dim:  rgba(160, 124, 30, 0.45);
 
   --white:     #1A1713;   /* primary text (ink) */
   --off-white: #4C463C;   /* secondary text */
-  --muted:     #857E71;
-  --muted-2:   #C4BDAE;
+  /* A11Y-1.4.3 (Q-28): #857E71 measured 4.02:1 on --card, 3.66:1 on --bg and
+     3.47:1 on --card-2 — below 4.5:1 on every surface it is used on, and it
+     carries ~200 pieces of real text (table headers, field labels, scoreboard
+     sub-lines, empty-state copy). #706A5F is 5.36 / 4.88 / 4.63:1. */
+  --muted:     #706A5F;
+  --muted-2:   #C4BDAE;   /* decorative only — never text */
 
   --font-display: 'Oswald', sans-serif;
   --font-accent:  'Cormorant Garamond', serif;
@@ -43,7 +62,12 @@
   --shadow-2: 0 8px 28px rgba(26, 23, 19, 0.09);
 }
 
-html { scroll-behavior: smooth; }
+/* WCAG 2.4.11 Focus Not Obscured (Minimum): nav#mainNav is position:fixed and
+   72-88px tall, and both fragment navigation (/governance#documents) and the
+   browser's own scroll-into-view on Tab align the target to the very top of the
+   viewport — i.e. underneath it. scroll-padding reserves the band. */
+html { scroll-behavior: smooth; scroll-padding-top: 96px; }
+@media (min-width: 1081px) { html { scroll-padding-top: 88px; } }
 
 body {
   background: var(--bg);
@@ -309,7 +333,7 @@ html.js-reveal .fade.vis { opacity: 1; transform: none; animation: none; }
 .input {
   width: 100%;
   background: #FFFFFF;
-  border: 1px solid var(--border-2);
+  border: 1px solid var(--control-border);
   color: var(--white);
   padding: 13px 15px;
   font-family: var(--font-body);
@@ -321,6 +345,14 @@ html.js-reveal .fade.vis { opacity: 1; transform: none; animation: none; }
   outline: none;
   border-color: var(--gold);
   box-shadow: 0 0 0 3px rgba(160, 124, 30, 0.12);
+}
+/* A11Y-2.4.7 (Q-28): the rule above removes the outline for every focus,
+   including keyboard focus, leaving only a 1px border tint. Keyboard focus gets
+   the site's real ring back. Declared after `.input:focus` — equal specificity,
+   later wins — so the mouse-focus appearance is unchanged. */
+.input:focus-visible {
+  outline: 2px solid var(--gold-2);
+  outline-offset: 1px;
 }
 .input::placeholder { color: var(--muted); }
 select.input option { background: #fff; color: var(--white); }

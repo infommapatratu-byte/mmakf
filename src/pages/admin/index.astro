@@ -108,7 +108,7 @@ if (authed) {
           <div class="admin-brand-1">MMAKF</div>
           <div class="admin-brand-2">Admin</div>
         </div>
-        <nav class="admin-nav">
+        <nav class="admin-nav" aria-label="Content sections">
           <a href="#dashboard" class="active">Dashboard</a>
           <a href="#federation">Federation Profile</a>
           <a href="#leadership">Leadership</a>
@@ -146,7 +146,8 @@ if (authed) {
         </div>
       </aside>
 
-      <main class="admin-main">
+      <div class="admin-main">
+        <h1 class="sr-only">MMAKF content administration</h1>
         <div class="admin-toast" id="toast" role="status" aria-live="polite">Saved</div>
 
         <section id="dashboard" class="admin-panel">
@@ -173,19 +174,19 @@ if (authed) {
           <p class="admin-sub">Identity shown across the public site.</p>
           <form data-key="federation" class="admin-form" data-mode="object" style="margin-top:20px">
             <div class="grid grid-2">
-              <div><label class="input-label">Full name</label><input class="input" name="name" value={data!.federation.name} /></div>
-              <div><label class="input-label">Short name</label><input class="input" name="shortName" value={data!.federation.shortName} /></div>
-              <div style="grid-column:1/-1"><label class="input-label">Tagline</label><input class="input" name="tagline" value={data!.federation.tagline} /></div>
-              <div><label class="input-label">Founded</label><input class="input" name="founded" value={data!.federation.founded} /></div>
-              <div><label class="input-label">Style</label><input class="input" name="style" value={data!.federation.style} /></div>
-              <div><label class="input-label">Lineage</label><input class="input" name="lineage" value={data!.federation.lineage} /></div>
-              <div><label class="input-label">Headquarters</label><input class="input" name="headquarters" value={data!.federation.headquarters} /></div>
-              <div><label class="input-label">Affiliation</label><input class="input" name="affiliation" value={data!.federation.affiliation} /></div>
-              <div><label class="input-label">UPI ID</label><input class="input" name="upi" value={data!.federation.upi} /></div>
-              <div><label class="input-label">Email</label><input class="input" name="contact.email" value={data!.federation.contact.email} /></div>
-              <div><label class="input-label">Phone</label><input class="input" name="contact.phone" value={data!.federation.contact.phone} /></div>
-              <div style="grid-column:1/-1"><label class="input-label">Address</label><input class="input" name="contact.address" value={data!.federation.contact.address} /></div>
-              <div style="grid-column:1/-1"><label class="input-label">Office hours</label><input class="input" name="contact.hours" value={data!.federation.contact.hours} /></div>
+              <div><label class="input-label" for="fed-name">Full name</label><input class="input" id="fed-name" name="name" value={data!.federation.name} /></div>
+              <div><label class="input-label" for="fed-shortName">Short name</label><input class="input" id="fed-shortName" name="shortName" value={data!.federation.shortName} /></div>
+              <div style="grid-column:1/-1"><label class="input-label" for="fed-tagline">Tagline</label><input class="input" id="fed-tagline" name="tagline" value={data!.federation.tagline} /></div>
+              <div><label class="input-label" for="fed-founded">Founded</label><input class="input" id="fed-founded" name="founded" value={data!.federation.founded} /></div>
+              <div><label class="input-label" for="fed-style">Style</label><input class="input" id="fed-style" name="style" value={data!.federation.style} /></div>
+              <div><label class="input-label" for="fed-lineage">Lineage</label><input class="input" id="fed-lineage" name="lineage" value={data!.federation.lineage} /></div>
+              <div><label class="input-label" for="fed-headquarters">Headquarters</label><input class="input" id="fed-headquarters" name="headquarters" value={data!.federation.headquarters} /></div>
+              <div><label class="input-label" for="fed-affiliation">Affiliation</label><input class="input" id="fed-affiliation" name="affiliation" value={data!.federation.affiliation} /></div>
+              <div><label class="input-label" for="fed-upi">UPI ID</label><input class="input" id="fed-upi" name="upi" value={data!.federation.upi} /></div>
+              <div><label class="input-label" for="fed-contact-email">Email</label><input class="input" id="fed-contact-email" name="contact.email" value={data!.federation.contact.email} /></div>
+              <div><label class="input-label" for="fed-contact-phone">Phone</label><input class="input" id="fed-contact-phone" name="contact.phone" value={data!.federation.contact.phone} /></div>
+              <div style="grid-column:1/-1"><label class="input-label" for="fed-contact-address">Address</label><input class="input" id="fed-contact-address" name="contact.address" value={data!.federation.contact.address} /></div>
+              <div style="grid-column:1/-1"><label class="input-label" for="fed-contact-hours">Office hours</label><input class="input" id="fed-contact-hours" name="contact.hours" value={data!.federation.contact.hours} /></div>
             </div>
             <button type="submit" class="btn btn-primary" style="margin-top:18px">Save Profile</button>
           </form>
@@ -280,7 +281,7 @@ if (authed) {
             ) : (
               <div style="overflow-x:auto">
                 <table class="schedule-tbl" style="min-width:760px">
-                  <thead><tr><th>When</th><th>App No.</th><th>Name</th><th>Phone</th><th>Type</th><th>State / District</th><th>Grade</th></tr></thead>
+                  <thead><tr><th scope="col">When</th><th scope="col">App No.</th><th scope="col">Name</th><th scope="col">Phone</th><th scope="col">Type</th><th scope="col">State / District</th><th scope="col">Grade</th></tr></thead>
                   <tbody>
                     {regList.slice(0, 200).map((r: any) => (
                       <tr>
@@ -309,7 +310,7 @@ if (authed) {
             ) : (
               <div style="overflow-x:auto">
                 <table class="schedule-tbl" style="min-width:780px">
-                  <thead><tr><th>When</th><th>Ref</th><th>Event</th><th>Name</th><th>Phone</th><th>Unit</th></tr></thead>
+                  <thead><tr><th scope="col">When</th><th scope="col">Ref</th><th scope="col">Event</th><th scope="col">Name</th><th scope="col">Phone</th><th scope="col">Unit</th></tr></thead>
                   <tbody>
                     {eventRegList.slice(0, 200).map((r: any) => (
                       <tr>
@@ -342,7 +343,7 @@ if (authed) {
             ) : (
               <div style="overflow-x:auto">
                 <table class="schedule-tbl" style="min-width:820px">
-                  <thead><tr><th>When</th><th>Unit</th><th>Level</th><th>Type</th><th>Title</th><th>Details</th></tr></thead>
+                  <thead><tr><th scope="col">When</th><th scope="col">Unit</th><th scope="col">Level</th><th scope="col">Type</th><th scope="col">Title</th><th scope="col">Details</th></tr></thead>
                   <tbody>
                     {subList.slice(0, 200).map((s: any) => (
                       <tr>
@@ -404,7 +405,7 @@ if (authed) {
               <div style="padding:32px;text-align:center;color:var(--muted)">No leads yet.</div>
             ) : (
               <table class="schedule-tbl" style="min-width:0">
-                <thead><tr><th>When</th><th>Name</th><th>Phone</th><th>Program</th></tr></thead>
+                <thead><tr><th scope="col">When</th><th scope="col">Name</th><th scope="col">Phone</th><th scope="col">Program</th></tr></thead>
                 <tbody>
                   {leadList.slice(0, 100).map((l: any) => (
                     <tr>
@@ -419,7 +420,7 @@ if (authed) {
             )}
           </div>
         </section>
-      </main>
+      </div>
     </div>
   )}
 </Base>
@@ -428,6 +429,10 @@ if (authed) {
   <style is:global>
     body { background: var(--bg); }
     .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+    /* WCAG 1.4.10: a grid item defaults to min-width:auto, so it cannot shrink
+       below its content and the whole console scrolled sideways at 320px
+       (measured 461px on /admin/approvals). */
+    .admin-wrap > * { min-width: 0; }
     @media (max-width: 800px) { .admin-wrap { grid-template-columns: 1fr; } }
 
     .admin-side {

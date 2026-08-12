@@ -579,6 +579,12 @@ const signedInButNoPerson = identity != null && personId == null;
   async function refresh(code: string) {
     const list = document.querySelector<HTMLElement>(`.q-list[data-code="${CSS.escape(code)}"]`);
     if (!list) return;
+    // The board is redrawn wholesale with innerHTML. Doing that while the
+    // keyboard is inside it destroys the focused Upvote button and drops focus
+    // to <body> — the user loses their place mid-poll (WCAG 2.4.3, 3.2.x).
+    // A poll that arrives while the board has focus is simply skipped; the next
+    // one thirty seconds later catches up.
+    if (list.contains(document.activeElement)) return;
     try {
       const response = await fetch(`/api/academy/questions?code=${encodeURIComponent(code)}`, {
         headers: { Accept: 'application/json' },

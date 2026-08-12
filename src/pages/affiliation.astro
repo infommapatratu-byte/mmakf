@@ -61,8 +61,9 @@ const ladder = [
       </div>
       <div class="branch-wrap tbl-scroll fade">
         <table class="branch-tbl">
+          <caption class="sr-only">Chartered state units of the federation</caption>
           <thead>
-            <tr><th>State</th><th>Unit</th><th>Headquarters</th><th>District Units</th><th>Since</th><th>Status</th></tr>
+            <tr><th scope="col">State</th><th scope="col">Unit</th><th scope="col">Headquarters</th><th scope="col">District Units</th><th scope="col">Since</th><th scope="col">Status</th></tr>
           </thead>
           <tbody>
             {stateUnits.map((s: any) => (
@@ -193,8 +194,9 @@ const ladder = [
       </div>
       <div class="branch-wrap tbl-scroll fade">
         <table class="branch-tbl">
+          <caption class="sr-only">The federation network, centre by centre</caption>
           <thead>
-            <tr><th>Centre</th><th>City</th><th>District</th><th>In-charge</th><th>Status</th></tr>
+            <tr><th scope="col">Centre</th><th scope="col">City</th><th scope="col">District</th><th scope="col">In-charge</th><th scope="col">Status</th></tr>
           </thead>
           <tbody>
             {branches.map((b: any) => (
@@ -250,7 +252,7 @@ const ladder = [
     font-family: var(--font-display);
     font-size: 1.6rem;
     font-weight: 600;
-    color: var(--red-3);
+    color: var(--numeral);
     line-height: 1;
     margin-bottom: 14px;
   }
@@ -306,7 +308,7 @@ const ladder = [
     font-family: var(--font-display);
     font-size: 1.5rem;
     font-weight: 600;
-    color: var(--red-3);
+    color: var(--numeral);
     flex-shrink: 0;
     line-height: 1.2;
   }

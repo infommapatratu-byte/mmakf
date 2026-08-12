@@ -33,11 +33,16 @@ const { id, title, subtitle, apiKey, rows, fields } = Astro.props;
     <div class="lp-form-grid">
       {fields.map((f) => (
         <div class={f.full ? 'full' : ''}>
-          <label class="input-label">{f.l}</label>
+          {/* WCAG 1.3.1 / 4.1.2: the label used to carry no `for`, so none of
+              these controls had an accessible name and clicking the label did
+              not focus the field. The id is scoped by the panel id because one
+              admin page renders ~20 of these panels and several share a field
+              name (`name`, `type`, `title`), which would otherwise collide. */}
+          <label class="input-label" for={`${id}-${f.n}`}>{f.l}</label>
           {f.textarea ? (
-            <textarea class="input" name={f.n} rows="3"></textarea>
+            <textarea class="input" id={`${id}-${f.n}`} name={f.n} rows="3"></textarea>
           ) : (
-            <input class="input" name={f.n} type={f.type || 'text'} />
+            <input class="input" id={`${id}-${f.n}`} name={f.n} type={f.type || 'text'} />
           )}
         </div>
       ))}

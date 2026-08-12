@@ -193,7 +193,7 @@ const medalWord = (m: string | null) => (m ? m : '');
                       <h4 class="cp-h">Official result</h4>
                       <div class="tbl-scroll">
                         <table class="cp-tbl">
-                          <thead><tr><th>Place</th><th>Medal</th><th>Competitor</th><th>Dojo</th><th>W–L</th></tr></thead>
+                          <thead><tr><th scope="col">Place</th><th scope="col">Medal</th><th scope="col">Competitor</th><th scope="col">Dojo</th><th scope="col">W–L</th></tr></thead>
                           <tbody>
                             {c.results.map((r: any) => (
                               <tr>
@@ -229,7 +229,7 @@ const medalWord = (m: string | null) => (m ? m : '');
                     ) : (
                       <div class="tbl-scroll">
                         <table class="cp-tbl">
-                          <thead><tr><th>Entry</th><th>Competitor</th><th>Dojo</th><th>Seed</th><th>Status</th></tr></thead>
+                          <thead><tr><th scope="col">Entry</th><th scope="col">Competitor</th><th scope="col">Dojo</th><th scope="col">Seed</th><th scope="col">Status</th></tr></thead>
                           <tbody>
                             {c.entries.map((e: any) => (
                               <tr class={e.status === 'withdrawn' ? 'cp-out' : ''}>
@@ -265,7 +265,7 @@ const medalWord = (m: string | null) => (m ? m : '');
                         </p>
                         <div class="tbl-scroll">
                           <table class="cp-tbl">
-                            <thead><tr><th>#</th><th>Round</th><th>Pool</th><th>Aka</th><th>Ao</th><th>Winner</th><th>State</th></tr></thead>
+                            <thead><tr><th scope="col">#</th><th scope="col">Round</th><th scope="col">Pool</th><th scope="col">Aka</th><th scope="col">Ao</th><th scope="col">Winner</th><th scope="col">State</th></tr></thead>
                             <tbody>
                               {c.bracket.matches.map((m: any) => (
                                 <tr>

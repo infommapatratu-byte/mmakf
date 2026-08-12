@@ -27,8 +27,10 @@ const cats = [...new Set(gallery.map((g: any) => g.cat))];
   <section>
     <div class="container">
       <div class="flex flex-wrap gap-3 fade" style="margin-bottom:32px" id="galleryFilters">
-        <button class="gfilter active" data-cat="all">All</button>
-        {cats.map((c) => <button class="gfilter" data-cat={c}>{c}</button>)}
+        {/* WCAG 4.1.2: `.active` was a class only — the pressed state was
+            visible but not programmatically determinable. */}
+        <button type="button" class="gfilter active" data-cat="all" aria-pressed="true">All</button>
+        {cats.map((c) => <button type="button" class="gfilter" data-cat={c} aria-pressed="false">{c}</button>)}
       </div>
 
       <div class="gallery-grid" id="galleryGrid">
@@ -135,8 +137,9 @@ const cats = [...new Set(gallery.map((g: any) => g.cat))];
   const items = document.querySelectorAll('.gitem');
   filters.forEach((btn) => {
     btn.addEventListener('click', () => {
-      filters.forEach((b) => b.classList.remove('active'));
+      filters.forEach((b) => { b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); });
       btn.classList.add('active');
+      btn.setAttribute('aria-pressed', 'true');
       const cat = (btn as HTMLElement).dataset.cat;
       items.forEach((it) => {
         const show = cat === 'all' || (it as HTMLElement).dataset.cat === cat;

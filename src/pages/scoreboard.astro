@@ -69,7 +69,8 @@ const otherEvents = events.filter((e) => !['live', 'check_in', 'results_pending'
   description="MMAKF competition scoreboard: mat by mat, with the score, penalties and state of each bout as last refreshed from the official record."
   showFooter={false}
 >
-  <main class="sb" data-event={board ? board.event.id : ''} data-mat={matParam ?? ''} data-refresh={REFRESH_SECONDS}>
+  <!-- WCAG 1.3.1: Base.astro already renders this page's main landmark. -->
+  <div class="sb" data-event={board ? board.event.id : ''} data-mat={matParam ?? ''} data-refresh={REFRESH_SECONDS}>
     <header class="sb-top">
       <div>
         <div class="sb-brand">MMAKF</div>
@@ -87,6 +88,15 @@ const otherEvents = events.filter((e) => !['live', 'check_in', 'results_pending'
         </div>
         <div id="sbStale" class="sb-stale" role="alert" hidden></div>
         <div class="sb-controls">
+          {/* WCAG 2.2.2 Pause, Stop, Hide: the board updates itself every few
+              seconds alongside the rest of the page. Anyone reading a name or a
+              penalty line slowly needs to be able to stop it moving under them.
+              Rendered only where the script that drives it is present. */}
+          {board && (
+            <button type="button" class="sb-btn" id="sbPause" aria-pressed="false" hidden>
+              Pause updates
+            </button>
+          )}
           <button type="button" class="sb-btn" id="sbRefresh">Refresh now</button>
           <button type="button" class="sb-btn" id="sbFull">Full screen</button>
         </div>
@@ -224,7 +234,7 @@ const otherEvents = events.filter((e) => !['live', 'check_in', 'results_pending'
         </p>
       </>
     )}
-  </main>
+  </div>
 </Base>
 
 <script>
@@ -314,7 +324,32 @@ const otherEvents = events.filter((e) => !['live', 'check_in', 'results_pending'
       }
     }
 
-    setInterval(refresh, every);
+    // WCAG 2.2.2: automatic updating must be stoppable. The button is hidden in
+    // the markup and revealed here, so it never appears when this script has
+    // not run — a control that cannot work is not shown.
+    let timer = window.setInterval(refresh, every);
+    const pauseBtn = document.getElementById('sbPause');
+    if (pauseBtn instanceof HTMLButtonElement) {
+      pauseBtn.hidden = false;
+      pauseBtn.addEventListener('click', () => {
+        if (timer) {
+          window.clearInterval(timer);
+          timer = 0;
+          pauseBtn.textContent = 'Resume updates';
+          pauseBtn.setAttribute('aria-pressed', 'true');
+          if (staleEl instanceof HTMLElement) {
+            staleEl.textContent = 'Updates are paused. The figures above are from the time shown and will not move until you resume.';
+            staleEl.hidden = false;
+          }
+        } else {
+          timer = window.setInterval(refresh, every);
+          pauseBtn.textContent = 'Pause updates';
+          pauseBtn.setAttribute('aria-pressed', 'false');
+          void refresh();
+        }
+      });
+    }
+
     setInterval(paintAge, 1000);
     paintAge();
     document.getElementById('sbRefresh')?.addEventListener('click', refresh);
