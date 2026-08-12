@@ -480,3 +480,54 @@ describe('input hygiene', () => {
     expect([...CATEGORIES].sort()).toEqual([...s.membershipCategory.enumValues].sort());
   });
 });
+
+describe('the member and the office are told the same thing', () => {
+  const page = readFileSync('src/pages/my/index.astro', 'utf8');
+  const desk = readFileSync('src/pages/admin/membership.astro', 'utf8');
+
+  /**
+   * Comments stripped before asserting on CODE.
+   *
+   * The a11y verifier on this project found a guard that was satisfied by the
+   * explanatory comment sitting above the line it was meant to check. This is
+   * the same trap inverted: the comment recording what the old rule WAS makes a
+   * "the old rule is gone" assertion fail forever. A test that reads source has
+   * to say which source it means.
+   */
+  const codeOf = (src: string) =>
+    src
+      .split(/\r?\n/)
+      .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+      .join('\n');
+
+  it('the member area does NOT carry its own standing rule', () => {
+    // It used to: `status === 'active' && validFrom <= today && validTo >= today`.
+    // Right about dates, wrong about everything else — it sorted a SUSPENDED and
+    // a REVOKED membership into the same bucket as a lapsed one, so a member
+    // whose membership the federation had withdrawn read "no membership is
+    // current today" and could reasonably conclude a renewal would fix it.
+    expect(codeOf(page)).not.toMatch(/status === 'active' && .*validFrom <= today/);
+    expect(page).toMatch(/resolveStanding\(/);
+  });
+
+  it('both surfaces answer with the same function', () => {
+    expect(page).toMatch(/from '@\/db\/membership'/);
+    expect(desk).toMatch(/from '@\/db\/membership'/);
+  });
+
+  it('the member sees all eight standings, not a two-way branch', () => {
+    const block = page.match(/const STANDING_LABEL[^{]*\{([\s\S]*?)\n\};/);
+    expect(block, 'no label map on the member page').toBeTruthy();
+    const covered = [...block![1].matchAll(/^\s{2}([a-z_]+):/gm)].map((m) => m[1]).sort();
+    expect(covered).toEqual([
+      'in_good_standing', 'lapsed', 'never_registered', 'no_expiry_recorded',
+      'not_yet_valid', 'pending', 'revoked', 'suspended',
+    ]);
+  });
+
+  it('prints the module\'s own explanation verbatim rather than rewording it', () => {
+    // The sentences are written to be read by the person who hit them.
+    // Rewording them per surface is how the member and the office disagree.
+    expect(page).toMatch(/\{standingNow\.explanation\}/);
+  });
+});

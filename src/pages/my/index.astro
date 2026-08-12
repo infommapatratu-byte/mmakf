@@ -28,6 +28,7 @@ import { athletePassport, AthleteError, type AthletePassport } from '@/db/athlet
 import { AcademyError, courseProgress, type CourseProgressReport } from '@/db/academy';
 import { ForbiddenError } from '@/lib/rbac';
 import { liveNow, upcomingClasses } from '@/lib/youtube';
+import { resolveStanding, todayIso, type Standing } from '@/db/membership';
 
 export const prerender = false;
 
@@ -180,13 +181,37 @@ const fmtTime = (v: unknown): string => {
 
 const titleCase = (v: string) => v.replace(/_/g, ' ');
 
-// A membership is only "current" when the federation's own dates say so. No
-// grace period is invented here.
-const today = new Date().toISOString().slice(0, 10);
-const currentMembership =
-  passport?.memberships.find(
-    (m) => m.status === 'active' && m.validFrom <= today && (m.validTo == null || m.validTo >= today)
-  ) ?? null;
+/**
+ * Member-facing wording for each standing. Eight labels, not two, because the
+ * whole point of the eight is that a member reading their own record can tell
+ * a lapse they can fix from a decision the federation made.
+ */
+const STANDING_LABEL: Record<Standing, string> = {
+  in_good_standing: 'In good standing',
+  lapsed: 'Lapsed',
+  not_yet_valid: 'Not yet valid',
+  no_expiry_recorded: 'Active — no expiry recorded',
+  pending: 'Pending issue',
+  suspended: 'Suspended',
+  revoked: 'Revoked',
+  never_registered: 'No membership recorded',
+};
+
+// THE STANDING RULE IS NOT WRITTEN HERE. This page used to carry its own
+// version — `status === 'active' && validFrom <= today && validTo >= today` —
+// which is right about dates and wrong about everything else. It sorted a
+// SUSPENDED and a REVOKED membership into the same bucket as a lapsed one, so
+// a member whose membership the federation had withdrawn read "no membership
+// is current today" and could reasonably conclude a renewal would fix it.
+//
+// resolveStanding() is the same function the renewals desk answers with, so
+// the member and the office cannot be told two different things.
+const today = todayIso();
+const standingNow = resolveStanding(
+  (passport?.memberships ?? []).map((m, i) => ({ ...m, id: i })),
+  today
+);
+const currentMembership = standingNow.covered ? standingNow.membership : null;
 
 const inProgress = courses.filter((c) => c.enrolment.status === 'active');
 const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
@@ -327,21 +352,29 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
 
             <div class="card">
               <div class="card-eyebrow">Membership</div>
-              {currentMembership ? (
+              {standingNow.membership ? (
                 <>
-                  <div class="card-title" style="margin-bottom:8px">{titleCase(currentMembership.category)}</div>
-                  <div class="card-body">
-                    {`Valid from ${fmt(currentMembership.validFrom)}${
-                      currentMembership.validTo ? ` to ${fmt(currentMembership.validTo)}` : ' — no end date recorded'
+                  <div class="card-title" style="margin-bottom:8px">
+                    {titleCase(standingNow.membership.category)}
+                  </div>
+                  <div class="ms-standing" data-tone={standingNow.covered ? 'good' : 'bad'}>
+                    {STANDING_LABEL[standingNow.standing]}
+                  </div>
+                  <div class="card-body" style="margin-top:10px">
+                    {`Recorded from ${fmt(standingNow.membership.validFrom)}${
+                      standingNow.membership.validTo
+                        ? ` to ${fmt(standingNow.membership.validTo)}`
+                        : ', with no end date recorded'
                     }.`}
                   </div>
+                  {/* The module's own sentence, printed verbatim. It is written
+                      to be read by the person who hit it, and rewording it here
+                      is how the member and the office start disagreeing. */}
+                  <div class="card-body" style="margin-top:8px">{standingNow.explanation}</div>
+                  <div class="card-body" style="margin-top:10px">
+                    See your <a class="text-gold" href="/my/passport">passport</a> for every term on record.
+                  </div>
                 </>
-              ) : passport && passport.memberships.length > 0 ? (
-                <div class="card-body">
-                  No membership is current today. {passport.memberships.length}{' '}
-                  {passport.memberships.length === 1 ? 'membership record is' : 'membership records are'} held —
-                  see your <a class="text-gold" href="/my/passport">passport</a> for their dates and status.
-                </div>
               ) : (
                 <div class="card-body">No membership record is held against your name.</div>
               )}
@@ -569,6 +602,18 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
   @media (max-width: 640px) {
     .btn { width: 100%; margin-left: 0 !important; margin-top: 10px; }
   }
+
+  /* Two tones, because a member needs to know at a glance whether they are
+     covered. The SENTENCE below it carries the distinction between a lapse
+     and a withdrawal; the colour cannot and should not try. */
+  .ms-standing {
+    font-family: var(--font-display); font-size: .68rem;
+    letter-spacing: .16em; text-transform: uppercase;
+    display: inline-flex; padding: 5px 13px; border-radius: 100px;
+    border: 1px solid var(--border-2); color: var(--muted);
+  }
+  .ms-standing[data-tone='good'] { color: var(--gold-2); border-color: var(--gold-dim); }
+  .ms-standing[data-tone='bad'] { color: var(--red-2); border-color: var(--red-3); }
 </style>
 
 <script>
