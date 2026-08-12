@@ -182,7 +182,7 @@ describe('expiry report', () => {
     expect(lapsed.length).toBeGreaterThan(0);
     // Lapsed first — an official still on an appointment list is how an invalid
     // act happens.
-    expect(rows[0].daysRemaining).toBeLessThanOrEqual(rows[rows.length - 1].daysRemaining);
+    expect(Number(rows[0].daysRemaining)).toBeLessThanOrEqual(Number(rows[rows.length - 1].daysRemaining));
   });
 });
 

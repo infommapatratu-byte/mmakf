@@ -9,5 +9,14 @@ export default defineConfig({
   },
   test: {
     include: ['tests/**/*.test.ts'],
+    // Most suites boot a real Postgres (PGlite) and apply all four migrations —
+    // 87 tables and roughly a thousand statements — inside beforeAll. That
+    // exceeds vitest's 10s hook default, and a timeout there fails the whole
+    // file with no useful message, which looks exactly like a broken test.
+    hookTimeout: 120_000,
+    testTimeout: 60_000,
+    // The suites are I/O-bound on their own database instances rather than
+    // CPU-bound, and running every one concurrently starves them all.
+    maxConcurrency: 4,
   },
 });
