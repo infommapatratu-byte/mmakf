@@ -247,7 +247,7 @@ describe('memberships', () => {
     expect(m.id).toBeGreaterThan(0);
 
     await expect(
-      issueMembership(db, { principal: brAdmin() }, { personId: p.id, category: 'athlete', validFrom: '2026-01-01' })
+      issueMembership(db, { principal: brAdmin() }, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: null })
     ).rejects.toThrow(/Forbidden/);
   });
 });

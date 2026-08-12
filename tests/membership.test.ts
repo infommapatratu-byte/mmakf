@@ -339,6 +339,37 @@ describe('a revocation cannot be undone by issuing a new card', () => {
   });
 });
 
+describe('there is only ONE path to issuing a membership', () => {
+  it('the legacy issueMembership() enforces the revocation guard too', async () => {
+    // It used to be a second implementation of the same act with none of the
+    // rules — it would issue over a revocation, letting an administrator
+    // reverse a federation decision by filling in a form. It now delegates.
+    const { issueMembership } = await import('../src/db/federation');
+    const p = await person('Legacy Path');
+    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    await revoke(db, ctx, r.membershipId, 'Serious breach');
+
+    await expect(
+      issueMembership(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2027-01-01', validTo: '2027-12-31' })
+    ).rejects.toThrow(/undo it without the decision that reversed it/);
+  });
+
+  it('the legacy path will not invent a term either', async () => {
+    const { issueMembership } = await import('../src/db/federation');
+    const p = await person('Legacy No Term');
+    await expect(
+      issueMembership(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01' } as any)
+    ).rejects.toThrow(/will not assume a term/);
+  });
+
+  it('and still returns the { id } shape its callers expect', async () => {
+    const { issueMembership } = await import('../src/db/federation');
+    const p = await person('Legacy Shape');
+    const m = await issueMembership(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: null });
+    expect(m.id).toBeGreaterThan(0);
+  });
+});
+
 describe('scope', () => {
   it('a state administrator cannot read another state\'s standing', async () => {
     const p = await person('Jharkhand Person', JH);

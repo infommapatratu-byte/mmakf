@@ -407,6 +407,20 @@ export async function revokeRank(
 
 // ─── Memberships ────────────────────────────────────────────────────────────
 
+/**
+ * @deprecated Use `renew()` from src/db/membership.ts.
+ *
+ * This was the original path to issuing a membership and it enforced NONE of
+ * the lifecycle rules: it would happily issue over a REVOKED membership, letting
+ * an administrator reverse a federation decision by filling in a form, and it
+ * reported no gap when a renewal followed a lapse. Two functions performing the
+ * same act with different rules is how a system ends up with two answers, so
+ * this one now delegates rather than duplicating.
+ *
+ * `validTo` is REQUIRED here as it is there — including an explicit null. It was
+ * optional before, which meant an omitted term silently became an open-ended
+ * membership nobody decided on.
+ */
 export async function issueMembership(
   db: DB,
   ctx: AuditContext,
@@ -414,32 +428,13 @@ export async function issueMembership(
     personId: number;
     category: 'athlete' | 'instructor' | 'dojo' | 'official';
     validFrom: string;
-    validTo?: string | null;
+    validTo: string | null;
   }
 ) {
-  const person = (
-    await db.select().from(s.persons).where(eq(s.persons.id, input.personId)).limit(1)
-  )[0];
-  if (!person) throw new Error('Unknown person');
-
-  assertCan(ctx.principal, 'membership:issue', {
-    stateUnitId: person.stateUnitId,
-    districtUnitId: person.districtUnitId,
-    dojoId: person.dojoId,
-  });
-
-  const rows = await db
-    .insert(s.memberships)
-    .values({ ...input, status: 'active', issuedByUserId: ctx.principal.userId ?? null })
-    .returning({ id: s.memberships.id });
-
-  await writeAudit(db, ctx, {
-    entityType: 'membership',
-    entityId: rows[0].id,
-    action: 'create',
-    newValue: { personId: input.personId, category: input.category },
-  });
-  return rows[0];
+  const { renew } = await import('@/db/membership');
+  const result = await renew(db, ctx, input);
+  // The original returned `{ id }`; callers depend on that shape.
+  return { id: result.membershipId };
 }
 
 export async function auditTrail(db: DB, principal: Principal, entityType: string, entityId: string | number) {
