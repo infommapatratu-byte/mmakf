@@ -1,0 +1,480 @@
+---
+/**
+ * THE RENEWALS DESK — /admin/membership
+ *
+ * Two jobs, and no more: work down the list of memberships about to lapse, and
+ * answer "is this person in good standing" for a date somebody names.
+ *
+ * WHY THE DATE IS A FIELD AND NOT A CAPTION. Every other page in this system
+ * answers for today. This one has to answer for a day in the past, because the
+ * question that arrives by email a month after an injury is "was this athlete a
+ * member on the 14th?" A page that can only say "they are a member now" cannot
+ * answer it, and the office ends up reading the row in a database client and
+ * interpreting the dates by eye — which is how two people give two answers.
+ *
+ * WHAT IT WILL NOT COLLAPSE. Lapsed, suspended and revoked all mean "not a
+ * member today" and are rendered as three different things, because they are.
+ * One is an oversight a renewal fixes; one is a pause the federation imposed;
+ * one is a decision it made. Rendering them alike would be the single most
+ * misleading simplification available on this page.
+ *
+ * "NO EXPIRY RECORDED" is counted and stated, never quietly folded into the
+ * healthy total. Those memberships cannot lapse, so they never appear in the
+ * lapsing list — and a register quietly filling with them is a data-quality
+ * problem that would otherwise be invisible precisely because it looks fine.
+ */
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import { identify } from '@/lib/session';
+import { ForbiddenError } from '@/lib/rbac';
+import { isConfigured, db, schema } from '@/db';
+import { eq } from 'drizzle-orm';
+import {
+  lapsingSoon, history, todayIso, requireIsoDate, isMembershipError,
+  type LapsingReport, type Standing,
+} from '@/db/membership';
+
+export const prerender = false;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const configured = isConfigured();
+const url = Astro.url;
+
+/** The date every answer on this page is computed for. Stated, never implied. */
+const rawAsAt = url.searchParams.get('asAt') || '';
+let asAt = todayIso();
+let asAtProblem: string | null = null;
+if (rawAsAt) {
+  try {
+    asAt = requireIsoDate(rawAsAt, 'asAt');
+  } catch (err: any) {
+    asAtProblem = isMembershipError(err) ? err.message : 'That is not a date.';
+  }
+}
+
+const WINDOWS = [7, 30, 60, 90];
+const rawWithin = Number(url.searchParams.get('within'));
+const withinDays = WINDOWS.includes(rawWithin) ? rawWithin : 30;
+
+/** A federation id to look up. Trimmed and upper-cased; never used to build SQL. */
+const lookup = (url.searchParams.get('id') || '').trim().toUpperCase();
+
+let lapsing: LapsingReport | null = null;
+let lapsingProblem: string | null = null;
+
+let found: { person: any; record: Awaited<ReturnType<typeof history>> } | null = null;
+let lookupProblem: string | null = null;
+
+async function guard<T>(fn: () => Promise<T>): Promise<{ value: T | null; problem: string | null }> {
+  try {
+    return { value: await fn(), problem: null };
+  } catch (err: any) {
+    if (err instanceof ForbiddenError) {
+      return {
+        value: null,
+        problem:
+          `Reading this requires the "${err.action}" authority inside the scope you asked about, ` +
+          'and your credential does not hold it there. Records may well exist; they are not yours to read.',
+      };
+    }
+    if (isMembershipError(err)) return { value: null, problem: err.message };
+    console.error('[admin/membership] failed', err);
+    return {
+      value: null,
+      problem:
+        'This could not be read. Nothing is shown rather than an empty list that would look like ' +
+        'a measurement. The failure is in this deployment’s server log.',
+    };
+  }
+}
+
+if (identity && configured && !asAtProblem) {
+  const r = await guard(() => lapsingSoon(db(), identity.principal, { asAt, withinDays }));
+  lapsing = r.value;
+  lapsingProblem = r.problem;
+
+  if (lookup) {
+    const rows = await db().select().from(schema.persons)
+      .where(eq(schema.persons.federationId, lookup)).limit(1);
+    if (!rows.length) {
+      // Said plainly. An empty history table under a heading with the id in it
+      // would read as "this member has no memberships", which is a different
+      // and much worse claim than "no such id".
+      lookupProblem = `No person is registered under ${lookup}.`;
+    } else {
+      const h = await guard(() => history(db(), identity.principal, rows[0].id, { asAt }));
+      if (h.value) found = { person: rows[0], record: h.value };
+      else lookupProblem = h.problem;
+    }
+  }
+}
+
+const STANDING_LABEL: Record<Standing, string> = {
+  in_good_standing: 'In good standing',
+  lapsed: 'Lapsed',
+  not_yet_valid: 'Not yet valid',
+  no_expiry_recorded: 'No expiry recorded',
+  pending: 'Pending issue',
+  suspended: 'Suspended',
+  revoked: 'Revoked',
+  never_registered: 'Never registered',
+};
+
+/**
+ * Three tones, not two. `warn` is for a state the office can fix by renewing;
+ * `bad` is for a federation decision that a renewal must not paper over.
+ */
+const STANDING_TONE: Record<Standing, 'good' | 'warn' | 'bad' | 'muted'> = {
+  in_good_standing: 'good',
+  no_expiry_recorded: 'warn',
+  lapsed: 'warn',
+  not_yet_valid: 'muted',
+  pending: 'muted',
+  suspended: 'bad',
+  revoked: 'bad',
+  never_registered: 'muted',
+};
+
+const CATEGORY_LABEL: Record<string, string> = {
+  athlete: 'Athlete', instructor: 'Instructor', dojo: 'Dojo', official: 'Official',
+};
+
+const q = (extra: Record<string, string | number | undefined>) => {
+  const p = new URLSearchParams();
+  if (rawAsAt) p.set('asAt', rawAsAt);
+  if (lookup) p.set('id', lookup);
+  p.set('within', String(withinDays));
+  for (const [k, v] of Object.entries(extra)) {
+    if (v === undefined || v === '') p.delete(k);
+    else p.set(k, String(v));
+  }
+  return `/admin/membership?${p.toString()}`;
+};
+
+const urgency = (days: number) => (days <= 7 ? 'bad' : days <= 30 ? 'warn' : 'muted');
+---
+
+<Base title="Renewals — MMAKF administration" showFooter={false}>
+  <section class="ms">
+    <div class="container">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/admin">Administration</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">Renewals</span>
+      </nav>
+
+      <div class="eyebrow">Membership</div>
+      <h1 class="display-1 ms-title">The renewals <em>desk</em>.</h1>
+      <p class="lead" style="max-width:60ch">
+        Everything on this page is answered as at <strong>{asAt}</strong> — including questions about
+        a day that has already passed, which is the form the question usually arrives in.
+      </p>
+
+      <form class="asat-form" method="get" action="/admin/membership">
+        <div class="field">
+          <label for="asAt">Answer as at</label>
+          <input id="asAt" name="asAt" type="date" value={rawAsAt || asAt} />
+        </div>
+        <div class="field">
+          <label for="id">Federation ID</label>
+          <input id="id" name="id" type="text" value={lookup} placeholder="MMAKF-MEM-2026-000001"
+                 autocomplete="off" spellcheck="false" />
+        </div>
+        <input type="hidden" name="within" value={withinDays} />
+        <button class="btn btn-primary" type="submit">Answer</button>
+      </form>
+
+      {!identity && (
+        <div class="notice">
+          <Icon name="shield" size={22} color="var(--gold)" />
+          <div>
+            <strong>Sign in to use the renewals desk.</strong>
+            <p>It reads the membership register, so it is scoped to the unit your credential covers.</p>
+            <p class="mt-4"><a class="btn btn-ghost" href="/admin">Go to administration &rarr;</a></p>
+          </div>
+        </div>
+      )}
+
+      {identity && !configured && (
+        <div class="notice">
+          <Icon name="shield" size={22} color="var(--gold)" />
+          <div>
+            <strong>The federation database is not configured for this environment.</strong>
+            <p>
+              Membership standing is computed from the register. With no database there is nothing
+              to compute from, which is said here rather than shown as a desk with no work on it.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {asAtProblem && (
+        <div class="notice bad" role="alert">
+          <Icon name="shield" size={22} color="var(--red)" />
+          <div><strong>That is not a date.</strong><p>{asAtProblem}</p></div>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ ONE PERSON, IN FULL ═══════ */}
+  {(found || lookupProblem) && (
+    <section class="bg2">
+      <div class="container">
+        {lookupProblem ? (
+          <div class="notice bad" role="alert">
+            <Icon name="shield" size={22} color="var(--red)" />
+            <div><strong>Nothing to show for that id.</strong><p>{lookupProblem}</p></div>
+          </div>
+        ) : (
+          <>
+            <div class="section-head">
+              <div class="eyebrow">{found!.person.federationId}</div>
+              <h2 class="display-2" style="font-size:clamp(1.4rem,2.6vw,2rem)">{found!.person.fullName}</h2>
+              <div class="rule gold"></div>
+            </div>
+
+            {found!.record.byCategory.length === 0 ? (
+              <p class="lead">
+                This person is on the register and holds no membership in any category. That is a
+                record of absence, not a gap in this page.
+              </p>
+            ) : (
+              found!.record.byCategory.map((c) => (
+                <div class="cat">
+                  <div class="cat-head">
+                    <h3 class="cat-title">{CATEGORY_LABEL[c.category] || c.category}</h3>
+                    <span class:list={['tag', STANDING_TONE[c.current.standing]]}>
+                      {STANDING_LABEL[c.current.standing]}
+                    </span>
+                  </div>
+                  <p class="cat-note">{c.current.explanation}</p>
+
+                  <div class="tbl-scroll">
+                    <table class="ms-tbl">
+                      <caption class="sr-only">
+                        {CATEGORY_LABEL[c.category] || c.category} membership terms, with standing as at {asAt}
+                      </caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">From</th>
+                          <th scope="col">To</th>
+                          <th scope="col">Recorded status</th>
+                          <th scope="col">As at {asAt}</th>
+                          <th scope="col">Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {c.terms.map((t) => (
+                          <tr>
+                            <td>{t.validFrom}</td>
+                            {/* Never "—". A blank cell reads as "no data"; this
+                                is a specific, meaningful state. */}
+                            <td>{t.validTo ?? <span class="none">no expiry recorded</span>}</td>
+                            <td class="text-muted">{t.status}</td>
+                            <td>
+                              <span class:list={['tag', STANDING_TONE[t.standingAsAt]]}>
+                                {STANDING_LABEL[t.standingAsAt]}
+                              </span>
+                            </td>
+                            <td class="text-muted">{t.revokedReason ?? ''}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ THE LIST TO WORK DOWN ═══════ */}
+  {(lapsing || lapsingProblem) && (
+    <section>
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Lapsing soon</div>
+          <h2 class="display-2" style="font-size:clamp(1.4rem,2.6vw,2rem)">
+            Within the next <em>{withinDays} days</em>.
+          </h2>
+          <div class="rule"></div>
+        </div>
+
+        <div class="win-bar" role="group" aria-label="Window">
+          {WINDOWS.map((w) => (
+            <a href={q({ within: w })} class:list={['win-chip', { on: w === withinDays }]}>{w} days</a>
+          ))}
+        </div>
+
+        {lapsingProblem ? (
+          <div class="notice bad" role="alert">
+            <Icon name="shield" size={22} color="var(--red)" />
+            <div><strong>The list could not be read.</strong><p>{lapsingProblem}</p></div>
+          </div>
+        ) : lapsing!.rows.length === 0 ? (
+          <p class="lead">
+            Nothing in your scope lapses in the next {withinDays} days, counting from {asAt}.
+          </p>
+        ) : (
+          <>
+            {lapsing!.truncated && (
+              <p class="text-muted" style="font-size:.86rem;margin-bottom:18px">
+                More lapse in this window than are listed. This is not the complete set, and the
+                page will not imply that it is — narrow the window to work through it.
+              </p>
+            )}
+            <div class="tbl-scroll">
+              <table class="ms-tbl">
+                <caption class="sr-only">Memberships lapsing within {withinDays} days of {asAt}</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Days left</th>
+                    <th scope="col">Member</th>
+                    <th scope="col">Federation ID</th>
+                    <th scope="col">Category</th>
+                    <th scope="col">Lapses on</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lapsing!.rows.map((r) => (
+                    <tr>
+                      <td><span class:list={['tag', urgency(r.daysRemaining)]}>{r.daysRemaining}</span></td>
+                      <td style="font-family:var(--font-display);font-weight:600">{r.fullName}</td>
+                      <td><a class="text-gold" href={q({ id: r.federationId })}>{r.federationId}</a></td>
+                      <td class="text-muted">{CATEGORY_LABEL[r.category] || r.category}</td>
+                      <td>{r.validTo}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
+        {lapsing && lapsing.withNoExpiryRecorded > 0 && (
+          <div class="noexp">
+            <Icon name="book" size={24} color="var(--gold)" />
+            <div>
+              <strong>
+                {lapsing.withNoExpiryRecorded} active {lapsing.withNoExpiryRecorded === 1 ? 'membership has' : 'memberships have'} no expiry date recorded.
+              </strong>
+              <p>
+                They cannot lapse, so they never appear in the list above — which is exactly why
+                they are counted here. A missing expiry may be deliberate or may be an omission from
+                the register, and only the office can say which. A register quietly filling with
+                them looks healthy from every angle except this one.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  )}
+</Base>
+
+<style>
+  .ms { padding-top: clamp(80px, 10vw, 120px); }
+
+  .crumbs {
+    font-family: var(--font-display); font-size: .72rem;
+    letter-spacing: .14em; text-transform: uppercase;
+    display: flex; gap: 10px; align-items: center; margin-bottom: 26px;
+  }
+  .crumbs a { color: var(--gold); text-decoration: none; }
+  .crumbs a:hover { text-decoration: underline; }
+  .crumbs span[aria-current] { color: var(--muted); }
+
+  .ms-title { font-size: clamp(2rem, 5vw, 3rem); margin: 6px 0 14px; }
+
+  .asat-form {
+    display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end;
+    margin-top: 30px; padding: 22px 24px;
+    background: var(--card); border: 1px solid var(--border-2); border-radius: var(--radius);
+  }
+  .field { display: flex; flex-direction: column; gap: 7px; flex: 1 1 220px; min-width: 0; }
+  .field label {
+    font-family: var(--font-display); font-size: .64rem;
+    letter-spacing: .18em; text-transform: uppercase; color: var(--gold);
+  }
+  .field input {
+    padding: 13px 15px; background: var(--bg-2); color: var(--white);
+    border: 1px solid var(--border-2); border-radius: var(--radius);
+    font-family: var(--font-body); font-size: .95rem; min-height: 44px;
+  }
+  .field input:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; border-color: var(--gold); }
+  .asat-form .btn { min-height: 44px; }
+
+  .notice {
+    display: flex; gap: 16px; align-items: flex-start;
+    margin-top: 26px; padding: 20px 22px;
+    background: var(--card); border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold); border-radius: var(--radius);
+  }
+  .notice.bad { border-left-color: var(--red); }
+  .notice strong { font-family: var(--font-display); color: var(--white); display: block; margin-bottom: 6px; }
+  .notice p { margin: 0; font-size: .9rem; color: var(--muted); line-height: 1.6; }
+
+  .cat { margin-bottom: 40px; }
+  .cat-head { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .cat-title {
+    font-family: var(--font-display); font-size: .76rem;
+    letter-spacing: .22em; text-transform: uppercase; color: var(--gold); margin: 0;
+  }
+  .cat-note { font-size: .9rem; color: var(--muted); margin: 0 0 18px; max-width: 72ch; line-height: 1.6; }
+
+  .tag {
+    display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 100px;
+    font-family: var(--font-display); font-size: .6rem; font-weight: 500;
+    letter-spacing: .14em; text-transform: uppercase;
+    border: 1px solid var(--border-2); color: var(--muted);
+  }
+  .tag.good { color: var(--gold-2); border-color: var(--gold-dim); }
+  .tag.warn { color: var(--off-white); border-color: var(--border-2); }
+  /* A federation decision reads differently from an administrative lapse. */
+  .tag.bad  { color: var(--red-2); border-color: var(--red-3); }
+  .tag.muted { color: var(--muted); }
+
+  .ms-tbl {
+    width: 100%; border-collapse: collapse;
+    background: var(--card); border: 1px solid var(--border); min-width: 640px;
+  }
+  .ms-tbl th, .ms-tbl td {
+    padding: 13px 18px; text-align: left;
+    border-bottom: 1px solid var(--border); font-size: .88rem; vertical-align: middle;
+  }
+  .ms-tbl th {
+    background: var(--bg-2); font-family: var(--font-display);
+    font-size: .62rem; letter-spacing: .2em; text-transform: uppercase;
+    color: var(--gold); font-weight: 500;
+  }
+  .ms-tbl tr:last-child td { border-bottom: 0; }
+  .none { color: var(--muted); font-style: italic; }
+
+  .win-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+  .win-chip {
+    font-family: var(--font-display); font-size: .7rem;
+    letter-spacing: .14em; text-transform: uppercase;
+    padding: 9px 15px; border: 1px solid var(--border-2); border-radius: 999px;
+    color: var(--muted); text-decoration: none; background: var(--card);
+  }
+  .win-chip:hover { color: var(--white); border-color: var(--gold-dim); }
+  .win-chip.on { color: var(--bg); background: var(--gold); border-color: var(--gold); }
+
+  .noexp {
+    display: flex; gap: 18px; align-items: flex-start;
+    margin-top: 34px; padding: 24px 26px;
+    background: var(--card); border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold); border-radius: var(--radius);
+  }
+  .noexp strong { font-family: var(--font-display); color: var(--white); display: block; margin-bottom: 8px; }
+  .noexp p { margin: 0; font-size: .9rem; color: var(--muted); line-height: 1.65; max-width: 76ch; }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+</style>
