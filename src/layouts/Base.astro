@@ -46,7 +46,15 @@ const orgSchema = {
   '@context': 'https://schema.org',
   '@type': 'SportsOrganization',
   name: 'Modern Martial Arts Karate-Do Federation of India',
-  alternateName: 'MMAKF',
+  // Both names are official and the federation uses them interchangeably:
+  // "Bharat" is the constitutional name of India, so this is one body under two
+  // correct names rather than an inconsistency. Declaring them lets search
+  // engines resolve the Instagram account and the website to the same entity.
+  alternateName: [
+    'MMAKF',
+    'Modern Martial Arts Karate-Do Federation, Bharat',
+    'Modern Martial Arts Karate-Do Federation of India',
+  ],
   url: SITE,
   logo: SITE + '/logo.jpg',
   foundingDate: '1983',

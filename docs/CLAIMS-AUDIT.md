@@ -77,24 +77,40 @@ lineage nobody can trace.
 
 ---
 
-## 3. Titles — three sources, three different answers
+## 3. Titles — RESOLVED 2026-08-12
 
-| Source | What it says |
+**The federation confirmed that Renshi, Sensei, Shihan, Soke and Grandmaster are all held by
+Shihan Pramod Kumar Pathak.** That is his to state, and it is now recorded.
+
+They are, however, **four different kinds of credential**, and the site was printing them as one
+run-on line — which reads as inflation to precisely the audience MMAKF wants to convince: WKF-track
+officials, other federations, senior instructors. Stated precisely they are stronger, not weaker:
+
+| | What it is |
 |---|---|
-| mmakf.in | "Shihan · Grandmaster · Soke", **VI Dan** |
-| His own YouTube channel and the former MMAKF website | **"Renshi"** |
-| A recovered newspaper clipping | Awarded **Black Belt 5th Dan in 2022** |
+| **VI Dan** | A **grade**, awarded by examination |
+| **Soke** | Head and founder of the system |
+| **Shihan** | Honorific for a senior instructor |
+| **Renshi** | A *shogo* — a teaching title, a separate track from grade |
+| **Sensei** | The ordinary form of address for a teacher |
 
-**Renshi, Shihan and Soke are three different things.** Renshi is a teaching title; Shihan denotes
-a senior instructor; Soke means the head and founder of a style. A V→VI Dan promotion after 2022 is
-entirely possible, but nothing evidences it.
+They are now modelled separately in the data — grade in one field, titles in another, honours in a
+third — which is the same separation the engineering directive requires for every credential
+(§33: rank ≠ instructor ≠ examiner ≠ office). It also means each can be evidenced independently.
 
-The same contradiction exists for Sensei Sumitra: the site says "Sumitra Devi, III Dan"; the former
-site says "Sensei Sumitra Pathak"; both newspapers call her "सुमित्रा, ब्लैक बेल्ट सेकंड डॉन" (2nd Dan).
+**Two knock-on changes made at the same time:**
 
-**Decision needed:** pick one form for each person and state when and by whom it was awarded. A
-federation that cannot state its own leaders' grades consistently undermines every certificate it
-issues.
+- His biography asserted "record-book recognition and a formal WKF pathway" as established fact.
+  Both are unresolved elsewhere in this document (§1, §4), so the biography no longer states them.
+  It now states what is evidenced: the conferred title, the district programmes, and his personal
+  authority over Dan examinations.
+- The "Jr. Tiger Lee Lineage" note is now **"Awarded the title Junior Tiger Lee, 2021"** — see §2.
+  This is an upgrade, not a retreat: it is the one thing in this entire dossier a third-party
+  publication independently confirms.
+
+**Still open:** Sensei Sumitra. The site says "Sumitra Devi, III Dan"; the former site says "Sensei
+Sumitra Pathak"; both newspapers call her "सुमित्रा, ब्लैक बेल्ट सेकंड डॉन" (2nd Dan). Confirm her name
+and current grade.
 
 ---
 
@@ -213,8 +229,25 @@ the site's structured data, so search engines connect them.
 
 Verified live before publication: two YouTube channels, Facebook, X, and a Telegram channel.
 
-**One unresolved:** Instagram. Two researchers reported fetching `@mmakf_india`; a third
-demonstrated that Instagram serves an identical login wall for every handle including invented
-ones, so those details cannot have been legitimately obtained. Note the official handle in the
-former site's own social bar is `@mmak_india`, not `@mmakf_india`. **Confirm which account is
-yours** and it will be added.
+**RESOLVED 2026-08-12.** The federation confirmed the account, and it verifies independently:
+`https://www.instagram.com/mmakf_india/` returns HTTP 200 declaring
+`Modern Martial Arts Karate-Do Federation, Bharat (@mmakf_india)` with **41 posts**.
+
+That settles the researchers' disagreement in favour of the two who reported finding it. The
+sceptical third agent had shown Instagram serves an identical login-wall shell for invented handles
+— true, but the `og:description` here carries account-specific counts that an invented handle
+cannot produce. A login wall hides the *posts*; it does not fabricate a follower count.
+
+**The two names are both official — confirmed by the federation, 2026-08-12.** The Instagram
+account styles it "Modern Martial Arts Karate-Do Federation, **Bharat**" and the website says
+"...**of India**". Bharat is the constitutional name of India, so this is one body under two correct
+names, not a discrepancy.
+
+Both are now declared as `alternateName` in the site's structured data, so search engines resolve
+the Instagram account and the website to the same entity instead of treating them as two
+organisations. **This does not extend to §3**, where the leaders' titles genuinely do conflict —
+Renshi, Shihan and Soke are different ranks, not different names for one thing.
+
+**41 posts is real content the website is not using.** Worth mining for photographs, particularly
+any showing Sensei Vikas Pathak, whose news item currently carries no image because no captioned
+photograph of him exists publicly (§8).

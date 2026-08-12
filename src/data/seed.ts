@@ -33,8 +33,25 @@ export const SEED = {
   // short fields. `img` (portrait URL) is optional — a monogram tile renders
   // when absent. Every field is admin-editable.
   leadership: [
-    { name: 'Shihan Pramod Kumar Pathak', role: 'Grandmaster · Soke', rank: 'VI Dan Black Belt', since: '1983', specialty: 'System authority · Dan gradings', note: 'Jr. Tiger Lee Lineage · Senior Technical Authority', img: '',
-      bio: 'Founder of MMAKF and direct inheritor of the Jr. Tiger Lee Shotokan lineage in India. Over four decades, Shihan Pathak has built the federation from a single Patratu training hall into an institution spanning 130+ school programs at its peak, with record-book recognition and a formal WKF pathway. Every Dan examination in the federation is conducted under his personal authority.' },
+    // Titles are held SEPARATELY from grade, because in Japanese martial arts
+    // they are different kinds of credential and collapsing them into one line
+    // reads as inflation to exactly the audience the federation wants to
+    // convince. Dan is a GRADE. Renshi is a shogo — a teaching title. Shihan is
+    // the honorific for a senior instructor. Soke denotes the head and founder
+    // of a system. Sensei is the ordinary form of address. Stated precisely,
+    // they are stronger than stated together.
+    { name: 'Shihan Pramod Kumar Pathak', role: 'Founder & Head of the System', rank: 'VI Dan Black Belt', since: '1983', specialty: 'System authority · Dan gradings', note: 'Awarded the title "Junior Tiger Lee", 2021 · Senior Technical Authority', img: '',
+      titles: [
+        { title: 'Soke', meaning: 'Head and founder of the system' },
+        { title: 'Shihan', meaning: 'Senior instructor' },
+        { title: 'Renshi', meaning: 'Teaching title (shogo)' },
+        { title: 'Sensei', meaning: 'Form of address for a teacher' },
+      ],
+      honours: [
+        { title: 'Junior Tiger Lee', year: '2021', note: 'Conferred title. Recorded in Shivangan Publication Jharkhand Current Affairs 2022.' },
+        { title: 'Bharat Gaurav Karate Khel Ratna', year: '2022', note: 'Reported in Johar Jharkhand.' },
+      ],
+      bio: 'Founder and head of the MMAKF system. Over four decades, Shihan Pathak has built the federation from a single Patratu training hall into an institution running school programmes across the Ramgarh and Hazaribagh districts. He was conferred the title \"Junior Tiger Lee\" in 2021. Every Dan examination in the federation is conducted under his personal authority.' },
     { name: 'Sensei Vikas Pathak', role: 'Chief Instructor', rank: 'IV Dan Black Belt', since: '2004', specialty: 'Kumite & competitive sparring', note: 'Kumite & Sparring', img: '',
       bio: 'The federation\'s Chief Instructor and head of kumite. Elevated to IV Dan in recognition of two decades of service, Sensei Vikas runs the sparring systems, reaction drills and competitive preparation that carry MMAKF athletes from their first bout to state-level podiums.' },
     { name: 'Sensei Dhiraj Pathak', role: 'Kata Specialist', rank: 'III Dan Black Belt', since: '2008', specialty: 'Kata & competition preparation', note: 'Form Training · Competition Preparation', img: '',
@@ -361,6 +378,7 @@ export const SEED = {
     { name: 'YouTube — MMAK India',                          platform: 'YouTube', url: 'https://www.youtube.com/@mmak_india',              primary: 'No',  note: 'Federation channel' },
     { name: 'Facebook — Modern Martial Art Karate Training Centre, Rasda/Patratu', platform: 'Facebook', url: 'https://www.facebook.com/people/Modern-Martial-Art-Karate-Training-Centrerasdapatratu/100093639247728/', primary: 'No', note: '' },
     { name: 'X (Twitter)',                                    platform: 'X',       url: 'https://x.com/arts_marti79722',                    primary: 'No',  note: '' },
+    { name: 'Instagram — @mmakf_india',                       platform: 'Instagram', url: 'https://www.instagram.com/mmakf_india/',           primary: 'No',  note: 'Confirmed by the federation, 2026-08-12' },
     { name: 'Telegram channel',                               platform: 'Telegram',url: 'https://t.me/mmakindia',                            primary: 'No',  note: 'Announcements' },
   ],
 };
