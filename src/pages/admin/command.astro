@@ -309,6 +309,7 @@ const NAV = [
         <nav class="admin-nav" aria-label="Sections">
           {configured && NAV.map((n) => (<a href={n.href}>{n.label}</a>))}
           <a href="/admin/dashboard" style="margin-top:12px">Scoped dashboard →</a>
+          <a href="/admin/report">Annual report →</a>
           <a href="/admin/queue">Approval queue →</a>
           <a href="/admin">Content admin →</a>
         </nav>
@@ -318,7 +319,9 @@ const NAV = [
         </div>
       </aside>
 
-      <main class="admin-main">
+      <!-- WCAG 1.3.1: Base.astro already renders the page's main landmark.
+           A second one nested inside it is invalid and ambiguous. -->
+      <div class="admin-main">
         <header class="admin-panel" style="padding-top:0">
           <h1 class="admin-h">National command centre</h1>
           <p class="admin-sub">
@@ -688,7 +691,7 @@ const NAV = [
             </section>
           </>
         )}
-      </main>
+      </div>
     </div>
   )}
 </Base>
@@ -802,6 +805,10 @@ const NAV = [
 <style is:global>
   body { background: var(--bg); }
   .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  /* WCAG 1.4.10: a grid item defaults to min-width:auto, so it cannot shrink
+     below its content and the whole console scrolled sideways at 320px
+     (measured 461px on /admin/approvals). */
+  .admin-wrap > * { min-width: 0; }
   @media (max-width: 800px) { .admin-wrap { grid-template-columns: 1fr; } }
 
   .admin-side {

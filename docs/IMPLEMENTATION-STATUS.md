@@ -11,7 +11,7 @@ Per-subsystem state. **No vague completion language** — every row carries one 
 
 Last updated 2026-08-12 · branch `wave-2b-federation` · production runs `6a44fdf`
 
-**1103 tests passing · 87 tables · tsc clean · build clean · migrations 5/5**
+**1481 tests passing · 40 test files · 87 tables · tsc clean · build clean · migrations 5/5**
 
 ---
 
@@ -26,7 +26,7 @@ Last updated 2026-08-12 · branch `wave-2b-federation` · production runs `6a44f
 | SEC-005 | CSRF middleware | **BACKEND** | Origin + Sec-Fetch-Site + JSON content type |
 | SEC-006 | Rate limiting | **PRODUCTION** | Redis fixed-window on every public write |
 | SEC-007 | Security headers, CSP, HSTS | **VERIFIED** | Zero CSP violations across 17 pages, CDP-measured |
-| SEC-008 | MFA | **NOT_STARTED** | |
+| SEC-008 | MFA | **TESTING** | TOTP verified against RFC 6238's own vectors. Constant-time verification proven by COUNTING comparisons, not by a stopwatch — the stopwatch measured machine load and failed at random. `MFA_REQUIRED_SCOPE` unset means nothing is required |
 | SEC-009 | Two-person control | **TESTING** | `src/lib/approvals.ts`. Self-approval refused even for SUPER_ADMIN |
 | SEC-010 | Backups / restore | **VERIFIED** | `npm run backup`. Cycle proven against real Postgres incl. tamper detection and refusal to overwrite live data. NO encryption at rest — see BACKUP-RESTORE §6 |
 | DATA-001 | Migration runner | **VERIFIED** | Transactional, checksummed, refuses edited history. 5/5 |
@@ -119,8 +119,8 @@ Last updated 2026-08-12 · branch `wave-2b-federation` · production runs `6a44f
 
 ## Public surfaces
 
-| ID | Surface | Status |
-|---|---|---|
+| ID | Surface | Status | Note |
+|---|---|---|---|
 | WEB-001 | Home, about, governance, contact | **PRODUCTION** |
 | WEB-002 | Registration (4 per-type forms) | **NEEDS_REVIEW** |
 | WEB-003 | `/application` status lookup | **NEEDS_REVIEW** |
@@ -128,19 +128,23 @@ Last updated 2026-08-12 · branch `wave-2b-federation` · production runs `6a44f
 | WEB-005 | `/press` | **NEEDS_REVIEW** |
 | WEB-006 | `/checkout` | **NEEDS_REVIEW** |
 | WEB-007 | Admin approval queue | **NEEDS_REVIEW** |
-| WEB-008 | Athlete profiles / passport | **NOT_STARTED** |
+| WEB-008 | Athlete profiles / passport | **FRONTEND** |
 | WEB-009 | Dojo directory | **NOT_STARTED** |
 | WEB-010 | National command centre | **FRONTEND** |
-| WEB-011 | Global search | **TESTING** | `src/lib/search.ts`. Certificates findable by number, never by holder name |
+| WEB-011 | Global search — `/search` | **FRONTEND** | Renders `skipped` and `notices`, not only `hits`. An empty result says which of "nothing here", "not yours to see" and "no rule has been set" it is |
+| WEB-012 | Individual profiles — `/people/[slug]` | **FRONTEND** | Grade and titles held apart. Honours render with their source. A clipping appears only where the printed text names that person |
+| WEB-013 | Federation calendar — `/calendar`, `/calendar.ics` | **FRONTEND** | Championships, gradings and courses in one place. An undated announcement is never placed on a day, and never enters the feed |
+| WEB-014 | Annual report — `/admin/report` | **FRONTEND** | A section with no records prints no zeros. Every figure carries its table, column and filter, on screen and on paper |
 
 ## Cross-cutting
 
 | ID | Subsystem | Status | Note |
 |---|---|---|---|
 | EVT-001 | Domain event feed | **TESTING** | `src/lib/domain-events.ts`. Cursor-based consumers; a failing consumer does not advance or block others |
-| NOT-001 | Notification engine | **DATABASE** | No transport configured — no email or SMS dependency exists |
+| NOT-001 | Notification engine | **TESTING** | `src/lib/notifications.ts`, 25 tests. Allow-list; essential messages unsuppressable; deduplicated on `domainEventId`. **Still no transport** — messages QUEUE rather than fail, and `transportStatus()` says which channels are unconfigured rather than letting the federation believe it is emailing members |
 | API-001 | Documented public API | **NOT_STARTED** | |
 | RT-001 | Real-time (live scores, live classes) | **NOT_STARTED** | |
 | AI-001 | Federation assistant | **NOT_STARTED** | Deliberately last — requires authoritative data first |
 | A11Y-001 | Accessibility | **PARTIALLY** | Specific fixes made. No systematic WCAG 2.2 AA pass yet (Q-28) |
 | OBS-001 | Observability | **BACKEND** | `src/lib/observability.ts`. Secrets and personal data redacted by key substring; probes time out |
+| CAL-001 | Federation calendar | **TESTING** | `src/lib/calendar.ts`, 41 tests. Registration answered *as at a date*; sanction carried onto the entry and into the iCalendar feed; RFC 5545 folding at 75 **octets** |

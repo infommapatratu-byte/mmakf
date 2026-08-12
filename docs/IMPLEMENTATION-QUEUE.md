@@ -76,20 +76,22 @@ cannot be done by anyone but the federation, and it must not be done by inventin
 
 ## Then
 
-| ID | P | Task | Depends on |
-|---|---|---|---|
-| Q-13 | P2 | YouTube broadcast poller — idempotent, never duplicates a broadcast | BLK-5 |
-| Q-14 | P2 | Live classroom: attendance policy, Q&A, resources, recording association | Q-13 |
-| Q-15 | P2 | Academy LMS surfaces: course player, progress, quizzes, certificates | EDU-001..003 |
-| Q-16 | P2 | Governance surfaces: committees, documents with versions, meetings, resolutions | GOV-001..003 |
-| Q-17 | P2 | Safeguarding + medical + disciplinary consoles, access-controlled | SAFE-001, MED-003, DISC-001 |
-| Q-18 | P2 | National command centre | Most of the above |
-| Q-19 | P2 | State / district / dojo dashboards, scope-enforced | Q-10 |
-| Q-20 | P2 | Global search respecting permissions | — |
-| Q-21 | P2 | Notification engine + a transport (none is configured today) | Q-05 |
-| Q-22 | P2 | Annual report generated from real data only | Analytics |
-| Q-23 | P2 | Documented public API with versioning and error contracts | Q-05 |
-| Q-24 | P2 | Real-time transport for live scores and live classes | Q-08, Q-14 |
+| ID | P | Task | Depends on | Status |
+|---|---|---|---|---|
+| Q-13 | P2 | YouTube broadcast poller — idempotent, never duplicates a broadcast | BLK-5 | |
+| Q-14 | P2 | Live classroom: attendance policy, Q&A, resources, recording association | Q-13 | |
+| Q-15 | P2 | Academy LMS surfaces: course player, progress, quizzes, certificates | EDU-001..003 | |
+| Q-16 | P2 | Governance surfaces: committees, documents with versions, meetings, resolutions | GOV-001..003 | |
+| Q-17 | P2 | Safeguarding + medical + disciplinary consoles, access-controlled | SAFE-001, MED-003, DISC-001 | |
+| Q-18 | P2 | National command centre | Most of the above | |
+| Q-19 | P2 | State / district / dojo dashboards, scope-enforced | Q-10 | |
+| Q-20 | P2 | Global search respecting permissions | — | **DONE** — `src/lib/search.ts` + `/search`. The page renders `skipped` and `notices`, not only `hits`: an empty result is worthless unless it says whether the answer is "nothing here", "not yours to see", or "nobody has told this system what the rule is". |
+| Q-21 | P2 | Notification engine + a transport | Q-05 | **DONE** — `src/lib/notifications.ts`, 25 tests. Allow-list; essential messages unsuppressable; deduplicated on `domainEventId`; **queued, never dropped** when no provider is configured. Still no transport: `transportStatus()` reports which channels are unconfigured rather than letting the federation believe it is emailing members. |
+| Q-22 | P2 | Annual report generated from real data only | Analytics | **DONE** — `annualReport()` + `/admin/report`, 16 tests. A section with no records prints **no zeros**; a withheld section renders as withheld; every figure prints its table, column and filter, and keeps them when printed on paper. |
+| Q-23 | P2 | Documented public API with versioning and error contracts | Q-05 | IN PROGRESS — `src/pages/api/v1/`, `docs/API-ARCHITECTURE.md` |
+| Q-24 | P2 | Real-time transport for live scores and live classes | Q-08, Q-14 | IN PROGRESS — `src/lib/realtime.ts`, `src/pages/api/stream/` |
+| Q-34 | P2 | **Federation calendar** — one calendar for championships, gradings and courses, with a subscribable feed | Q-06, Q-02 | **DONE** — `src/lib/calendar.ts`, `/calendar`, `/calendar.ics`, 41 tests. An event with no date is never placed on one; registration answered *as at a date*; sanction carried onto the entry and into the feed. |
+| Q-35 | P2 | **Individual profiles** — grade and titles held apart, honours with their sources | — | **DONE** — `/people/[slug]`, 17 tests. A press clipping appears on a profile only where the printed text names that person; no portrait on record renders a monogram and says so. |
 
 ## Hardening
 
