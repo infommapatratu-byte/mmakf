@@ -91,11 +91,15 @@ describe('content the federation has asked to be removed', () => {
     for (const name of readdirSync(dir)) {
       const full = join(dir, name);
       if (statSync(full).isDirectory()) out.push(...sources(full));
-      else if (/\.(ts|astro|css)$/.test(name)) out.push(full.replace(/\\/g, '/'));
+      else if (/\.(ts|astro|css|json|webmanifest|txt|xml)$/.test(name)) out.push(full.replace(/\\/g, '/'));
     }
     return out;
   };
-  const FILES = sources();
+  // src/ AND public/. The "Tiger Lee Lineage" claim survived a whole removal
+  // pass inside public/manifest.webmanifest — the file a phone reads when
+  // somebody installs the site — because the walker only looked at src/.
+  // A guard is only as wide as the tree it walks.
+  const FILES = [...sources(), ...sources('public')];
   /**
    * Comments are stripped before matching. A comment recording that a claim was
    * REMOVED would otherwise fail a "this claim is gone" assertion for ever — the
