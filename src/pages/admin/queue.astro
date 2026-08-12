@@ -1,0 +1,442 @@
+---
+// The approval queue — the screen the federation office actually works.
+//
+// Until now `status` was written once and read by nothing: applications, event
+// entries and unit submissions all arrived, sat in a read-only table, and could
+// only be progressed by telephone. src/lib/queue.ts and POST /api/queue/decide
+// supplied the engine; this is the surface that drives it.
+//
+// Three things are deliberate here:
+//
+//  1. Authority is asked of rbac, not assumed from being signed in. A queue the
+//     caller cannot decide shows the reason and no controls, because a button
+//     the server would refuse is worse than no button at all.
+//  2. Nothing is optimistic. The page never claims a decision succeeded; it
+//     repeats what the server said, including "already decided" and "no
+//     change", and leaves the item exactly as the server left it.
+//  3. The decision history is rendered in full — who, when, from, to, why.
+//     That trail is the point of the screen; the buttons only produce it.
+
+import Base from '@/layouts/Base.astro';
+import QueuePanel from '@/components/QueuePanel.astro';
+import { identify } from '@/lib/session';
+import { can } from '@/lib/rbac';
+import { QUEUES, queueSummary, openItems, type QueueName } from '@/lib/queue';
+import { getList, redisHealthy } from '@/lib/storage';
+import { isConfigured } from '@/db';
+
+export const prerender = false;
+
+// identify() is the only way this page learns who the caller is (§75). A user
+// cookie that no longer resolves returns null rather than falling back to a
+// shared credential, so a revoked account lands on the sign-in prompt.
+const identity = await identify(Astro.request.headers.get('cookie'));
+
+const queueNames = Object.keys(QUEUES) as QueueName[];
+
+interface Section {
+  name: QueueName;
+  label: string;
+  action: string;
+  states: readonly string[];
+  terminal: readonly string[];
+  authorised: boolean;
+  summary: Record<string, number>;
+  items: any[];
+  note: string | null;
+}
+
+let sections: Section[] = [];
+let storageDurable = false;
+let auditable = false;
+
+if (identity) {
+  const who = identity;
+  sections = await Promise.all(
+    queueNames.map(async (name): Promise<Section> => {
+      const meta = QUEUES[name];
+      // The same check decide() makes, asked with the same empty resource, so
+      // the page and the endpoint cannot disagree about who may act.
+      const authorised = can(who.principal, meta.action, {});
+      return {
+        name,
+        label: meta.label,
+        action: meta.action,
+        states: meta.states,
+        terminal: meta.terminal,
+        authorised,
+        summary: authorised ? await queueSummary(name) : {},
+        items: authorised ? await openItems(name, 100) : [],
+        note: null,
+      };
+    })
+  );
+
+  // Event entries submitted from /events are appended to the `eventRegs` list,
+  // while the approval engine reads `eventEntries`. Where that leaves entries
+  // stranded the office is told, rather than being shown an empty queue and
+  // left to conclude nobody has entered.
+  const entries = sections.find((s) => s.name === 'eventEntries');
+  if (entries && entries.authorised && entries.items.length === 0) {
+    const stray = await getList<any>('eventRegs', 5000);
+    if (stray.length > 0) {
+      entries.note =
+        `${stray.length} event ${stray.length === 1 ? 'entry is' : 'entries are'} stored under the ` +
+        `"eventRegs" list, which this queue does not read — the approval engine reads "eventEntries". ` +
+        `They are listed on the Admin → Event Entries table but cannot be decided here until the two names agree.`;
+    }
+  }
+
+  // Two capability facts the operator has a right to know before deciding.
+  storageDurable = await redisHealthy();
+  auditable = isConfigured();
+}
+
+const signedInAs = identity
+  ? identity.shared
+    ? `${identity.principal.label} — shared credential (${identity.via}), not attributable to a person`
+    : `${identity.principal.label} — personal account #${identity.userId}`
+  : '';
+---
+
+<Base title="MMAKF Admin — Approval Queue" showNav={false} showFooter={false}>
+  {!identity ? (
+    <section style="min-height:90vh;display:flex;align-items:center;justify-content:center;padding:64px 24px">
+      <div style="width:100%;max-width:420px">
+        <div style="text-align:center;margin-bottom:36px">
+          <div style="font-family:var(--font-display);font-size:1.8rem;font-weight:700;letter-spacing:.06em">MMAKF</div>
+          <div style="font-family:var(--font-display);font-size:.7rem;letter-spacing:.22em;text-transform:uppercase;color:var(--gold);margin-top:6px">Approval Queue</div>
+        </div>
+        <form id="loginForm" class="card" style="padding:32px">
+          <h1 class="card-title" style="font-size:1.2rem;margin-bottom:24px">Sign in</h1>
+
+          <label class="input-label" for="login-email">Email address</label>
+          <input class="input" type="email" id="login-email" name="email" autocomplete="username"
+                 autocapitalize="off" autocorrect="off" spellcheck="false" autofocus
+                 placeholder="you@mmakf.in" />
+
+          <label class="input-label" for="login-password" style="margin-top:14px">Password</label>
+          <input class="input" type="password" id="login-password" name="password"
+                 autocomplete="current-password" required />
+
+          <div id="loginErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
+          <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;justify-content:center;min-height:44px">Sign in</button>
+
+          <p style="margin-top:20px;font-size:.75rem;color:var(--muted);text-align:center;line-height:1.6">
+            Authorised personnel only. Every decision is recorded against the credential used to take it.<br />
+            <span style="opacity:.8">Leave the email blank only if you are using the shared office password, which is retired once personal accounts exist.</span>
+          </p>
+        </form>
+      </div>
+    </section>
+  ) : (
+    <div class="admin-wrap">
+      <aside class="admin-side">
+        <div class="admin-brand">
+          <div class="admin-brand-1">MMAKF</div>
+          <div class="admin-brand-2">Approval Queue</div>
+        </div>
+        <nav class="admin-nav" aria-label="Queues">
+          {sections.map((s) => (
+            <a href={`#${s.name}`}>{s.label}</a>
+          ))}
+          <a href="/admin" style="margin-top:12px">← Content admin</a>
+        </nav>
+        <div style="padding:16px;border-top:1px solid var(--border)">
+          <button class="btn btn-ghost" style="width:100%;justify-content:center;min-height:44px" id="logoutBtn">Logout</button>
+          <a href="/" target="_blank" rel="noopener" class="btn-link" style="display:flex;align-items:center;justify-content:center;min-height:44px;margin-top:6px">View Site →</a>
+        </div>
+      </aside>
+
+      <main class="admin-main">
+        <header class="admin-panel" style="padding-top:0">
+          <h1 class="admin-h">Approval queue</h1>
+          <p class="admin-sub">
+            Every item below is waiting on the federation. A decision moves it, is recorded against
+            the credential that took it, and is appended to that item's own history — nothing here
+            overwrites what came before. A shared credential is recorded as shared, because it cannot
+            identify the person who used it.
+          </p>
+          <p class="q-signed">Signed in as {signedInAs}</p>
+
+          {!storageDurable && (
+            <div class="q-warn" role="alert">
+              <strong>Shared storage is not configured on this deployment.</strong> The queue is being
+              served from this server's memory, so any decision recorded now is lost when the server
+              restarts. Configure Upstash Redis before working the queue for real.
+            </div>
+          )}
+          {!auditable && (
+            <div class="q-warn q-warn-soft">
+              <strong>The federation database is not configured.</strong> Decisions are still recorded
+              in each item's own append-only history, but they are not written to the central audit
+              log until a database is available.
+            </div>
+          )}
+        </header>
+
+        {sections.map((s) => (
+          <QueuePanel
+            queue={s.name}
+            label={s.label}
+            action={s.action}
+            states={s.states}
+            terminal={s.terminal}
+            authorised={s.authorised}
+            summary={s.summary}
+            items={s.items}
+            note={s.note}
+          />
+        ))}
+      </main>
+    </div>
+  )}
+</Base>
+
+<script>
+  // Sign-in — only present when the caller is unauthenticated.
+  const loginForm = document.getElementById('loginForm');
+  if (loginForm instanceof HTMLFormElement) {
+    const loginErr = document.getElementById('loginErr');
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (loginErr) loginErr.style.display = 'none';
+      const btn = loginForm.querySelector('button[type=submit]');
+      const fd = new FormData(loginForm);
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      if (btn instanceof HTMLButtonElement) { btn.disabled = true; btn.textContent = 'Signing in…'; }
+
+      // An empty email means the legacy shared-password path; the server decides
+      // whether that is still permitted, never the client.
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(email ? { email, password } : { password }),
+      }).catch(() => null);
+
+      if (btn instanceof HTMLButtonElement) { btn.disabled = false; btn.textContent = 'Sign in'; }
+
+      if (r && r.ok) { location.reload(); return; }
+
+      let message = 'Sign-in failed. Check your details and try again.';
+      if (r) {
+        const body = await r.json().catch(() => null);
+        if (body && body.error) message = String(body.error);
+        else if (r.status === 429) message = 'Too many attempts. Wait a minute and try again.';
+      } else {
+        message = 'Could not reach the server. Check your connection.';
+      }
+      if (loginErr) { loginErr.textContent = message; loginErr.style.display = 'block'; }
+      const pw = loginForm.querySelector('input[name=password]');
+      if (pw instanceof HTMLInputElement) pw.select();
+    });
+  }
+
+  document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
+    location.reload();
+  });
+
+  // Reload — offered whenever the server's answer means the page is now stale.
+  // It is a plain reload, never a silent re-render of a state we guessed at.
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (t instanceof Element && t.closest('.q-refresh')) location.reload();
+  });
+
+  // ─── Decisions ────────────────────────────────────────────────────────────
+  document.addEventListener('submit', async (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.classList.contains('q-form')) return;
+    event.preventDefault();
+
+    const queue = form.getAttribute('data-queue') || '';
+    const recordId = form.getAttribute('data-record') || '';
+    const fieldset = form.querySelector('fieldset');
+    const button = form.querySelector('.q-submit');
+    const okEl = form.querySelector('.q-ok');
+    const errEl = form.querySelector('.q-err');
+    const refresh = form.querySelector('.q-refresh');
+    const statusEl = form.querySelector('select[name=toStatus]');
+    const reasonEl = form.querySelector('textarea[name=reason]');
+    const noteEl = form.querySelector('textarea[name=applicantNote]');
+    if (!(statusEl instanceof HTMLSelectElement) ||
+        !(reasonEl instanceof HTMLTextAreaElement) ||
+        !(noteEl instanceof HTMLTextAreaElement) ||
+        !(okEl instanceof HTMLElement) || !(errEl instanceof HTMLElement)) return;
+
+    // Unhidden BEFORE the text is written: a role="alert" whose content changes
+    // while it is still `hidden` is not reliably announced.
+    const fail = (msg, focus) => {
+      errEl.hidden = false;
+      errEl.textContent = msg;
+      if (focus instanceof HTMLElement) focus.focus();
+    };
+
+    okEl.hidden = true; okEl.textContent = '';
+    errEl.hidden = true; errEl.textContent = '';
+
+    const toStatus = statusEl.value;
+    const reason = reasonEl.value.trim();
+    const applicantNote = noteEl.value.trim();
+
+    if (!toStatus) { fail('Choose the status this item should move to.', statusEl); return; }
+
+    // Convenience only. The server refuses a reasonless rejection with
+    // `reason_required`, and that refusal is the gate that actually holds.
+    if (/reject|return/i.test(toStatus) && !reason) {
+      fail(
+        'A reason is required to ' + toStatus.toLowerCase() +
+        ' an item — the federation has to be able to explain the decision afterwards. ' +
+        'Nothing has been sent to the server.',
+        reasonEl
+      );
+      return;
+    }
+
+    const label = button instanceof HTMLButtonElement ? button.textContent : '';
+    if (button instanceof HTMLButtonElement) { button.disabled = true; button.textContent = 'Recording…'; }
+
+    const response = await fetch('/api/queue/decide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ queue, recordId, toStatus, reason, applicantNote }),
+    }).catch(() => null);
+
+    if (button instanceof HTMLButtonElement) { button.disabled = false; button.textContent = label; }
+
+    if (!response) {
+      fail('Could not reach the server. The decision was NOT recorded. Check your connection and try again.');
+      return;
+    }
+
+    const body = await response.json().catch(() => null);
+
+    if (response.ok && body && body.ok) {
+      // The server's own account of what changed — not a guess made here.
+      okEl.hidden = false;
+      okEl.textContent =
+        'Recorded by the server: "' + body.from + '" → "' + body.to + '". ' +
+        'Reload to take this item off the open list and see the new history entry.';
+      if (fieldset instanceof HTMLFieldSetElement) fieldset.disabled = true;
+      if (refresh instanceof HTMLElement) refresh.hidden = false;
+      return;
+    }
+
+    const code = body && body.code ? String(body.code) : '';
+    let message = body && body.error ? String(body.error) : '';
+    if (!message) {
+      if (response.status === 401) message = 'Your session has ended.';
+      else if (response.status === 429) message = 'Too many decisions in a short time. Wait a minute and try again.';
+      else message = 'The decision was not recorded (HTTP ' + response.status + ').';
+    }
+
+    // Only `forbidden` means the authority is missing. A bare 403 without that
+    // code is the CSRF middleware refusing the request ("Request refused"),
+    // which is a browser or proxy problem, not a permissions one — diagnosing it
+    // as lost authority and disabling the form would strand the operator on a
+    // screen that has to be reloaded to recover.
+    if (code === 'forbidden') {
+      message += ' Nothing was changed. Your credential does not hold the authority this queue requires, ' +
+                 'so the controls have been disabled — ask a federation administrator to grant it.';
+      if (fieldset instanceof HTMLFieldSetElement) fieldset.disabled = true;
+      fail(message);
+      return;
+    }
+    if (response.status === 403) {
+      message += ' Nothing was changed. The server refused the request before it reached the queue — ' +
+                 'this is usually a blocked or rewritten request rather than a permissions problem. ' +
+                 'Reload the page and try once more; if it happens again, report it.';
+      if (refresh instanceof HTMLElement) refresh.hidden = false;
+      fail(message);
+      return;
+    }
+    if (code === 'already_decided' || code === 'no_change' || code === 'not_found') {
+      message += ' Nothing was changed. Reload to see this item as it now stands.';
+      if (refresh instanceof HTMLElement) refresh.hidden = false;
+      fail(message);
+      return;
+    }
+    if (code === 'reason_required') { fail(message + ' Nothing was changed.', reasonEl); return; }
+    if (code === 'bad_status') { fail(message + ' Nothing was changed.', statusEl); return; }
+    if (response.status === 401) {
+      message += ' Nothing was changed. Reload the page and sign in again.';
+      if (refresh instanceof HTMLElement) refresh.hidden = false;
+      fail(message);
+      return;
+    }
+    fail(message + ' Nothing was changed.');
+  });
+</script>
+
+{/* Top level, not inside an expression: Astro only extracts and bundles a
+    <style> tag that sits in the template proper. Wrapped in {identity && …} the
+    compiler emitted it verbatim into the body, unprocessed, with `is:global`
+    left in the HTML as a stray attribute. Hoisting is safe — the sign-in view
+    uses none of these classes, and body's background is global.css's default. */}
+<style is:global>
+    body { background: var(--bg); }
+    .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+    @media (max-width: 800px) { .admin-wrap { grid-template-columns: 1fr; } }
+
+    .admin-side {
+      background: var(--bg-2);
+      border-right: 1px solid var(--border);
+      padding: 24px 0;
+      display: flex; flex-direction: column;
+      position: sticky; top: 0; align-self: start;
+      height: 100vh;
+    }
+    @media (max-width: 800px) { .admin-side { position: static; height: auto; } }
+    .admin-brand { padding: 0 24px 24px; border-bottom: 1px solid var(--border); }
+    .admin-brand-1 { font-family: var(--font-display); font-size: 1.4rem; font-weight: 700; letter-spacing: 0.06em; }
+    .admin-brand-2 { font-family: var(--font-display); font-size: 0.66rem; letter-spacing: 0.22em; text-transform: uppercase; color: var(--gold); margin-top: 4px; }
+    .admin-nav { flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+    .admin-nav a {
+      padding: 12px 14px;
+      min-height: 44px;
+      display: flex; align-items: center;
+      font-family: var(--font-display);
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      color: var(--off-white);
+      border-radius: var(--radius);
+      transition: all 0.18s;
+    }
+    .admin-nav a:hover, .admin-nav a.active { background: var(--card); color: var(--gold); }
+
+    .admin-main { padding: 32px 36px 64px; max-width: 1100px; }
+    @media (max-width: 600px) { .admin-main { padding: 24px 18px 48px; } }
+
+    .admin-panel { padding: 36px 0; border-bottom: 1px solid var(--border); scroll-margin-top: 20px; }
+    .admin-panel:first-of-type { padding-top: 0; }
+    .admin-h { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; letter-spacing: 0.02em; }
+    .admin-sub { color: var(--muted); font-size: 0.88rem; margin-top: 6px; line-height: 1.7; }
+
+    .q-signed {
+      margin-top: 14px;
+      font-size: 0.76rem;
+      letter-spacing: 0.04em;
+      color: var(--off-white);
+      overflow-wrap: anywhere;
+    }
+    .q-warn {
+      margin-top: 16px;
+      background: rgba(142, 18, 18, 0.05);
+      border: 1px solid var(--red-3);
+      border-left: 3px solid var(--red);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      font-size: 0.85rem;
+      line-height: 1.65;
+      color: var(--off-white);
+    }
+    .q-warn strong { color: var(--red-2); }
+    .q-warn-soft {
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--gold-dim);
+    }
+    .q-warn-soft strong { color: var(--gold-3); }
+</style>

@@ -1,0 +1,845 @@
+---
+// Checkout — turns a basket into a real order.
+//
+// The contract with the server (src/pages/api/payments/checkout.ts): this page
+// names WHAT is being bought — variant ids and quantities — and never what it
+// costs. Every amount on this page that is authoritative comes back from the
+// server. The catalogue prices rendered below are read from the same commerce
+// tables the pricing code reads, and are shown so the buyer knows what they are
+// committing to; the total that matters is the one the API returns.
+//
+// §70: the three states in which this page cannot take an order — no database,
+// no catalogue, no payment provider — are stated plainly with the route that
+// does work. No Pay button is rendered that cannot work.
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { get } from '@/lib/storage';
+import { isConfigured, db, schema as s } from '@/db';
+import { formatINR } from '@/db/orders';
+import { paymentStatusReport } from '@/lib/payments';
+import { eq } from 'drizzle-orm';
+
+export const prerender = false;
+
+const fed = await get('federation');
+const email = String(fed?.contact?.email || '');
+const phone = String(fed?.contact?.phone || '');
+const tel = phone.replace(/[^\d+]/g, '');
+
+const pay = paymentStatusReport();
+const dbReady = isConfigured();
+
+/** variantId → what the buyer is choosing, priced from the catalogue. */
+type CatalogueEntry = {
+  name: string;
+  label: string;
+  pricePaise: number;
+  priceLabel: string;
+  available: number;
+};
+const catalogue: Record<string, CatalogueEntry> = {};
+let loadFailed = false;
+
+if (dbReady) {
+  try {
+    const variants: any[] = await db()
+      .select()
+      .from(s.productVariants)
+      .where(eq(s.productVariants.status, 'active'));
+
+    if (variants.length > 0) {
+      const products: any[] = await db().select().from(s.products);
+      const byId = new Map<number, any>(products.map((p: any) => [p.id, p]));
+
+      for (const v of variants) {
+        const product = byId.get(v.productId);
+        if (!product || product.status !== 'active') continue;
+        catalogue[String(v.id)] = {
+          name: String(product.name),
+          label: String(v.label),
+          pricePaise: v.pricePaise,
+          priceLabel: formatINR(v.pricePaise),
+          available: Math.max(0, (v.stockQty ?? 0) - (v.reservedQty ?? 0)),
+        };
+      }
+    }
+  } catch (err) {
+    loadFailed = true;
+    console.error('[checkout] catalogue read failed', err);
+  }
+}
+
+const catalogueSize = Object.keys(catalogue).length;
+
+type State = 'ready' | 'no_database' | 'load_failed' | 'no_catalogue' | 'no_payment';
+const state: State =
+  !dbReady ? 'no_database'
+  : loadFailed ? 'load_failed'
+  : catalogueSize === 0 ? 'no_catalogue'
+  : !pay.ready ? 'no_payment'
+  : 'ready';
+
+const STATE_TEXT: Record<Exclude<State, 'ready'>, { head: string; body: string }> = {
+  no_database: {
+    head: 'Online ordering is not live yet',
+    body: 'The federation’s order system is not connected on this deployment, so an order cannot be created or paid for here. Nothing you entered has been charged or recorded.',
+  },
+  load_failed: {
+    head: 'The catalogue could not be loaded',
+    body: 'The shop catalogue could not be read just now, so an order cannot be priced or placed. Nothing has been charged or recorded. Please try again shortly.',
+  },
+  no_catalogue: {
+    head: 'The online catalogue is not published yet',
+    body: 'No items have been published to the online shop, so there is nothing to order here yet.',
+  },
+  no_payment: {
+    head: 'Online payment is not yet available',
+    body: 'No payment method is configured for the federation, so an order cannot be paid for on the site. Nothing has been charged or recorded.',
+  },
+};
+
+// Escape `<` so a product name can never close this script tag.
+const catalogueJson = JSON.stringify(catalogue).replace(/</g, '\\u003c');
+
+const payNote = pay.automatic
+  ? `Payment is taken by ${pay.label}. Your order is marked paid — and your receipt issued — only when ${pay.label} confirms the payment was captured.`
+  : 'Payment is by UPI. The federation office confirms receipt against its bank statement before your order is marked paid.';
+---
+
+<Base
+  title="Checkout — MMAKF"
+  description="Place your MMAKF shop order. Every amount is priced by the federation; nothing is confirmed as paid until the payment is verified."
+>
+  <PageHero
+    eyebrow="Shop"
+    title={`Order <em>checkout</em>.`}
+    lead="Review your basket, give us the delivery details, and place the order. The federation prices the order — the total shown when you place it is the one that counts."
+  />
+
+  {state !== 'ready' ? (
+    <section>
+      <div class="container">
+        <div class="co-block fade" role="status">
+          <div class="co-block-h">{STATE_TEXT[state].head}</div>
+          <p class="body-txt">{STATE_TEXT[state].body}</p>
+          <p class="body-txt" style="margin-top:12px">
+            To order any item in the catalogue, contact the federation office
+            {email && <Fragment> — <a href={`mailto:${email}`}>{email}</a></Fragment>}
+            {phone && <Fragment> · <a href={`tel:${tel}`}>{phone}</a></Fragment>}, or order at the dojo desk.
+          </p>
+          <div class="mt-6"><a class="btn btn-gold" href="/shop">Back to the catalogue</a></div>
+        </div>
+      </div>
+    </section>
+  ) : (
+    <section>
+      <div
+        class="container co-grid"
+        id="coRoot"
+        data-email={email}
+        data-phone={phone}
+        data-tel={tel}
+      >
+        {/* ── Basket ── */}
+        <div class="fade">
+          <div class="eyebrow">Your basket</div>
+          <h2 class="display-2" style="margin-top:14px">What you are <em class="r">ordering</em>.</h2>
+          <div class="rule"></div>
+
+          <div id="basketPanel" class="co-basket">
+            <p class="body-txt">Reading your basket…</p>
+          </div>
+
+          {/* The basket is browser-side. Without scripting nothing here can be
+              read or sent, so the page says so instead of sitting on a
+              placeholder behind a form that cannot submit. */}
+          <noscript>
+            <p class="co-note">
+              Your basket is held in your browser, so it cannot be read or ordered with
+              JavaScript switched off. To order, contact the federation office
+              {email && <Fragment> — <a href={`mailto:${email}`}>{email}</a></Fragment>}
+              {phone && <Fragment> · <a href={`tel:${tel}`}>{phone}</a></Fragment>},
+              or order at the dojo desk.
+            </p>
+          </noscript>
+
+          <p class="co-note">
+            Prices shown are the federation’s catalogue prices. The order total is
+            calculated by the federation when you place the order, and that total is
+            what appears on your receipt.
+          </p>
+          <p class="co-note">
+            No delivery charge is added to the total — the federation has not published a
+            delivery tariff. Collection is at the dojo desk; ask the office about
+            outstation dispatch.
+          </p>
+          <p class="co-note"><a class="btn-link" href="/shop">← Add more from the catalogue</a></p>
+        </div>
+
+        {/* ── Buyer details ── */}
+        <div class="fade">
+          <form id="coForm" class="co-card" novalidate>
+            <div class="co-card-h">Buyer & delivery details</div>
+
+            <div class="co-fields">
+              <div class="full">
+                <label class="input-label" for="co-name">Full name</label>
+                <input class="input" id="co-name" name="name" required maxlength="120" autocomplete="name" />
+              </div>
+              <div>
+                <label class="input-label" for="co-email">Email</label>
+                <input class="input" id="co-email" name="email" type="email" required maxlength="254" autocomplete="email" />
+              </div>
+              <div>
+                <label class="input-label" for="co-phone">Phone</label>
+                <input class="input" id="co-phone" name="phone" type="tel" required maxlength="32" autocomplete="tel" />
+              </div>
+              <div class="full">
+                <label class="input-label" for="co-line1">Delivery address — line 1</label>
+                <input class="input" id="co-line1" name="line1" required maxlength="160" autocomplete="address-line1" />
+              </div>
+              <div class="full">
+                <label class="input-label" for="co-line2">Delivery address — line 2 (optional)</label>
+                <input class="input" id="co-line2" name="line2" maxlength="160" autocomplete="address-line2" />
+              </div>
+              <div>
+                <label class="input-label" for="co-city">City / Town</label>
+                <input class="input" id="co-city" name="city" required maxlength="80" autocomplete="address-level2" />
+              </div>
+              <div>
+                <label class="input-label" for="co-state">State</label>
+                <input class="input" id="co-state" name="state" required maxlength="80" autocomplete="address-level1" />
+              </div>
+              <div>
+                <label class="input-label" for="co-pincode">PIN code</label>
+                <input
+                  class="input"
+                  id="co-pincode"
+                  name="pincode"
+                  required
+                  inputmode="numeric"
+                  maxlength="6"
+                  autocomplete="postal-code"
+                />
+              </div>
+              <div>
+                <label class="input-label" for="co-notes">Note for the office (optional)</label>
+                <input class="input" id="co-notes" name="notes" maxlength="200" />
+              </div>
+            </div>
+
+            <p class="co-paynote">{payNote}</p>
+
+            <div id="coError" class="co-error" role="alert" hidden></div>
+
+            {/* Disabled until the script has read a basket worth sending. With
+                scripting off this form has no lines and no handler, and would
+                otherwise reload the page while appearing to place an order. */}
+            <button type="submit" class="btn btn-primary co-submit" disabled>Place the order</button>
+          </form>
+
+          <div id="coResult" class="co-result" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+  )}
+
+  {state === 'ready' && (
+    <script type="application/json" id="catalogueData" is:inline set:html={catalogueJson}></script>
+  )}
+</Base>
+
+<style>
+  .co-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.1fr;
+    gap: 56px;
+    align-items: start;
+  }
+  @media (max-width: 900px) { .co-grid { grid-template-columns: 1fr; gap: 40px; } }
+
+  .co-block {
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold);
+    border-radius: var(--radius);
+    padding: 28px 32px;
+    max-width: 720px;
+  }
+  .co-block-h {
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-bottom: 12px;
+  }
+  .co-block a { color: var(--gold-2); }
+
+  .co-basket { margin-top: 8px; }
+  .co-note { margin-top: 14px; color: var(--muted); font-size: 0.84rem; line-height: 1.7; }
+
+  .co-card {
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    padding: 28px;
+  }
+  .co-card-h {
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--gold);
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 20px;
+  }
+  .co-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 520px) { .co-fields { grid-template-columns: 1fr; } }
+  .co-fields .full { grid-column: 1 / -1; }
+  .co-fields .input { min-height: 44px; }
+
+  .co-paynote {
+    margin-top: 20px;
+    color: var(--off-white);
+    font-size: 0.84rem;
+    line-height: 1.7;
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+  .co-submit { margin-top: 18px; width: 100%; min-height: 48px; }
+  .co-error {
+    margin-top: 16px;
+    border: 1px solid rgba(142, 18, 18, 0.35);
+    border-left: 3px solid var(--red-2);
+    background: rgba(142, 18, 18, 0.05);
+    color: var(--white);
+    padding: 14px 16px;
+    border-radius: var(--radius);
+    font-size: 0.88rem;
+    line-height: 1.6;
+  }
+  .co-error[hidden] { display: none; }
+
+  .co-result:empty { display: none; }
+
+  /* ── Client-rendered pieces (scoped styles do not reach them) ── */
+  :global(.co-line) {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px 16px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  :global(.co-line-name) {
+    font-family: var(--font-display);
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--white);
+    line-height: 1.35;
+  }
+  :global(.co-line-sub) { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
+  :global(.co-line-amt) {
+    font-family: var(--font-display);
+    font-size: 0.95rem;
+    color: var(--gold-2);
+    white-space: nowrap;
+  }
+  :global(.co-line-ctl) {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  :global(.co-line-ctl label) {
+    font-family: var(--font-display);
+    font-size: 0.58rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  :global(.co-line-ctl select) { min-height: 44px; width: auto; padding: 8px 12px; }
+  :global(.co-remove) {
+    background: none;
+    border: 0;
+    color: var(--muted);
+    font-size: 0.78rem;
+    text-decoration: underline;
+    min-height: 44px;
+    padding: 0 4px;
+  }
+  :global(.co-remove:hover) { color: var(--red-2); }
+  :global(.co-sub) {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding-top: 16px;
+    font-family: var(--font-display);
+    font-size: 1rem;
+    color: var(--white);
+  }
+  :global(.co-sub-amt) { color: var(--gold-2); }
+
+  :global(.co-panel) {
+    margin-top: 24px;
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold);
+    border-radius: var(--radius);
+    padding: 24px 26px;
+  }
+  :global(.co-panel.bad) { border-left-color: var(--red-2); }
+  :global(.co-panel h3) {
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-bottom: 12px;
+  }
+  :global(.co-panel p) { color: var(--off-white); font-size: 0.89rem; line-height: 1.7; margin-bottom: 10px; }
+  :global(.co-panel a) { color: var(--gold-2); }
+  :global(.co-panel .btn) { margin-top: 8px; }
+  :global(.co-kv) {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.89rem;
+  }
+  :global(.co-kv:last-of-type) { border-bottom: 0; }
+  :global(.co-k) {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: 3px;
+    flex-shrink: 0;
+  }
+  :global(.co-v) { color: var(--white); text-align: right; word-break: break-word; }
+  :global(.co-verbatim) {
+    background: var(--card-2);
+    border: 1px dashed var(--border-2);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    color: var(--off-white);
+    font-size: 0.86rem;
+    line-height: 1.7;
+    margin: 12px 0;
+  }
+  :global(.co-warn) {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--red-2);
+  }
+</style>
+
+<script>
+  // ── Basket (variant ids and quantities only) ──
+  const KEY = 'mmakf.basket.v1';
+  type Line = { v: number; q: number };
+  type Entry = { name: string; label: string; pricePaise: number; priceLabel: string; available: number };
+
+  const root = document.getElementById('coRoot') as HTMLElement | null;
+  const panel = document.getElementById('basketPanel');
+  const form = document.getElementById('coForm') as HTMLFormElement | null;
+  const errBox = document.getElementById('coError') as HTMLElement | null;
+  const resultBox = document.getElementById('coResult') as HTMLElement | null;
+
+  if (root && panel && form && errBox && resultBox) {
+    let catalogue: Record<string, Entry> = {};
+    try {
+      catalogue = JSON.parse(document.getElementById('catalogueData')?.textContent || '{}');
+    } catch { catalogue = {}; }
+
+    const office = {
+      email: root.dataset.email || '',
+      phone: root.dataset.phone || '',
+      tel: root.dataset.tel || '',
+    };
+
+    function readBasket(): Line[] {
+      try {
+        const raw = JSON.parse(localStorage.getItem(KEY) || '[]');
+        if (!Array.isArray(raw)) return [];
+        return raw
+          .filter((l: any) => l && Number.isInteger(l.v) && Number.isInteger(l.q) && l.q > 0 && l.q <= 99)
+          .slice(0, 50)
+          .map((l: any) => ({ v: l.v, q: l.q }));
+      } catch {
+        return [];
+      }
+    }
+    function writeBasket(lines: Line[]) {
+      try { localStorage.setItem(KEY, JSON.stringify(lines)); } catch { /* storage disabled */ }
+    }
+
+    function esc(v: unknown): string {
+      return String(v)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    /**
+     * Mirrors formatINR() in src/db/orders.ts — integer paise, Indian digit
+     * grouping (12,34,567.89). Duplicated here rather than imported because
+     * that module reaches into the database layer and must not be shipped to
+     * the browser. Kept byte-for-byte identical in behaviour on purpose.
+     */
+    function inr(amountPaise: number): string {
+      const sign = amountPaise < 0 ? '-' : '';
+      const abs = Math.abs(Math.round(amountPaise));
+      const p = String(abs % 100).padStart(2, '0');
+      const str = String(Math.floor(abs / 100));
+      const last3 = str.slice(-3);
+      const rest = str.slice(0, -3);
+      const grouped = rest ? `${rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',')},${last3}` : last3;
+      return `${sign}₹${grouped}.${p}`;
+    }
+
+    function officeLine(): string {
+      const bits: string[] = [];
+      if (office.email) bits.push(`<a href="mailto:${esc(office.email)}">${esc(office.email)}</a>`);
+      if (office.phone) bits.push(`<a href="tel:${esc(office.tel)}">${esc(office.phone)}</a>`);
+      return bits.length ? bits.join(' · ') : 'the federation office';
+    }
+
+    function showError(message: string) {
+      // Unhide before writing: a role="alert" whose text changes while it is
+      // hidden is not reliably announced.
+      errBox!.hidden = false;
+      errBox!.textContent = message;
+      errBox!.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+    function clearError() {
+      errBox!.hidden = true;
+      errBox!.textContent = '';
+    }
+
+    // ── Render the basket ──
+    let dropped = 0;
+
+    function paint() {
+      const lines = readBasket();
+      const known = lines.filter((l) => catalogue[String(l.v)]);
+      dropped = lines.length - known.length;
+      if (dropped > 0) writeBasket(known);
+
+      if (known.length === 0) {
+        panel!.innerHTML =
+          `<p class="body-txt">Your basket is empty.</p>` +
+          (dropped > 0
+            ? `<p class="co-note">Some items were removed because they are no longer in the catalogue.</p>`
+            : '') +
+          `<p class="co-note"><a class="btn-link" href="/shop">Browse the catalogue →</a></p>`;
+        (form!.querySelector('.co-submit') as HTMLButtonElement).disabled = true;
+        return;
+      }
+
+      (form!.querySelector('.co-submit') as HTMLButtonElement).disabled = false;
+
+      let subtotal = 0;
+      const rows = known.map((l) => {
+        const e = catalogue[String(l.v)];
+        const lineTotal = e.pricePaise * l.q;
+        subtotal += lineTotal;
+        // The quantity already in the basket must always be selectable, even
+        // when stock has since fallen below it — otherwise the select shows one
+        // number while the amount beside it is priced on another.
+        const avail = Math.max(0, Number(e.available) || 0);
+        const cap = Math.max(1, l.q, Math.min(9, avail));
+        const opts = Array.from({ length: cap }, (_, i) => i + 1)
+          .map((n) => `<option value="${n}"${n === l.q ? ' selected' : ''}>${n}</option>`)
+          .join('');
+        const short = avail < l.q
+          ? `<div class="co-line-sub co-warn">${
+              avail === 0
+                ? 'Out of stock — this line will be refused when the order is placed'
+                : `Only ${avail} left — reduce the quantity or this line will be refused`
+            }</div>`
+          : '';
+        return `
+          <div class="co-line">
+            <div>
+              <div class="co-line-name">${esc(e.name)}</div>
+              <div class="co-line-sub">${esc(e.label)} · ${esc(e.priceLabel)} each</div>
+              ${short}
+            </div>
+            <div class="co-line-amt">${esc(inr(lineTotal))}</div>
+            <div class="co-line-ctl">
+              <label for="q-${l.v}">Qty</label>
+              <select class="input co-qty" id="q-${l.v}" data-v="${l.v}">${opts}</select>
+              <button type="button" class="co-remove" data-v="${l.v}">Remove</button>
+            </div>
+          </div>`;
+      }).join('');
+
+      panel!.innerHTML =
+        rows +
+        `<div class="co-sub"><span>Catalogue subtotal</span><span class="co-sub-amt">${esc(inr(subtotal))}</span></div>` +
+        (dropped > 0
+          ? `<p class="co-note">Some items were removed because they are no longer in the catalogue.</p>`
+          : '');
+
+      panel!.querySelectorAll<HTMLSelectElement>('.co-qty').forEach((sel) => {
+        sel.addEventListener('change', () => {
+          const v = Number(sel.dataset.v);
+          const q = Number(sel.value);
+          const next = readBasket().map((l) => (l.v === v ? { v, q } : l));
+          writeBasket(next);
+          paint();
+        });
+      });
+      panel!.querySelectorAll<HTMLButtonElement>('.co-remove').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const v = Number(btn.dataset.v);
+          writeBasket(readBasket().filter((l) => l.v !== v));
+          paint();
+        });
+      });
+    }
+
+    // ── Result panels ──
+    function panelHtml(title: string, bodyHtml: string, bad = false): string {
+      return `<div class="co-panel${bad ? ' bad' : ''}"><h3>${esc(title)}</h3>${bodyHtml}</div>`;
+    }
+
+    function showResult(html: string) {
+      resultBox!.innerHTML = html;
+      resultBox!.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+
+    /** Manual UPI: an order exists and is AWAITING PAYMENT. Nobody is told they have paid. */
+    function renderManualUpi(data: any) {
+      const c = data.checkout || {};
+      const amount = inr(Number(data.amountPaise) || 0);
+      const link = typeof c.deepLink === 'string' ? c.deepLink : '';
+      const body =
+        `<div class="co-kv"><span class="co-k">Order</span><span class="co-v">${esc(data.orderNo)}</span></div>` +
+        `<div class="co-kv"><span class="co-k">Amount</span><span class="co-v">${esc(amount)}</span></div>` +
+        (c.upiId ? `<div class="co-kv"><span class="co-k">UPI ID</span><span class="co-v">${esc(c.upiId)}</span></div>` : '') +
+        (c.reference ? `<div class="co-kv"><span class="co-k">Payment note</span><span class="co-v">MMAKF ${esc(c.reference)}</span></div>` : '') +
+        (link
+          ? `<p><a class="btn btn-primary" href="${esc(link)}">Pay ${esc(amount)} by UPI</a></p>` +
+            // A upi:// link does nothing on a desktop browser. Rather than leave
+            // that as a dead button, give the manual route in the same breath.
+            `<p class="co-line-sub">This button opens a UPI app on a phone. On a computer, pay the UPI ID above from your own UPI app, keeping the payment note exactly as shown.</p>`
+          : '') +
+        (c.instruction
+          ? `<div class="co-verbatim">${esc(c.instruction)}</div>` +
+            // The provider's instruction is rendered verbatim and asks for the
+            // UTR to be entered; there is no form on the site that takes one, so
+            // the gap is stated rather than left for the buyer to hunt for.
+            `<p>There is no form on this site for the UPI reference yet — send it to the federation office instead, using the details below.</p>`
+          : '') +
+        `<p class="co-warn">This order is not paid yet.</p>` +
+        `<p>Your order is recorded as awaiting payment. It is marked paid, and your receipt issued, only once the federation office has confirmed the money against its bank statement.</p>` +
+        `<p>Send the UPI reference (UTR) to the office quoting order ${esc(data.orderNo)} — ${officeLine()}.</p>`;
+      showResult(panelHtml(`Order ${data.orderNo} created`, body));
+    }
+
+    function loadScript(src: string): Promise<boolean> {
+      return new Promise((resolve) => {
+        const el = document.createElement('script');
+        el.src = src;
+        el.onload = () => resolve(true);
+        el.onerror = () => resolve(false);
+        document.head.appendChild(el);
+      });
+    }
+
+    /** Razorpay: open its checkout with the public parameters the server returned. */
+    async function renderRazorpay(data: any) {
+      const amount = inr(Number(data.amountPaise) || 0);
+      const orderLine =
+        `<div class="co-kv"><span class="co-k">Order</span><span class="co-v">${esc(data.orderNo)}</span></div>` +
+        `<div class="co-kv"><span class="co-k">Amount</span><span class="co-v">${esc(amount)}</span></div>`;
+
+      showResult(panelHtml(`Order ${data.orderNo} created`, orderLine + `<p>Opening the payment window…</p>`));
+
+      const ok =
+        (window as any).Razorpay || (await loadScript('https://checkout.razorpay.com/v1/checkout.js'));
+      if (!(window as any).Razorpay || !ok) {
+        showResult(panelHtml(
+          `Order ${data.orderNo} created — payment window did not open`,
+          orderLine +
+            `<p>The payment window could not be loaded in this browser. Your order is recorded as awaiting payment; nothing has been charged.</p>` +
+            `<p>Contact the office quoting order ${esc(data.orderNo)} — ${officeLine()}.</p>`,
+          true,
+        ));
+        return;
+      }
+
+      const rzp = new (window as any).Razorpay({
+        ...data.checkout,
+        handler: () => {
+          showResult(panelHtml(
+            `Payment submitted for order ${data.orderNo}`,
+            orderLine +
+              `<p>The payment has been submitted. The federation confirms it against the payment provider’s own record before the order is marked paid and the receipt is issued — a confirmation from this page is not proof of payment.</p>` +
+              `<p>Any query — ${officeLine()}, quoting order ${esc(data.orderNo)}.</p>`,
+          ));
+        },
+        modal: {
+          ondismiss: () => {
+            showResult(panelHtml(
+              `Order ${data.orderNo} is awaiting payment`,
+              orderLine +
+                `<p>The payment window was closed before payment completed. Nothing has been charged. Contact the office quoting the order number to complete it — ${officeLine()}.</p>`,
+              true,
+            ));
+          },
+        },
+      });
+      rzp.open();
+    }
+
+    // ── Submit ──
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearError();
+
+      const submit = form.querySelector('.co-submit') as HTMLButtonElement;
+      const fd = new FormData(form);
+      const val = (k: string) => String(fd.get(k) ?? '').trim();
+
+      const lines = readBasket().filter((l) => catalogue[String(l.v)]);
+      if (lines.length === 0) {
+        showError('Your basket is empty. Add an item from the catalogue first.');
+        return;
+      }
+
+      // Convenience checks only — the server is the authority on every one of
+      // these, and on every price.
+      const required: [string, string][] = [
+        ['name', 'your full name'], ['email', 'your email address'], ['phone', 'your phone number'],
+        ['line1', 'the first line of the delivery address'], ['city', 'the city or town'],
+        ['state', 'the state'], ['pincode', 'the PIN code'],
+      ];
+      const missing = required.filter(([k]) => !val(k));
+      if (missing.length > 0) {
+        showError(`Please give ${missing.map(([, label]) => label).join(', ')}.`);
+        (form.querySelector(`[name="${missing[0][0]}"]`) as HTMLElement | null)?.focus();
+        return;
+      }
+      if (!/^\S+@\S+\.\S+$/.test(val('email'))) {
+        showError('Please give a valid email address — your receipt is sent there.');
+        (form.querySelector('[name="email"]') as HTMLElement | null)?.focus();
+        return;
+      }
+
+      submit.disabled = true;
+      const label = submit.textContent;
+      submit.textContent = 'Placing the order…';
+
+      try {
+        const res = await fetch('/api/payments/checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: val('name'),
+            email: val('email'),
+            phone: val('phone'),
+            shipTo: {
+              name: val('name'),
+              line1: val('line1'),
+              line2: val('line2'),
+              city: val('city'),
+              state: val('state'),
+              pincode: val('pincode'),
+              phone: val('phone'),
+              notes: val('notes'),
+            },
+            // Variant ids and quantities. No price, no discount, no tax rate:
+            // the server prices every line from the catalogue.
+            lines: lines.map((l) => ({
+              kind: 'product',
+              variantId: l.v,
+              quantity: l.q,
+              description: `${catalogue[String(l.v)].name} — ${catalogue[String(l.v)].label}`,
+            })),
+          }),
+        });
+
+        let data: any = null;
+        try { data = await res.json(); } catch { data = null; }
+
+        if (res.ok && data?.ok) {
+          writeBasket([]);
+          paint();
+          form.reset();
+          if (data.checkout?.mode === 'manual_upi') {
+            renderManualUpi(data);
+          } else if (data.provider === 'razorpay' && data.checkout) {
+            await renderRazorpay(data);
+          } else {
+            // A provider this page has no flow for. The order is real, so say so.
+            showResult(panelHtml(
+              `Order ${data.orderNo} created`,
+              `<div class="co-kv"><span class="co-k">Order</span><span class="co-v">${esc(data.orderNo)}</span></div>` +
+              `<div class="co-kv"><span class="co-k">Amount</span><span class="co-v">${esc(inr(Number(data.amountPaise) || 0))}</span></div>` +
+              `<p class="co-warn">This order is not paid yet.</p>` +
+              `<p>Payment for this method cannot be completed on this page. Contact the office quoting order ${esc(data.orderNo)} — ${officeLine()}.</p>`,
+              true,
+            ));
+          }
+          return;
+        }
+
+        // ── Failures, in the server's own words wherever it gives them ──
+        if (res.status === 429) {
+          showError('Too many checkout attempts from this connection. Please wait a minute and try again.');
+        } else if (res.status === 503) {
+          // no_database / no_provider — the honest "not live yet" states.
+          showResult(panelHtml(
+            data?.code === 'no_provider' ? 'Online payment is not available' : 'Online ordering is not live yet',
+            `<p>${esc(data?.error || 'Online ordering is not available on this deployment yet.')}</p>` +
+            `<p>Nothing has been charged and no order was created. To buy these items, order at the dojo desk or contact the federation office — ${officeLine()}.</p>`,
+            true,
+          ));
+        } else if (res.status === 403) {
+          // The CSRF middleware refuses anything it cannot prove came from this
+          // site. Its own body is deliberately terse ("Request refused"), so it
+          // is not shown — the buyer needs the action, not the reason.
+          showError(
+            'The order was refused because the request did not appear to come from this site. ' +
+            'Nothing has been charged and no order was created. Reload this page and try again — ' +
+            'if it keeps happening, contact the federation office.',
+          );
+        } else if (res.status === 404) {
+          showError(
+            'The ordering service is not available on this deployment. Nothing has been charged ' +
+            'and no order was created — please order at the dojo desk or contact the federation office.',
+          );
+        } else if (res.status === 409) {
+          // out_of_stock — the server names the item and the quantity left.
+          showError(data?.error || 'One of the items in your basket is no longer available in that quantity.');
+          paint();
+        } else if (res.status === 400) {
+          // fee_not_published, unavailable, bad_quantity — all reported verbatim.
+          showError(data?.error || 'The order could not be placed.');
+        } else if (res.status === 502) {
+          showError(data?.error || 'The payment provider could not be reached. Please try again.');
+        } else {
+          showError(data?.error || 'The order could not be placed. Please try again, or contact the federation office.');
+        }
+      } catch {
+        showError('The order could not be sent — check your connection and try again. Nothing has been charged.');
+      } finally {
+        submit.textContent = label;
+        // paint() owns the disabled state, because it is the thing that knows
+        // whether there is anything left to order. Re-enabling unconditionally
+        // re-offered "Place the order" on the basket that had just been cleared
+        // by a successful order.
+        paint();
+      }
+    });
+
+    paint();
+  }
+</script>

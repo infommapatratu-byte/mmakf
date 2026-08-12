@@ -305,3 +305,12 @@ export const idSequences = pgTable('id_sequences', {
 // Kept in its own file for size, re-exported here so `import * as s from
 // './schema'` remains the single entry point and drizzle-kit sees one schema.
 export * from './commerce.schema';
+
+// ─── Technical, competition, education, governance ──────────────────────────
+//
+// Split by domain for size, re-exported here so `import * as s from './schema'`
+// stays the single entry point and drizzle-kit sees one schema.
+export * from './technical.schema';
+export * from './competition.schema';
+export * from './education.schema';
+export * from './governance.schema';

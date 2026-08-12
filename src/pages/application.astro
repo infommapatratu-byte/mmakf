@@ -1,0 +1,713 @@
+---
+// Application status — the applicant's own view of an application they filed.
+//
+// Every application already minted an access token and handed back a status
+// URL (/api/register returns `statusUrl`); there was nowhere for that URL to
+// land. This is that page.
+//
+// Authorisation is the PAIR (reference, access code) and it is checked by
+// /api/application. This page calls that endpoint's own handler rather than
+// repeating the check: the constant-time compare, the rate limit and the
+// deliberately identical 404 for "no such reference" and "wrong access code"
+// are the security properties of this feature, and there must be exactly one
+// copy of them. The wording below keeps the two cases indistinguishable too —
+// an unknown reference and a wrong code say the same sentence, so the page
+// cannot be used to discover which references exist.
+//
+// Nothing internal is rendered. The endpoint returns only the reference, the
+// submission date, the status, the decision date and `applicantNote` — the one
+// field the office marks as shareable. Rejection reasons and reviewer identity
+// live in the record's history and never leave the server.
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import Icon from '@/components/Icon.astro';
+import { QUEUES } from '@/lib/queue';
+import { redisHealthy } from '@/lib/storage';
+import { GET as lookupApplication } from './api/application';
+
+export const prerender = false;
+
+// The URL carries a secret and the page carries personal data: never held by a
+// shared cache, never indexed.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+
+// The vocabulary comes from the approval engine, so this page can never drift
+// into words the office does not actually use.
+//
+// WHICH vocabulary is decided by the reference itself, not assumed: /api/register
+// mints "MMAKF-R-…" into the `registrations` queue and /api/event-register mints
+// "MMAKF-E-…" into the event queue (src/lib/refs.ts), and the two queues have
+// different stages — an event entry never passes "Verified by unit". Showing one
+// queue's stages for the other kind would be inventing a process step.
+type Kind = 'registrations' | 'eventEntries';
+function queueFor(reference: string): Kind {
+  return /^MMAKF-E-/i.test(reference) ? 'eventEntries' : 'registrations';
+}
+function trailOf(name: Kind): string[] {
+  const q = QUEUES[name];
+  const terminal = q.terminal as readonly string[];
+  return (q.states as readonly string[]).filter((s) => !terminal.includes(s));
+}
+const TRAILS: Record<Kind, string[]> = {
+  registrations: trailOf('registrations'),
+  eventEntries: trailOf('eventEntries'),
+};
+
+interface Lookup {
+  ok: true;
+  reference: string;
+  submittedOn: string | null;
+  status: string;
+  decidedOn: string | null;
+  note: string | null;
+  type: string | null;
+  name: string | null;
+}
+
+type Failure = 'not-found' | 'rate-limited' | 'unavailable' | 'incomplete';
+
+const ref = (Astro.url.searchParams.get('ref') || '').trim();
+const token = (Astro.url.searchParams.get('token') || '').trim();
+const followedLink = !!(ref && token);
+// Half a link — the usual cause is a URL cut off by a messaging app. Without
+// this branch the page rendered the bare form and said nothing at all, which
+// looks like the link simply did nothing.
+const halfLink = !followedLink && !!(ref || token);
+
+let found: Lookup | null = null;
+let failure: Failure | null = null;
+
+if (followedLink) {
+  try {
+    // Astro.request carries the real client headers, so the endpoint's rate
+    // limit counts this render against the right visitor.
+    const res = await lookupApplication({ request: Astro.request, url: Astro.url } as any);
+    if (res.status === 200) found = (await res.json()) as Lookup;
+    else if (res.status === 429) failure = 'rate-limited';
+    else if (res.status === 404 || res.status === 400) {
+      // getList() never throws: when Redis is unconfigured or unreachable it
+      // returns an empty list, so the endpoint's honest 404 turns into a lie —
+      // "no application matches" when the truth is "the register could not be
+      // read". Ask the storage layer before telling an applicant they do not
+      // exist. This is the same answer for an unknown reference and a wrong
+      // access code, so it discloses nothing either way.
+      failure = (await redisHealthy()) ? 'not-found' : 'unavailable';
+    } else failure = 'unavailable';
+  } catch {
+    // Storage unreachable. Say so, rather than implying the application is gone.
+    failure = 'unavailable';
+  }
+} else if (halfLink) {
+  failure = 'incomplete';
+}
+
+const DATE = new Intl.DateTimeFormat('en-IN', {
+  day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
+});
+function onDate(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : DATE.format(d);
+}
+
+interface Step { label: string; cls: string; state: string; when: string }
+
+/** Withdrawn, Rejected and Returned all end the trail without an approval. */
+function isRefusal(status: string): boolean {
+  return /reject|withdraw|return/i.test(status);
+}
+
+function stepsFor(
+  status: string,
+  trail: string[],
+  submittedOn: string | null,
+  decidedOn: string | null
+): Step[] {
+  const idx = trail.indexOf(status);
+  // Anything outside the pre-decision states is an outcome.
+  const isDecided = idx === -1;
+  // A decided item stands past every pre-decision stage.
+  const at = isDecided ? trail.length : idx;
+
+  // Exactly two things are certain: the item was received (its submission date
+  // proves it) and where it stands now (that is the stored status). decide()
+  // imposes NO order on the states — Received can go straight to a decision, or
+  // straight to "Verified by unit" — so every stage BETWEEN those two may never
+  // have happened. Those are drawn as past with no claim that they completed;
+  // marking them "Complete" would be a fabrication about the federation's
+  // process, whether or not a decision has been taken.
+  const steps: Step[] = trail.map((label, i) => {
+    if (i === at) {
+      return { label, cls: 'is-current', state: 'Current stage', when: i === 0 ? onDate(submittedOn) : '' };
+    }
+    if (i > at) return { label, cls: 'is-pending', state: 'Pending', when: '' };
+    if (i === 0) return { label, cls: 'is-done', state: 'Complete', when: onDate(submittedOn) };
+    return { label, cls: 'is-past', state: '', when: '' };
+  });
+
+  steps.push(
+    isDecided
+      ? {
+          label: status,
+          cls: isRefusal(status) ? 'is-done is-refused' : 'is-done',
+          state: 'Complete',
+          when: onDate(decidedOn),
+        }
+      : { label: 'Decision', cls: 'is-pending', state: 'Pending', when: '' }
+  );
+  return steps;
+}
+
+const trail = found ? TRAILS[queueFor(String(found.reference || ''))] : TRAILS.registrations;
+// A stored record with a blank status is at the first state, not at a nameless
+// outcome: `status ?? 'Received'` in the endpoint does not catch an empty string.
+const status = found ? (found.status || trail[0]) : '';
+const decided = !!found && trail.indexOf(status) === -1;
+const badgeClass = decided ? (isRefusal(status) ? 'no' : 'ok') : 'wait';
+const steps = found ? stepsFor(status, trail, found.submittedOn, found.decidedOn) : [];
+---
+
+<Base
+  title="Application status — MMAKF"
+  description="Check the status of an MMAKF application using its reference number and the access code issued with it."
+>
+  <PageHero
+    eyebrow="Member Services"
+    title={`Application <em>status</em>.`}
+    lead="Check an application you have already submitted. You need the reference number and the access code that were issued with it — both together, because that pair is what keeps your application private."
+  />
+
+  <section>
+    <div class="container app-wrap">
+      {found && (
+        <div class="card app-card">
+          <div class="app-head">
+            <div>
+              <div class="card-eyebrow">Reference</div>
+              <div class="app-ref">{found.reference}</div>
+            </div>
+            <span class={`app-badge ${badgeClass}`}>{status}</span>
+          </div>
+
+          <div class="app-meta">
+            {found.name && (
+              <div class="app-meta-row"><span class="app-k">Applicant</span><span class="app-v">{found.name}</span></div>
+            )}
+            {found.type && (
+              <div class="app-meta-row"><span class="app-k">Application</span><span class="app-v">{found.type}</span></div>
+            )}
+            {onDate(found.submittedOn) && (
+              <div class="app-meta-row"><span class="app-k">Submitted on</span><span class="app-v">{onDate(found.submittedOn)}</span></div>
+            )}
+            {decided && onDate(found.decidedOn) && (
+              <div class="app-meta-row"><span class="app-k">Decided on</span><span class="app-v">{onDate(found.decidedOn)}</span></div>
+            )}
+          </div>
+
+          <div class="app-trail-h">Progress</div>
+          <ol class="app-trail">
+            {steps.map((s) => (
+              <li class={`app-step ${s.cls}`}>
+                <span class="app-dot" aria-hidden="true"></span>
+                <span class="app-step-label">{s.label}</span>
+                {s.state && <span class="app-step-state">{s.state}</span>}
+                {s.when && <span class="app-step-when">{s.when}</span>}
+              </li>
+            ))}
+          </ol>
+
+          {found.note ? (
+            <div class="app-note">
+              <div class="app-note-h">Note from the federation office</div>
+              <p class="body-txt" style="margin:0">{found.note}</p>
+            </div>
+          ) : decided ? (
+            <div class="app-note plain">
+              <p class="body-txt" style="margin:0">The office did not record a note with this decision.</p>
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {failure === 'not-found' && (
+        <div class="app-msg bad" role="alert">
+          <strong>No application matches that reference and access code.</strong>
+          <p class="body-txt" style="margin:8px 0 0">
+            Check both against the confirmation you were given — they are only valid as a pair. If you
+            copied the link out of a message, make sure none of it was cut off.
+          </p>
+        </div>
+      )}
+
+      {failure === 'rate-limited' && (
+        <div class="app-msg bad" role="alert">
+          <strong>Too many checks from this connection.</strong>
+          <p class="body-txt" style="margin:8px 0 0">
+            Wait about a minute, then reload this page. The limit exists so nobody can try access
+            codes in bulk against the register.
+          </p>
+        </div>
+      )}
+
+      {failure === 'unavailable' && (
+        <div class="app-msg bad" role="alert">
+          <strong>We could not confirm that application.</strong>
+          <p class="body-txt" style="margin:8px 0 0">
+            The application register is not available right now, so this check could not be completed.
+            That is a fault on our side: it does not mean your application is missing, and it is not a
+            decision on it. Please try again shortly, and
+            <a href="/contact" class="text-gold">contact the federation office</a> if it keeps happening.
+          </p>
+        </div>
+      )}
+
+      {failure === 'incomplete' && (
+        <div class="app-msg bad" role="alert">
+          <strong>That link is missing one of its two halves.</strong>
+          <p class="body-txt" style="margin:8px 0 0">
+            A status link carries both a reference number and an access code, and both are needed.
+            Messaging apps often cut a long link short — open it from the original confirmation, or
+            type both halves into the form below.
+          </p>
+        </div>
+      )}
+
+      {/* ═══════ MANUAL LOOKUP ═══════ */}
+      <div class="card app-form-card" id="check">
+        <div class="app-form-h">{found ? 'Check another application' : 'Check an application'}</div>
+        <p class="body-txt" style="margin:0 0 20px">
+          Enter the reference number and the access code exactly as they were issued to you. Both are
+          required — a reference on its own will not open an application.
+        </p>
+
+        <form id="appForm" novalidate>
+          <div class="app-fields">
+            <div>
+              <label class="input-label" for="app-ref">Reference number</label>
+              {/* The reference is not the secret half, so carrying it over from a
+                  truncated link saves retyping. The access code never is. */}
+              <input class="input" id="app-ref" name="ref" required maxlength="40"
+                     value={!found && ref ? ref : undefined}
+                     autocomplete="off" spellcheck="false" />
+            </div>
+            <div>
+              <label class="input-label" for="app-token">Access code</label>
+              <input class="input" id="app-token" name="token" required maxlength="120"
+                     autocomplete="off" spellcheck="false" />
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary" style="width:100%;margin-top:18px">Check status</button>
+        </form>
+
+        <div id="appError" role="alert" aria-live="assertive"></div>
+        <div id="appResult" role="status" aria-live="polite" data-trails={JSON.stringify(TRAILS)}></div>
+
+        <noscript>
+          <div class="app-msg" style="margin-top:18px">
+            This form needs JavaScript. The status link issued with your application works without it —
+            open that link instead, or contact the federation office.
+          </div>
+        </noscript>
+      </div>
+
+      {/* ═══════ WHY BOTH HALVES ═══════ */}
+      <div class="grid grid-2 app-explain">
+        <div class="card">
+          <div class="card-icon"><Icon name="shield" size={30} color="var(--gold)" /></div>
+          <div class="card-title" style="font-size:1rem">Both halves are required</div>
+          <div class="card-body">
+            A reference number gets quoted in messages and read out over the phone, so on its own it
+            proves nothing. The access code issued alongside it is what shows the application is
+            yours. Anyone holding both can see this page, so treat the link as private.
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-icon"><Icon name="clock" size={30} color="var(--gold)" /></div>
+          <div class="card-title" style="font-size:1rem">A lost access code cannot be recovered</div>
+          <div class="card-body">
+            The office cannot resend or reset an access code, and that limitation is exactly what
+            keeps this check private — it also means nobody can talk their way into somebody else's
+            application. If you have lost yours, please
+            <a href="/contact" class="text-gold">contact the federation office</a>.
+          </div>
+        </div>
+      </div>
+
+      <p class="body-txt app-foot">
+        Applying for the first time? Go to <a href="/registration#apply" class="text-gold">registration</a>.
+      </p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .app-wrap { max-width: 760px; }
+
+  /* These rules are :global because the JavaScript path builds the same markup
+     at runtime, and scoped Astro styles only reach server-rendered elements. */
+  :global(.app-card) { margin-bottom: 28px; }
+  :global(.app-head) {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  :global(.app-ref) {
+    font-family: var(--font-display);
+    font-size: 1.35rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--white);
+    overflow-wrap: anywhere;
+  }
+  :global(.app-badge) {
+    display: inline-flex;
+    align-items: center;
+    padding: 7px 15px;
+    border: 1px solid var(--border-2);
+    border-radius: 100px;
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    font-weight: 500;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--off-white);
+    white-space: nowrap;
+  }
+  :global(.app-badge.ok) { color: var(--gold-3); border-color: var(--gold-dim); background: rgba(160, 124, 30, 0.07); }
+  :global(.app-badge.no) { color: var(--red-2); border-color: rgba(142, 18, 18, 0.35); background: rgba(142, 18, 18, 0.05); }
+
+  :global(.app-meta) { padding: 6px 0 4px; }
+  :global(.app-meta-row) {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 18px;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  :global(.app-meta-row:last-child) { border-bottom: 0; }
+  :global(.app-k) {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  :global(.app-v) { color: var(--white); text-align: right; overflow-wrap: anywhere; }
+
+  :global(.app-trail-h) {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 26px;
+  }
+  .app-form-h {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    margin-bottom: 14px;
+  }
+
+  :global(.app-trail) { list-style: none; margin: 18px 0 0; padding: 0; }
+  :global(.app-step) {
+    position: relative;
+    padding: 0 0 24px 36px;
+    min-height: 30px;
+  }
+  :global(.app-step:last-child) { padding-bottom: 0; }
+  :global(.app-step::before) {
+    content: '';
+    position: absolute;
+    left: 9px; top: 24px; bottom: 0;
+    width: 1px;
+    background: var(--border-2);
+  }
+  :global(.app-step:last-child::before) { display: none; }
+  :global(.app-dot) {
+    position: absolute;
+    left: 0; top: 4px;
+    width: 19px; height: 19px;
+    border-radius: 50%;
+    border: 1px solid var(--border-2);
+    background: var(--bg-2);
+  }
+  :global(.app-step.is-done .app-dot) { background: var(--gold-2); border-color: var(--gold-2); }
+  :global(.app-step.is-current .app-dot) { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-glow); }
+  :global(.app-step.is-refused .app-dot) { background: var(--red); border-color: var(--red); }
+  :global(.app-step-label) {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 0.95rem;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    line-height: 1.3;
+  }
+  :global(.app-step.is-past .app-dot) { background: var(--border-2); border-color: var(--border-2); }
+  :global(.app-step.is-done .app-step-label) { color: var(--white); }
+  :global(.app-step.is-past .app-step-label) { color: var(--off-white); }
+  :global(.app-step.is-current .app-step-label) { color: var(--red); }
+  :global(.app-step.is-refused .app-step-label) { color: var(--red-2); }
+  :global(.app-step-state),
+  :global(.app-step-when) {
+    display: block;
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-top: 3px;
+  }
+
+  :global(.app-note) {
+    margin-top: 26px;
+    padding: 18px 20px;
+    background: var(--card-2);
+    border-left: 2px solid var(--gold-dim);
+    border-radius: var(--radius);
+  }
+  :global(.app-note.plain) { border-left-color: var(--border-2); }
+  :global(.app-note-h) {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    margin-bottom: 8px;
+  }
+
+  :global(.app-msg) {
+    padding: 20px 22px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 28px;
+    color: var(--white);
+  }
+  :global(.app-msg.bad) { border-left: 2px solid var(--red); }
+  :global(#appError:empty), :global(#appResult:empty) { display: none; }
+  :global(#appError .app-msg), :global(#appResult .app-card) { margin: 20px 0 0; }
+
+  .app-form-card { margin-bottom: 28px; }
+  .app-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 600px) { .app-fields { grid-template-columns: 1fr; } }
+  .app-explain { margin-bottom: 24px; }
+  .app-foot { text-align: center; }
+</style>
+
+<script>
+  // The form is a convenience for people who did not keep their link. It hits
+  // the SAME endpoint with the same pair, so it can learn nothing the
+  // server-rendered path cannot — and it must not distinguish "no such
+  // reference" from "wrong access code" either.
+  const form = document.getElementById('appForm') as HTMLFormElement | null;
+  const out = document.getElementById('appResult') as HTMLElement | null;
+  const errBox = document.getElementById('appError') as HTMLElement | null;
+
+  if (form && out && errBox) {
+    // Both queue vocabularies, straight from the approval engine. Which one
+    // applies is decided by the reference prefix, exactly as on the server.
+    const TRAILS: Record<string, string[]> =
+      JSON.parse(out.dataset.trails || '{"registrations":[],"eventEntries":[]}');
+    const trailFor = (reference: string) =>
+      (/^MMAKF-E-/i.test(reference) ? TRAILS.eventEntries : TRAILS.registrations) || [];
+    const DATE = new Intl.DateTimeFormat('en-IN', {
+      day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
+    });
+
+    const el = (tag: string, cls?: string, text?: string) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text != null) n.textContent = text;
+      return n;
+    };
+    const onDate = (iso: string | null) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      return isNaN(d.getTime()) ? '' : DATE.format(d);
+    };
+    const isRefusal = (s: string) => /reject|withdraw|return/i.test(s);
+    // Same words the server render uses, so the two paths cannot drift apart.
+    const UNAVAILABLE: [string, string] = [
+      'We could not confirm that application.',
+      'The application register is not available right now, so this check could not be completed. ' +
+      'That is a fault on our side: it does not mean your application is missing, and it is not a ' +
+      'decision on it. Please try again shortly.',
+    ];
+    const clear = () => { errBox.textContent = ''; out.textContent = ''; };
+
+    function message(title: string, detail: string) {
+      clear();
+      const box = el('div', 'app-msg bad');
+      box.appendChild(el('strong', undefined, title));
+      const p = el('p', 'body-txt', detail);
+      p.style.margin = '8px 0 0';
+      box.appendChild(p);
+      errBox!.appendChild(box);
+    }
+
+    function step(label: string, cls: string, state: string, when: string) {
+      const li = el('li', 'app-step ' + cls);
+      const dot = el('span', 'app-dot');
+      dot.setAttribute('aria-hidden', 'true');
+      li.appendChild(dot);
+      li.appendChild(el('span', 'app-step-label', label));
+      if (state) li.appendChild(el('span', 'app-step-state', state));
+      if (when) li.appendChild(el('span', 'app-step-when', when));
+      return li;
+    }
+
+    // /api/health reports the storage layer honestly. If the probe itself
+    // cannot be run we assume the register WAS readable, so a health-check
+    // glitch never turns a genuine "not found" into a false reassurance.
+    async function registerReadable(): Promise<boolean> {
+      try {
+        const res = await fetch('/api/health', { headers: { Accept: 'application/json' } });
+        if (!res.ok) return true;
+        const body = await res.json();
+        return body?.redis !== false;
+      } catch {
+        return true;
+      }
+    }
+
+    function row(k: string, v: string) {
+      const r = el('div', 'app-meta-row');
+      r.appendChild(el('span', 'app-k', k));
+      r.appendChild(el('span', 'app-v', v));
+      return r;
+    }
+
+    // Every stored value enters the page through textContent, never as HTML.
+    function render(d: any) {
+      clear();
+      const reference = String(d.reference || '');
+      const TRAIL = trailFor(reference);
+      const status = String(d.status || TRAIL[0] || '');
+      const idx = TRAIL.indexOf(status);
+      const done = idx === -1;
+      // A decided item stands past every pre-decision stage.
+      const at = done ? TRAIL.length : idx;
+
+      const card = el('div', 'card app-card');
+
+      const head = el('div', 'app-head');
+      const left = el('div');
+      left.appendChild(el('div', 'card-eyebrow', 'Reference'));
+      left.appendChild(el('div', 'app-ref', reference));
+      head.appendChild(left);
+      head.appendChild(el('span',
+        'app-badge ' + (done ? (isRefusal(status) ? 'no' : 'ok') : 'wait'), status));
+      card.appendChild(head);
+
+      const meta = el('div', 'app-meta');
+      if (d.name) meta.appendChild(row('Applicant', String(d.name)));
+      if (d.type) meta.appendChild(row('Application', String(d.type)));
+      if (onDate(d.submittedOn)) meta.appendChild(row('Submitted on', onDate(d.submittedOn)));
+      if (done && onDate(d.decidedOn)) meta.appendChild(row('Decided on', onDate(d.decidedOn)));
+      card.appendChild(meta);
+
+      card.appendChild(el('div', 'app-trail-h', 'Progress'));
+      const ol = el('ol', 'app-trail');
+      TRAIL.forEach((label, i) => {
+        // Same rule as the server render: only "Received" and the current stage
+        // are certain, because decide() lets the office skip states. Stages in
+        // between are drawn as past, never claimed as completed.
+        if (i === at) {
+          ol.appendChild(step(label, 'is-current', 'Current stage', i === 0 ? onDate(d.submittedOn) : ''));
+        } else if (i > at) {
+          ol.appendChild(step(label, 'is-pending', 'Pending', ''));
+        } else if (i === 0) {
+          ol.appendChild(step(label, 'is-done', 'Complete', onDate(d.submittedOn)));
+        } else {
+          ol.appendChild(step(label, 'is-past', '', ''));
+        }
+      });
+      ol.appendChild(done
+        ? step(status, isRefusal(status) ? 'is-done is-refused' : 'is-done', 'Complete', onDate(d.decidedOn))
+        : step('Decision', 'is-pending', 'Pending', ''));
+      card.appendChild(ol);
+
+      // Only the note the office marked as shareable is ever returned — never
+      // the internal reason, never the reviewer's identity.
+      if (d.note) {
+        const note = el('div', 'app-note');
+        note.appendChild(el('div', 'app-note-h', 'Note from the federation office'));
+        const p = el('p', 'body-txt', String(d.note));
+        p.style.margin = '0';
+        note.appendChild(p);
+        card.appendChild(note);
+      } else if (done) {
+        const note = el('div', 'app-note plain');
+        const p = el('p', 'body-txt', 'The office did not record a note with this decision.');
+        p.style.margin = '0';
+        note.appendChild(p);
+        card.appendChild(note);
+      }
+
+      out!.appendChild(card);
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = form!.querySelector('button[type=submit]') as HTMLButtonElement;
+      const data = new FormData(form!);
+      const refValue = String(data.get('ref') || '').trim();
+      const codeValue = String(data.get('token') || '').trim();
+
+      if (!refValue || !codeValue) {
+        message('Both fields are required.',
+          'A reference number without its access code is not enough to open an application.');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Checking…';
+      try {
+        const res = await fetch(
+          '/api/application?ref=' + encodeURIComponent(refValue) +
+          '&token=' + encodeURIComponent(codeValue),
+          { headers: { Accept: 'application/json' } }
+        );
+        if (res.status === 200) {
+          const body = await res.json();
+          if (body && body.ok) render(body);
+          else message('That reply could not be read.', 'Please try again shortly.');
+        } else if (res.status === 429) {
+          const wait = Number(res.headers.get('Retry-After') || 0);
+          message('Too many checks from this connection.',
+            'Wait ' + (wait > 0 ? 'about ' + wait + ' seconds' : 'about a minute') +
+            ', then try again. The limit exists so nobody can try access codes in bulk against the register.');
+        } else if (res.status === 404 || res.status === 400) {
+          // The lookup reads an empty list when the register is unreachable, so
+          // a 404 alone does not prove the application is absent. Ask /api/health
+          // before saying it is. Same wording for an unknown reference and a
+          // wrong access code, so this still discloses nothing.
+          if (await registerReadable()) {
+            message('No application matches that reference and access code.',
+              'Check both against the confirmation you were given — they are only valid as a pair.');
+          } else {
+            message(UNAVAILABLE[0], UNAVAILABLE[1]);
+          }
+        } else {
+          message(UNAVAILABLE[0], UNAVAILABLE[1]);
+        }
+      } catch {
+        message('Could not reach the federation server.',
+          'Check your connection and try again. Nothing about your application has changed.');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Check status';
+      }
+    });
+  }
+</script>

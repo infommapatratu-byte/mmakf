@@ -22,6 +22,13 @@
       "when": 1786505268774,
       "tag": "0002_commerce_core",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786511288275,
+      "tag": "0003_federation_domains",
+      "breakpoints": true
     }
   ]
 }

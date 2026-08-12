@@ -1,0 +1,469 @@
+---
+// One approval queue, rendered the way the office actually works it: what was
+// submitted, what state it is in now, who moved it there and why, and the form
+// that moves it next.
+//
+// Before this panel the `status` field was written once and read by nothing —
+// there was no approve or reject anywhere in the product. Everything here
+// exists so a decision can be taken, explained, and afterwards audited. The
+// decision history is therefore the centre of the card, not a footnote.
+//
+// The panel renders NO control it cannot honour:
+//  · no authority for the queue  -> the notice, and no form at all;
+//  · a record with no id         -> POST /api/queue/decide could not address
+//                                   it, so the form is replaced by an
+//                                   explanation instead of a dead button.
+
+import { CORE_FIELDS, TYPE_FIELDS, CONSENTS, ageOn, MINOR_AGE } from '@/lib/registration';
+
+interface Props {
+  /** QUEUES key — sent verbatim to /api/queue/decide. */
+  queue: string;
+  label: string;
+  /** The rbac action the queue requires, quoted when authority is missing. */
+  action: string;
+  states: readonly string[];
+  terminal: readonly string[];
+  authorised: boolean;
+  /** Counts per status across the whole list, from queueSummary(). */
+  summary: Record<string, number>;
+  /** Items still needing a decision, from openItems(). */
+  items: any[];
+  /** Optional operational note rendered above the list. */
+  note?: string | null;
+}
+
+const {
+  queue, label, action, states, terminal,
+  authorised, summary, items, note = null,
+} = Astro.props;
+
+// Human labels come from the one field model the application forms already use,
+// so a question is worded identically to the office and to the applicant.
+const LABELS: Record<string, string> = {};
+for (const f of [...CORE_FIELDS, ...Object.values(TYPE_FIELDS).flat(), ...CONSENTS]) {
+  if (!LABELS[f.name]) LABELS[f.name] = f.label;
+}
+Object.assign(LABELS, {
+  appNo: 'Application reference',
+  ref: 'Entry reference',
+  type: 'Membership type',
+  event: 'Event',
+  unit: 'Unit',
+  level: 'Unit level',
+  kind: 'Submission type',
+  title: 'Title',
+  detail: 'Details',
+});
+
+// Never rendered as a fact: internal plumbing, the applicant's private access
+// token, and the fields the card already shows in their own right.
+const HIDE = new Set(['id', 'token', 'history', 'status', 'ts', 'decidedOn', 'decidedBy', 'applicantNote']);
+
+function humanise(key: string): string {
+  return LABELS[key] || key.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
+}
+
+function show(v: unknown): string {
+  if (v === true) return 'Yes';
+  if (v === false) return 'No';
+  if (v == null || v === '') return '—';
+  if (Array.isArray(v)) return v.map((x) => (x && typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ');
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+function when(iso: unknown): string {
+  if (!iso) return '—';
+  const d = new Date(String(iso));
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+// Counts are taken from EVERY status present in the data, not only the ones
+// this queue declares. A record carrying an unrecognised status — legacy data,
+// or a state list that has since been edited — is still handed to the office by
+// openItems(), so counting only the declared states would have printed
+// "0 awaiting a decision" above a list of items. Anything outside the declared
+// list is named rather than quietly folded in.
+const extraStates = Object.keys(summary).filter((s) => !states.includes(s) && (summary[s] ?? 0) > 0);
+const chips = [...states, ...extraStates];
+const total = Object.values(summary).reduce((n, v) => n + (v || 0), 0);
+const closed = terminal.reduce((n, s) => n + (summary[s] ?? 0), 0);
+const open = total - closed;
+---
+
+<section id={queue} class="admin-panel">
+  <h2 class="admin-h">{label}</h2>
+  <p class="admin-sub">
+    {authorised
+      ? `${open} awaiting a decision · ${total} in the register`
+      : 'You are signed in, but this queue is not yours to decide.'}
+  </p>
+
+  {authorised ? (
+    <>
+      <div class="q-counts" role="list" aria-label={`${label} — count by status`}>
+        {chips.map((s) => (
+          <div role="listitem" class="q-count" class:list={[{ 'is-final': terminal.includes(s), 'is-zero': !summary[s], 'is-odd': !states.includes(s) }]}>
+            <div class="q-count-n">{summary[s] ?? 0}</div>
+            <div class="q-count-l">{s}</div>
+          </div>
+        ))}
+      </div>
+
+      {extraStates.length > 0 && (
+        <p class="q-note">
+          {extraStates.length === 1 ? 'One status held by records in this queue is' : 'Some statuses held by records in this queue are'}
+          {' '}not in its declared state list: {extraStates.join(', ')}. Those records are still listed below and
+          can be moved to a declared status, but the state list in <code>src/lib/queue.ts</code> and the data
+          disagree — tell whoever maintains it.
+        </p>
+      )}
+
+      {note && <p class="q-note">{note}</p>}
+
+      {open > items.length && (
+        <p class="q-note">
+          Showing the first {items.length} of {open} items awaiting a decision. The rest are not hidden —
+          they appear once these have been worked and the page reloaded.
+        </p>
+      )}
+
+      {items.length === 0 ? (
+        <div class="q-empty">Nothing is awaiting a decision in this queue.</div>
+      ) : (
+        <div class="q-list">
+          {items.map((r: any) => {
+            const rid = r?.id == null ? '' : String(r.id);
+            const dom = `${queue}-${rid || 'noid'}`;
+            const status = String(r?.status ?? states[0]);
+            const headKey = r?.name ? 'name' : r?.title ? 'title' : r?.dojoName ? 'dojoName' : null;
+            const headline = headKey ? String(r[headKey]) : '(no name was given)';
+            const refKey = r?.appNo ? 'appNo' : r?.ref ? 'ref' : null;
+            const reference = refKey ? String(r[refKey]) : null;
+            const age = r?.dob ? ageOn(String(r.dob)) : null;
+            const facts = Object.keys(r || {}).filter((k) => !HIDE.has(k) && k !== headKey && k !== refKey);
+            const history: any[] = Array.isArray(r?.history) ? r.history : [];
+            // openItems() only returns non-terminal rows, so every other status
+            // is a legitimate destination. The current one is removed because
+            // the server refuses it with `no_change` — offering it would be
+            // offering a button that cannot work.
+            const targets = states.filter((s) => s !== status);
+            const inProgress = targets.filter((s) => !terminal.includes(s));
+            const closing = targets.filter((s) => terminal.includes(s));
+
+            return (
+              <article class="q-item">
+                <header class="q-item-head">
+                  <div class="q-item-id">
+                    {reference && <div class="q-ref">{reference}</div>}
+                    <h3 class="q-name">{headline}</h3>
+                    <div class="q-meta">
+                      Submitted {when(r?.ts)}
+                      {r?.type ? ` · ${r.type}` : ''}
+                      {r?.unit ? ` · ${r.unit}` : ''}
+                      {r?.state ? ` · ${r.state}` : ''}
+                    </div>
+                    {age !== null && age < MINOR_AGE && (
+                      <span class="q-flag">Applicant is under {MINOR_AGE}</span>
+                    )}
+                  </div>
+                  <div class="q-state">
+                    <span class="q-state-l">Current status</span>
+                    <span class="q-state-v">{status}</span>
+                  </div>
+                </header>
+
+                <details class="q-facts">
+                  <summary>Submitted details — {facts.length} fields</summary>
+                  <dl>
+                    {facts.map((k) => (
+                      <div class="q-fact">
+                        <dt>{humanise(k)}</dt>
+                        <dd>{show(r[k])}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </details>
+
+                <section class="q-history" aria-label={`Decision history for ${reference || headline}`}>
+                  <div class="q-history-h">Decision history</div>
+                  {history.length === 0 ? (
+                    <p class="q-history-none">No decision has been recorded on this item since it was received.</p>
+                  ) : (
+                    <ol class="q-history-list">
+                      {history.map((h: any) => (
+                        <li>
+                          <div class="q-h-move">
+                            <span class="q-h-from">{show(h?.from)}</span>
+                            <span class="q-h-arrow" aria-hidden="true">→</span>
+                            <span class="q-h-to">{show(h?.to)}</span>
+                          </div>
+                          <div class="q-h-who">
+                            {show(h?.by)}
+                            {h?.userId == null
+                              ? ' — shared credential, not attributable to a person'
+                              : ` — user #${h.userId}`}
+                            {' · '}
+                            {when(h?.at)}
+                          </div>
+                          {h?.reason && (
+                            <div class="q-h-why"><span>Reason</span>{String(h.reason)}</div>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                  {r?.applicantNote && (
+                    <div class="q-h-note"><span>Note the applicant can see</span>{String(r.applicantNote)}</div>
+                  )}
+                </section>
+
+                {rid === '' ? (
+                  <p class="q-blocked">
+                    This record carries no identifier. POST /api/queue/decide addresses an item by its
+                    <code>id</code>, so there is nothing to send and no decision form is offered. The record
+                    has to be given an id in storage before it can be worked.
+                  </p>
+                ) : (
+                  <form class="q-form" data-queue={queue} data-record={rid}>
+                    <fieldset>
+                      <legend>Record a decision</legend>
+                      <div class="q-form-grid">
+                        <div class="q-field">
+                          <label class="input-label" for={`st-${dom}`}>Move to</label>
+                          <select class="input" id={`st-${dom}`} name="toStatus" required>
+                            <option value="">Choose a status…</option>
+                            {inProgress.length > 0 && (
+                              <optgroup label="In progress">
+                                {inProgress.map((s) => <option value={s}>{s}</option>)}
+                              </optgroup>
+                            )}
+                            {closing.length > 0 && (
+                              <optgroup label="Closing">
+                                {closing.map((s) => <option value={s}>{s}</option>)}
+                              </optgroup>
+                            )}
+                          </select>
+                        </div>
+                        <div class="q-field">
+                          <label class="input-label" for={`rs-${dom}`}>Reason — required to reject or return</label>
+                          <textarea class="input" id={`rs-${dom}`} name="reason" rows="2" maxlength="500"
+                                    aria-describedby={`rsh-${dom}`}></textarea>
+                          <p class="q-help" id={`rsh-${dom}`}>Kept on the internal record. The applicant never sees this.</p>
+                        </div>
+                        <div class="q-field">
+                          <label class="input-label" for={`nt-${dom}`}>Note to the applicant — optional</label>
+                          <textarea class="input" id={`nt-${dom}`} name="applicantNote" rows="2" maxlength="500"
+                                    aria-describedby={`nth-${dom}`}></textarea>
+                          <p class="q-help" id={`nth-${dom}`}>Shown on their status page. Nothing else from this card is.</p>
+                        </div>
+                      </div>
+                      <button type="submit" class="btn btn-primary q-submit">Record decision</button>
+                    </fieldset>
+                    <p class="q-ok" role="status" hidden></p>
+                    <p class="q-err" role="alert" hidden></p>
+                    <button type="button" class="btn btn-ghost q-refresh" hidden>Reload the queue</button>
+                  </form>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </>
+  ) : (
+    <div class="q-forbidden">
+      <div class="q-forbidden-h">You do not have authority over this queue</div>
+      <p>
+        Deciding {label.toLowerCase()} requires the <code>{action}</code> authority at a scope that
+        covers the whole queue. Your account does not hold it, so no decision controls are shown and
+        no items are listed — a button here would only be refused by the server.
+      </p>
+      <p>Ask a federation administrator to grant the authority, or pass these items to someone who holds it.</p>
+    </div>
+  )}
+</section>
+
+<style>
+  /* Counts ─────────────────────────────────────────────────────────────── */
+  .q-counts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+  .q-count {
+    flex: 1 1 120px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+  }
+  .q-count.is-final { border-style: dashed; }
+  .q-count.is-zero { opacity: 0.62; }
+  /* A status the queue does not declare — flagged, not hidden. */
+  .q-count.is-odd { border-color: var(--red-3); }
+  .q-count.is-odd .q-count-n { color: var(--red-2); }
+  .q-count-n {
+    font-family: var(--font-display);
+    font-size: 1.6rem; font-weight: 600; line-height: 1;
+    color: var(--gold);
+  }
+  .q-count-l {
+    font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted); margin-top: 6px;
+  }
+
+  .q-note, .q-blocked {
+    margin-top: 18px;
+    background: var(--card-2);
+    border-left: 3px solid var(--gold-dim);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    font-size: 0.85rem;
+    color: var(--off-white);
+    line-height: 1.6;
+  }
+  .q-note code, .q-blocked code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.82rem; color: var(--gold-3);
+    background: var(--card); padding: 1px 5px; border-radius: var(--radius);
+    overflow-wrap: anywhere;
+  }
+  .q-empty {
+    margin-top: 18px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 32px; text-align: center;
+    color: var(--muted);
+  }
+
+  /* Item ───────────────────────────────────────────────────────────────── */
+  .q-list { display: flex; flex-direction: column; gap: 18px; margin-top: 22px; }
+  .q-item {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+  }
+  .q-item-head {
+    display: flex; flex-wrap: wrap; gap: 14px;
+    align-items: flex-start; justify-content: space-between;
+  }
+  .q-item-id { min-width: 0; flex: 1 1 240px; }
+  .q-ref {
+    font-family: var(--font-display);
+    font-size: 0.78rem; letter-spacing: 0.1em;
+    color: var(--gold-2);
+    overflow-wrap: anywhere;
+  }
+  .q-name {
+    font-family: var(--font-display);
+    font-size: 1.1rem; font-weight: 600;
+    color: var(--white);
+    margin-top: 3px;
+    overflow-wrap: anywhere;
+  }
+  .q-meta { font-size: 0.8rem; color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+  .q-flag {
+    display: inline-block; margin-top: 8px;
+    font-family: var(--font-display);
+    font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--red-2);
+    border: 1px solid var(--red-3);
+    border-radius: var(--radius);
+    padding: 4px 10px;
+  }
+  .q-state { text-align: right; flex: 0 0 auto; }
+  .q-state-l {
+    display: block;
+    font-size: 0.64rem; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  .q-state-v {
+    display: block; margin-top: 4px;
+    font-family: var(--font-display);
+    font-size: 0.95rem; color: var(--white);
+  }
+  @media (max-width: 560px) { .q-state { text-align: left; } }
+
+  /* Submitted details ──────────────────────────────────────────────────── */
+  .q-facts { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 6px; }
+  /* Height comes from padding, not from `display:flex`: flexing a <summary>
+     removes the disclosure triangle in Chrome and Safari, and the only cue that
+     the section opens would have gone with it. */
+  .q-facts summary {
+    cursor: pointer;
+    font-family: var(--font-display);
+    font-size: 0.74rem; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--gold-2);
+    min-height: 44px;
+    padding: 13px 0;
+  }
+  .q-facts dl { margin: 4px 0 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px 20px; }
+  @media (max-width: 720px) { .q-facts dl { grid-template-columns: 1fr; } }
+  .q-fact { min-width: 0; }
+  .q-fact dt { font-size: 0.72rem; color: var(--muted); line-height: 1.5; }
+  .q-fact dd { font-size: 0.88rem; color: var(--white); margin: 2px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+
+  /* History ────────────────────────────────────────────────────────────── */
+  .q-history { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .q-history-h {
+    font-family: var(--font-display);
+    font-size: 0.74rem; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--gold-2);
+  }
+  .q-history-none { font-size: 0.84rem; color: var(--muted); margin-top: 8px; }
+  .q-history-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+  .q-history-list li { border-left: 2px solid var(--border-2); padding: 2px 0 2px 12px; }
+  .q-h-move { font-family: var(--font-display); font-size: 0.9rem; color: var(--white); }
+  .q-h-arrow { color: var(--gold); margin: 0 6px; }
+  .q-h-who { font-size: 0.76rem; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
+  .q-h-why, .q-h-note { font-size: 0.84rem; color: var(--off-white); margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .q-h-why span, .q-h-note span {
+    font-family: var(--font-display);
+    font-size: 0.64rem; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--muted); margin-right: 8px;
+  }
+  .q-h-note { margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 10px; }
+
+  /* Decision form ──────────────────────────────────────────────────────── */
+  .q-form { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .q-form fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+  .q-form legend {
+    font-family: var(--font-display);
+    font-size: 0.74rem; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--gold-2);
+    padding: 0;
+  }
+  .q-form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 12px; }
+  @media (max-width: 860px) { .q-form-grid { grid-template-columns: 1fr; } }
+  .q-field { min-width: 0; }
+  .q-form select.input, .q-form textarea.input { min-height: 44px; width: 100%; max-width: 100%; }
+  .q-help { font-size: 0.72rem; color: var(--muted); margin-top: 5px; line-height: 1.5; }
+  .q-submit { margin-top: 14px; min-height: 44px; }
+  .q-form fieldset:disabled .q-submit { opacity: 0.55; cursor: not-allowed; }
+  .q-ok, .q-err {
+    margin-top: 12px; font-size: 0.86rem; line-height: 1.6;
+    border-radius: var(--radius); padding: 10px 14px;
+    overflow-wrap: anywhere;
+  }
+  .q-ok { color: var(--gold-3); background: rgba(160, 124, 30, 0.08); border: 1px solid var(--gold-dim); }
+  .q-err { color: var(--red-2); background: rgba(142, 18, 18, 0.06); border: 1px solid var(--red-3); }
+  .q-refresh { margin-top: 12px; min-height: 44px; }
+
+  /* No authority ───────────────────────────────────────────────────────── */
+  .q-forbidden {
+    margin-top: 20px;
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-left: 3px solid var(--red);
+    border-radius: var(--radius);
+    padding: 20px;
+  }
+  .q-forbidden-h { font-family: var(--font-display); font-size: 0.95rem; color: var(--white); }
+  .q-forbidden p { font-size: 0.86rem; color: var(--off-white); line-height: 1.7; margin-top: 8px; }
+  .q-forbidden code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.82rem; color: var(--gold-3);
+    background: var(--card-2); padding: 1px 5px; border-radius: var(--radius);
+  }
+</style>

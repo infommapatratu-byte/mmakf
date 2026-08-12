@@ -1,18 +1,178 @@
 ---
+// The federation shop, on real orders.
+//
+// What changed and why: this page used to render a `upi://pay` deep link to a
+// personal UPI handle and a wa.me message, per product. That produced no order,
+// no reference, no stock movement and no receipt — a bank statement line that
+// nobody could reconcile against anything. The catalogue is now read from the
+// commerce tables, the buyer builds a basket, and /checkout creates a real order
+// priced entirely server-side.
+//
+// The basket in localStorage holds VARIANT IDS AND QUANTITIES ONLY. It never
+// holds a price: a basket that carries prices is a basket an attacker edits.
+//
+// §70 (no fake features): ordering is offered only when the order database, an
+// active catalogue and a payment provider all exist. When any of them is
+// missing the catalogue still renders — it is genuine published content — but
+// the page says plainly why it cannot be ordered online and gives the route
+// that does work. No Pay button that cannot work.
+
 import Base from '@/layouts/Base.astro';
 import Icon from '@/components/Icon.astro';
 import PageHero from '@/components/PageHero.astro';
 import { get } from '@/lib/storage';
+import { isConfigured, db, schema as s } from '@/db';
+import { formatINR, paise } from '@/db/orders';
+import { paymentStatusReport } from '@/lib/payments';
+import { asc, eq, inArray } from 'drizzle-orm';
 
 export const prerender = false;
 
 const fed = await get('federation');
-const products = await get<any[]>('products');
+const cmsProducts = (await get<any[]>('products')) || [];
 
-const cats = [...new Set(products.map((p: any) => p.cat))];
-const waPhone = String(fed.contact.phone || '').replace(/\D/g, '');
-const upiPay = (p: any) => `upi://pay?pa=${fed.upi}&pn=MMAKF&am=${p.p}&cu=INR&tn=${encodeURIComponent('Shop: ' + p.n)}`;
-const waOrder = (p: any) => `https://wa.me/${waPhone}?text=${encodeURIComponent(`MMAKF Shop order: ${p.n} (₹${p.p}). Please confirm availability.`)}`;
+const pay = paymentStatusReport();
+const dbReady = isConfigured();
+
+interface ShopVariant {
+  id: number;
+  label: string;
+  pricePaise: number;
+  available: number;
+}
+interface ShopItem {
+  key: string;
+  name: string;
+  cat: string;
+  img: string | null;
+  icon: string;
+  badge: string | null;
+  priceLabel: string;
+  compareLabel: string | null;
+  variants: ShopVariant[];
+  /** Total available across variants — decides whether the item is orderable. */
+  available: number;
+  /** The largest single-variant availability — the ceiling for the qty picker. */
+  maxQty: number;
+}
+
+// ─── The orderable catalogue, from the commerce tables ───────────────────────
+let live: ShopItem[] = [];
+let loadFailed = false;
+
+if (dbReady) {
+  try {
+    const rows: any[] = await db()
+      .select()
+      .from(s.products)
+      .where(eq(s.products.status, 'active'))
+      .orderBy(asc(s.products.name));
+
+    if (rows.length > 0) {
+      const variants: any[] = await db()
+        .select()
+        .from(s.productVariants)
+        .where(inArray(s.productVariants.productId, rows.map((p: any) => p.id)))
+        .orderBy(asc(s.productVariants.pricePaise));
+
+      live = rows
+        .map((p: any): ShopItem => {
+          const vs: ShopVariant[] = variants
+            .filter((v: any) => v.productId === p.id && v.status === 'active')
+            .map((v: any) => ({
+              id: v.id,
+              label: v.label,
+              pricePaise: v.pricePaise,
+              // Available is stock less what unpaid orders are holding, so the
+              // last gi is not sold twice inside the same minute.
+              available: Math.max(0, (v.stockQty ?? 0) - (v.reservedQty ?? 0)),
+            }));
+
+          // The card carries one figure, so it must be the lowest and it must
+          // say so when the variants are not all the same price — a bare
+          // "₹1,800.00" on a product whose selected size costs ₹2,600.00 is a
+          // misrepresentation even though the select shows the true price.
+          const cheapest = vs.reduce<ShopVariant | null>(
+            (lo, v) => (lo === null || v.pricePaise < lo.pricePaise ? v : lo),
+            null,
+          );
+          const varies = cheapest !== null && vs.some((v) => v.pricePaise !== cheapest!.pricePaise);
+          const compare = cheapest
+            ? variants.find((v: any) => v.id === cheapest!.id && v.comparePricePaise)
+            : undefined;
+
+          return {
+            key: `p${p.id}`,
+            name: p.name,
+            cat: p.category || 'Catalogue',
+            img: p.imageUrl || null,
+            icon: 'karate-gi',
+            badge: null,
+            priceLabel: cheapest
+              ? (varies ? `From ${formatINR(cheapest.pricePaise)}` : formatINR(cheapest.pricePaise))
+              : '',
+            // A struck-through MRP beside a "From" price would be comparing two
+            // different variants, so it is only shown on a single-price item.
+            compareLabel: !varies && compare ? formatINR(compare.comparePricePaise) : null,
+            variants: vs,
+            available: vs.reduce((n, v) => n + v.available, 0),
+            maxQty: Math.min(9, Math.max(0, ...vs.map((v) => v.available))),
+          };
+        })
+        .filter((i) => i.variants.length > 0);
+    }
+  } catch (err) {
+    // A catalogue read failure must not blank the page; it must be stated.
+    loadFailed = true;
+    console.error('[shop] catalogue read failed', err);
+  }
+}
+
+// ─── The published catalogue, for display when ordering is not available ─────
+// These are the federation's own CMS entries. They are shown as a catalogue,
+// never as something that can be paid for here.
+const published: ShopItem[] = cmsProducts.map((p: any) => ({
+  key: `c${p.id}`,
+  name: String(p.n ?? ''),
+  cat: String(p.cat ?? 'Catalogue'),
+  img: p.img || null,
+  icon: p.icon || 'karate-gi',
+  badge: p.badge || null,
+  priceLabel: formatINR(paise(Number(p.p) || 0)),
+  compareLabel: p.m ? formatINR(paise(Number(p.m))) : null,
+  variants: [],
+  available: 0,
+  maxQty: 0,
+}));
+
+const items = live.length > 0 ? live : published;
+const orderable = live.length > 0 && pay.ready;
+
+// Exactly one reason, reported honestly, in the order the checks actually fail.
+const blocked: string | null =
+  orderable ? null
+  : !dbReady ? 'no_database'
+  : loadFailed ? 'load_failed'
+  : live.length === 0 ? 'no_catalogue'
+  : 'no_payment';
+
+const BLOCK_TEXT: Record<string, string> = {
+  no_database:
+    'Online ordering is not live yet — the federation’s order system is not connected on this deployment. The items below are the published catalogue; to buy any of them, order at the dojo desk or contact the federation office.',
+  load_failed:
+    'The online catalogue could not be loaded just now, so orders cannot be placed on the site at this moment. The items below are the published catalogue; please order at the dojo desk or contact the federation office.',
+  no_catalogue:
+    'The orderable catalogue has not been published to the online shop yet. The items below are the published catalogue; to buy any of them, order at the dojo desk or contact the federation office.',
+  no_payment:
+    'Online payment is not yet available — no payment method is configured for the federation. Items can be ordered at the dojo desk or by contacting the federation office.',
+};
+
+const cats = [...new Set(items.map((i) => i.cat))];
+const email = String(fed?.contact?.email || '');
+const phone = String(fed?.contact?.phone || '');
+const heroPills = orderable
+  ? ['Order online', 'Collection at the dojo desk']
+  : ['Published catalogue', 'Order at the federation office'];
 ---
 
 <Base
@@ -23,48 +183,144 @@ const waOrder = (p: any) => `https://wa.me/${waPhone}?text=${encodeURIComponent(
     image="https://images.unsplash.com/photo-1549719386-74dfcbf7dbed?auto=format&fit=crop&w=1800&q=70"
     eyebrow="Equipment"
     title={`Federation-certified <em>gear</em>.`}
-    lead="Gis, belts, sparring equipment and merchandise — the same gear the federation trains and competes in. Order at the dojo desk or by UPI."
-    pills={[`UPI · ${fed.upi}`]}
+    lead="Gis, belts, sparring equipment and merchandise — the same gear the federation trains and competes in."
+    pills={heroPills}
   />
 
   <section>
     <div class="container">
-      <div class="flex flex-wrap gap-3 fade" style="margin-bottom:32px">
-        <button class="sfilter active" data-cat="all">All</button>
-        {cats.map((c) => <button class="sfilter" data-cat={c}>{c}</button>)}
-      </div>
+      {blocked && (
+        <div class="shop-notice fade" role="status">
+          <div class="shop-notice-h">Ordering on this site</div>
+          <p>{BLOCK_TEXT[blocked]}</p>
+          <p class="shop-notice-contact">
+            Federation office —
+            {email && <a href={`mailto:${email}`}>{email}</a>}
+            {email && phone && <span aria-hidden="true"> · </span>}
+            {phone && <a href={`tel:${phone.replace(/[^\d+]/g, '')}`}>{phone}</a>}
+          </p>
+        </div>
+      )}
 
-      <div class="grid grid-4" id="shopGrid">
-        {products.map((p: any) => (
-          <div class="prod fade" data-cat={p.cat}>
-            {p.badge && <div class="prod-badge">{p.badge}</div>}
-            <div class="prod-thumb">
-              {p.img
-                ? <img class="prod-photo" src={p.img} alt={p.n} loading="lazy" />
-                : <Icon name={p.icon || 'karate-gi'} size={56} color="var(--gold)" />}
-            </div>
-            <div class="prod-cat">{p.cat}</div>
-            <div class="prod-name">{p.n}</div>
-            <div class="prod-foot">
-              <div class="prod-prices">
-                <span class="prod-price">₹{Number(p.p).toLocaleString()}</span>
-                {p.m && <span class="prod-orig">₹{Number(p.m).toLocaleString()}</span>}
-              </div>
-              <div class="prod-actions">
-                <a class="btn-link" href={upiPay(p)}>UPI Pay</a>
-                <a class="btn-link" href={waOrder(p)} target="_blank" rel="noopener">WhatsApp →</a>
-              </div>
-            </div>
+      {/* The basket lives in the browser. Without scripting the Add button is a
+          dead control, so say so rather than let it fail silently. */}
+      {orderable && (
+        <noscript>
+          <div class="shop-notice" role="status">
+            <div class="shop-notice-h">Ordering on this site</div>
+            <p>
+              The basket is held in your browser, so ordering here needs JavaScript switched
+              on. With it off, the list below is a catalogue only — the “Add to basket”
+              buttons will not do anything. To order, contact the federation office
+              {email && <Fragment> — <a href={`mailto:${email}`}>{email}</a></Fragment>}
+              {phone && <Fragment> · <a href={`tel:${phone.replace(/[^\d+]/g, '')}`}>{phone}</a></Fragment>},
+              or order at the dojo desk.
+            </p>
           </div>
-        ))}
+        </noscript>
+      )}
+
+      <div class="flex flex-wrap gap-3 fade" style="margin-bottom:32px">
+        <button type="button" class="sfilter active" data-cat="all">All</button>
+        {cats.map((c) => <button type="button" class="sfilter" data-cat={c}>{c}</button>)}
       </div>
 
-      <div style="text-align:center;margin-top:32px;color:var(--muted);font-size:.85rem">
-        Payments via UPI: <strong class="text-gold">{fed.upi}</strong> · Or message us on WhatsApp at {fed.contact.phone}.
-        Collection at the dojo desk; outstation delivery on request.
+      {items.length === 0 ? (
+        <p class="body-txt">No catalogue items are published at the moment.</p>
+      ) : (
+        <div class="grid grid-4" id="shopGrid">
+          {items.map((i) => (
+            <div class="prod fade" data-cat={i.cat}>
+              {i.badge && <div class="prod-badge">{i.badge}</div>}
+              <div class="prod-thumb">
+                {i.img
+                  ? <img class="prod-photo" src={i.img} alt={i.name} loading="lazy" />
+                  : <Icon name={i.icon} size={56} color="var(--gold)" />}
+              </div>
+              <div class="prod-cat">{i.cat}</div>
+              <div class="prod-name">{i.name}</div>
+              <div class="prod-foot">
+                <div class="prod-prices">
+                  <span class="prod-price">{i.priceLabel}</span>
+                  {i.compareLabel && <span class="prod-orig">{i.compareLabel}</span>}
+                </div>
+
+                {orderable && i.available === 0 && (
+                  <div class="prod-oos">Out of stock</div>
+                )}
+
+                {orderable && i.available > 0 && (
+                  <div class="prod-add">
+                    {i.variants.length > 1 ? (
+                      <div class="prod-field">
+                        <label class="input-label" for={`opt-${i.key}`}>Option</label>
+                        <select class="input prod-variant" id={`opt-${i.key}`}>
+                          {i.variants.map((v) => (
+                            <option value={v.id} data-avail={v.available} disabled={v.available === 0}>
+                              {v.label} — {formatINR(v.pricePaise)}{v.available === 0 ? ' (out of stock)' : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : (
+                      <input
+                        type="hidden"
+                        class="prod-variant"
+                        value={i.variants[0].id}
+                        data-avail={i.variants[0].available}
+                      />
+                    )}
+
+                    <div class="prod-field prod-qty-field">
+                      <label class="input-label" for={`qty-${i.key}`}>Qty</label>
+                      <select class="input prod-qty" id={`qty-${i.key}`}>
+                        {Array.from({ length: Math.max(1, i.maxQty) }, (_, n) => n + 1).map((n) => (
+                          <option value={n}>{n}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <button type="button" class="btn btn-gold prod-btn">Add to basket</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div class="shop-foot">
+        {orderable ? (
+          <p>
+            Prices are set by the federation and confirmed on the order itself.
+            Collection at the dojo desk; outstation delivery on request.
+            Questions — {email && <a href={`mailto:${email}`}>{email}</a>}
+            {email && phone && <span aria-hidden="true"> · </span>}
+            {phone && <a href={`tel:${phone.replace(/[^\d+]/g, '')}`}>{phone}</a>}.
+          </p>
+        ) : (
+          <p>
+            Collection at the dojo desk; outstation delivery on request.
+            To order, contact the federation office
+            {email && <Fragment> — <a href={`mailto:${email}`}>{email}</a></Fragment>}
+            {phone && <Fragment> · <a href={`tel:${phone.replace(/[^\d+]/g, '')}`}>{phone}</a></Fragment>}.
+          </p>
+        )}
       </div>
     </div>
   </section>
+
+  {orderable && (
+    <div class="basket-bar" id="basketBar" hidden>
+      <div class="container basket-bar-in">
+        <div class="basket-count" id="basketCount" aria-live="polite">Basket is empty</div>
+        <div class="basket-acts">
+          <button type="button" class="btn btn-ghost" id="basketClear">Clear</button>
+          <a class="btn btn-primary" href="/checkout">Go to checkout</a>
+        </div>
+      </div>
+    </div>
+  )}
 </Base>
 
 <style>
@@ -72,6 +328,10 @@ const waOrder = (p: any) => `https://wa.me/${waPhone}?text=${encodeURIComponent(
     background: var(--card);
     border: 1px solid var(--border-2);
     color: var(--off-white);
+    /* 44px minimum touch target — the pill rendered ~30px tall. */
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
     padding: 8px 18px;
     border-radius: 100px;
     font-family: var(--font-display);
@@ -82,6 +342,30 @@ const waOrder = (p: any) => `https://wa.me/${waPhone}?text=${encodeURIComponent(
   }
   .sfilter:hover { border-color: var(--gold); color: var(--gold); }
   .sfilter.active { background: var(--red); border-color: var(--red); color: #fff; }
+
+  /* Why ordering is or is not possible, stated before the catalogue rather
+     than discovered at a dead button. */
+  .shop-notice {
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    margin-bottom: 32px;
+    color: var(--off-white);
+    font-size: 0.9rem;
+    line-height: 1.6;
+  }
+  .shop-notice-h {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    margin-bottom: 8px;
+  }
+  .shop-notice-contact { margin-top: 8px; color: var(--muted); font-size: 0.85rem; }
+  .shop-notice a { color: var(--gold-2); }
 
   .prod {
     display: flex;
@@ -152,14 +436,13 @@ const waOrder = (p: any) => `https://wa.me/${waPhone}?text=${encodeURIComponent(
   .prod-foot {
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
+    align-items: stretch;
     gap: 10px;
     padding: 14px 16px;
     border-top: 1px solid var(--border);
     margin-top: auto;
   }
   .prod-prices { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-  .prod-actions { display: flex; gap: 16px; flex-wrap: wrap; }
   .prod-price {
     font-family: var(--font-display);
     font-size: 1.1rem;
@@ -171,21 +454,187 @@ const waOrder = (p: any) => `https://wa.me/${waPhone}?text=${encodeURIComponent(
     color: var(--muted);
     font-size: 0.72rem;
   }
+  .prod-oos {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .prod-add { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+  .prod-field { flex: 1 1 100%; min-width: 0; }
+  .prod-qty-field { flex: 0 0 84px; }
+  .prod-add .input { padding: 9px 11px; font-size: 0.85rem; min-height: 44px; }
+  .prod-add .btn { flex: 1 1 120px; min-height: 44px; padding: 11px 14px; font-size: 0.66rem; }
+  .prod-add .input-label { font-size: 0.56rem; letter-spacing: 0.18em; }
+
+  .shop-foot {
+    text-align: center;
+    margin-top: 32px;
+    color: var(--muted);
+    font-size: 0.85rem;
+    line-height: 1.7;
+  }
+  .shop-foot a { color: var(--gold-2); }
+
+  /* Sticky basket summary. Rendered only when an order can actually be placed. */
+  .basket-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 50;
+    background: var(--card);
+    border-top: 1px solid var(--border-2);
+    box-shadow: 0 -8px 28px rgba(26, 23, 19, 0.09);
+  }
+  .basket-bar[hidden] { display: none; }
+  .basket-bar-in {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .basket-count {
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--off-white);
+  }
+  .basket-acts { display: flex; gap: 10px; flex-wrap: wrap; }
+  .basket-acts .btn { min-height: 44px; }
+
+  @media (max-width: 420px) {
+    .basket-bar-in { justify-content: center; text-align: center; }
+    .basket-acts { width: 100%; }
+    .basket-acts .btn { flex: 1 1 auto; }
+  }
 </style>
 
 <script>
-  const filters = document.querySelectorAll('.sfilter');
-  const prods = document.querySelectorAll('.prod');
+  // ── Category filter ──
+  const filters = document.querySelectorAll<HTMLElement>('.sfilter');
+  const prods = document.querySelectorAll<HTMLElement>('.prod');
   filters.forEach((btn) => {
     btn.addEventListener('click', () => {
       filters.forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      const cat = (btn as HTMLElement).dataset.cat;
+      const cat = btn.dataset.cat;
       prods.forEach((p) => {
-        const show = cat === 'all' || (p as HTMLElement).dataset.cat === cat;
+        const show = cat === 'all' || p.dataset.cat === cat;
         p.classList.toggle('hidden', !show);
       });
     });
   });
 
+  // ── Basket ──
+  //
+  // Variant ids and quantities ONLY. No price is ever written here: every
+  // amount on this site is looked up server-side at checkout, so a tampered
+  // basket can change what you are buying but never what it costs.
+  const KEY = 'mmakf.basket.v1';
+  type Line = { v: number; q: number };
+
+  function readBasket(): Line[] {
+    try {
+      const raw = JSON.parse(localStorage.getItem(KEY) || '[]');
+      if (!Array.isArray(raw)) return [];
+      return raw
+        .filter((l: any) => l && Number.isInteger(l.v) && Number.isInteger(l.q) && l.q > 0 && l.q <= 99)
+        .slice(0, 50)
+        .map((l: any) => ({ v: l.v, q: l.q }));
+    } catch {
+      return [];
+    }
+  }
+  function writeBasket(lines: Line[]) {
+    try { localStorage.setItem(KEY, JSON.stringify(lines)); } catch { /* storage disabled */ }
+  }
+
+  const bar = document.getElementById('basketBar');
+  const countEl = document.getElementById('basketCount');
+
+  function paint() {
+    if (!bar || !countEl) return;
+    const lines = readBasket();
+    const n = lines.reduce((sum, l) => sum + l.q, 0);
+    bar.hidden = n === 0;
+    countEl.textContent = n === 1 ? '1 item in basket' : `${n} items in basket`;
+  }
+
+  document.querySelectorAll<HTMLElement>('.prod-add').forEach((box) => {
+    const btn = box.querySelector<HTMLButtonElement>('.prod-btn');
+    const variantEl = box.querySelector<HTMLSelectElement | HTMLInputElement>('.prod-variant');
+    const qtyEl = box.querySelector<HTMLSelectElement>('.prod-qty');
+    if (!btn || !variantEl || !qtyEl) return;
+
+    // The quantity ceiling belongs to the chosen variant, not to the product:
+    // offering 9 of a size with 2 left just earns a 409 from the server.
+    function availableNow(): number {
+      if (variantEl instanceof HTMLSelectElement) {
+        const opt = variantEl.selectedOptions[0];
+        return Math.max(0, Number(opt?.dataset.avail ?? 0));
+      }
+      return Math.max(0, Number((variantEl as HTMLInputElement).dataset.avail ?? 0));
+    }
+
+    function syncQty() {
+      const cap = Math.min(9, availableNow());
+      const want = Number(qtyEl!.value) || 1;
+      qtyEl!.textContent = '';
+      for (let n = 1; n <= Math.max(1, cap); n++) {
+        const opt = document.createElement('option');
+        opt.value = String(n);
+        opt.textContent = String(n);
+        qtyEl!.appendChild(opt);
+      }
+      qtyEl!.value = String(Math.min(want, Math.max(1, cap)));
+      qtyEl!.disabled = cap === 0;
+      btn!.disabled = cap === 0;
+    }
+
+    if (variantEl instanceof HTMLSelectElement) {
+      // A disabled first <option> is still the default selection in most
+      // browsers, so move to the first option that can actually be bought.
+      if (variantEl.selectedOptions[0]?.disabled) {
+        const first = Array.from(variantEl.options).find((o) => !o.disabled);
+        if (first) variantEl.value = first.value;
+      }
+      variantEl.addEventListener('change', syncQty);
+    }
+    syncQty();
+
+    btn.addEventListener('click', () => {
+      const variantId = Number(variantEl.value);
+      const qty = Number(qtyEl.value);
+      if (!Number.isInteger(variantId) || !Number.isInteger(qty) || qty < 1) return;
+
+      const lines = readBasket();
+      const found = lines.find((l) => l.v === variantId);
+      if (found) found.q = Math.min(99, found.q + qty);
+      else lines.push({ v: variantId, q: qty });
+      writeBasket(lines);
+      paint();
+
+      const original = btn.textContent;
+      btn.textContent = 'Added';
+      btn.disabled = true;
+      window.setTimeout(() => {
+        btn.textContent = original;
+        // Re-read availability instead of blindly re-enabling: the buyer may
+        // have switched to an out-of-stock option while the button was locked,
+        // and re-enabling it there just earns a 409 from the server.
+        syncQty();
+      }, 1200);
+    });
+  });
+
+  document.getElementById('basketClear')?.addEventListener('click', () => {
+    writeBasket([]);
+    paint();
+  });
+
+  paint();
 </script>

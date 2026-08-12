@@ -1,20 +1,152 @@
 ---
+// Membership registration.
+//
+// The form used to ask the SAME six questions of athletes, instructors, dojos
+// and officials. src/lib/registration.ts already defines four distinct field
+// sets and /api/register already validates against them — this page now renders
+// FROM that model rather than hand-listing fields, so the two cannot drift.
+//
+// No fee amount is stated anywhere: the federation has not published one.
+
 import Base from '@/layouts/Base.astro';
 import Icon from '@/components/Icon.astro';
 import PageHero from '@/components/PageHero.astro';
-import { get } from '@/lib/storage';
+import { get, redisHealthy } from '@/lib/storage';
+import {
+  MEMBERSHIP_TYPES,
+  CORE_FIELDS,
+  TYPE_FIELDS,
+  CONSENTS,
+  MINOR_AGE,
+  type FieldDef,
+  type MembershipType,
+} from '@/lib/registration';
 
 export const prerender = false;
 
 const fed = await get('federation');
-const stateUnits = await get<any[]>('stateUnits');
+const stateUnits = (await get<any[]>('stateUnits')) || [];
 
-const memberTypes = [
-  { icon: 'medal',      t: 'Athlete',     d: 'Competitive and grading members. Carries your grading record and tournament eligibility across all sanctioned events.' },
-  { icon: 'black-belt', t: 'Instructor',  d: 'Dan-graded teachers certified by the Technical Committee. Required to conduct MMAKF batches and present grading candidates.' },
-  { icon: 'karate-gi',  t: 'Dojo / Club', d: 'Chartered training centres under a district or state unit. Listed in the federation register with grading and tournament rights.' },
-  { icon: 'shield',     t: 'Official',    d: 'Certified judges, referees and coaches empanelled by the Tournament Commission for sanctioned events.' },
+// The state list the SERVER validates against — same source, same values.
+const states: string[] = stateUnits
+  .map((s: any) => String(s?.state ?? '').trim())
+  .filter(Boolean);
+
+const todayISO = new Date().toISOString().slice(0, 10);
+const officePhone = String(fed.contact.phone ?? '');
+const telHref = `tel:${officePhone.replace(/[^+\d]/g, '')}`;
+
+// An application is only durable when shared storage is configured. Without it
+// /api/register still answers 200 and still mints a reference, but the record
+// lives in one server's memory and the status link stops resolving as soon as
+// that instance goes away. The applicant is told before they rely on it —
+// same fact the approval queue already discloses to the office.
+const storageDurable = await redisHealthy();
+
+// /api/register rejects any state that is not in the federation's own list, so
+// with an empty list there is no answer that can pass validation. The form is
+// then not submittable, and says so, rather than failing at the server.
+const canSubmit = states.length > 0;
+
+const slug = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+// Icon + description per membership type — the federation's existing published
+// wording for these categories. Nothing new is asserted here.
+const TYPE_INFO: Record<MembershipType, { icon: string; d: string }> = {
+  Athlete: {
+    icon: 'medal',
+    d: 'Competitive and grading members. Carries your grading record and tournament eligibility across all sanctioned events.',
+  },
+  Instructor: {
+    icon: 'black-belt',
+    d: 'Dan-graded teachers certified by the Technical Committee. Required to conduct MMAKF batches and present grading candidates.',
+  },
+  'Dojo / Club': {
+    icon: 'karate-gi',
+    d: 'Chartered training centres under a district or state unit. Listed in the federation register with grading and tournament rights.',
+  },
+  Official: {
+    icon: 'shield',
+    d: 'Certified judges, referees and coaches empanelled by the Tournament Commission for sanctioned events.',
+  },
+};
+
+// ── Field model → render model ───────────────────────────────────────────────
+// Consecutive fields sharing the same visibility rule become one group, so the
+// minor-only fields can be revealed and (importantly) DISABLED as a unit.
+// A disabled fieldset is neither submitted nor constraint-validated, which is
+// what stops hidden fields from blocking the browser's own required checks.
+interface FieldGroup {
+  minor: boolean;
+  fields: FieldDef[];
+}
+
+function groupFields(fields: FieldDef[]): FieldGroup[] {
+  const out: FieldGroup[] = [];
+  for (const f of fields) {
+    const minor = f.showWhen === 'minor';
+    const last = out[out.length - 1];
+    if (last && last.minor === minor) last.fields.push(f);
+    else out.push({ minor, fields: [f] });
+  }
+  return out;
+}
+
+interface Block {
+  kind: 'core' | 'type' | 'consent';
+  prefix: string;
+  legend: string;
+  note?: string;
+  panel?: string;
+  groups: FieldGroup[];
+}
+
+const blocks: Block[] = [
+  {
+    kind: 'core',
+    prefix: 'core',
+    legend: 'About the applicant',
+    groups: groupFields(CORE_FIELDS),
+  },
+  ...MEMBERSHIP_TYPES.map((t): Block => ({
+    kind: 'type',
+    prefix: slug(t),
+    panel: slug(t),
+    legend: `${t} details`,
+    groups: groupFields(TYPE_FIELDS[t]),
+  })),
+  {
+    kind: 'consent',
+    prefix: 'consent',
+    legend: 'Declarations and consent',
+    note: 'Every declaration is explicit. Nothing here is pre-ticked.',
+    groups: groupFields(CONSENTS),
+  },
 ];
+
+// What the client needs in order to mirror the server's own rules: the minor
+// threshold and the type→panel mapping come from the model, not a second copy.
+const clientModel = {
+  minorAge: MINOR_AGE,
+  slugs: Object.fromEntries(MEMBERSHIP_TYPES.map((t) => [t, slug(t)])),
+  minorFields: [...CORE_FIELDS, ...MEMBERSHIP_TYPES.flatMap((t) => TYPE_FIELDS[t]), ...CONSENTS]
+    .filter((f) => f.showWhen === 'minor')
+    .map((f) => f.name),
+};
+const clientModelJson = JSON.stringify(clientModel).replace(/</g, '\\u003c');
+
+const AUTOCOMPLETE: Record<string, string> = {
+  name: 'name',
+  email: 'email',
+  phone: 'tel',
+  city: 'address-level2',
+  state: 'address-level1',
+  district: 'address-level2',
+  dob: 'bday',
+};
+
+const isFull = (f: FieldDef) =>
+  f.type === 'textarea' || f.type === 'checkbox' || f.label.length > 46;
 ---
 
 <Base
@@ -38,11 +170,11 @@ const memberTypes = [
         <div class="rule"></div>
       </div>
       <div class="grid grid-4">
-        {memberTypes.map((m) => (
+        {MEMBERSHIP_TYPES.map((t) => (
           <div class="card hoverable fade">
-            <div class="card-icon"><Icon name={m.icon} size={32} color="var(--gold)" /></div>
-            <div class="card-title" style="font-size:1rem">{m.t}</div>
-            <div class="card-body" style="font-size:.86rem">{m.d}</div>
+            <div class="card-icon"><Icon name={TYPE_INFO[t].icon} size={32} color="var(--gold)" /></div>
+            <div class="card-title" style="font-size:1rem">{t}</div>
+            <div class="card-body" style="font-size:.86rem">{TYPE_INFO[t].d}</div>
           </div>
         ))}
       </div>
@@ -53,79 +185,257 @@ const memberTypes = [
   <section id="apply" class="bg2">
     <div class="container reg-grid">
       <div class="fade">
-        <div class="eyebrow">Apply</div>
-        <h2 class="display-2" style="margin-top:14px">Registration <em class="r">application</em>.</h2>
-        <div class="rule"></div>
-        <p class="lead">
-          Submit the application online — you receive an application number instantly.
-          The federation office verifies your details with your state or district unit and
-          issues your MMAKF ID. Any applicable fee, as notified by the office, is payable on approval.
-        </p>
-        <ul class="reg-steps mt-6">
-          <li><strong>01</strong> Submit the application — note your application number.</li>
-          <li><strong>02</strong> The office verifies with your unit (within 7 working days).</li>
-          <li><strong>03</strong> Pay the registration fee on approval.</li>
-          <li><strong>04</strong> Your MMAKF ID is issued and entered in the national register.</li>
-        </ul>
+        <div class="reg-intro">
+          <div class="eyebrow">Apply</div>
+          <h2 class="display-2" style="margin-top:14px">Registration <em class="r">application</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            Choose what you are applying for — the form then asks only the questions
+            that apply to you. You receive an application number and a private status
+            link as soon as it is submitted.
+          </p>
+          <ul class="reg-steps mt-6">
+            <li><strong>01</strong> Submit the application — save your application number and status link.</li>
+            <li><strong>02</strong> The office verifies your details with your state or district unit.</li>
+            <li><strong>03</strong> Any fee is as advised by the federation office — no amount is published on this site.</li>
+            <li><strong>04</strong> Your MMAKF ID is issued and entered in the national register.</li>
+          </ul>
+          <p class="body-txt" style="font-size:.82rem;color:var(--muted);margin-top:18px">
+            Applicants under {MINOR_AGE} must give parent or guardian details and guardian
+            consent. That section appears once a date of birth is entered.
+          </p>
+        </div>
       </div>
 
       <div class="fade">
-        <form id="regForm" class="reg-card">
+        <form id="regForm" class="reg-card" data-office-phone={officePhone}>
           <div class="reg-card-h">Application Form</div>
-          <div class="reg-fields">
-            <div class="full">
-              <label class="input-label" for="reg-name">Full name / Club name</label>
-              <input class="input" id="reg-name" name="name" required maxlength="120" />
+
+          {!storageDurable && (
+            <div class="blk-warn" role="alert">
+              <strong>Shared storage is not configured on this deployment.</strong> An application
+              submitted now is held only in this server's memory, so it can be lost when the server
+              restarts and the status link may stop working. Please apply by phone instead —
+              <a href={telHref} class="text-gold"> {fed.contact.phone}</a>.
             </div>
-            <div>
-              <label class="input-label" for="reg-phone">Phone (+91)</label>
-              <input class="input" id="reg-phone" name="phone" required maxlength="32" />
+          )}
+
+          {!canSubmit && (
+            <div class="blk-warn" role="alert">
+              <strong>Applications cannot be submitted at the moment.</strong> The federation's list
+              of state units is unavailable, and an application must name a recognised state unit.
+              Please apply by phone — <a href={telHref} class="text-gold"> {fed.contact.phone}</a> —
+              or email <a href={`mailto:${fed.contact.email}`} class="text-gold"> {fed.contact.email}</a>.
             </div>
-            <div>
-              <label class="input-label" for="reg-type">Membership type</label>
-              <select class="input" id="reg-type" name="type" required>
-                <option value="">Select type</option>
-                <option>Athlete</option>
-                <option>Instructor</option>
-                <option>Dojo / Club</option>
-                <option>Official</option>
-              </select>
-            </div>
-            <div>
-              <label class="input-label" for="reg-state">State</label>
-              <select class="input" id="reg-state" name="state" required>
-                <option value="">Select state</option>
-                {stateUnits.map((s: any) => <option>{s.state}</option>)}
-                <option>Other</option>
-              </select>
-            </div>
-            <div>
-              <label class="input-label" for="reg-district">District</label>
-              <input class="input" id="reg-district" name="district" maxlength="60" />
-            </div>
-            <div class="full">
-              <label class="input-label" for="reg-grade">Current grade (if any)</label>
-              <input class="input" id="reg-grade" name="grade" placeholder="e.g. 5th Kyu, I Dan, or blank" maxlength="60" />
-            </div>
-          </div>
-          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;margin-top:18px">Submit Application</button>
-          <div style="margin-top:12px;color:var(--muted);font-size:.72rem;text-align:center">
-            Details are used only for federation registration and unit verification.
-          </div>
+          )}
+
           <noscript>
-            <div style="margin-top:12px;color:var(--off-white);font-size:.8rem;text-align:center">
-              JavaScript is required to apply online — call <a href="tel:+919939144318" class="text-gold">{fed.contact.phone}</a>.
+            <div class="noscript-note">
+              This form needs JavaScript to submit. With JavaScript off, please apply by
+              phone — <a href={telHref} class="text-gold">{fed.contact.phone}</a> — or email
+              <a href={`mailto:${fed.contact.email}`} class="text-gold"> {fed.contact.email}</a>.
             </div>
           </noscript>
+
+          <p id="regBanner" class="form-banner" role="alert"></p>
+
+          {/* ── Type chooser ── */}
+          <fieldset class="reg-block">
+            <legend class="blk-h">What are you applying for?</legend>
+            <div class="type-grid">
+              {MEMBERSHIP_TYPES.map((t) => (
+                <div class="type-opt">
+                  <input
+                    class="type-radio"
+                    type="radio"
+                    id={`type-${slug(t)}`}
+                    name="type"
+                    value={t}
+                    required
+                    data-err="err-type"
+                    aria-describedby="err-type"
+                  />
+                  <label class="type-card" for={`type-${slug(t)}`}>
+                    <Icon name={TYPE_INFO[t].icon} size={26} color="var(--gold)" />
+                    <span class="type-name">{t}</span>
+                  </label>
+                </div>
+              ))}
+            </div>
+            <p class="field-err" id="err-type" role="alert"></p>
+          </fieldset>
+
+          {/* ── Everything below appears once a type is chosen ── */}
+          <fieldset id="regBody" class="reg-body" hidden disabled>
+            <p class="req-key">Fields marked <span class="req">*</span> are required.</p>
+
+            {blocks.map((b) => (
+              <fieldset
+                class="reg-block"
+                data-type-panel={b.panel}
+                hidden={b.kind === 'type'}
+                disabled={b.kind === 'type'}
+              >
+                <legend class="blk-h">{b.legend}</legend>
+                {b.note && <p class="blk-note">{b.note}</p>}
+
+                {b.kind === 'core' && states.length === 0 && (
+                  <p class="blk-warn">
+                    The federation's list of state units is unavailable right now, so the state
+                    field cannot be completed. Please call
+                    <a href={telHref} class="text-gold"> {fed.contact.phone}</a>.
+                  </p>
+                )}
+
+                {b.groups.map((g) => (
+                  <fieldset
+                    class="reg-group"
+                    data-minor-group={g.minor ? '' : undefined}
+                    hidden={g.minor}
+                    disabled={g.minor}
+                  >
+                    {g.minor && (
+                      <p class="minor-note">
+                        The applicant is under {MINOR_AGE} — a parent or guardian completes this part.
+                      </p>
+                    )}
+                    <div class="reg-fields">
+                      {g.fields.map((f) => {
+                        const id = `f-${b.prefix}-${f.name}`;
+                        const errId = `${id}-err`;
+                        const helpId = `${id}-help`;
+                        const describedBy = f.help ? `${helpId} ${errId}` : errId;
+                        const opts = f.name === 'state' ? states : (f.options ?? []);
+                        return (
+                          <div class:list={['reg-field', { full: isFull(f) }]}>
+                            {f.type === 'checkbox' ? (
+                              <div class="check-row">
+                                <input
+                                  class="check-box"
+                                  type="checkbox"
+                                  id={id}
+                                  name={f.name}
+                                  required={f.required}
+                                  data-err={errId}
+                                  aria-describedby={describedBy}
+                                />
+                                <label class="check-label" for={id}>
+                                  {f.label}
+                                  {f.required && <span class="req" aria-hidden="true"> *</span>}
+                                </label>
+                              </div>
+                            ) : (
+                              <Fragment>
+                                <label class="input-label" for={id}>
+                                  {f.label}
+                                  {f.required && <span class="req" aria-hidden="true"> *</span>}
+                                </label>
+                                {f.type === 'select' ? (
+                                  <select
+                                    class="input"
+                                    id={id}
+                                    name={f.name}
+                                    required={f.required}
+                                    disabled={f.name === 'state' && !canSubmit}
+                                    data-err={errId}
+                                    aria-describedby={describedBy}
+                                    autocomplete={AUTOCOMPLETE[f.name]}
+                                  >
+                                    <option value="">Choose…</option>
+                                    {opts.map((o) => <option value={o}>{o}</option>)}
+                                  </select>
+                                ) : f.type === 'textarea' ? (
+                                  <textarea
+                                    class="input"
+                                    id={id}
+                                    name={f.name}
+                                    rows="3"
+                                    required={f.required}
+                                    maxlength={f.maxLength}
+                                    data-err={errId}
+                                    aria-describedby={describedBy}
+                                  />
+                                ) : (
+                                  <input
+                                    class="input"
+                                    id={id}
+                                    name={f.name}
+                                    type={f.type}
+                                    required={f.required}
+                                    maxlength={f.maxLength}
+                                    min={f.type === 'number' ? '0' : undefined}
+                                    max={f.type === 'date' ? todayISO : undefined}
+                                    inputmode={f.type === 'tel' ? 'tel' : undefined}
+                                    autocomplete={AUTOCOMPLETE[f.name]}
+                                    data-dob={f.name === 'dob' ? '' : undefined}
+                                    data-err={errId}
+                                    aria-describedby={describedBy}
+                                  />
+                                )}
+                              </Fragment>
+                            )}
+                            {f.help && <p class="field-help" id={helpId}>{f.help}</p>}
+                            <p class="field-err" id={errId} role="alert"></p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </fieldset>
+                ))}
+              </fieldset>
+            ))}
+
+            <button
+              type="submit"
+              class="btn btn-primary"
+              style="width:100%;justify-content:center;margin-top:22px"
+              disabled={!canSubmit}
+              aria-describedby={!canSubmit ? 'submit-blocked' : undefined}
+            >
+              Submit Application
+            </button>
+            {!canSubmit && (
+              <p id="submit-blocked" class="field-err" style="text-align:center">
+                Submission is unavailable until the federation's state unit list is restored.
+              </p>
+            )}
+            <div style="margin-top:12px;color:var(--muted);font-size:.72rem;text-align:center">
+              Details are used only for federation registration and unit verification.
+            </div>
+          </fieldset>
         </form>
 
-        <div id="regDone" class="reg-card" style="display:none;text-align:center">
-          <div class="reg-card-h" style="color:var(--gold)">Application Received</div>
-          <p class="body-txt" style="margin:10px 0 18px">Your application number is</p>
+        {/* ── Receipt ── */}
+        <div id="regDone" class="reg-card" hidden>
+          <h3 id="regDoneH" class="reg-card-h" style="color:var(--gold)" tabindex="-1">Application Received</h3>
+          <p class="body-txt" style="margin:10px 0 14px;text-align:center">Your application number is</p>
           <div id="regAppNo" class="reg-appno"></div>
+
+          <p id="regMinorNote" class="body-txt" style="margin-top:16px;font-size:.86rem" hidden>
+            The applicant is under {MINOR_AGE}: the guardian details and guardian consent you gave
+            have been recorded with the application.
+          </p>
+
+          <div class="status-box">
+            <div class="input-label">Your private status link</div>
+            <a id="regStatusLink" class="status-link" href="#" rel="nofollow"></a>
+            <p class="body-txt" style="font-size:.82rem;margin-top:10px">
+              <strong>Save this link now.</strong> It carries a private access code and is the only
+              way to check this application later — it is not emailed to you and cannot be recovered
+              from the application number alone. Do not share it.
+            </p>
+            <button type="button" id="regCopy" class="btn btn-gold" style="margin-top:12px">Copy link</button>
+            {!storageDurable && (
+              <p class="field-err" style="margin-top:12px">
+                Shared storage is not configured on this deployment, so this link may stop working.
+                Quote the application number to the office by phone.
+              </p>
+            )}
+          </div>
+
           <p class="body-txt" style="margin-top:18px;font-size:.86rem">
-            Note it down — quote it in all correspondence. The federation office will
-            contact you within 7 working days.
+            Quote the application number in all correspondence. Any fee is as advised by the
+            federation office.
           </p>
         </div>
       </div>
@@ -146,24 +456,30 @@ const memberTypes = [
       </div>
 
       <form id="verifyForm" class="verify-bar fade">
-        <input class="input" name="id" placeholder="e.g. MMAKF-A-2015-00891" aria-label="Member ID" required maxlength="40" style="text-transform:uppercase" />
+        <label class="sr-only" for="verify-id">MMAKF member ID</label>
+        <input class="input" id="verify-id" name="id" placeholder="e.g. MMAKF-A-2015-00891" required maxlength="40" style="text-transform:uppercase" />
         <button type="submit" class="btn btn-gold">Verify</button>
       </form>
 
-      <div id="verifyResult" class="fade" style="margin-top:24px"></div>
+      <div id="verifyResult" class="fade" style="margin-top:24px" aria-live="polite"></div>
     </div>
   </section>
+
+  <script type="application/json" id="regModel" set:html={clientModelJson}></script>
 </Base>
 
 <style>
+  [hidden] { display: none !important; }
+
   .bg2 { background: var(--bg-2); }
   .reg-grid {
     display: grid;
-    grid-template-columns: 1fr 1.1fr;
+    grid-template-columns: 0.85fr 1.15fr;
     gap: 56px;
     align-items: start;
   }
-  @media (max-width: 900px) { .reg-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 980px) { .reg-grid { grid-template-columns: 1fr; gap: 40px; } }
+  @media (min-width: 981px) { .reg-intro { position: sticky; top: 100px; } }
 
   .reg-steps { list-style: none; display: flex; flex-direction: column; }
   .reg-steps li {
@@ -182,30 +498,194 @@ const memberTypes = [
     border-radius: var(--radius);
     padding: 28px;
   }
+  @media (max-width: 480px) { .reg-card { padding: 20px 16px; } }
   .reg-card-h {
     font-family: var(--font-display);
     font-size: 0.7rem;
     letter-spacing: 0.24em;
     text-transform: uppercase;
     color: var(--gold);
+    font-weight: 500;
     padding-bottom: 16px;
     border-bottom: 1px solid var(--border);
     margin-bottom: 20px;
   }
+
+  /* ── Fieldsets carry the grouping; no browser chrome ── */
+  fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+  .blk-h {
+    display: block;
+    width: 100%;
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    font-weight: 500;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+  }
+  .reg-body .reg-block { margin-top: 26px; }
+  .blk-note, .blk-warn { color: var(--muted); font-size: 0.8rem; margin-bottom: 14px; }
+  .blk-warn {
+    color: var(--red-2);
+    border-left: 3px solid var(--red);
+    background: rgba(142, 18, 18, 0.05);
+    padding: 10px 12px;
+  }
+  .req-key { color: var(--muted); font-size: 0.78rem; margin: 18px 0 0; }
+  .req { color: var(--red-2); font-weight: 600; }
+
+  /* ── Type chooser ── */
+  .type-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+  }
+  .type-opt { position: relative; }
+  .type-radio {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .type-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    text-align: center;
+    min-height: 92px;
+    padding: 14px 10px;
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    background: var(--bg-2);
+    color: var(--off-white);
+    transition: border-color .2s, box-shadow .2s, background .2s;
+    cursor: pointer;
+  }
+  .type-name {
+    font-family: var(--font-display);
+    font-size: 0.74rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--white);
+  }
+  .type-radio:hover + .type-card { border-color: var(--gold-dim); }
+  .type-radio:focus-visible + .type-card { outline: 2px solid var(--gold-2); outline-offset: 2px; }
+  .type-radio:checked + .type-card {
+    border-color: var(--gold);
+    background: rgba(160, 124, 30, 0.07);
+    box-shadow: inset 0 0 0 1px var(--gold-dim);
+  }
+
+  /* ── Fields ── */
   .reg-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  @media (max-width: 520px) { .reg-fields { grid-template-columns: 1fr; } }
+  @media (max-width: 620px) { .reg-fields { grid-template-columns: 1fr; } }
   .reg-fields .full { grid-column: 1 / -1; }
+  .reg-group + .reg-group { margin-top: 14px; }
+  textarea.input { resize: vertical; min-height: 88px; }
+  .input[aria-invalid='true'] { border-color: var(--red-2); box-shadow: 0 0 0 3px rgba(142, 18, 18, 0.1); }
+
+  .field-help { color: var(--muted); font-size: 0.76rem; margin-top: 6px; line-height: 1.5; }
+  .field-err { color: var(--red-2); font-size: 0.78rem; margin-top: 6px; font-weight: 500; }
+  .field-err:empty { display: none; }
+
+  .form-banner {
+    color: var(--red-2);
+    font-size: 0.85rem;
+    border-left: 3px solid var(--red);
+    background: rgba(142, 18, 18, 0.05);
+    padding: 11px 13px;
+    margin-bottom: 4px;
+  }
+  .form-banner:empty { display: none; }
+
+  /* Checkboxes: 44px minimum target, label bound with `for` */
+  .check-row { display: flex; align-items: flex-start; gap: 12px; min-height: 44px; padding: 4px 0; }
+  .check-box {
+    width: 22px; height: 22px;
+    flex: 0 0 22px;
+    margin-top: 11px;
+    accent-color: var(--red);
+    cursor: pointer;
+  }
+  .check-label {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    color: var(--off-white);
+    font-size: 0.86rem;
+    line-height: 1.5;
+    cursor: pointer;
+  }
+  .check-box[aria-invalid='true'] { outline: 2px solid var(--red-2); outline-offset: 2px; }
+
+  .minor-note {
+    font-size: 0.8rem;
+    color: var(--gold-3);
+    border-left: 3px solid var(--gold-dim);
+    background: rgba(160, 124, 30, 0.06);
+    padding: 9px 12px;
+    margin-bottom: 12px;
+  }
+
+  .noscript-note {
+    color: var(--off-white);
+    font-size: 0.85rem;
+    border-left: 3px solid var(--gold);
+    background: rgba(160, 124, 30, 0.06);
+    padding: 12px 14px;
+    margin-bottom: 16px;
+  }
+
+  /* ── Receipt ── */
   .reg-appno {
     font-family: var(--font-display);
-    font-size: 1.6rem;
+    font-size: 1.5rem;
     font-weight: 600;
     letter-spacing: 0.08em;
     color: var(--gold-2);
     border: 1px dashed var(--gold-dim);
     padding: 14px;
     border-radius: var(--radius);
+    text-align: center;
+    word-break: break-word;
   }
+  .status-box {
+    margin-top: 20px;
+    border: 1px solid var(--border-2);
+    border-left: 3px solid var(--gold);
+    border-radius: var(--radius);
+    padding: 16px;
+    background: var(--card-2);
+  }
+  .status-link {
+    display: block;
+    color: var(--gold-3);
+    text-decoration: underline;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    word-break: break-all;
+    min-height: 44px;
+    padding: 10px 0;
+  }
+  .status-link:hover { color: var(--red-2); }
 
+  /* ── Verify ── */
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
   .verify-bar {
     display: grid;
     grid-template-columns: 1fr auto;
@@ -252,32 +732,220 @@ const memberTypes = [
 </style>
 
 <script>
-  // ── Registration application ──
+  // ══ Registration application ═════════════════════════════════════════════
   const regForm = document.getElementById('regForm') as HTMLFormElement | null;
+  const regBody = document.getElementById('regBody') as HTMLFieldSetElement | null;
+  const banner = document.getElementById('regBanner') as HTMLElement | null;
+
+  interface RegModel {
+    minorAge: number;
+    slugs: Record<string, string>;
+    minorFields: string[];
+  }
+  let MODEL: RegModel = { minorAge: 18, slugs: {}, minorFields: [] };
+  try {
+    const raw = document.getElementById('regModel')?.textContent;
+    if (raw) MODEL = JSON.parse(raw) as RegModel;
+  } catch {
+    /* falls back to the defaults above */
+  }
+
+  /**
+   * Whole years between a date of birth and today — the SAME arithmetic as
+   * ageOn() in src/lib/registration.ts (UTC components throughout). If the two
+   * ever disagree, the form accepts what the server rejects.
+   */
+  function ageOn(dob: string): number | null {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dob)) return null;
+    const d = new Date(dob + 'T00:00:00Z');
+    if (Number.isNaN(d.getTime())) return null;
+    const on = new Date();
+    let age = on.getUTCFullYear() - d.getUTCFullYear();
+    const monthDiff = on.getUTCMonth() - d.getUTCMonth();
+    if (monthDiff < 0 || (monthDiff === 0 && on.getUTCDate() < d.getUTCDate())) age--;
+    return age;
+  }
+
+  function chosenType(): string {
+    const r = regForm?.querySelector('input[name="type"]:checked') as HTMLInputElement | null;
+    return r ? r.value : '';
+  }
+
+  function activePanel(): HTMLFieldSetElement | null {
+    const t = chosenType();
+    const s = t ? MODEL.slugs[t] : '';
+    if (!s) return null;
+    return (regForm?.querySelector('[data-type-panel="' + s + '"]') as HTMLFieldSetElement | null) ?? null;
+  }
+
+  /** Reveal the chosen type's fields — and only those — plus the minor blocks. */
+  function sync() {
+    const type = chosenType();
+    if (regBody) {
+      regBody.hidden = !type;
+      regBody.disabled = !type;
+    }
+    const wanted = type ? MODEL.slugs[type] : '';
+    regForm?.querySelectorAll('[data-type-panel]').forEach((el) => {
+      const fs = el as HTMLFieldSetElement;
+      const on = !!wanted && fs.dataset.typePanel === wanted;
+      fs.hidden = !on;
+      fs.disabled = !on;
+    });
+
+    // Only the visible type's date of birth decides this, exactly as the server
+    // reads a single `dob` off the submitted body.
+    const dobEl = activePanel()?.querySelector('[data-dob]') as HTMLInputElement | null;
+    const age = dobEl ? ageOn(dobEl.value) : null;
+    const isMinor = age !== null && age < MODEL.minorAge;
+    regForm?.querySelectorAll('[data-minor-group]').forEach((el) => {
+      const fs = el as HTMLFieldSetElement;
+      fs.hidden = !isMinor;
+      fs.disabled = !isMinor;
+    });
+  }
+
+  regForm?.addEventListener('change', sync);
+  regForm?.addEventListener('input', (e) => {
+    const t = e.target as HTMLElement | null;
+    if (t && t.hasAttribute('data-dob')) sync();
+  });
+  sync();
+
+  function clearErrors() {
+    regForm?.querySelectorAll('.field-err').forEach((el) => { el.textContent = ''; });
+    regForm?.querySelectorAll('[aria-invalid]').forEach((el) => el.removeAttribute('aria-invalid'));
+    if (banner) banner.textContent = '';
+  }
+
+  /**
+   * /api/register answers a 400 with { error, fields: { fieldName: message } }.
+   * Each message is rendered against its own field; a lone banner would leave
+   * the applicant hunting for what was wrong.
+   */
+  function showFieldErrors(fields: Record<string, string>): HTMLElement | null {
+    let first: HTMLElement | null = null;
+    const orphans: string[] = [];
+    for (const name of Object.keys(fields)) {
+      const msg = String(fields[name] ?? '');
+      const safe = /^[A-Za-z0-9_-]+$/.test(name);
+      const el = safe
+        ? (regForm?.querySelector('[name="' + name + '"]:not(:disabled)') as HTMLElement | null)
+        : null;
+      if (!el) {
+        orphans.push(msg ? name + ': ' + msg : name);
+        continue;
+      }
+      el.setAttribute('aria-invalid', 'true');
+      const box = document.getElementById(el.getAttribute('data-err') || '');
+      if (box) box.textContent = msg;
+      if (!first) first = el;
+    }
+    // Never drop a message the server sent — surface anything unmatched.
+    if (orphans.length && banner) {
+      banner.textContent = (banner.textContent ? banner.textContent + ' ' : '') + orphans.join(' · ');
+    }
+    return first;
+  }
+
   regForm?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const btn = regForm.querySelector('button[type=submit]') as HTMLButtonElement;
-    const body = Object.fromEntries(new FormData(regForm).entries());
-    btn.disabled = true; btn.textContent = 'Submitting…';
+    clearErrors();
+    const btn = regForm.querySelector('button[type=submit]') as HTMLButtonElement | null;
+    const payload: Record<string, string> = {};
+    new FormData(regForm).forEach((v, k) => {
+      if (typeof v === 'string') payload[k] = v;
+    });
+
+    if (btn) { btn.disabled = true; btn.textContent = 'Submitting…'; }
+
+    let res: Response;
+    let data: any = null;
     try {
-      const res = await fetch('/api/register', {
+      res = await fetch('/api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error('bad');
-      (document.getElementById('regAppNo') as HTMLElement).textContent = data.appNo;
-      regForm.style.display = 'none';
-      (document.getElementById('regDone') as HTMLElement).style.display = 'block';
-      (window as any).showNotif('Application received. Note your application number.');
+      try { data = await res.json(); } catch { data = null; }
     } catch {
-      (window as any).showNotif('Could not submit. Please call +91 99391 44318.');
-      btn.disabled = false; btn.textContent = 'Submit Application';
+      if (banner) banner.textContent = 'Could not reach the federation server. Check your connection and try again.';
+      if (btn) { btn.disabled = false; btn.textContent = 'Submit Application'; }
+      banner?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
     }
+
+    if (btn) { btn.disabled = false; btn.textContent = 'Submit Application'; }
+
+    if (res.status === 400 && data && data.fields) {
+      if (banner) banner.textContent = String(data.error || 'Please correct the highlighted fields.');
+      const first = showFieldErrors(data.fields as Record<string, string>);
+      if (first) {
+        first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        (first as HTMLInputElement).focus({ preventScroll: true });
+      } else {
+        banner?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return;
+    }
+
+    if (!res.ok || !data || !data.ok) {
+      // The office number comes from the CMS via a data attribute — a second
+      // copy written into this script would drift the day the number changes.
+      const officePhone = regForm.dataset.officePhone || '';
+      if (banner) {
+        banner.textContent =
+          String((data && data.error) || 'Could not submit the application.') +
+          (res.status === 429 || !officePhone ? '' : ' If this continues, please call ' + officePhone + '.');
+      }
+      banner?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+
+    // ── Received ──
+    const done = document.getElementById('regDone') as HTMLElement | null;
+    const appNoEl = document.getElementById('regAppNo') as HTMLElement | null;
+    const linkEl = document.getElementById('regStatusLink') as HTMLAnchorElement | null;
+    const minorNote = document.getElementById('regMinorNote') as HTMLElement | null;
+    if (appNoEl) appNoEl.textContent = String(data.appNo || '');
+    if (linkEl && data.statusUrl) {
+      const abs = new URL(String(data.statusUrl), window.location.origin).href;
+      linkEl.href = abs;
+      linkEl.textContent = abs;
+    }
+    if (minorNote) minorNote.hidden = !data.isMinor;
+    regForm.hidden = true;
+    if (done) {
+      done.hidden = false;
+      done.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      (document.getElementById('regDoneH') as HTMLElement | null)?.focus({ preventScroll: true });
+    }
+    (window as any).showNotif?.('Application received. Save your status link.');
   });
 
-  // ── ID verification ──
+  // Copy is offered only where the clipboard API actually exists (it is absent
+  // on insecure origins) — a button that silently does nothing is a defect.
+  const copyBtn = document.getElementById('regCopy') as HTMLButtonElement | null;
+  if (copyBtn) {
+    if (!navigator.clipboard) {
+      copyBtn.hidden = true;
+    } else {
+      copyBtn.addEventListener('click', async () => {
+        const link = document.getElementById('regStatusLink') as HTMLAnchorElement | null;
+        if (!link) return;
+        try {
+          await navigator.clipboard.writeText(link.href);
+          copyBtn.textContent = 'Link copied';
+          setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 2500);
+        } catch {
+          copyBtn.hidden = true;
+          (window as any).showNotif?.('Copying is blocked here — select the link and copy it manually.');
+        }
+      });
+    }
+  }
+
+  // ══ ID verification ══════════════════════════════════════════════════════
   const vForm = document.getElementById('verifyForm') as HTMLFormElement | null;
   const vOut = document.getElementById('verifyResult') as HTMLElement | null;
   const esc = (s: any) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -290,7 +958,23 @@ const memberTypes = [
     vOut.innerHTML = '<div style="text-align:center;color:var(--muted)">Checking the register…</div>';
     try {
       const res = await fetch('/api/verify?id=' + encodeURIComponent(id));
-      const data = await res.json();
+      let data: any = null;
+      try { data = await res.json(); } catch { data = null; }
+
+      // A rate-limited or rejected request is NOT a negative register result.
+      // Rendering it as "no member found" would tell an employer or a parent
+      // that a genuine member does not exist.
+      if (res.status === 429) {
+        vOut.innerHTML = `<div class="verify-card notfound">Too many checks from this connection. Please wait a minute and try again — this is not a result about the ID.</div>`;
+        return;
+      }
+      if (!res.ok || !data || typeof data.found !== 'boolean') {
+        const why = data && data.error ? esc(data.error) : 'The register could not be searched just now.';
+        vOut.innerHTML = `<div class="verify-card notfound">${why}<br/>
+          <span style="font-size:.85rem">This is not a result about the ID. Please try again, or contact the federation office.</span></div>`;
+        return;
+      }
+
       if (data.found) {
         const m = data.member;
         vOut.innerHTML = `<div class="verify-card">

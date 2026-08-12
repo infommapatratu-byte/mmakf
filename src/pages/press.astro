@@ -1,0 +1,557 @@
+---
+import Base from '@/layouts/Base.astro';
+import Icon from '@/components/Icon.astro';
+import PageHero from '@/components/PageHero.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+/**
+ * Every link on this page is built from a store-held string an admin can edit.
+ * Only http(s) and site-relative values are accepted; a row whose address is
+ * anything else is dropped rather than rendered as a link that cannot work.
+ */
+const safeHref = (u: string): string | null => {
+  const v = (u || '').trim();
+  if (!v) return null;
+  if (v.startsWith('/') && !v.startsWith('//')) return v;
+  try {
+    const proto = new URL(v).protocol;
+    return proto === 'http:' || proto === 'https:' ? v : null;
+  } catch {
+    return null;
+  }
+};
+
+const press = ((await get<any[]>('press')) || []).filter((p: any) => p && safeHref(p.img));
+const social = ((await get<any[]>('social')) || []).filter((a: any) => a && safeHref(a.url));
+
+const primary = social.filter((a: any) => a.primary === 'Yes');
+const others = social.filter((a: any) => a.primary !== 'Yes');
+
+/** Federation contact — read from the store, never hardcoded on the page. */
+const fed = await get<any>('federation');
+const contactEmail: string = fed?.contact?.email || '';
+
+/**
+ * English glosses of the PRINTED HEADLINES ONLY, keyed on the exact Hindi
+ * string held in the store. A gloss renders only on an exact match, so an
+ * edited or replaced headline loses its gloss rather than carrying a stale one.
+ *
+ * These translate the headline and nothing else. No clipping body is
+ * transcribed on this page, and nothing is said about a clipping beyond the
+ * summary the federation recorded with the scan.
+ */
+const HEADLINE_GLOSS: Record<string, string> = {
+  'पतरातु में कराटे प्रशिक्षण सह बेल्ट ग्रेडिंग संपन्न':
+    'Karate training and belt grading concluded at Patratu',
+  'जूनियर टाइगर ली': 'Junior Tiger Lee',
+  'मार्शल आर्ट में प्रमोद ने बनाए हैं कई रिकॉर्ड':
+    'Pramod has set several records in martial arts',
+};
+
+const hasDevanagari = (s: string) => /[ऀ-ॿ]/.test(s || '');
+
+/** Platform to house icon. No brand marks are shipped, so these are indicative. */
+const platformIcon = (platform: string) => {
+  const p = (platform || '').toLowerCase();
+  if (p.includes('youtube')) return 'monitor';
+  if (p.includes('facebook')) return 'users';
+  if (p.includes('telegram')) return 'book';
+  return 'globe';
+};
+
+/** Readable form of a URL for display. The full href stays on the anchor. */
+const prettyUrl = (u: string) => {
+  try {
+    const url = new URL(u);
+    const host = url.hostname.replace(/^www\./, '');
+    const path = url.pathname.replace(/\/$/, '');
+    return host + (path.length > 28 ? path.slice(0, 28) + '…' : path);
+  } catch {
+    return u;
+  }
+};
+---
+
+<Base
+  title="Press Coverage & Official Channels — MMAKF"
+  description="Newspaper clippings held by MMAKF and self-hosted here with a note on what each one establishes, and the federation's verified official channels."
+>
+  <PageHero
+    eyebrow="Press & Channels"
+    title={`In print, and <em>on the record</em>.`}
+    lead="Newspaper clippings held by the federation, published here with an honest note on what each one establishes — and the official channels where the federation and its academy actually publish."
+  />
+
+  {/* ═══════ PRESS ARCHIVE ═══════ */}
+  <section id="archive">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Newspaper archive</div>
+        <h2 class="display-2">Press <em class="r">clippings</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Clippings the federation holds, scanned and self-hosted here. The archive was
+          recovered from the federation's lapsed predecessor site; these are scans of print
+          pages, not web articles, so hosting them is what keeps them reachable.
+        </p>
+      </div>
+
+      <div class="card note fade" style="margin-bottom:40px">
+        <div class="card-eyebrow">What a clipping proves</div>
+        <p class="card-body">
+          A clipping is evidence that a newspaper printed something. It is not, on its own,
+          independent confirmation of what was reported. Every entry below carries a
+          <strong>verification</strong> line recording exactly what the federation has
+          established — nothing here should be read as more than that line states.
+        </p>
+      </div>
+
+      {press.length === 0 ? (
+        <div class="card fade">
+          <p class="card-body">No clippings are published at present.</p>
+        </div>
+      ) : (
+        <div class="clip-grid">
+          {press.map((p: any) => {
+            const gloss = HEADLINE_GLOSS[p.headline];
+            const label = [p.outlet, p.date].filter(Boolean).join(' · ');
+            return (
+              <figure class="clip card fade">
+                <a
+                  class="clip-shot"
+                  href={p.img}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-full={p.img}
+                  data-cap={label}
+                  aria-label={`Open the full-size scan of this clipping — ${label}`}
+                >
+                  <img src={p.img} alt={`Newspaper clipping — ${label}`} loading="lazy" decoding="async" />
+                  <span class="clip-zoom" aria-hidden="true">Open full size ↗</span>
+                </a>
+
+                <figcaption class="clip-meta">
+                  <div class="clip-outlet">{p.outlet}</div>
+                  {p.date && <div class="clip-date">{p.date}</div>}
+
+                  {p.headline && (
+                    <h3 class="clip-head" lang={hasDevanagari(p.headline) ? 'hi' : 'en'}>{p.headline}</h3>
+                  )}
+                  {gloss && (
+                    <p class="clip-gloss">
+                      “{gloss}”
+                      <span class="clip-gloss-k">— English translation of the printed headline; not an official federation translation</span>
+                    </p>
+                  )}
+
+                  {p.summary && <p class="clip-summary">{p.summary}</p>}
+
+                  {p.verified && (
+                    <p class="clip-verified">
+                      <span class="clip-verified-k">Verification</span>
+                      <span>{p.verified}</span>
+                    </p>
+                  )}
+                </figcaption>
+              </figure>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ OFFICIAL CHANNELS ═══════ */}
+  <section id="channels">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Official channels</div>
+        <h2 class="display-2">Where the federation <em>publishes</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          The channels the federation and its academy publish on. Follower and subscriber
+          counts are deliberately not shown — they change, and a stale number on a federation
+          page is a claim that quietly becomes untrue. Anything a channel carries is published
+          there by its own operator; this page only points at it.
+        </p>
+      </div>
+
+      {social.length === 0 ? (
+        <div class="card fade">
+          <p class="card-body">No official channels are published at present.</p>
+        </div>
+      ) : (
+        <Fragment>
+          {primary.map((c: any) => (
+            <a class="chan-feature card hoverable fade" href={c.url} target="_blank" rel="noopener noreferrer">
+              <span class="chan-feature-icon">
+                <Icon name={platformIcon(c.platform)} size={34} color="var(--gold-2)" />
+              </span>
+              <span class="chan-feature-body">
+                <span class="card-eyebrow chan-block">Primary channel · {c.platform}</span>
+                <span class="chan-feature-title">{c.name}</span>
+                {c.note && <span class="chan-feature-note">{c.note}</span>}
+                <span class="btn btn-primary chan-feature-cta">Open the channel ↗</span>
+                <span class="chan-url">{prettyUrl(c.url)}</span>
+              </span>
+            </a>
+          ))}
+
+          {others.length > 0 && (
+            <div class="chan-grid" style={primary.length > 0 ? 'margin-top:22px' : ''}>
+              {others.map((c: any) => (
+                <a class="chan card hoverable fade" href={c.url} target="_blank" rel="noopener noreferrer">
+                  <span class="chan-top">
+                    <span class="chan-icon"><Icon name={platformIcon(c.platform)} size={22} color="var(--gold-2)" /></span>
+                    <span class="chan-platform">{c.platform}</span>
+                  </span>
+                  <span class="chan-name">{c.name}</span>
+                  {c.note && <span class="chan-note">{c.note}</span>}
+                  <span class="chan-url">{prettyUrl(c.url)} ↗</span>
+                </a>
+              ))}
+            </div>
+          )}
+        </Fragment>
+      )}
+
+      <p class="text-muted mt-8" style="font-size:.82rem;max-width:70ch">
+        Links open on the platform's own site in a new tab. If a channel listed here has moved or
+        closed, {contactEmail
+          ? <Fragment>write to <a class="text-gold" href={`mailto:${contactEmail}`}>{contactEmail}</a> and it will be corrected.</Fragment>
+          : <Fragment>tell the federation office and it will be corrected.</Fragment>}
+      </p>
+    </div>
+  </section>
+
+  {/* Lightbox — progressive enhancement. Without JS, or where modal dialogs are
+      unsupported, each clipping link simply opens the full-size scan in a new
+      tab, which is exactly what the link declares. */}
+  <dialog id="clipDialog" class="clip-dialog" aria-label="Full-size newspaper clipping">
+    <div class="clip-dialog-bar">
+      <span class="clip-dialog-cap" id="clipDialogCap"></span>
+      <button type="button" class="clip-dialog-close" id="clipDialogClose" aria-label="Close the full-size clipping">Close ✕</button>
+    </div>
+    <img id="clipDialogImg" alt="" />
+    <p class="clip-dialog-err" id="clipDialogErr" role="alert" hidden>
+      This scan could not be loaded.
+      <a class="text-gold" id="clipDialogErrLink" href="/" target="_blank" rel="noopener noreferrer">Open the file directly ↗</a>
+    </p>
+  </dialog>
+</Base>
+
+<style>
+  .note { border-left: 3px solid var(--gold-dim); }
+
+  /* ─── Clippings ─── */
+  .clip-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 22px;
+  }
+  @media (max-width: 900px) { .clip-grid { grid-template-columns: minmax(0, 1fr); } }
+
+  .clip { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+
+  .clip-shot {
+    display: block;
+    position: relative;
+    background: var(--card-2);
+    border-bottom: 1px solid var(--border);
+    padding: 12px;
+    min-height: 44px;
+  }
+  .clip-shot img {
+    width: 100%;
+    height: auto;
+    max-height: 340px;
+    object-fit: contain;
+    object-position: center;
+    background: #fff;
+    border: 1px solid var(--border);
+  }
+  .clip-zoom {
+    position: absolute;
+    right: 20px;
+    bottom: 20px;
+    display: inline-flex;
+    align-items: center;
+    background: rgba(26, 23, 19, 0.85);
+    color: #F5F2EC;
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    opacity: 0;
+    transition: opacity 0.22s;
+  }
+  .clip-shot:hover .clip-zoom,
+  .clip-shot:focus-visible .clip-zoom { opacity: 1; }
+  @media (pointer: coarse) { .clip-zoom { opacity: 1; } }
+
+  .clip-meta { padding: 22px 24px 24px; display: flex; flex-direction: column; flex: 1; }
+  .clip-outlet {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    line-height: 1.5;
+  }
+  .clip-date {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+  .clip-head {
+    font-size: 1.12rem;
+    font-weight: 600;
+    line-height: 1.45;
+    color: var(--white);
+    margin-top: 12px;
+    overflow-wrap: anywhere;
+  }
+  .clip-gloss {
+    font-family: var(--font-accent);
+    font-size: 1.02rem;
+    font-style: italic;
+    color: var(--off-white);
+    margin-top: 8px;
+    line-height: 1.6;
+  }
+  .clip-gloss-k {
+    display: block;
+    font-family: var(--font-body);
+    font-style: normal;
+    font-size: 0.74rem;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  .clip-summary {
+    font-size: 0.9rem;
+    color: var(--off-white);
+    line-height: 1.75;
+    margin-top: 14px;
+  }
+  .clip-verified {
+    margin-top: auto;
+    padding-top: 18px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 0.82rem;
+    color: var(--muted);
+    line-height: 1.6;
+    border-top: 1px solid var(--border);
+  }
+  .clip-verified-k {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold-3);
+  }
+
+  /* ─── Lightbox ─── */
+  .clip-dialog {
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    background: var(--card);
+    padding: 0;
+    width: min(1100px, 94vw);
+    max-width: 94vw;
+    max-height: 92vh;
+    overflow: auto;
+    box-shadow: var(--shadow-2);
+  }
+  .clip-dialog::backdrop { background: rgba(20, 18, 15, 0.78); }
+  .clip-dialog-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 10px 12px 10px 18px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--card);
+  }
+  .clip-dialog-cap {
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .clip-dialog-close {
+    background: transparent;
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    color: var(--off-white);
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    padding: 12px 16px;
+    min-height: 44px;
+    white-space: nowrap;
+  }
+  .clip-dialog-close:hover { border-color: var(--gold-dim); color: var(--gold-2); }
+  .clip-dialog img { width: 100%; height: auto; background: #fff; }
+  .clip-dialog-err {
+    padding: 26px 18px;
+    font-size: 0.88rem;
+    color: var(--off-white);
+    line-height: 1.7;
+  }
+  .clip-dialog-err[hidden] { display: none; }
+
+  /* ─── Channels ─── */
+  .chan-feature {
+    display: flex;
+    gap: 26px;
+    align-items: flex-start;
+    padding: 34px;
+    border-left: 3px solid var(--red);
+  }
+  @media (max-width: 640px) { .chan-feature { flex-direction: column; gap: 18px; padding: 26px; } }
+  .chan-feature-icon {
+    flex: 0 0 auto;
+    width: 62px;
+    height: 62px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .chan-feature-body { display: block; min-width: 0; }
+  .chan-block { display: block; }
+  .chan-feature-title {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    font-weight: 600;
+    line-height: 1.28;
+    color: var(--white);
+    margin-top: 4px;
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 640px) { .chan-feature-title { font-size: 1.18rem; } }
+  .chan-feature-note {
+    display: block;
+    font-size: 0.9rem;
+    color: var(--off-white);
+    line-height: 1.75;
+    margin-top: 10px;
+  }
+  .chan-feature-cta { margin-top: 20px; }
+
+  .chan-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+  @media (max-width: 760px) { .chan-grid { grid-template-columns: minmax(0, 1fr); } }
+
+  .chan { display: block; padding: 24px; min-width: 0; }
+  .chan-top { display: flex; align-items: center; gap: 12px; }
+  .chan-icon {
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    flex: 0 0 auto;
+  }
+  .chan-platform {
+    font-family: var(--font-display);
+    font-size: 0.64rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+  }
+  .chan-name {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 0.98rem;
+    font-weight: 600;
+    color: var(--white);
+    margin-top: 14px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+  .chan-note {
+    display: block;
+    font-size: 0.85rem;
+    color: var(--off-white);
+    margin-top: 8px;
+    line-height: 1.65;
+  }
+  .chan-url {
+    display: block;
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-top: 12px;
+    overflow-wrap: anywhere;
+  }
+  .chan:hover .chan-url, .chan-feature:hover .chan-url { color: var(--gold-2); }
+</style>
+
+<script>
+  // Clipping lightbox. The anchors are real links to the full-size scan; this
+  // only intercepts the click where a modal dialog is actually available.
+  const dlg = document.getElementById('clipDialog') as HTMLDialogElement | null;
+  const dlgImg = document.getElementById('clipDialogImg') as HTMLImageElement | null;
+  const dlgCap = document.getElementById('clipDialogCap');
+  const dlgClose = document.getElementById('clipDialogClose');
+  const dlgErr = document.getElementById('clipDialogErr');
+  const dlgErrLink = document.getElementById('clipDialogErrLink') as HTMLAnchorElement | null;
+
+  if (dlg && dlgImg && typeof dlg.showModal === 'function') {
+    document.querySelectorAll<HTMLAnchorElement>('.clip-shot').forEach((a) => {
+      a.addEventListener('click', (e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+        const full = a.dataset.full;
+        if (!full) return;
+        e.preventDefault();
+        const cap = a.dataset.cap || '';
+        if (dlgErr) dlgErr.hidden = true;
+        if (dlgErrLink) dlgErrLink.href = full;
+        dlgImg.hidden = false;
+        dlgImg.src = full;
+        dlgImg.alt = cap ? `Full-size newspaper clipping — ${cap}` : 'Full-size newspaper clipping';
+        if (dlgCap) dlgCap.textContent = cap;
+        dlg.showModal();
+      });
+    });
+
+    // A scan that fails to load must say so, not leave an empty frame.
+    dlgImg.addEventListener('error', () => {
+      if (!dlgImg.getAttribute('src')) return;
+      dlgImg.hidden = true;
+      if (dlgErr) dlgErr.hidden = false;
+    });
+
+    dlgClose?.addEventListener('click', () => dlg.close());
+    // A click on the backdrop area closes the dialog.
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+    // Release the decoded image when the dialog closes.
+    dlg.addEventListener('close', () => {
+      dlgImg.removeAttribute('src');
+      dlgImg.hidden = false;
+      if (dlgErr) dlgErr.hidden = true;
+      if (dlgCap) dlgCap.textContent = '';
+    });
+  }
+</script>

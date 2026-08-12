@@ -46,6 +46,7 @@ type Entry = {
   url: string;
   evidence: string;    // what the fetch actually returned
   note?: string;
+  checked?: string;    // per-entry check date; falls back to the register date
 };
 
 type Area = { area: string; blurb: string; items: Entry[] };
@@ -294,57 +295,142 @@ const EXTERNAL_FALLBACK: Area[] = [
  * MMAKF's OWN instruments.
  *
  * Every one of these is a document the federation itself must author, adopt and
- * publish. None has been drafted here. `state` is the honest status and nothing
- * else — no summary, no paraphrase, no placeholder text that could be mistaken
- * for policy.
+ * publish. None has been drafted here — no summary, no paraphrase, no
+ * placeholder text that could be mistaken for policy.
+ *
+ * Deliberately absent: the reference code and the publication state. Both are
+ * read at render time from the federation's OWN document register (the
+ * `documents` key that /governance renders), because a second hand-maintained
+ * copy of that register would drift from it — and the drift is not cosmetic.
+ * The day the office uploads the constitution, a hardcoded "Not yet published"
+ * here becomes a false statement about the federation's own compliance. It also
+ * means no reference code is ever invented on this page for a document the
+ * federation has not actually registered.
  */
-type Own = { title: string; ref: string; covers: string; state: string };
+type Own = { title: string; covers: string };
 
 const OWN_FALLBACK: Own[] = [
-  { title: 'Constitution & Bye-Laws', ref: 'MMAKF/CONST', state: 'Not yet published',
+  { title: 'Constitution & Bye-Laws',
     covers: 'Legal form of the federation, membership classes, general body and executive, elections, powers of office bearers, amendment procedure.' },
-  { title: 'Code of Conduct — Members & Officials', ref: 'MMAKF/COC', state: 'Not yet published',
+  { title: 'Code of Conduct — Members & Officials',
     covers: 'Standards of behaviour expected of athletes, instructors, officials and office bearers, and the consequences of breach.' },
-  { title: 'Athlete Safeguarding & Child Protection Policy', ref: 'MMAKF/SGP', state: 'Not yet published',
+  { title: 'Athlete Safeguarding & Child Protection Policy',
     covers: 'Protection of minors and adults at risk, instructor screening, supervision and travel rules, reporting routes, and the designated safeguarding contact.' },
-  { title: 'Anti-Doping Policy', ref: 'MMAKF/ADP', state: 'Not yet published',
+  { title: 'Anti-Doping Policy (NADA / WADA aligned)',
     covers: 'How MMAKF gives effect to the National Anti-Doping Rules within the federation — education, testing cooperation, and results-management responsibilities.' },
-  { title: 'Grading Syllabus & Examination Regulations', ref: 'MMAKF/GRD', state: 'Not yet published',
+  { title: 'Grading Syllabus & Examination Regulations',
     covers: 'The kyu and Dan syllabus, examiner appointment, eligibility and time-in-grade requirements, examination conduct, and appeal against a grading result.' },
-  { title: 'National Competition Regulations', ref: 'MMAKF/CMP', state: 'Not yet published',
+  { title: 'National Competition Regulations',
     covers: 'How the WKF competition rules are applied at MMAKF events — age and weight divisions, entry and eligibility, protest procedure, and sanctioning of events.' },
-  { title: 'National Selection Policy', ref: 'MMAKF/SEL', state: 'Not yet published',
+  { title: 'National Selection Policy',
     covers: 'Criteria and procedure for selecting athletes to represent a district, a state unit or the federation, and the route to challenge a selection decision.' },
-  { title: 'Referee & Judge Certification Regulation', ref: 'MMAKF/REF', state: 'Not yet published',
+  { title: 'Referee & Judge Certification Regulation',
     covers: 'Certification levels for judges and referees, examination and re-certification cycle, appointment to events, and the officials register.' },
-  { title: 'Disciplinary & Appeals Procedure', ref: 'MMAKF/DAP', state: 'Not yet published',
+  { title: 'Disciplinary & Appeals Procedure',
     covers: 'Complaint intake, investigation, hearing rights, sanctions available, and the independent appeal route.' },
-  { title: 'Affiliation Regulations — dojo, district and state charters', ref: 'MMAKF/AFF', state: 'Not yet published',
+  { title: 'Affiliation Regulations — dojo, district and state charters',
     covers: 'Requirements and procedure for chartering a dojo, a district association and a state association, and the grounds for suspension or withdrawal of a charter.' },
 ];
 
 // Admin override: the office can maintain the whole register from the CMS
 // without a deploy. Falls back to the literals above when the key is unset.
 const stored = await get<any>('regulations');
-const external: Area[] =
-  Array.isArray(stored?.external) && stored.external.length ? stored.external : EXTERNAL_FALLBACK;
-const own: Own[] =
-  Array.isArray(stored?.own) && stored.own.length ? stored.own : OWN_FALLBACK;
-const checked: string = typeof stored?.checked === 'string' && stored.checked ? stored.checked : CHECKED;
+const checked: string =
+  typeof stored?.checked === 'string' && stored.checked.trim() ? stored.checked.trim() : CHECKED;
+
+const txt = (v: unknown): string => (typeof v === 'string' && v.trim() ? v.trim() : '');
+
+// Only ever emit an http(s) href. The register is admin-editable, so an
+// unchecked value here would put whatever was saved — `javascript:` included —
+// into a live link on a public page.
+const httpUrl = (v: unknown): string => {
+  const s = txt(v);
+  const scheme = s.slice(0, 8).toLowerCase();
+  return scheme.startsWith('https://') || scheme.startsWith('http://') ? s : '';
+};
+
+/**
+ * Defensive rendering (MASTER-SPEC F1). storage.ts guards only the TOP-LEVEL
+ * shape of a stored value, so a saved register whose areas were missing their
+ * `items` array would throw inside the count below and 500 this public page.
+ * Anything malformed is dropped; if nothing survives, the seed literal is served.
+ */
+function cleanAreas(raw: unknown): Area[] | null {
+  if (!Array.isArray(raw)) return null;
+  const areas: Area[] = raw
+    .filter((a: any) => a && txt(a.area) && Array.isArray(a.items))
+    .map((a: any) => ({
+      area: txt(a.area),
+      blurb: txt(a.blurb),
+      items: a.items
+        .filter((i: any) => i && txt(i.title) && httpUrl(i.url))
+        .map((i: any) => ({
+          title: txt(i.title),
+          body: txt(i.body),
+          edition: txt(i.edition),
+          effective: txt(i.effective),
+          url: httpUrl(i.url),
+          evidence: txt(i.evidence),
+          note: txt(i.note) || undefined,
+          checked: txt(i.checked) || undefined,
+        })),
+    }))
+    .filter((a: Area) => a.items.length > 0);
+  return areas.length ? areas : null;
+}
+
+const external: Area[] = cleanAreas(stored?.external) ?? EXTERNAL_FALLBACK;
 
 const externalCount = external.reduce((n, a) => n + a.items.length, 0);
-const email = fed?.contact?.email || 'admin@mmakf.in';
+// "Verified" is a claim about work actually done, so it is counted rather than
+// asserted: only entries carrying the evidence of a fetch count as verified.
+const verifiedCount = external.reduce(
+  (n, a) => n + a.items.filter((i) => i.evidence).length,
+  0,
+);
+
+const ownStored: Own[] = Array.isArray(stored?.own)
+  ? stored.own
+      .filter((d: any) => d && txt(d.title))
+      .map((d: any) => ({ title: txt(d.title), covers: txt(d.covers) }))
+  : [];
+const own: Own[] = ownStored.length ? ownStored : OWN_FALLBACK;
+
+/**
+ * Reference code and publication state come from the federation's own document
+ * register — the same `documents` key /governance renders — so this page can
+ * never contradict it and can never invent a reference code.
+ */
+const registerRaw = await get<any[]>('documents');
+const register: any[] = Array.isArray(registerRaw) ? registerRaw : [];
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+const ownRows = own.map((d) => {
+  const entry = register.find((r: any) => r && txt(r.title) && norm(txt(r.title)) === norm(d.title));
+  const url = httpUrl(entry?.url);
+  return { title: d.title, covers: d.covers, ref: txt(entry?.ref), url, published: !!url };
+});
+const anyUnpublished = ownRows.some((d) => !d.published);
+
+// No fabricated contact: if the office has cleared the address, the mailto
+// buttons are replaced with the contact page rather than rendering a dead
+// `mailto:` that opens an empty compose window.
+const email = txt(fed?.contact?.email);
 ---
 
 <Base
   title="Rules & Regulations — MMAKF"
-  description="The rules MMAKF competes under and the register of the federation's own governing documents. Every external link is verified against the publisher and dated."
+  description="The rules MMAKF competes under and the register of the federation's own governing documents. Each external link records its issuing body, its edition and the date the federation last checked it."
 >
   <PageHero
     eyebrow="Rules & Regulations"
     title={`The <em class="r">rulebook</em> register.`}
     lead="Two separate things live on this page: the rules published by other organisations that MMAKF competes under, and the register of MMAKF's own governing documents. They are never mixed, and nothing on this page is a summary of a rule — the rule is whatever the linked document says."
-    pills={[`${externalCount} external documents verified`, `Links last checked ${checked}`]}
+    pills={[
+      `${externalCount} external documents`,
+      verifiedCount === externalCount
+        ? `Every link checked ${checked}`
+        : `${verifiedCount} of ${externalCount} links checked ${checked}`,
+    ]}
   />
 
   {/* ═══════ HOW TO READ THIS REGISTER ═══════ */}
@@ -399,7 +485,15 @@ const email = fed?.contact?.email || 'admin@mmakf.in';
         </p>
       </div>
 
-      <div class="tbl-scroll fade">
+      {/* The table is wider than a phone, so it scrolls inside its own box. A
+          scrollable box must also be reachable by keyboard: role + tabindex make
+          it a focus stop, and the label says what a screen reader has landed in. */}
+      <div
+        class="tbl-scroll fade"
+        tabindex="0"
+        role="region"
+        aria-label="Register of MMAKF's own governing documents"
+      >
         <table class="reg-tbl">
           <caption class="sr-only">
             MMAKF's own governing documents, with the subject each covers and its publication state.
@@ -413,36 +507,59 @@ const email = fed?.contact?.email || 'admin@mmakf.in';
             </tr>
           </thead>
           <tbody>
-            {own.map((d) => (
+            {ownRows.map((d) => (
               <tr>
                 <th scope="row" class="reg-title">{d.title}</th>
-                <td class="text-muted nowrap">{d.ref}</td>
-                <td class="reg-covers">{d.covers}</td>
-                <td><span class="pill reg-state">{d.state}</span></td>
+                <td class="text-muted nowrap">{d.ref || 'Not assigned'}</td>
+                <td class="reg-covers">{d.covers || '—'}</td>
+                <td>
+                  {d.published ? (
+                    <a href={d.url} class="text-gold" target="_blank" rel="noopener noreferrer">
+                      Published — open
+                      <span class="sr-only"> (opens in a new tab)</span>
+                    </a>
+                  ) : (
+                    <span class="pill reg-state">Not yet published</span>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <div class="tbl-hint" aria-hidden="true">Scroll the table sideways to see every column</div>
+      <div class="tbl-hint">Scroll the table sideways to see every column</div>
 
       <div class="reg-note fade mt-8">
-        <h3 class="reg-note-h">Why these say "Not yet published"</h3>
-        <p class="body-txt">
-          MMAKF has not published the text of these documents on this website. Rather than print a
-          plausible-looking draft, the federation records the gap. Where a document exists in the
-          federation office in signed form, a certified copy is issued on request — the office is the
-          authority on what has been adopted, not this page.
-        </p>
-        <p class="body-txt mt-4">
+        {anyUnpublished && (
+          <Fragment>
+            <h3 class="reg-note-h">What "Not yet published" means</h3>
+            <p class="body-txt">
+              Where a row above reads <strong>Not yet published</strong>, MMAKF has not published
+              that document's text on this website. Rather than print a plausible-looking draft, the
+              federation records the gap. Where a document exists in the federation office in signed
+              form, a certified copy is issued on request — the office is the authority on what has
+              been adopted, not this page. The reference code and publication state in the table are
+              read from the federation's document register, the same register shown on the
+              governance page.
+            </p>
+          </Fragment>
+        )}
+        <p class="body-txt" class:list={[{ 'mt-4': anyUnpublished }]}>
           Fee amounts, eligibility criteria, time-in-grade requirements, selection standards and
           syllabus content are <strong>not yet published by the federation</strong> and are therefore
           not stated anywhere on this page.
         </p>
         <div class="flex flex-wrap gap-3 mt-6">
-          <a href={`mailto:${email}?subject=${encodeURIComponent('Request for a federation document')}`} class="btn btn-gold">
-            Request a document from the office
-          </a>
+          {email ? (
+            <a
+              href={`mailto:${email}?subject=${encodeURIComponent('Request for a federation document')}`}
+              class="btn btn-gold"
+            >
+              Request a document from the office
+            </a>
+          ) : (
+            <a href="/contact" class="btn btn-gold">Contact the federation office</a>
+          )}
           <a href="/governance#documents" class="btn btn-ghost">Documents &amp; forms register</a>
         </div>
       </div>
@@ -475,23 +592,33 @@ const email = fed?.contact?.email || 'admin@mmakf.in';
                   <a href={d.url} class="reg-item-title" target="_blank" rel="noopener noreferrer">
                     {d.title}
                     <span class="reg-ext" aria-hidden="true">↗</span>
+                    <span class="sr-only"> (opens on the publisher's site in a new tab)</span>
                   </a>
-                  <div class="reg-issuer">{d.body}</div>
+                  <div class="reg-issuer">{d.body || 'Issuing body not recorded'}</div>
                   {d.note && <p class="reg-item-note">{d.note}</p>}
                 </div>
 
                 <dl class="reg-meta">
                   <div class="reg-meta-row">
                     <dt>Edition / version</dt>
-                    <dd>{d.edition}</dd>
+                    <dd>{d.edition || 'Not stated by the publisher'}</dd>
                   </div>
                   <div class="reg-meta-row">
                     <dt>Effective</dt>
-                    <dd>{d.effective}</dd>
+                    <dd>{d.effective || 'Not stated by the publisher'}</dd>
                   </div>
                   <div class="reg-meta-row">
-                    <dt>Link verified</dt>
-                    <dd>{checked} · <span class="reg-evidence">{d.evidence}</span></dd>
+                    <dt>{d.evidence ? 'Link verified' : 'Link'}</dt>
+                    <dd>
+                      {d.evidence ? (
+                        <Fragment>
+                          {d.checked || checked} ·{' '}
+                          <span class="reg-evidence">{d.evidence}</span>
+                        </Fragment>
+                      ) : (
+                        'Not yet checked by the federation — confirm the edition on the document itself'
+                      )}
+                    </dd>
                   </div>
                 </dl>
               </li>
@@ -529,9 +656,10 @@ const email = fed?.contact?.email || 'admin@mmakf.in';
           The WKF's document server answers requests for withdrawn rulebooks with
           <strong> HTTP 200 and a 1.6 KB image file</strong> rather than a 404. A superseded rulebook
           therefore looks perfectly healthy to any ordinary link checker, and a federation that ran
-          one would publish a rulebook link that quietly downloads a broken image. Every link on this
-          page was checked on the content type and body size actually returned, not on the status
-          code — that is what the "Link verified" line records.
+          one would publish a rulebook link that quietly downloads a broken image. Each link the
+          federation has checked was checked on the content type and body size actually returned,
+          not on the status code — that is what the "Link verified" line records. A row without that
+          line has not been checked, and says so.
         </p>
       </div>
 
@@ -568,9 +696,16 @@ const email = fed?.contact?.email || 'admin@mmakf.in';
           issuing body is right.
         </p>
         <div class="flex flex-wrap gap-3 mt-6">
-          <a href={`mailto:${email}?subject=${encodeURIComponent('Broken or outdated link on the Rules & Regulations page')}`} class="btn btn-primary">
-            Report a broken link
-          </a>
+          {email ? (
+            <a
+              href={`mailto:${email}?subject=${encodeURIComponent('Broken or outdated link on the Rules & Regulations page')}`}
+              class="btn btn-primary"
+            >
+              Report a broken link
+            </a>
+          ) : (
+            <a href="/contact" class="btn btn-primary">Contact the federation office</a>
+          )}
           <a href="/governance" class="btn btn-ghost">Governance &amp; officials</a>
         </div>
       </div>
