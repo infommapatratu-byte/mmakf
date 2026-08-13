@@ -1,0 +1,172 @@
+---
+// The admin surface's frame: identity, the module menu, and the refusal.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE MENU IS FILTERED, AND THAT IS NOT THE CONTROL
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// adminNavFor() hides modules the principal cannot reach, so a finance officer
+// does not see safeguarding and a training administrator does not see the
+// disciplinary register. That is a COURTESY — it stops people clicking into
+// refusals — and it is not what keeps them out. Every page repeats the check
+// itself, because a menu is markup and markup is not an authorisation system.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// A REFUSAL SAYS WHAT WAS NEEDED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// "Forbidden" sends an administrator to ask somebody who also does not know.
+// The refusal here names the action, which is the thing whoever grants roles
+// actually needs to hear.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { canAnywhere, type Action, type Principal } from '@/lib/rbac';
+import { adminNavFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export interface Props {
+  title: string;
+  /** The action this module needs. The page is refused without it. */
+  requires: Action;
+  intro?: string;
+}
+
+const { title, requires, intro } = Astro.props;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal: Principal | null = identity?.principal ?? null;
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const permitted = !!principal && canAnywhere(principal, requires);
+const groups = principal ? adminNavFor((a) => canAnywhere(principal, a as Action)) : [];
+const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
+---
+
+<Base title={`${title} — MMAKF operations`} description="MMAKF federation operations.">
+  <div class="ad">
+    <div class="container ad-grid">
+
+      <aside class="ad-side" aria-label="Operations modules">
+        <p class="ad-side-h">Operations</p>
+        {groups.length === 0 ? (
+          <p class="ad-side-empty">No modules are available to this account.</p>
+        ) : (
+          groups.map((g) => (
+            <nav class="ad-group" aria-label={g.label}>
+              <p class="ad-group-h">{g.label}</p>
+              <ul>
+                {g.modules.map((m) => (
+                  <li>
+                    <a
+                      href={h(m.href)}
+                      class={currentPath === m.href ? 'active' : ''}
+                      aria-current={currentPath === m.href ? 'page' : undefined}
+                    >{m.label}</a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          ))
+        )}
+      </aside>
+
+      <div class="ad-main">
+        {!identity ? (
+          <section class="ad-refuse">
+            <h1 class="display-2">Sign in.</h1>
+            <p class="ad-lede">
+              This is the federation's operations platform. It is not a public
+              surface and it is never indexed.
+            </p>
+            <a class="btn btn-primary" href={h('/admin')}>Go to sign in</a>
+          </section>
+        ) : !permitted ? (
+          <section class="ad-refuse">
+            <h1 class="display-2">Not your module.</h1>
+            <p class="ad-lede">
+              This page needs <code>{requires}</code>, which this account does
+              not hold in any scope.
+            </p>
+            <p class="ad-lede">
+              Signed in as <strong>{identity.principal.label}</strong>. If you
+              need it, that action is what to ask for — quoting it saves whoever
+              grants roles from guessing.
+            </p>
+          </section>
+        ) : (
+          <>
+            <header class="ad-head">
+              <h1 class="display-2">{title}</h1>
+              {intro && <p class="ad-lede">{intro}</p>}
+            </header>
+            <slot />
+          </>
+        )}
+      </div>
+    </div>
+  </div>
+</Base>
+
+<style>
+  .ad { padding: 92px 0 72px; }
+  .ad-grid {
+    display: grid;
+    grid-template-columns: 224px minmax(0, 1fr);
+    gap: 0 44px;
+    align-items: start;
+  }
+
+  .ad-side { position: sticky; top: 92px; }
+  .ad-side-h {
+    font-family: var(--font-display); font-size: .78rem;
+    letter-spacing: .18em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 18px;
+  }
+  .ad-side-empty { color: var(--muted); font-size: .88rem; line-height: 1.6; }
+  .ad-group { margin-bottom: 22px; }
+  .ad-group-h {
+    font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--gold-dim); margin: 0 0 7px;
+  }
+  .ad-group ul { list-style: none; margin: 0; padding: 0; }
+  .ad-group a {
+    display: block; padding: 6px 10px; margin-left: -10px;
+    border-radius: 6px; font-size: .89rem; text-decoration: none;
+    color: var(--muted); line-height: 1.4;
+  }
+  .ad-group a:hover { background: var(--bg-2); color: var(--off-white, inherit); }
+  .ad-group a.active {
+    background: var(--bg-2); color: var(--gold-2);
+    box-shadow: inset 2px 0 0 var(--gold);
+  }
+
+  .ad-head { margin-bottom: 26px; }
+  .ad-lede { color: var(--muted); line-height: 1.7; max-width: 62ch; margin: 12px 0 0; }
+  .ad-refuse { padding: 40px 0; }
+  .ad-refuse code {
+    font-family: var(--font-accent, monospace); background: var(--bg-2);
+    padding: 2px 7px; border-radius: 4px;
+  }
+
+  /* ── Phone ────────────────────────────────────────────────────────────────
+     PART AL: admin critical actions must work on mobile. The sidebar becomes a
+     horizontal scroller above the content rather than a 224px column squeezed
+     into a 360px screen — which would leave the workspace 100px wide. */
+  @media (max-width: 900px) {
+    .ad { padding: 76px 0 56px; }
+    .ad-grid { grid-template-columns: 1fr; gap: 24px; }
+    .ad-side {
+      position: static;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 14px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .ad-side-h { display: none; }
+    .ad-group { display: inline-block; margin: 0 20px 0 0; vertical-align: top; }
+    .ad-group ul { display: flex; gap: 4px; }
+    .ad-group a { white-space: nowrap; padding: 9px 12px; margin-left: 0; min-height: 44px; }
+    .ad-group a.active { box-shadow: inset 0 -2px 0 var(--gold); }
+  }
+</style>

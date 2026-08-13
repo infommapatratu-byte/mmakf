@@ -6,6 +6,11 @@ import '@/styles/a11y.css';
 import Crest from '@/components/Crest.astro';
 import { get } from '@/lib/storage';
 import { CREST_ABSOLUTE } from '@/lib/brand';
+import {
+  PUBLIC_NAV, PUBLIC_ACTIONS, LEARN_NAV, LEARN_ACTIONS,
+  canonicalFor, href as surfaceHref, isIndexable, SURFACE_ORIGIN,
+  type Surface,
+} from '@/lib/surface';
 
 // Official channels, loaded here so every page footer links to them. The site
 // previously had no outbound links at all, which is why none of the
@@ -26,22 +31,45 @@ const {
   showFooter = true,
 } = Astro.props;
 
-const navItems = [
-  { href: '/about',        label: 'About' },
-  { href: '/governance',   label: 'Governance' },
-  { href: '/programs',     label: 'Programs' },
-  { href: '/schedule',     label: 'Schedule' },
-  { href: '/events',       label: 'Events' },
-  { href: '/affiliation',  label: 'Affiliation' },
-  { href: '/registration', label: 'Registration' },
-  { href: '/contact',      label: 'Contact' },
-];
+// ── Which surface is this? ─────────────────────────────────────────────────
+//
+// Set by the middleware from the Host header. Falls back to 'public' when the
+// layout is rendered outside a request (a test, a prerender), which is the
+// fail-safe direction — an unrecognised context gets the public federation.
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+
 const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
 
-// Canonical URL per page (P2: no canonical existed; og:url was hardcoded to
-// the site root, so every page advertised itself to crawlers as the homepage).
-const SITE = 'https://www.mmakf.in';
-const canonical = SITE + (currentPath === '/' ? '/' : currentPath);
+// ── The navigation ─────────────────────────────────────────────────────────
+//
+// WAS: About · Governance · Programs · Schedule · Events · Affiliation ·
+// Registration · Contact.
+//
+// That is a club's menu. It put a class timetable and an enrolment form at the
+// same level as the constitution of a national body, and it had no place at all
+// for athletes, rankings, officials, results, the network or credential
+// verification — the things a federation exists to hold. The replacement is
+// grouped the way a national federation is actually organised; see PUBLIC_NAV
+// in src/lib/surface.ts, where every link is checked against the routes that
+// exist by tests/navigation.test.ts.
+const nav = surface === 'learn' ? LEARN_NAV : PUBLIC_NAV;
+const actions = surface === 'learn' ? LEARN_ACTIONS : PUBLIC_ACTIONS;
+
+// The internal path, which is what currentPath already is: the middleware
+// rewrites before the page renders, so on learn.mmakf.in/schools this is
+// /learn/schools. Links are written through surfaceHref() so the same
+// definition serves every host.
+const isCurrent = (target: string) =>
+  currentPath === target || currentPath.startsWith(target + '/');
+
+// ── Canonical ──────────────────────────────────────────────────────────────
+//
+// One page, one address. A page reachable at both www.mmakf.in/learn/schools
+// and learn.mmakf.in/schools that names itself differently depending on how you
+// arrived is two pages competing for the same content.
+const SITE = SURFACE_ORIGIN[surface];
+const canonical = canonicalFor(surface, currentPath);
+const indexable = isIndexable(surface);
 
 // Organization structured data — only facts the federation itself publishes.
 const sameAs = social.map((a: any) => a.url);
@@ -104,6 +132,10 @@ const orgSchema = {
     <meta property="og:locale" content="en_IN" />
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="canonical" href={canonical} />
+    {/* admin.mmakf.in is never indexed. The header is belt to robots.txt's
+        braces — a header travels with the response, and cannot be missed by a
+        crawler that never fetched robots.txt. */}
+    {!indexable && <meta name="robots" content="noindex, nofollow" />}
     <script type="application/ld+json" set:html={JSON.stringify(orgSchema)} />
     <script is:inline>
       // P1-15: only enable the hidden-until-revealed state when JS is running.
@@ -118,27 +150,53 @@ const orgSchema = {
     {showNav && (
       <nav id="mainNav">
         <div class="nav-inner container">
-          <a href="/" class="nav-brand">
+          <a href={surface === 'public' ? '/' : surfaceHref(surface, surface === 'learn' ? '/learn' : '/admin')} class="nav-brand">
             <Crest size={44} />
             <div class="nav-name">
               <div class="nav-name-1">MMAKF</div>
-              <div class="nav-name-2">Modern Martial Arts Karate-Do Federation of India</div>
+              <div class="nav-name-2">
+                {surface === 'learn'
+                  ? 'National Training and Institutional Engagement'
+                  : surface === 'admin'
+                    ? 'Federation Operations'
+                    : 'Modern Martial Arts Karate-Do Federation of India'}
+              </div>
             </div>
           </a>
 
           <div class="nav-links" id="navLinks">
-            {navItems.map((item) => (
-              <a href={item.href} class={currentPath === item.href ? 'active' : ''} aria-current={currentPath === item.href ? 'page' : undefined}>
-                {item.label}
-              </a>
+            {nav.map((item) => (
+              <div class="nav-item">
+                <a
+                  href={surfaceHref(surface, item.href)}
+                  class={isCurrent(item.href) ? 'active' : ''}
+                  aria-current={isCurrent(item.href) ? 'page' : undefined}
+                >{item.label}</a>
+                {item.children && item.children.length > 0 && (
+                  /* Rendered in the DOM, not built by script on hover. A menu
+                     that only exists once JavaScript has run is a menu a
+                     crawler never sees, and PART AN is explicit that discovery
+                     content must be in the DOM. */
+                  <div class="nav-sub">
+                    {item.children.map((c) => (
+                      <a href={surfaceHref(surface, c.href)} class={currentPath === c.href ? 'active' : ''}>{c.label}</a>
+                    ))}
+                  </div>
+                )}
+              </div>
             ))}
-            <a href="/search" class="nav-search" aria-label="Search the federation" title="Search the federation">
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-                <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path>
-              </svg>
-              <span class="nav-search-word">Search</span>
-            </a>
-            <a href="/contact#enroll" class="nav-enroll">Enroll</a>
+            {surface !== 'admin' && (
+              <a href={surfaceHref(surface, '/search')} class="nav-search" aria-label="Search the federation" title="Search the federation">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path>
+                </svg>
+                <span class="nav-search-word">Search</span>
+              </a>
+            )}
+            {/* WAS "Enroll", pointing at /contact#enroll — a dojo's call to
+                action on a national federation's masthead. The federation's
+                primary action is to register with it. */}
+            {actions[0] && <a href={surfaceHref(surface, actions[0].href)} class="nav-enroll">{actions[0].label}</a>}
           </div>
 
           <button class="nav-hamburger" id="navHamburger" aria-label="Toggle navigation" aria-expanded="false" aria-controls="navLinks">
@@ -262,6 +320,46 @@ const orgSchema = {
       }
       @media (max-width: 420px) { .nav-name-2 { max-width: 15ch; } }
       .nav-links { display: flex; align-items: center; gap: 2px; }
+
+      /* ── Grouped navigation ────────────────────────────────────────────────
+         The federation has more than eight things worth reaching, so the top
+         level is six groups rather than eight destinations.
+
+         THE SUBMENU IS IN THE DOM AND IS NOT BUILT BY SCRIPT. It is hidden with
+         visibility/opacity rather than display:none so that it stays in the
+         accessibility tree and in the crawler's view — PART AN is explicit that
+         discovery content must be present in the markup.
+
+         Opened by :hover AND :focus-within, so it works from the keyboard
+         without a line of JavaScript. */
+      .nav-item { position: relative; display: flex; align-items: center; }
+      .nav-sub {
+        position: absolute; top: 100%; left: -12px;
+        min-width: 218px;
+        background: rgba(255, 255, 255, 0.98);
+        backdrop-filter: blur(24px);
+        -webkit-backdrop-filter: blur(24px);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow-2);
+        padding: 8px;
+        display: flex; flex-direction: column;
+        opacity: 0; visibility: hidden;
+        transform: translateY(-4px);
+        transition: opacity .16s ease, transform .16s ease, visibility 0s .16s;
+      }
+      .nav-item:hover > .nav-sub,
+      .nav-item:focus-within > .nav-sub {
+        opacity: 1; visibility: visible; transform: none;
+        transition: opacity .16s ease, transform .16s ease, visibility 0s;
+      }
+      .nav-sub a {
+        padding: 9px 12px; border-radius: 6px; white-space: nowrap;
+        font-size: .86rem; letter-spacing: .01em; text-transform: none;
+      }
+      .nav-sub a:hover, .nav-sub a:focus-visible { background: var(--bg-2); }
+      .nav-sub a.active { color: var(--gold-2); }
+      .nav-sub a.active::after { display: none; }
       .nav-links a {
         font-family: var(--font-display);
         font-size: 0.68rem;
@@ -343,6 +441,21 @@ const orgSchema = {
         }
         .nav-links a:last-of-type { border: 0; }
         .nav-links a.active::after { display: none; }
+
+        /* On a phone the drawer is a list, so the groups flatten into indented
+           sections rather than becoming eight hover targets nobody can hit.
+           Every destination is reachable by scrolling — no second tap needed to
+           reveal a group, which is the pattern that makes mobile menus
+           unusable one-handed. */
+        .nav-item { display: block; }
+        .nav-sub {
+          position: static; opacity: 1; visibility: visible; transform: none;
+          background: none; border: 0; box-shadow: none;
+          padding: 0 0 6px 14px; min-width: 0;
+          border-left: 2px solid var(--border);
+          margin: 0 0 8px 4px;
+        }
+        .nav-sub a { padding: 8px 10px; font-size: .84rem; border: 0; opacity: .82; }
         .nav-search { border: 0; border-radius: 0; margin-left: 0; padding: 0; }
         .nav-links .nav-enroll { text-align: center; margin: 12px 0 0; }
         .nav-hamburger { display: flex; }

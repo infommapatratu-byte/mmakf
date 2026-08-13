@@ -21,6 +21,8 @@ import type { APIRoute } from 'astro';
 import { and, eq, isNotNull, isNull, desc } from 'drizzle-orm';
 import { isConfigured, db } from '@/db';
 import { expireStaleOrders, confirmPayment, markWebhookProcessed } from '@/db/orders';
+import { runDailySweeps } from '@/db/automations';
+import { legacyAdminPrincipal } from '@/lib/rbac';
 import { providerById } from '@/lib/payments';
 import * as s from '@/db/schema';
 
@@ -118,6 +120,27 @@ export const GET: APIRoute = async ({ request }) => {
     report.inconsistentOrders = orphans.map((o: any) => o.orderNo);
   } catch {
     /* diagnostic only */
+  }
+
+  // ── 4. The operations sweeps ─────────────────────────────────────────────
+  //
+  // Workflow retries, task escalation and support escalation. All three are
+  // idempotent and each is independently guarded inside runDailySweeps(), so a
+  // stuck workflow retry cannot stop task escalation from running for a week.
+  //
+  // ONE CRON, NOT FOUR. Vercel's Hobby plan allows daily crons only, and it
+  // rejects a project that asks for more AT DEPLOYMENT CREATION — leaving no
+  // deployment, no build log and no error anywhere in the dashboard. That cost
+  // this project seventeen hours once already (see tests/vercel-config.test.ts).
+  // Adding a second schedule here would risk it again for no benefit.
+  try {
+    report.operations = await runDailySweeps(db(), {
+      principal: legacyAdminPrincipal(),
+      reason: 'Scheduled daily operations sweep.',
+      authority: 'MMAKF cron',
+    });
+  } catch (err: any) {
+    report.operationsError = String(err?.message ?? err).slice(0, 300);
   }
 
   console.log('[cron/reconcile]', JSON.stringify(report));

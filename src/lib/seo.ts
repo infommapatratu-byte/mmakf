@@ -47,7 +47,7 @@ export const PRIVATE_PREFIXES = ['/admin', '/api', '/my', '/portal'] as const;
  * Directories under src/pages whose contents are public. Declaring these is
  * what makes an undeclared directory an error rather than a silent publication.
  */
-export const PUBLIC_SECTIONS = ['/athlete', '/people'] as const;
+export const PUBLIC_SECTIONS = ['/athlete', '/people', '/learn', '/training', '/kata'] as const;
 
 /**
  * Public URLs that exist and are deliberately NOT advertised, with the reason.
@@ -56,6 +56,10 @@ export const PUBLIC_SECTIONS = ['/athlete', '/people'] as const;
  */
 export const EXCLUSIONS: Record<string, string> = {
   '/404': 'The error page. Indexing it puts a "page not found" result in search for the federation.',
+  '/learn/apply':
+    'The twenty-step application form. Indexing it would send a school straight into step one ' +
+    'without ever reading what MMAKF does for schools — /karate-for-schools and /learn/schools are ' +
+    'the pages that should meet a searcher, and both link here.',
   '/application': 'Sets X-Robots-Tag: noindex on its own response. A sitemap entry would contradict the page itself.',
   '/checkout': 'A transactional step that only means anything with a basket behind it; on its own it renders the reasons it cannot take an order.',
   '/unit': 'The Unit Portal sign-in. Same class of surface as /admin — an access-code gate, not a page for readers.',

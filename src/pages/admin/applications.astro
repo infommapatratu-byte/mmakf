@@ -1,0 +1,184 @@
+---
+// Institutional applications, as the training office works them.
+//
+// The whole point of the intake automation is that this screen is the FIRST
+// place an administrator touches an application — everything on it was derived
+// from what the school typed, and nothing was re-entered.
+//
+// The rows are scope-filtered in SQL by applicationQueue(); this page does not
+// filter after the fact. A state administrator sees their own state's
+// applications because the WHERE clause says so.
+
+import AdminShell from '@/components/AdminShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere } from '@/lib/rbac';
+import { applicationQueue } from '@/db/applications';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+const filter = Astro.url.searchParams.get('status') || '';
+const unassignedOnly = Astro.url.searchParams.get('unassigned') === '1';
+
+let rows: any[] = [];
+let unavailable: string | null = null;
+
+if (principal && canAnywhere(principal, 'engagement:read')) {
+  if (!isConfigured()) {
+    unavailable = 'The federation database is not reachable from this deployment, so no applications can be listed.';
+  } else {
+    try {
+      rows = await applicationQueue(db(), principal, {
+        status: (filter || undefined) as any,
+        unassignedOnly,
+        limit: 200,
+      });
+    } catch (err: any) {
+      unavailable = String(err?.message ?? err);
+    }
+  }
+}
+
+const STATUSES = [
+  'submitted', 'acknowledged', 'under_review', 'information_requested',
+  'program_design', 'quoted', 'proposed', 'approved', 'contracted', 'declined',
+];
+
+const fmt = (v: unknown) => {
+  if (!v) return '—';
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+};
+---
+
+<AdminShell
+  title="Applications"
+  requires="engagement:read"
+  intro="Institutions that have applied for a training programme. Every row here was created from one form submission — the institution, the enquiry and the review task with it."
+>
+  <nav class="filters" aria-label="Filter applications">
+    <a href={h('/admin/applications')} class={!filter && !unassignedOnly ? 'on' : ''}>All</a>
+    <a href={`${h('/admin/applications')}?unassigned=1`} class={unassignedOnly ? 'on' : ''}>Unassigned</a>
+    {STATUSES.map((s) => (
+      <a href={`${h('/admin/applications')}?status=${s}`} class={filter === s ? 'on' : ''}>
+        {s.replace(/_/g, ' ')}
+      </a>
+    ))}
+  </nav>
+
+  {unavailable ? (
+    <p class="note" role="alert">{unavailable}</p>
+  ) : rows.length === 0 ? (
+    <p class="note">
+      No applications match. When a school, company or university applies through
+      the training platform, it appears here with its institution record, its
+      enquiry and its review task already created.
+    </p>
+  ) : (
+    <>
+      <p class="tbl-hint">Scroll the table sideways to see every column.</p>
+      <div class="tbl-scroll">
+        <table class="tbl">
+          <caption class="sr-only">Institutional applications</caption>
+          <thead>
+            <tr>
+              <th scope="col">Reference</th>
+              <th scope="col">Institution</th>
+              <th scope="col">Kind</th>
+              <th scope="col">Where</th>
+              <th scope="col">People</th>
+              <th scope="col">Status</th>
+              <th scope="col">Owner</th>
+              <th scope="col">Score</th>
+              <th scope="col">Sent</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr>
+                <td><code>{r.ref}</code></td>
+                <td class="strong">{r.institutionName}</td>
+                <td>{r.audience}</td>
+                <td>{r.city ?? r.stateName ?? '—'}</td>
+                <td class="num">{r.participantCount ?? '—'}</td>
+                <td><span class="pill"><span class="pill-dot"></span>{String(r.status).replace(/_/g, ' ')}</span></td>
+                <td>{r.ownerRole ? String(r.ownerRole).replace(/_/g, ' ').toLowerCase() : <span class="muted">unassigned</span>}</td>
+                {/* Triage, not a judgement — see scoreApplication(). */}
+                <td class="num">{r.leadScore ?? '—'}</td>
+                <td>{fmt(r.submittedAt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* On a phone the table is unreadable however far it scrolls, so the same
+          rows are recomposed as records. PART AL. */}
+      <ul class="cards" aria-label="Institutional applications">
+        {rows.map((r) => (
+          <li>
+            <p class="c-top"><code>{r.ref}</code><span class="pill"><span class="pill-dot"></span>{String(r.status).replace(/_/g, ' ')}</span></p>
+            <p class="c-name">{r.institutionName}</p>
+            <dl>
+              <div><dt>Kind</dt><dd>{r.audience}</dd></div>
+              <div><dt>Where</dt><dd>{r.city ?? r.stateName ?? '—'}</dd></div>
+              <div><dt>Participants</dt><dd>{r.participantCount ?? '—'}</dd></div>
+              <div><dt>Owner</dt><dd>{r.ownerRole ? String(r.ownerRole).replace(/_/g, ' ').toLowerCase() : 'unassigned'}</dd></div>
+              <div><dt>Sent</dt><dd>{fmt(r.submittedAt)}</dd></div>
+            </dl>
+          </li>
+        ))}
+      </ul>
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 22px; }
+  .filters a {
+    padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
+    font-size: .8rem; text-decoration: none; color: var(--muted);
+    text-transform: capitalize; line-height: 1.5;
+  }
+  .filters a:hover { border-color: var(--gold); }
+  .filters a.on { background: var(--gold); color: #1a1713; border-color: var(--gold); }
+
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 62ch;
+  }
+
+  .tbl { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  .tbl th, .tbl td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .tbl thead th {
+    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); font-weight: 400;
+  }
+  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tbl .strong { font-family: var(--font-display); white-space: normal; min-width: 16ch; }
+  .muted { color: var(--muted); }
+  code { font-family: var(--font-accent, monospace); font-size: .88em; }
+
+  .cards { display: none; list-style: none; margin: 0; padding: 0; }
+
+  @media (max-width: 900px) {
+    .tbl-scroll, .tbl-hint { display: none; }
+    .cards { display: block; }
+    .cards li {
+      padding: 16px 0; border-bottom: 1px solid var(--border);
+    }
+    .c-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 6px; }
+    .c-name { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 10px; }
+    .cards dl { margin: 0; display: grid; gap: 4px; }
+    .cards dl > div { display: grid; grid-template-columns: 11ch 1fr; gap: 10px; font-size: .87rem; }
+    .cards dt { color: var(--muted); }
+    .cards dd { margin: 0; }
+  }
+</style>

@@ -1,0 +1,93 @@
+---
+// The federation's people.
+//
+// A register, not a gallery of cards. Each entry links to the full profile at
+// /people/[slug] — the governance table already links there, and this is the
+// index that page needed and never had.
+//
+// Where a portrait is not held, the entry shows a monogram and says nothing
+// about the absence. Announcing "no photograph on file" on a public page is
+// exactly the pattern the federation objected to on the news page.
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { get } from '@/lib/storage';
+import { profileHref, initials } from '@/lib/people';
+
+export const prerender = false;
+
+const leadership = (await get<any[]>('leadership')) || [];
+---
+
+<Base
+  title="People of the federation — MMAKF"
+  description="The technical leadership and office of the Modern Martial Arts Karate-Do Federation of India."
+>
+  <PageHero
+    eyebrow="Federation"
+    title="People"
+    lede="The technical leadership of MMAKF, and the office that runs it."
+  />
+
+  <section class="container">
+    {leadership.length === 0 ? (
+      <p class="empty">The register is not available at the moment.</p>
+    ) : (
+      <ul class="ppl">
+        {leadership.map((p: any) => {
+          const link = profileHref(p.name);
+          return (
+            <li>
+              <div class="p-face" aria-hidden="true">
+                {p.img
+                  ? <img src={p.img} alt="" loading="lazy" width="72" height="72" />
+                  : <span class="p-mono">{initials(p.name)}</span>}
+              </div>
+              <div class="p-body">
+                <h2 class="p-name">{link ? <a href={link}>{p.name}</a> : p.name}</h2>
+                <p class="p-role">{p.role}</p>
+                <p class="p-facts">
+                  {p.rank && <span>{p.rank}</span>}
+                  {p.since && <span>In the federation since {p.since}</span>}
+                  {p.specialty && <span>{p.specialty}</span>}
+                </p>
+              </div>
+              {link && <a class="p-go" href={link} aria-label={`Full profile of ${p.name}`}>→</a>}
+            </li>
+          );
+        })}
+      </ul>
+    )}
+  </section>
+</Base>
+
+<style>
+  .ppl { list-style: none; margin: 0 0 88px; padding: 0; }
+  .ppl li {
+    display: grid; grid-template-columns: 72px minmax(0, 1fr) 32px;
+    gap: 0 22px; align-items: center;
+    padding: 22px 0; border-bottom: 1px solid var(--border);
+  }
+  .ppl li:first-child { border-top: 1px solid var(--border); }
+  .p-face {
+    width: 72px; height: 72px; border-radius: 50%;
+    background: var(--bg-2); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  .p-face img { width: 100%; height: 100%; object-fit: cover; }
+  .p-mono { font-family: var(--font-display); font-size: 1.2rem; color: var(--gold-2); }
+  .p-name { margin: 0; font-family: var(--font-display); font-size: 1.25rem; line-height: 1.3; }
+  .p-name a { text-decoration: none; }
+  .p-name a:hover { color: var(--gold-2); }
+  .p-role { margin: 4px 0 0; color: var(--gold-2); font-size: .92rem; }
+  .p-facts { margin: 7px 0 0; color: var(--muted); font-size: .86rem; line-height: 1.6; }
+  .p-facts span:not(:last-child)::after { content: ' · '; }
+  .p-go { color: var(--gold-2); text-align: right; font-size: 1.1rem; text-decoration: none; }
+  .empty { color: var(--muted); padding: 40px 0 88px; }
+
+  @media (max-width: 640px) {
+    .ppl li { grid-template-columns: 56px minmax(0, 1fr); gap: 0 16px; }
+    .p-face { width: 56px; height: 56px; }
+    .p-go { display: none; }
+  }
+</style>

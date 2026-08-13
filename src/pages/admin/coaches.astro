@@ -1,0 +1,181 @@
+---
+// The coach pipeline.
+//
+// Recruitment is a sequence of recorded stages, and this screen is where they
+// are read. Nothing here appoints anybody: the assignment engine recommends
+// with reasons, and only confirmAssignment() — which takes a principal and
+// writes an audit row — can put a coach on a programme.
+
+import AdminShell from '@/components/AdminShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere } from '@/lib/rbac';
+import { coachPipeline, expiringQualifications, COACH_STATUSES, type CoachStatus } from '@/db/coaches';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+const filter = Astro.url.searchParams.get('status') || '';
+
+let rows: any[] = [];
+let expiring: any[] = [];
+let unavailable: string | null = null;
+
+if (principal && canAnywhere(principal, 'coach:read')) {
+  if (!isConfigured()) {
+    unavailable = 'The federation database is not reachable from this deployment, so the coach pipeline cannot be listed.';
+  } else {
+    try {
+      rows = await coachPipeline(db(), principal, {
+        status: (filter || undefined) as CoachStatus | undefined,
+        limit: 200,
+      });
+      expiring = await expiringQualifications(db(), principal, 60);
+    } catch (err: any) {
+      unavailable = String(err?.message ?? err);
+    }
+  }
+}
+
+// The order the federation described. Rendered as a pipeline rather than a
+// status dropdown, because the sequence is the point: an approval means the
+// stages before it actually happened.
+const PIPELINE: CoachStatus[] = [
+  'candidate', 'screening', 'interview', 'technical_review',
+  'document_check', 'approved', 'active',
+];
+
+const countIn = (s: CoachStatus) => rows.filter((r) => r.status === s).length;
+const label = (s: string) => s.replace(/_/g, ' ');
+const fmt = (v: unknown) => {
+  if (!v) return '—';
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+};
+---
+
+<AdminShell
+  title="Coaches"
+  requires="coach:read"
+  intro="Candidates and instructors. The stages are recorded in order and cannot be skipped, so an approval always means the screening, the interview and the technical review took place."
+>
+  {unavailable ? (
+    <p class="note" role="alert">{unavailable}</p>
+  ) : (
+    <>
+      <ol class="pipe" aria-label="Recruitment pipeline">
+        {PIPELINE.map((s) => (
+          <li class={filter === s ? 'on' : ''}>
+            <a href={`${h('/admin/coaches')}?status=${s}`}>
+              <span class="p-n">{countIn(s)}</span>
+              <span class="p-l">{label(s)}</span>
+            </a>
+          </li>
+        ))}
+        <li class={!filter ? 'on' : ''}>
+          <a href={h('/admin/coaches')}>
+            <span class="p-n">{rows.length}</span>
+            <span class="p-l">all</span>
+          </a>
+        </li>
+      </ol>
+
+      {expiring.length > 0 && (
+        <section class="expiring" role="status">
+          <h2 class="sec-h">Qualifications lapsing within sixty days</h2>
+          <p class="sec-p">
+            A coach whose clearance has lapsed is excluded from work with
+            children automatically. Told now, rather than on the morning they
+            turn up at a school and cannot teach.
+          </p>
+          <ul>
+            {expiring.map((e: any) => (
+              <li>
+                <strong>{e.fullName}</strong> — {e.qualification.title}
+                <span class="muted"> expires {fmt(e.qualification.expiresOn)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {rows.length === 0 ? (
+        <p class="note">
+          No candidates at this stage. Applications arrive through the training
+          platform and create a screening task for the coach manager
+          automatically.
+        </p>
+      ) : (
+        <ul class="cands">
+          {rows.map((r) => (
+            <li>
+              <div>
+                <p class="c-name">{r.fullName}</p>
+                <p class="c-meta">
+                  <code>{r.ref}</code>
+                  {r.danGrade && <> · {r.danGrade}</>}
+                  {r.teachingYears != null && <> · {r.teachingYears} years teaching</>}
+                  {r.city && <> · {r.city}</>}
+                </p>
+                {r.decisionReason && <p class="c-reason">{r.decisionReason}</p>}
+              </div>
+              <div class="c-side">
+                <span class="pill"><span class="pill-dot"></span>{label(r.status)}</span>
+                <span class="c-when">{fmt(r.submittedAt)}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .note, .expiring {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
+  }
+  .expiring { border-left-color: var(--red); margin: 0 0 26px; }
+  .sec-h { font-family: var(--font-display); font-size: 1rem; margin: 0 0 8px; color: var(--off-white, inherit); }
+  .sec-p { margin: 0 0 12px; font-size: .9rem; }
+  .expiring ul { margin: 0; padding-left: 18px; }
+  .expiring li { margin: 4px 0; font-size: .9rem; }
+
+  .pipe { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 26px; padding: 0; }
+  .pipe li a {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 11px 16px; border: 1px solid var(--border); border-radius: var(--radius);
+    text-decoration: none; min-width: 92px;
+  }
+  .pipe li a:hover { border-color: var(--gold); }
+  .pipe li.on a { border-color: var(--gold); background: var(--bg-2); }
+  .p-n { font-family: var(--font-display); font-size: 1.3rem; font-variant-numeric: tabular-nums; }
+  .p-l { font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+
+  .cands { list-style: none; margin: 0; padding: 0; }
+  .cands li {
+    display: flex; justify-content: space-between; gap: 20px; align-items: flex-start;
+    padding: 16px 0; border-bottom: 1px solid var(--border);
+  }
+  .c-name { margin: 0; font-family: var(--font-display); font-size: 1.05rem; }
+  .c-meta { margin: 4px 0 0; font-size: .82rem; color: var(--muted); }
+  .c-reason { margin: 7px 0 0; font-size: .87rem; color: var(--muted); max-width: 60ch; line-height: 1.6; }
+  .c-side { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex-shrink: 0; }
+  .c-when { font-size: .78rem; color: var(--muted); }
+  .muted { color: var(--muted); }
+  code { font-family: var(--font-accent, monospace); font-size: .95em; }
+
+  @media (max-width: 700px) {
+    .pipe { gap: 6px; }
+    .pipe li a { min-width: 0; flex: 1 1 auto; padding: 9px 12px; }
+    .cands li { flex-direction: column; gap: 8px; }
+    .c-side { flex-direction: row; align-items: center; gap: 10px; }
+  }
+</style>

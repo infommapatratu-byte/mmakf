@@ -1,0 +1,43 @@
+---
+// Training as an individual.
+//
+// The second of the two pages /training has been linking to, and 404ing on,
+// since it was written.
+//
+// Renders the same audience definition the learn surface uses, so the public
+// federation and the training platform cannot end up describing individual
+// training differently.
+
+import Base from '@/layouts/Base.astro';
+import AudienceEditorial from '@/components/AudienceEditorial.astro';
+import { AUDIENCES, audienceBySlug } from '@/data/audiences';
+import { canonicalFor, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const audience = audienceBySlug('individuals')!;
+
+const schema = {
+  '@context': 'https://schema.org',
+  '@type': 'Service',
+  name: 'Individual karate training with MMAKF',
+  description: audience.standfirst,
+  serviceType: 'Martial arts training',
+  areaServed: { '@type': 'Country', name: 'India' },
+  provider: {
+    '@type': 'SportsOrganization',
+    name: 'Modern Martial Arts Karate-Do Federation of India',
+    url: 'https://www.mmakf.in',
+  },
+  url: canonicalFor(surface, '/training/individual'),
+};
+---
+
+<Base
+  title="Train with MMAKF — individual karate training in India"
+  description={audience.standfirst}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+  <AudienceEditorial audience={audience} surface={surface} siblings={AUDIENCES} />
+</Base>
