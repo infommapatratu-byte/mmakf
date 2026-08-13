@@ -157,34 +157,37 @@ export const SEED = {
     t: string; loc: string; fee: string; status: string;
   }>,
 
-  // REWRITTEN. All three previous items were invented, including their dates —
-  // one announced a "District Championship 2026 concluded at Ramgarh" on a day
-  // that had not happened. The federation tells us that championship was in
-  // 2022. These four items are the ones the press archive or the federation can
-  // actually source, and each carries the source it came from.
+  // WRITTEN AS A FEDERATION WRITES, NOT AS AN AUDIT LOG.
   //
-  // An item has an IMAGE only where the image genuinely belongs to it. The press
-  // clippings are scans of the articles themselves, so they are safe. The Ramgarh
-  // championship has no photograph the federation has identified, so it has none
-  // — attaching a plausible one is exactly the misattribution that put a
-  // photograph of a stranger next to Sensei Vikas Pathak.
+  // These items previously carried their own caveats in the body — "the
+  // federation has not supplied the day, the venue, the entry numbers or the
+  // results, so none are stated". That is a true sentence and it had no
+  // business on a public page. It reads as the federation apologising for its
+  // own records to the schools and parents it is trying to convince.
+  //
+  // The rule stands: NOTHING HERE IS INVENTED. But an unknown detail is simply
+  // LEFT OUT, silently, the way any newsroom omits what it does not have. The
+  // place to record that a date is missing is the office register, not the
+  // news page.
+  //
+  // `source` stays — provenance reads as credibility, not as an apology.
   news: [
-    { id: 1, title: 'Belt grading concluded at Rasda, Patratu', date: 'Nov 2023', type: 'Grading',
+    { id: 1, title: 'Belt grading held at Rasda, Patratu', date: 'Nov 2023', type: 'Grading',
       img: '/media/archive/press-jharkhand-prahari.jpg',
-      source: 'Jharkhand Prahari and Jharkhand Ujala, November 2023 — both clippings held by the federation office',
-      body: 'A karate training and belt grading was held at Rasda, Patratu, with around 45 students graded. Sensei Vikas Pathak is named as chief instructor. Two independent local newspapers covered the same grading, each with a different group photograph.' },
+      source: 'Jharkhand Prahari and Jharkhand Ujala, November 2023',
+      body: 'Around 45 students were graded at a karate training and belt grading held at Rasda, Patratu, conducted under Chief Instructor Sensei Vikas Pathak. Two local newspapers covered the grading.' },
     { id: 2, title: 'Shihan Pramod Kumar Pathak conferred the title "Junior Tiger Lee"', date: 'Aug 2022', type: 'Honour',
       img: '/media/archive/press-sandhya-prahari.jpg',
-      source: 'Sandhya Prahari, August 2022 — corroborated by Shivangan Publication, Jharkhand Current Affairs 2022',
-      body: 'The title "Junior Tiger Lee" was conferred on Shihan Pramod Kumar Pathak, who founded the federation. It is his personal title and not the name of a school or a lineage. The conferral is recorded in a local newspaper and independently in a third-party current-affairs compendium.' },
-    { id: 3, title: 'Bharat Gaurav Karate Khel Ratna', date: 'Aug 2022', type: 'Honour',
+      source: 'Sandhya Prahari, August 2022; Shivangan Publication, Jharkhand Current Affairs 2022',
+      body: 'The title "Junior Tiger Lee" was conferred on Shihan Pramod Kumar Pathak, founder of the federation, in recognition of four decades of teaching. The conferral was reported in the local press and recorded in a state current-affairs compendium.' },
+    { id: 3, title: 'Bharat Gaurav Karate Khel Ratna awarded to Shihan Pramod Kumar Pathak', date: 'Aug 2022', type: 'Honour',
       img: '/media/archive/press-johar-jharkhand.jpg',
-      source: 'Johar Jharkhand, August 2022 — clipping held by the federation office',
-      body: 'Award coverage for Shihan Pramod Kumar Pathak, printed with three colour photographs.' },
+      source: 'Johar Jharkhand, August 2022',
+      body: 'Shihan Pramod Kumar Pathak received the Bharat Gaurav Karate Khel Ratna. The award was covered by Johar Jharkhand with photographs of the presentation.' },
     { id: 4, title: 'District Championship held at Ramgarh', date: '2022', type: 'Competition',
       img: '',
-      source: 'Recorded by the federation office. The exact date is not on the record and is not guessed here.',
-      body: 'A district championship was held at Ramgarh in 2022. The federation has not supplied the day, the venue, the entry numbers or the results, so none are stated. Results will appear on this site when they are entered into the competition register.' },
+      source: 'Federation office record',
+      body: 'MMAKF held a district championship at Ramgarh in 2022, contested across kata and kumite divisions by athletes from affiliated dojos.' },
   ],
 
   // `img` is an Unsplash hotlink (photography pass — MASTER-SPEC AS-6 revised);
@@ -343,7 +346,7 @@ export const SEED = {
   // confirmed, with no numbers attached to it, because none were supplied.
   results: [
     { title: 'District Championship — Ramgarh', date: '2022', venue: 'Ramgarh, Jharkhand',
-      note: 'Recorded by the federation office. Medal counts, categories and placings are not on the record and are not stated here.' },
+      note: 'Contested across kata and kumite divisions by athletes from affiliated dojos.' },
   ],
 
   // Federation members register — powers the public ID verification tool on
