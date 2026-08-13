@@ -21,6 +21,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import net from 'node:net';
+import {
+  PUBLIC_NAV, PUBLIC_ACTIONS, LEARN_NAV, LEARN_ACTIONS,
+} from '@/lib/surface';
+import { AUDIENCES } from '@/data/audiences';
 
 let proc: ChildProcess | null = null;
 let base = '';
@@ -119,12 +123,56 @@ const OK_ROUTES = [
   '/verify',
 ];
 
+/**
+ * EVERY LINK IN EVERY MENU, DERIVED FROM THE MENU ITSELF.
+ *
+ * The list above is hand-written and therefore has the same weakness as the
+ * pages it checks: somebody adds a navigation entry and forgets to add it here.
+ * That is exactly how /learn/coaches and then /learn/request both shipped as
+ * 404s — both were in the navigation, both matched /learn/[audience] in the
+ * static check, and neither had a file.
+ *
+ * Deriving the list from PUBLIC_NAV, PUBLIC_ACTIONS, LEARN_NAV and LEARN_ACTIONS
+ * means a new menu entry is fetched the moment it is added, with no second list
+ * to remember. The admin menu is excluded: those pages legitimately answer 200
+ * with a sign-in prompt, which the block below checks separately.
+ */
+const NAV_PATHS = [
+  ...new Set([
+    ...PUBLIC_NAV.map((n) => n.href),
+    ...PUBLIC_NAV.flatMap((n) => (n.children ?? []).map((c) => c.href)),
+    ...PUBLIC_ACTIONS.map((a) => a.href),
+    ...LEARN_NAV.map((n) => n.href),
+    ...LEARN_ACTIONS.map((a) => a.href),
+    // The audience data drives links on several pages and is the other place a
+    // slug can be added without a file appearing.
+    ...AUDIENCES.map((a) => `/learn/${a.slug}`),
+    ...AUDIENCES.map((a) => a.action.href),
+    ...AUDIENCES.filter((a) => a.publicPath).map((a) => a.publicPath as string),
+  ]),
+];
+
 describe('every route the navigation offers actually answers', () => {
   for (const path of OK_ROUTES) {
     it(`GET ${path}`, async () => {
       const { status, body } = await load(path);
       expect(status, `${path} returned ${status}`).toBe(200);
       // A 200 that rendered a framework error page is still a failure.
+      expect(body, `${path} answered 200 with an error in the body`)
+        .not.toMatch(/Internal server error|Cannot read propert|is not defined/i);
+    }, 60_000);
+  }
+});
+
+describe('every navigation link, taken from the navigation', () => {
+  for (const path of NAV_PATHS) {
+    it(`GET ${path}`, async () => {
+      const { status, body } = await load(path);
+      expect(
+        status,
+        `${path} is offered in the navigation and answered ${status}. ` +
+        'A link that only resolves through a dynamic route is still a 404 to a visitor.'
+      ).toBe(200);
       expect(body, `${path} answered 200 with an error in the body`)
         .not.toMatch(/Internal server error|Cannot read propert|is not defined/i);
     }, 60_000);
