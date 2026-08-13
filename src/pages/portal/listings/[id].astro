@@ -46,6 +46,7 @@ import {
   LISTING_REVIEW_TURNAROUND_NOT_SET,
   isMarketplaceError,
 } from '@/db/marketplace';
+import { paiseToRupeeInput } from '../_lib';
 
 export const prerender = false;
 
@@ -141,15 +142,10 @@ const fmt = (v: unknown): string => {
     : d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
-/**
- * Paise back to the decimal a person edits.
- *
- * The only direction that happens on this page. Rupees are turned into paise in
- * exactly one place — rupeesToPaise() in src/pages/api/marketplace/[...action].ts
- * — and that place is on the server, so no browser can decide what a price
- * means. Integer division of an integer column is exact.
- */
-const rupeeInput = (minor: number): string => (minor / 100).toFixed(2);
+// Paise back to the decimal a person edits — the only direction that happens on
+// this page, and it is the portal's one shared helper rather than a copy of it.
+// Rupees become paise in exactly one place in this codebase, on the server, so
+// no browser and no page decides what a price means.
 
 /** What a seller may do next with an item in this state, in the module's terms. */
 const LISTING_STATE: Record<string, string> = {
@@ -368,7 +364,7 @@ const canSubmit = listing && ['draft', 'rejected', 'withdrawn', 'delisted'].incl
                 name="priceRupees"
                 inputmode="decimal"
                 required
-                value={rupeeInput(listing.priceMinor)}
+                value={paiseToRupeeInput(listing.priceMinor)}
               />
               <p class="hint">
                 Rupees and paise, e.g. 450.50. It is stored as whole paise, and the conversion happens once, on the

@@ -658,12 +658,22 @@ describe('limits', () => {
     const from = await currentHead(db);
     for (let i = 0; i < 3; i++) await publishMatch(publicCompetitionId, { matchId: 8500 + i });
 
+    // The clock is INJECTED, and it is the injected sleep that advances it.
+    // maxDurationMs is a deadline the stream reads off now(), so with the real
+    // clock this test was really asserting that three database round trips fit
+    // inside 200 wall-clock milliseconds on the machine running it. They do on
+    // an idle machine and they do not when the whole suite is running, which is
+    // how this failed once in a full run and passed on its own. Nothing about
+    // the pacing rule is a fact about wall-clock time, so nothing here should
+    // depend on one.
     const waits: number[] = [];
+    let clock = 0;
     const frames = await drain(openStream(db, grant, {
       cursor: from,
       options: {
         maxBatch: 1, catchupMs: 5, pollMs: 60, heartbeatMs: 10_000, maxDurationMs: 200,
-        sleep: async (ms: number) => { waits.push(ms); await new Promise((r) => setTimeout(r, ms)); },
+        now: () => clock,
+        sleep: async (ms: number) => { waits.push(ms); clock += ms; await new Promise((r) => setTimeout(r, ms)); },
       },
     }));
 

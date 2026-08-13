@@ -21,7 +21,7 @@
 //    Attendance is recorded when a member joins the class, and the page says
 //    plainly that it is being recorded.
 //  · It will not repeat the database's own words to the visitor. See
-//    loadFailure() below — this page answers strangers, and what postgres.js
+//    readableError() below — this page answers strangers, and what postgres.js
 //    and drizzle put in `err.message` is a fact about the server.
 
 import Base from '@/layouts/Base.astro';
@@ -29,24 +29,43 @@ import { identify, type Identity } from '@/lib/session';
 import { isConfigured, db } from '@/db';
 import * as s from '@/db/schema';
 import { eq, inArray } from 'drizzle-orm';
-import { canAnywhere, type Principal } from '@/lib/rbac';
+import { canAnywhere, ForbiddenError, type Principal } from '@/lib/rbac';
 import { liveNow, upcomingClasses, integrationStatus } from '@/lib/youtube';
-import { liveClassQuestions } from '@/db/academy';
+import { liveClassQuestions, AcademyError } from '@/db/academy';
 
 export const prerender = false;
 
-const configured = isConfigured();
-const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+/**
+ * What a stranger may be told about a failure.
+ *
+ * This page answers the unauthenticated public: the first person to open it
+ * during an outage is whoever happened to click the link. The modules write
+ * their refusals to be read by the person who hit them, so those are shown
+ * as they were written. Everything else — a driver fault, a missing relation,
+ * a timeout — is a fact about the SERVER. The driver names the table and
+ * drizzle prepends the whole generated statement and its bound parameters, and
+ * publishing that is how the shape of the schema, and eventually a connection
+ * string, reaches someone who was only looking for a class. Those are logged
+ * for the office and summarised here.
+ *
+ * `context` names the read for the log line. It is deliberately not repeated
+ * into the returned sentence: the card that renders it already carries the
+ * heading, and the visitor should not be told the same thing twice.
+ */
+function readableError(err: unknown, context: string): string {
+  if (err instanceof AcademyError) return String(err.message);
+  if (err instanceof ForbiddenError) {
+    return 'The federation’s permission rules do not allow this visitor to read that record.';
+  }
+  console.error(`[live] ${context}`, err);
+  return 'The federation’s records could not be reached just now. The fault has been logged for the federation office; nothing has been changed. An empty page here is this page failing to read the schedule, not the federation cancelling a class.';
+}
 
 /** Anyone at all. A public class is genuinely open; everything else is not. */
 const ANONYMOUS: Principal = { userId: null, label: 'anonymous', bindings: [] };
-const principal: Principal = identity?.principal ?? ANONYMOUS;
 
+const configured = isConfigured();
 const youtube = integrationStatus();
-// The missing variable names are operational detail. Naming them to the public
-// tells the internet what this deployment is missing; naming them to an editor
-// is how they get fixed.
-const showMissing = canAnywhere(principal, 'content:write');
 
 interface ClassView {
   id: number;
@@ -60,6 +79,8 @@ interface ClassView {
   questions: any[];
 }
 
+let identity: Identity | null = null;
+let principal: Principal = ANONYMOUS;
 let personId: number | null = null;
 let liveClasses: ClassView[] = [];
 let upcoming: ClassView[] = [];
@@ -68,14 +89,21 @@ let hiddenUpcoming = 0;
 let loadError: string | null = null;
 
 if (configured) {
-  if (identity?.userId != null) {
-    const user = (
-      await db().select({ personId: s.users.personId }).from(s.users).where(eq(s.users.id, identity.userId)).limit(1)
-    )[0];
-    personId = user?.personId ?? null;
-  }
-
+  // identify() is itself a database read, and so is the users lookup under it.
+  // Left outside this block they are a blank 500 for every caller holding a
+  // cookie during the same outage a stranger is shown a card for — the member
+  // gets the worse page precisely because they are a member.
   try {
+    identity = await identify(Astro.request.headers.get('cookie'));
+    principal = identity?.principal ?? ANONYMOUS;
+
+    if (identity?.userId != null) {
+      const user = (
+        await db().select({ personId: s.users.personId }).from(s.users).where(eq(s.users.id, identity.userId)).limit(1)
+      )[0];
+      personId = user?.personId ?? null;
+    }
+
     const liveRows = await liveNow(db());
     const upcomingRows = await upcomingClasses(db(), 8);
 
@@ -123,10 +151,25 @@ if (configured) {
     const upcomingGated = await Promise.all(upcomingRows.map(gate));
     upcoming = upcomingGated.filter((c): c is ClassView => c != null);
     hiddenUpcoming = upcomingRows.length - upcoming.length;
-  } catch (err: any) {
-    loadError = String(err?.message ?? err);
+  } catch (err) {
+    loadError = readableError(err, 'The class list');
+    // A half-read page is worse than an unread one: it would report classes
+    // the gate never finished checking, and a count of hidden ones taken from
+    // a list that stopped early.
+    identity = null;
+    principal = ANONYMOUS;
+    personId = null;
+    liveClasses = [];
+    upcoming = [];
+    hiddenLive = 0;
+    hiddenUpcoming = 0;
   }
 }
+
+// The missing variable names are operational detail. Naming them to the public
+// tells the internet what this deployment is missing; naming them to an editor
+// is how they get fixed.
+const showMissing = canAnywhere(principal, 'content:write');
 
 const fmtTime = (v: unknown): string => {
   if (v == null || v === '') return '—';
@@ -201,7 +244,14 @@ const signedInButNoPerson = identity != null && personId == null;
         </div>
       )}
 
-      {configured && !identity && (
+      {/*
+        `!loadError` is load-bearing, not tidiness. When the read failed the
+        page never learned who the caller is, so "you are not signed in" is a
+        guess — and it is the wrong guess for exactly the member whose cookie
+        could not be resolved, who is then told to sign in again during an
+        outage that has nothing to do with their session.
+      */}
+      {configured && !loadError && !identity && (
         <div class="card" role="note" style="margin-bottom:22px">
           <div class="card-body">
             You are not signed in, so only classes the federation has made public are listed, your attendance is not
@@ -322,7 +372,14 @@ const signedInButNoPerson = identity != null && personId == null;
           <div class="rule"></div>
         </div>
 
-        {upcoming.length === 0 ? (
+        {loadError ? (
+          <div class="card" role="alert">
+            <div class="card-body">
+              The schedule could not be read either — it comes from the same records as the list above. An empty
+              schedule here would be a claim the federation is not currently able to make.
+            </div>
+          </div>
+        ) : upcoming.length === 0 ? (
           <div class="card">
             <div class="card-body">
               No class is scheduled.

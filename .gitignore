@@ -1,6 +1,10 @@
 node_modules/
 dist/
 .astro/
+# Per-suite Astro caches: the two suites that boot a real `astro dev` each get
+# their own, so they cannot race on data-store.json. See astro.config.mjs.
+.astro-test-live/
+.astro-test-seo/
 .vercel/
 .env
 .env.local

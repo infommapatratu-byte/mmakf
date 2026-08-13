@@ -6,8 +6,8 @@
 //   1. THE MONEY BOUNDARY. A price is typed in rupees and stored in paise. That
 //      conversion is the one piece of arithmetic on this surface, it happens in
 //      exactly one place, and ₹450.50 has to arrive in the column as 45050 —
-//      not 450.5, not 45050.000000000007, and not silently rounded from
-//      something that was never a price.
+//      not 450.5, not anything with a fraction still on it, and not silently
+//      rounded from something that was never a price.
 //
 //   2. THE SHAPE OF THE HANDLERS. No caller may name the seller. This is not
 //      checked by reading each handler and hoping; it is checked by asserting
@@ -49,21 +49,33 @@ const SURFACE = [ROUTE, LIST_PAGE, ITEM_PAGE];
 
 describe('rupees to paise — the one conversion on the seller surface', () => {
   it('₹450.50 is 45050 paise, and never 450.5', () => {
-    // The case named in the brief. `450.50 * 100` is 45050.000000000007 in
-    // IEEE-754, which is not an integer and which assertPriceMinor() in
-    // marketplace.ts refuses outright.
+    // The case named in the brief: what must never reach the column is 450.5,
+    // the rupee figure itself, in a column that means paise — which is what a
+    // surface with two conversions on it eventually stores. assertPriceMinor()
+    // in marketplace.ts refuses any non-integer outright.
     expect(rupeesToPaise('450.50')).toBe(45050);
     expect(rupeesToPaise('450.50')).not.toBe(450.5);
     expect(Number.isInteger(rupeesToPaise('450.50'))).toBe(true);
   });
 
   it('the float multiplication this function avoids really is wrong', () => {
-    // Stated as a fact rather than trusted as folklore: if the conversion ever
-    // becomes `Math.round(x * 100)` this test still passes, but the reason the
-    // function is written the way it is stops being a matter of opinion.
-    expect(450.5 * 100).not.toBe(45050);
-    expect(1799.99 * 100).not.toBe(179999);
-    expect(Math.floor(1799.99 * 100)).toBe(179998);   // a rupee short of the price
+    // Stated as a fact rather than trusted as folklore — and the folklore was
+    // wrong about WHICH prices. ₹450.50 and ₹1,799.99 both survive the
+    // multiplication exactly; that is a property of those two numbers in binary,
+    // not a rule, and it is why picking the examples by eye is not good enough.
+    expect(450.5 * 100).toBe(45050);
+    expect(1799.99 * 100).toBe(179999);
+
+    // These are the ordinary prices that do NOT survive it. ₹19.99 truncates to
+    // a paisa less than the seller asked for, which is the whole reason the
+    // conversion is written the way it is.
+    expect(19.99 * 100).not.toBe(1999);
+    expect(8.2 * 100).not.toBe(820);
+    expect(Math.floor(19.99 * 100)).toBe(1998);   // a paisa short of the price
+
+    // And the conversion under test gets every one of them right.
+    expect(rupeesToPaise('19.99')).toBe(1999);
+    expect(rupeesToPaise('8.20')).toBe(820);
   });
 
   it('whole rupees, single paise digits and the awkward ones all land exactly', () => {

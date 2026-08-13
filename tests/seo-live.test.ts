@@ -48,6 +48,12 @@ beforeAll(async () => {
   proc = spawn(process.execPath, ['node_modules/astro/astro.js', 'dev', '--port', String(port), '--host', '127.0.0.1'], {
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Its OWN Astro cache. tests/live-error-disclosure.test.ts boots a second
+    // `astro dev` in this same directory, and two servers sharing one cacheDir
+    // race on the rename of data-store.json — the loser exits and the suite
+    // reports "astro dev exited" with nothing about the real cause. See the
+    // note on cacheDir in astro.config.mjs.
+    env: { ...process.env, ASTRO_CACHE_DIR: '.astro-test-seo' },
   });
   let log = '';
   proc.stdout?.on('data', (d) => (log += d));

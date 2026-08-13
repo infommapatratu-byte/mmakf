@@ -19,8 +19,10 @@
 //    module puts the caller's user id in the WHERE clause, so another seller's
 //    listing does not come back as "forbidden", it simply does not exist.
 //    (The reviewer-side handlers do take a seller id, because deciding somebody
-//    else's shop is the whole act; each one is gated by assertCan() on the
-//    seller's own scope, and refuses self-review.)
+//    else's shop is the whole act; each one is gated inside marketplace.ts
+//    against the seller's own scope, and refuses self-review. The name of that
+//    check is deliberately not written anywhere in this file — a route that can
+//    name a permission check is a route that is one edit away from making one.)
 //
 // 2. PRICES ARRIVE IN RUPEES AND ARE CONVERTED HERE, EXACTLY ONCE.
 //    `rupeesToPaise()` below is the only rupee→paise conversion in the seller
@@ -74,11 +76,14 @@ export class InputError extends Error {
  * paise because that is the only representation that survives being multiplied
  * by a quantity. Between those two facts sits exactly one function.
  *
- * IT DOES NOT MULTIPLY BY 100. `450.50 * 100` is 45050.000000000007 in IEEE-754
- * and `1799.99 * 100` is 179998.99999999997 — the second of which truncates to
- * a rupee less than the seller asked for. The rupees and the paise are parsed
- * as separate integers out of the decimal string and combined with integer
- * arithmetic, so the result is exact for every input this accepts.
+ * IT NEVER MULTIPLIES A DECIMAL BY A HUNDRED. Measured in this repository's own
+ * Node: ₹19.99 through that arithmetic is 1998.9999999999998 and ₹8.20 is
+ * 819.9999999999999, each of which truncates to a paisa less than the seller
+ * asked for. ₹450.50 and ₹1,799.99 happen to come out exact — a fact about
+ * those two numbers in binary, not a rule, and a price column needs a rule.
+ * Here the rupees and the paise are taken out of the decimal string as DIGITS
+ * and read once, so no arithmetic is ever performed on a fractional value and
+ * the result is exact for every input this accepts.
  *
  * IT REFUSES RATHER THAN ROUNDS. `450.555` is not a price in India, it is a
  * typo or a machine sending the wrong units, and quietly turning it into
@@ -99,9 +104,10 @@ export function rupeesToPaise(value: unknown): number | null {
   const m = /^(\d{1,9})(?:\.(\d{1,2}))?$/.exec(text);
   if (!m) return null;
 
-  const rupees = Number(m[1]);
-  const paise = Number((m[2] ?? '').padEnd(2, '0') || '0');
-  return rupees * 100 + paise;
+  // '450' and '50' are joined as text and read as one integer. Nothing here
+  // scales anything, so there is no rounding rule to get wrong and none to
+  // disagree with a second copy of it elsewhere.
+  return Number(m[1] + (m[2] ?? '').padEnd(2, '0'));
 }
 
 /**
@@ -162,10 +168,17 @@ function reqInt(b: Body, k: string): number {
 /**
  * Media, as the listing form sends it.
  *
- * Passed straight through to updateListing/createListing, which normalise and
- * refuse it. Supplying `media` REPLACES the whole set — that is the module's
- * contract, and the portal states it on the form rather than restating it here
- * as a different rule.
+ * READ IN ONE PLACE, FOR ONE ACT. Photographs are reviewable content: swapping
+ * one changes what a reviewer would be looking at exactly as changing the title
+ * does. `listing/update` is the act that knows that — it is the act RULE 6 lives
+ * behind — so it is the only act that reads media. A media setter of its own, or
+ * a second read on create, would be a second write to reviewable content, and
+ * the second one is the one that forgets to recompute the content hash.
+ *
+ * Passed straight through to updateListing(), which normalises and refuses it.
+ * Supplying `media` REPLACES the whole set — that is the module's contract, and
+ * the portal states it on the form rather than restating it here as a different
+ * rule.
  */
 function media(b: Body): mkt.ListingMediaInput[] | undefined {
   if (b.media === undefined) return undefined;
@@ -221,14 +234,31 @@ const HANDLERS: Record<string, Handler> = {
 
   // ── Listings, the seller's side ───────────────────────────────────────────
 
-  'listing/create': (ctx, b) => mkt.createListing(db(), ctx, {
-    title: str(b, 'title'),
-    description: optStr(b, 'description'),
-    category: str(b, 'category') as mkt.ListingCategory,
-    priceMinor: priceMinorFromBody(b),
-    stockQty: b.stockQty === undefined ? 0 : reqInt(b, 'stockQty'),
-    media: media(b) ?? [],
-  }),
+  // A new item is created with no photographs. They are added on the item's own
+  // page, through listing/update, which is where the effect of changing what a
+  // reviewer looked at is spelled out and where RULE 6 is applied. Reading media
+  // here as well would give reviewable content two ways in, and the portal
+  // already tells the seller there is one.
+  //
+  // Photographs sent to this act are REFUSED, not ignored — the same rule this
+  // route applies to a price in the wrong units two functions above. A caller
+  // that uploaded three images and got back a listing with none would find out
+  // at review, and the seller would be the one waiting.
+  'listing/create': (ctx, b) => {
+    if (b.media !== undefined) {
+      throw new InputError(
+        'Photographs are added to an item after it exists, on the item\'s own page, because changing ' +
+        'what a reviewer looks at is an edit and is reported as one. Create the item, then add them.'
+      );
+    }
+    return mkt.createListing(db(), ctx, {
+      title: str(b, 'title'),
+      description: optStr(b, 'description'),
+      category: str(b, 'category') as mkt.ListingCategory,
+      priceMinor: priceMinorFromBody(b),
+      stockQty: b.stockQty === undefined ? 0 : reqInt(b, 'stockQty'),
+    });
+  },
 
   // RULE 6 LIVES BEHIND THIS ONE. If the edit moves reviewable content and the
   // listing was approved, updateListing returns it to `submitted`, clears the
@@ -255,9 +285,9 @@ const HANDLERS: Record<string, Handler> = {
   // ── The federation's side ─────────────────────────────────────────────────
   //
   // These DO take a seller or listing id, because deciding somebody else's
-  // record is the entire act. Every one is gated inside marketplace.ts by
-  // assertCan() against that seller's own scope, refuses self-review, and
-  // requires a recorded reason — none of which is re-implemented here.
+  // record is the entire act. Every one is gated inside marketplace.ts against
+  // that seller's own scope, refuses self-review, and requires a recorded
+  // reason — none of which is re-implemented, or even named, here.
 
   'seller/approve': (ctx, b) => mkt.approveSeller(db(), ctx, reqInt(b, 'sellerId'), str(b, 'reason')),
   'seller/reject': (ctx, b) => mkt.rejectSeller(db(), ctx, reqInt(b, 'sellerId'), str(b, 'reason')),

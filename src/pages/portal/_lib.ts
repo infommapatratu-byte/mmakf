@@ -65,28 +65,12 @@ export const titleCase = (v: unknown): string => String(v ?? '').replace(/_/g, '
 
 // ─── Money ──────────────────────────────────────────────────────────────────
 
-/**
- * Rupees typed by a human -> integer paise.
- *
- * PARSED AS TEXT, NEVER THROUGH A FLOAT. `Number('1799.99') * 100` is
- * 179998.99999999997, and the moment that reaches a database it is a rounding
- * error that multiplies by every quantity and tax rate afterwards. Splitting the
- * string and doing integer arithmetic cannot drift.
- *
- * Returns a message rather than throwing, because the caller is a form and the
- * person filling it in needs to be told which field is wrong.
- */
-export function rupeesToPaise(input: unknown): { paise: number } | { error: string } {
-  const text = String(input ?? '').trim().replace(/[₹,\s]/g, '');
-  if (!text) return { error: 'Enter a price in rupees.' };
-  if (!/^\d+(\.\d{1,2})?$/.test(text)) {
-    return { error: 'A price must be a number of rupees, with at most two decimal places — for example 1799 or 1799.50.' };
-  }
-  const [whole, fraction = ''] = text.split('.');
-  const paise = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
-  if (!Number.isSafeInteger(paise)) return { error: 'That price is implausibly large.' };
-  return { paise };
-}
+// ONLY ONE DIRECTION IS DONE HERE. Rupees become paise in exactly one place in
+// this codebase — rupeesToPaise() in src/pages/api/marketplace/[...action].ts,
+// on the server, where no browser can decide what a price means. A convenience
+// copy lived here once and did the arithmetic its own way; two ways of reading
+// a price is how the same typed figure reaches two different columns, so it was
+// removed rather than kept in step.
 
 /** Integer paise -> the string a form field should be pre-filled with. */
 export function paiseToRupeeInput(paise: number): string {

@@ -105,6 +105,12 @@ beforeAll(async () => {
       DATABASE_URL: DB_URL,
       POSTGRES_URL: '',
       ADMIN_SESSION_SECRET: SECRET,
+      // Its OWN Astro cache. tests/seo-live.test.ts boots a second `astro dev`
+      // in this same directory, and two servers sharing one cacheDir race on
+      // the rename of data-store.json — the loser exits and the suite reports
+      // "astro dev exited" with nothing about the real cause. See the note on
+      // cacheDir in astro.config.mjs.
+      ASTRO_CACHE_DIR: '.astro-test-live',
       // The classroom's own "not configured" notice is a different state with a
       // different card; leaving these unset is what /live already expects.
       NODE_ENV: 'development',

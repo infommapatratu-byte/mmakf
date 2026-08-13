@@ -152,7 +152,12 @@ export const PORTAL_SECTIONS: readonly PortalSection[] = [
       'approves each ITEM before the public can see it.',
     links: [
       {
-        href: '/portal/selling',
+        // /portal/listings, not a separate /portal/selling: ONE page serves
+        // both faces of the seller area, and it decides which to show from the
+        // caller's own seller row. Before approval it renders "Apply to sell";
+        // after it, the item list. A second route for the first state would be
+        // a second place for the gate to be got wrong.
+        href: '/portal/listings',
         label: 'Seller account',
         what: 'Apply to sell, or read the standing of the seller record this account already holds.',
         anyOf: [],
@@ -176,7 +181,10 @@ export const PORTAL_SECTIONS: readonly PortalSection[] = [
       'own state’s sellers and no others; the restriction is applied in SQL, not to the page.',
     links: [
       {
-        href: '/portal/review',
+        // The review queues were built at /admin/listings, where both gates
+        // live on one screen. The catalogue offered /portal/review, which was
+        // never written.
+        href: '/admin/listings',
         label: 'Seller and listing queues',
         what: 'Approve, reject, suspend or delist — each with a recorded reason.',
         anyOf: ['marketplace:read', 'marketplace:review', 'marketplace:suspend'],
@@ -193,7 +201,10 @@ export const PORTAL_SECTIONS: readonly PortalSection[] = [
       'confer what you already hold, and only inside the scope of your own binding.',
     links: [
       {
-        href: '/portal/review#applications',
+        // /admin/onboarding is the queue where authority is conferred. The
+        // catalogue pointed at a fragment on a page that did not exist, so the
+        // one link in the federation that confers a role led to the 404 page.
+        href: '/admin/onboarding',
         label: 'Application queue',
         what: 'Read the evidence, then approve or reject with a recorded reason.',
         anyOf: ['role:grant'],

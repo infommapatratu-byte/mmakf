@@ -21,11 +21,13 @@
 // state and on the words the operator actually reads.
 
 import { describe, it, expect } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import postgres from 'postgres';
 import { readdirSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { PGlite } from '@electric-sql/pglite';
+import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
 
 // Ports derived from the pid so parallel runs on one machine do not collide,
 // and spaced so each case in this file gets its own pristine server.
@@ -53,29 +55,26 @@ async function withDatabase<T>(
 ): Promise<T> {
   const port = PORT_BASE + slot;
   const url = `postgresql://postgres:postgres@127.0.0.1:${port}/postgres`;
-  const server: ChildProcess = spawn(process.execPath, ['scripts/pg-testserver.mjs', String(port)], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
 
-  const started = await new Promise<boolean>((ok) => {
-    const timer = setTimeout(() => ok(false), 60_000);
-    server.stdout!.on('data', (d) => {
-      if (String(d).includes('ready on')) { clearTimeout(timer); ok(true); }
-    });
-    server.on('error', () => { clearTimeout(timer); ok(false); });
-    server.on('exit', () => { clearTimeout(timer); ok(false); });
-  });
-  if (!started) {
-    server.kill();
-    throw new Error(`test Postgres did not start on 127.0.0.1:${port}`);
-  }
+  // PGlite is published on the socket from inside this process rather than
+  // spawned via scripts/pg-testserver.mjs, for the same reason
+  // tests/bootstrap-cli.test.ts hosts its own: that server permits a SINGLE
+  // connection, and every case here needs one for its own assertions while the
+  // migrate.mjs child holds another. Sharing it had the runner's connection
+  // rejected with "Too many connections", which surfaces as `read ECONNRESET`
+  // and a non-zero exit — a harness ceiling that reads exactly like a defect in
+  // the runner under test.
+  const db = await PGlite.create();
+  const server = new PGLiteSocketServer({ db, port, host: '127.0.0.1', maxConnections: 4 });
+  await server.start();
 
   const sql = postgres(url, { max: 1, prepare: false, connect_timeout: 10, idle_timeout: 0, onnotice: () => {} });
   try {
     return await body(url, sql);
   } finally {
     await sql.end({ timeout: 5 }).catch(() => {});
-    server.kill();
+    await server.stop();
+    await db.close();
   }
 }
 
