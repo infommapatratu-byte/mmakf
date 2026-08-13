@@ -56,16 +56,64 @@ export const SEED = {
     // of a system. Sensei is the ordinary form of address. Stated precisely,
     // they are stronger than stated together.
     { name: 'Shihan Pramod Kumar Pathak', role: 'Founder & Head of the System', rank: 'VI Dan Black Belt', since: '1983', specialty: 'System authority · Dan gradings', note: 'Awarded the title "Junior Tiger Lee", 2021 · Senior Technical Authority', img: '',
+      // HOW HE IS ADDRESSED, AND WHO GAVE HIM THE NAME.
+      //
+      // Stated by the federation, August 2026: he is himself Grandmaster Jr.
+      // Tiger Lee — a name awarded by his master, Grandmaster S N T Lee.
+      //
+      // `master` is A NAMED PERSON WHO CONFERRED A NAME. It is deliberately not
+      // a string on `federation.lineage`, and it must never be moved there. A
+      // master conferring a title on his student, and a SCHOOL of Shotokan that
+      // MMAKF descends from, are two different claims. This site asserted the
+      // second one in nine places with nothing behind it and removed it. Only
+      // the first has ever been stated, so only the first is recorded.
+      //
+      // Nothing else about Grandmaster S N T Lee exists in this repository — no
+      // grade, no school, no nationality, no dates, no chain of transmission —
+      // so there is no other field here to fill in, and none is guessed.
+      addressedAs: 'Grandmaster Jr. Tiger Lee',
+      master: {
+        name: 'Grandmaster S N T Lee',
+        relation: 'Master',
+        conferred: 'Junior Tiger Lee',
+        conferredShort: 'Jr. Tiger Lee',
+        source: 'Stated by the federation, August 2026',
+      },
       titles: [
         { title: 'Soke', meaning: 'Head and founder of the system' },
         { title: 'Shihan', meaning: 'Senior instructor' },
         { title: 'Renshi', meaning: 'Teaching title (shogo)' },
         { title: 'Sensei', meaning: 'Form of address for a teacher' },
       ],
+      // `source` is the publication the honour was recorded from, held apart
+      // from `note` so the profile can REFUSE to render an honour that has no
+      // source rather than trusting a sentence to contain one.
       honours: [
-        { title: 'Junior Tiger Lee', year: '2021', note: 'Conferred title. Recorded in Shivangan Publication Jharkhand Current Affairs 2022.' },
-        { title: 'Bharat Gaurav Karate Khel Ratna', year: '2022', note: 'Reported in Johar Jharkhand.' },
+        { title: 'Junior Tiger Lee', year: '2021', note: 'Conferred title.',
+          source: 'Shivangan Publication, Jharkhand Current Affairs 2022' },
+        { title: 'Bharat Gaurav Karate Khel Ratna', year: '2022',
+          source: 'Johar Jharkhand, August 2022' },
       ],
+      // What the federation's own registers make him responsible for. Both rows
+      // are held elsewhere on this site — the committee register on /governance
+      // and the grading rule on /belt-system — so each carries the link rather
+      // than a paraphrase that could drift away from the page it came from.
+      authority: [
+        { role: 'Chairman — Technical Committee & Examination Board',
+          detail: 'Custodian of the Shotokan syllabus. Sanctions all kyu and Dan examinations, appoints examiners, and rules on technical standards across every affiliated centre.',
+          href: '/governance' },
+        { role: 'Dan examinations',
+          detail: 'Every Dan examination in the federation is conducted under his personal authority.',
+          href: '/belt-system' },
+      ],
+      // WHICH OF THE PUBLISHED CHANNELS ARE HIS, BY ADDRESS.
+      //
+      // The profile used to show this channel to visitors under the caption
+      // "these are the federation's channels, not this person's personal
+      // accounts" — which was wrong about the one channel it showed. The URL is
+      // the join key into `social`; the name, platform and note stay there, so
+      // this list claims ownership and duplicates nothing.
+      ownChannels: ['https://www.youtube.com/@PramodPathakMartialArt'],
       bio: 'Founder and head of the MMAKF system. Over four decades, Shihan Pathak has built the federation from a single Patratu training hall into an institution running school programmes across the Ramgarh and Hazaribagh districts. He was conferred the title \"Junior Tiger Lee\" in 2021. Every Dan examination in the federation is conducted under his personal authority.' },
     { name: 'Sensei Vikas Pathak', role: 'Chief Instructor', rank: 'IV Dan Black Belt', since: '2004', specialty: 'Kumite & competitive sparring', note: 'Kumite & Sparring', img: '',
       bio: 'The federation\'s Chief Instructor and head of kumite. Elevated to IV Dan in recognition of two decades of service, Sensei Vikas runs the sparring systems, reaction drills and competitive preparation that carry MMAKF athletes from their first bout to state-level podiums.' },
