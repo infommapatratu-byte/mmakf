@@ -1,0 +1,1075 @@
+---
+// /learn/portal — what a client school, company or university sees.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ONLY RULE THIS PAGE REALLY HAS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// PART AC: Institution A cannot access Institution B. Everything below is
+// arranged so that sentence is true by construction rather than by care:
+//
+//  1. THE INSTITUTION IS RESOLVED FROM THE CALLER, NEVER FROM THE URL. It comes
+//     from `institution_users` rows belonging to the signed-in user, and is then
+//     intersected with the institution ids their ROLE BINDING actually covers
+//     (visibleScopes). A membership row without a binding grants nothing, and a
+//     binding without a membership row selects nothing.
+//  2. EVERY QUERY CARRIES `institutionId` IN ITS WHERE CLAUSE. Not one list is
+//     fetched broadly and narrowed in JavaScript. Where a table has no
+//     institution column of its own — program_sessions, program_attendance,
+//     coach_assignments — the predicate is reached through an INNER JOIN to
+//     training_programs, so a row with no owning programme cannot appear.
+//  3. NOTHING IS TAKEN FROM A QUERY PARAMETER. The one parameter this page
+//     reads (`?i=`) is a POSITION in a list the server built from the caller's
+//     own memberships; see where it is parsed.
+//
+// tests/tenant-isolation.test.ts is the guarantee being relied on: an
+// institution binding contains no federation resource at all, because a
+// federation row carries no institutionId and `undefined === 7` is false. This
+// page does not re-implement any of that — it asks can() and visibleScopes().
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// AND WHAT IT REFUSES TO SHOW
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//  · A document is listed only where `visibleToClient` is TRUE. That column
+//    defaults to FALSE precisely so a staff upload is internal until somebody
+//    decides otherwise, and honouring it in SQL is the whole point of it.
+//  · A DRAFT quote version, and a DRAFT contract, are internal. A number the
+//    federation has not issued is not a number the client has been given.
+//  · A `recommended` coach assignment is the engine's suggestion, not an
+//    assignment. Only what a human confirmed appears here.
+//  · No fee rule, no lead score, no internal note, no owner, no deadline. The
+//    federation has published no service standard, so this page shows no
+//    response time — an invented one would be a commitment nobody made.
+//
+// This is a CLIENT surface, so it uses Base.astro rather than AdminShell and
+// renders its own <h1>.
+
+import Base from '@/layouts/Base.astro';
+import { and, asc, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm';
+
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { can, visibleScopes, type Principal } from '@/lib/rbac';
+import { href as surfaceHref, SURFACE_ORIGIN, type Surface } from '@/lib/surface';
+import { formatINR } from '@/db/orders';
+import { institutionTickets } from '@/db/support';
+
+import { persons } from '@/db/schema';
+import {
+  institutions, trainingPrograms, programParticipants, quotes, quoteVersions,
+} from '@/db/engagement.schema';
+import {
+  institutionUsers, clientDocuments, contracts, programSessions,
+  programAttendance, coachAssignments, venues,
+} from '@/db/operations.schema';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+// Pages that live only on the www surface. h() would leave the path untouched
+// and the learn host would then rewrite /my to /learn/my, which does not exist.
+const wwwHref = (p: string) => (surface === 'learn' ? SURFACE_ORIGIN.public + p : p);
+
+// This route sits under /learn, which src/lib/seo.ts classifies as a PUBLIC
+// section — so nothing upstream marks it noindex. The response says so itself.
+// A header travels with the page and cannot be missed by a crawler that never
+// read robots.txt. See the limitation noted at the end of this comment block in
+// the handover: /learn/portal also belongs in EXCLUSIONS in src/lib/seo.ts.
+Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+
+type Gate =
+  | 'no_database'
+  | 'signed_out'
+  | 'shared_credential'
+  | 'no_institution'
+  | 'invited_only'
+  | 'no_binding'
+  | 'refused'
+  | 'ok';
+
+interface Membership {
+  institutionId: number;
+  institutionName: string;
+  institutionCode: string;
+  memberRole: string;
+  memberTitle: string | null;
+  status: string;
+}
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal: Principal | null = identity?.principal ?? null;
+
+let gate: Gate = 'ok';
+let loadError: string | null = null;
+
+let permitted: Membership[] = [];
+let invitedOnly: Membership[] = [];
+let linkedButUnbound: Membership[] = [];
+let me: Membership | null = null;
+
+// What the caller may see FOR THIS institution. Each is asked of can() with the
+// institution as the resource, so the action and the tenant are checked
+// together — an INSTITUTION_COORDINATOR holds attendance and documents but not
+// quotations or agreements, and that difference is visible on the page rather
+// than silently producing empty sections.
+let mayReadPrograms = false;
+let mayReadAttendance = false;
+let mayReadDocuments = false;
+let mayReadQuotes = false;
+let mayReadContracts = false;
+let mayReadSupport = false;
+
+let programmes: any[] = [];
+let sessions: any[] = [];
+let coaches: any[] = [];
+let documents: any[] = [];
+let quotations: any[] = [];
+let agreements: any[] = [];
+let tickets: any[] = [];
+let ticketNote: string | null = null;
+
+/** programId -> counts. Only ever populated from the institution's own rows. */
+const sessionCounts = new Map<number, { total: number; delivered: number; cancelled: number }>();
+const attendanceCounts = new Map<number, { recorded: number; present: number }>();
+const participantCounts = new Map<number, number>();
+
+if (!configured) {
+  // The path that renders in production today: no DATABASE_URL is set, so the
+  // federation's records are not reachable from this deployment at all.
+  gate = 'no_database';
+} else if (!identity) {
+  gate = 'signed_out';
+} else if (identity.userId == null) {
+  // A shared office password or unit code. Both are federation credentials and
+  // neither identifies a person, so neither can belong to a client.
+  gate = 'shared_credential';
+} else {
+  try {
+    const database = db();
+
+    // ── Who the caller is a client OF ──────────────────────────────────────
+    // Keyed on the caller's own user id. A revoked row is excluded here, in
+    // SQL, so a withdrawn coordinator cannot even learn the institution's name.
+    const rows = await database
+      .select({
+        institutionId: institutionUsers.institutionId,
+        memberRole: institutionUsers.role,
+        memberTitle: institutionUsers.title,
+        status: institutionUsers.status,
+        institutionName: institutions.name,
+        institutionCode: institutions.code,
+      })
+      .from(institutionUsers)
+      .innerJoin(institutions, eq(institutionUsers.institutionId, institutions.id))
+      .where(and(
+        eq(institutionUsers.userId, identity.userId),
+        inArray(institutionUsers.status, ['active', 'invited'])
+      ))
+      .orderBy(asc(institutions.name));
+
+    const active: Membership[] = rows.filter((r: any) => r.status === 'active');
+    invitedOnly = rows.filter((r: any) => r.status === 'invited');
+
+    // The second half of the check. Belonging to an institution is a fact about
+    // the client's own records; being able to READ them is a role binding, and
+    // the two are issued separately. Requiring both means neither one on its
+    // own opens the portal.
+    const scopes = visibleScopes(principal, 'program:read');
+    const inScope = (id: number) =>
+      scopes.kind === 'all' || (scopes.kind === 'scoped' && scopes.institutions.includes(id));
+
+    permitted = active.filter((m) => inScope(m.institutionId));
+    linkedButUnbound = active.filter((m) => !inScope(m.institutionId));
+
+    if (permitted.length === 0) {
+      gate = linkedButUnbound.length > 0 ? 'no_binding'
+        : invitedOnly.length > 0 ? 'invited_only'
+        : 'no_institution';
+    } else {
+      // ── Which of the caller's own institutions is on screen ──────────────
+      //
+      // NOT AN INSTITUTION ID. `?i=` is a 1-based POSITION in `permitted`, a
+      // list this request built from the caller's own membership rows. An
+      // altered value can therefore only ever select another institution the
+      // caller already belongs to, and anything out of range falls back to the
+      // first. There is no value of this parameter that names a stranger.
+      const asked = Number(Astro.url.searchParams.get('i'));
+      const pos = Number.isInteger(asked) && asked >= 1 && asked <= permitted.length ? asked - 1 : 0;
+      me = permitted[pos];
+
+      const institutionId = me.institutionId;
+      const resource = { institutionId };
+
+      mayReadPrograms = can(principal, 'program:read', resource);
+      mayReadAttendance = can(principal, 'attendance:read', resource);
+      mayReadDocuments = can(principal, 'document:read', resource);
+      mayReadQuotes = can(principal, 'quote:read', resource);
+      mayReadContracts = can(principal, 'contract:read', resource);
+      mayReadSupport = can(principal, 'support:read', resource);
+
+      if (!mayReadPrograms) {
+        // Membership without the programme-reading action. Nothing on this page
+        // is readable, so it refuses rather than rendering eight empty boxes.
+        gate = 'refused';
+      } else {
+        const now = new Date();
+
+        programmes = await database
+          .select({
+            id: trainingPrograms.id,
+            code: trainingPrograms.code,
+            title: trainingPrograms.title,
+            status: trainingPrograms.status,
+            mode: trainingPrograms.mode,
+            startsOn: trainingPrograms.startsOn,
+            endsOn: trainingPrograms.endsOn,
+            sessionsPlanned: trainingPrograms.sessionsPlanned,
+            venue: trainingPrograms.venue,
+            leadCoachName: persons.fullName,
+          })
+          .from(trainingPrograms)
+          .leftJoin(persons, eq(trainingPrograms.leadCoachPersonId, persons.id))
+          .where(eq(trainingPrograms.institutionId, institutionId))
+          .orderBy(desc(trainingPrograms.createdAt))
+          .limit(100);
+
+        // Upcoming means SCHEDULED and still ahead of now. A cancelled or
+        // rescheduled occurrence is not upcoming — the replacement is its own
+        // row and appears on its own merit.
+        sessions = await database
+          .select({
+            id: programSessions.id,
+            seq: programSessions.seq,
+            title: programSessions.title,
+            topic: programSessions.topic,
+            startsAt: programSessions.startsAt,
+            endsAt: programSessions.endsAt,
+            programTitle: trainingPrograms.title,
+            programCode: trainingPrograms.code,
+            coachName: persons.fullName,
+            venueName: venues.name,
+            venueCity: venues.city,
+          })
+          .from(programSessions)
+          .innerJoin(trainingPrograms, eq(programSessions.programId, trainingPrograms.id))
+          .leftJoin(persons, eq(programSessions.coachPersonId, persons.id))
+          .leftJoin(venues, eq(programSessions.venueId, venues.id))
+          .where(and(
+            eq(trainingPrograms.institutionId, institutionId),
+            eq(programSessions.status, 'scheduled'),
+            gte(programSessions.startsAt, now)
+          ))
+          .orderBy(asc(programSessions.startsAt))
+          .limit(30);
+
+        // Confirmed people only. `recommended` and `proposed` are the engine's
+        // and the office's working states — showing a client a name that has
+        // not been confirmed to them promises a coach who may never arrive.
+        coaches = await database
+          .select({
+            coachName: persons.fullName,
+            assignmentRole: coachAssignments.role,
+            status: coachAssignments.status,
+            programId: trainingPrograms.id,
+            programTitle: trainingPrograms.title,
+          })
+          .from(coachAssignments)
+          .innerJoin(trainingPrograms, eq(coachAssignments.programId, trainingPrograms.id))
+          .innerJoin(persons, eq(coachAssignments.coachPersonId, persons.id))
+          .where(and(
+            eq(trainingPrograms.institutionId, institutionId),
+            inArray(coachAssignments.status, ['accepted', 'confirmed', 'completed'])
+          ))
+          .orderBy(asc(persons.fullName))
+          .limit(100);
+
+        const partRows = await database
+          .select({
+            programId: programParticipants.programId,
+            n: sql<number>`count(*)::int`,
+          })
+          .from(programParticipants)
+          .innerJoin(trainingPrograms, eq(programParticipants.programId, trainingPrograms.id))
+          .where(eq(trainingPrograms.institutionId, institutionId))
+          .groupBy(programParticipants.programId);
+        for (const r of partRows) participantCounts.set(r.programId, Number(r.n));
+
+        if (mayReadAttendance) {
+          const sessRows = await database
+            .select({
+              programId: programSessions.programId,
+              total: sql<number>`count(*)::int`,
+              delivered: sql<number>`count(*) filter (where ${programSessions.status} = 'delivered')::int`,
+              cancelled: sql<number>`count(*) filter (where ${programSessions.status} = 'cancelled')::int`,
+            })
+            .from(programSessions)
+            .innerJoin(trainingPrograms, eq(programSessions.programId, trainingPrograms.id))
+            .where(eq(trainingPrograms.institutionId, institutionId))
+            .groupBy(programSessions.programId);
+          for (const r of sessRows) {
+            sessionCounts.set(r.programId, {
+              total: Number(r.total), delivered: Number(r.delivered), cancelled: Number(r.cancelled),
+            });
+          }
+
+          // Two hops to reach the tenant predicate, and both are INNER joins:
+          // an attendance mark can only be counted if its session belongs to a
+          // programme belonging to this institution.
+          const attRows = await database
+            .select({
+              programId: programSessions.programId,
+              recorded: sql<number>`count(*)::int`,
+              present: sql<number>`count(*) filter (where ${programAttendance.present})::int`,
+            })
+            .from(programAttendance)
+            .innerJoin(programSessions, eq(programAttendance.sessionId, programSessions.id))
+            .innerJoin(trainingPrograms, eq(programSessions.programId, trainingPrograms.id))
+            .where(eq(trainingPrograms.institutionId, institutionId))
+            .groupBy(programSessions.programId);
+          for (const r of attRows) {
+            attendanceCounts.set(r.programId, { recorded: Number(r.recorded), present: Number(r.present) });
+          }
+        }
+
+        if (mayReadDocuments) {
+          // `visibleToClient` in the WHERE clause, not in a filter afterwards.
+          // The default is FALSE, and this is the surface that default exists
+          // to protect.
+          documents = await database
+            .select({
+              id: clientDocuments.id,
+              ref: clientDocuments.ref,
+              kind: clientDocuments.kind,
+              title: clientDocuments.title,
+              filename: clientDocuments.filename,
+              publishedAt: clientDocuments.publishedAt,
+              createdAt: clientDocuments.createdAt,
+            })
+            .from(clientDocuments)
+            .where(and(
+              eq(clientDocuments.institutionId, institutionId),
+              eq(clientDocuments.visibleToClient, true)
+            ))
+            .orderBy(desc(clientDocuments.createdAt))
+            .limit(100);
+        }
+
+        if (mayReadQuotes) {
+          // Versions the federation has actually put in front of the client.
+          // `draft` and `awaiting_approval` are internal states — a figure still
+          // waiting on an approver is not a figure anyone has been quoted.
+          const versionRows = await database
+            .select({
+              quoteId: quotes.id,
+              ref: quotes.ref,
+              version: quoteVersions.version,
+              status: quoteVersions.status,
+              totalMinor: quoteVersions.totalMinor,
+              currency: quoteVersions.currency,
+              requiresManualQuote: quoteVersions.requiresManualQuote,
+              validUntil: quoteVersions.validUntil,
+              issuedAt: quoteVersions.issuedAt,
+            })
+            .from(quoteVersions)
+            .innerJoin(quotes, eq(quoteVersions.quoteId, quotes.id))
+            .where(and(
+              eq(quotes.institutionId, institutionId),
+              inArray(quoteVersions.status, ['issued', 'accepted', 'rejected', 'expired', 'superseded'])
+            ))
+            .orderBy(desc(quotes.id), desc(quoteVersions.version))
+            .limit(200);
+
+          // Latest version per quote. This is presentation, not authorisation —
+          // the tenant filter is already in the SQL above, and every row here
+          // belongs to this institution however it is reduced.
+          const seen = new Set<number>();
+          for (const v of versionRows) {
+            if (seen.has(v.quoteId)) continue;
+            seen.add(v.quoteId);
+            quotations.push(v);
+          }
+        }
+
+        if (mayReadContracts) {
+          agreements = await database
+            .select({
+              id: contracts.id,
+              ref: contracts.ref,
+              status: contracts.status,
+              startsOn: contracts.startsOn,
+              endsOn: contracts.endsOn,
+              valueMinor: contracts.valueMinor,
+              currency: contracts.currency,
+              termsSummary: contracts.termsSummary,
+              signedByName: contracts.signedByName,
+              signedAt: contracts.signedAt,
+            })
+            .from(contracts)
+            .where(and(
+              eq(contracts.institutionId, institutionId),
+              // A draft agreement is a document being written, not one the
+              // client has been given.
+              ne(contracts.status, 'draft')
+            ))
+            .orderBy(desc(contracts.createdAt))
+            .limit(50);
+        }
+
+        if (mayReadSupport) {
+          try {
+            // The domain function, not a hand-rolled query: it re-checks the
+            // caller's scope and excludes confidential tickets in SQL.
+            tickets = await institutionTickets(database, principal, institutionId, 50);
+          } catch (err: any) {
+            ticketNote = String(err?.message ?? err);
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    loadError = String(err?.message ?? err);
+  }
+}
+
+// ── Presentation helpers ────────────────────────────────────────────────────
+
+const words = (v: unknown) => (v == null || v === '' ? '—' : String(v).replace(/_/g, ' '));
+
+const day = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? String(v)
+    : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+};
+
+const dayTime = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  if (Number.isNaN(d.getTime())) return String(v);
+  return d.toLocaleString('en-IN', {
+    weekday: 'short', day: 'numeric', month: 'short',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+};
+
+/**
+ * Money, or nothing at all.
+ *
+ * Returns null rather than a zero when there is no figure. A quotation that
+ * could not be priced carries `requiresManualQuote` and no number, and printing
+ * ₹0.00 there would read as "free" — the most expensive misunderstanding this
+ * codebase can produce. formatINR() is the federation's own paise formatter.
+ */
+const money = (minor: unknown, currency: unknown): string | null => {
+  if (minor == null || typeof minor !== 'number' || !Number.isFinite(minor)) return null;
+  const cur = String(currency || 'INR');
+  return cur === 'INR' ? formatINR(minor) : `${cur} ${(minor / 100).toFixed(2)}`;
+};
+
+const MODE_LABEL: Record<string, string> = {
+  on_site: 'At your premises',
+  at_dojo: 'At an MMAKF centre',
+  online: 'Online',
+  hybrid: 'Mixed',
+};
+
+const pageTitle = me ? `${me.institutionName} — MMAKF client portal` : 'Client portal — MMAKF';
+---
+
+<Base
+  title={pageTitle}
+  description="The MMAKF client portal: the programmes, sessions, coaches, documents and agreements belonging to one institution."
+>
+  <div class="pt">
+    <div class="container pt-inner">
+
+      {gate === 'no_database' && (
+        <>
+          <p class="eyebrow">MMAKF client portal</p>
+          <h1 class="display-2">The portal cannot reach the federation's records.</h1>
+          <p class="pt-lede">
+            This deployment has no database connection configured, so there is
+            nothing for the portal to read — not an empty institution, but no
+            institution at all. Nothing you have sent MMAKF has been lost; it is
+            simply not reachable from this address yet.
+          </p>
+          <p class="pt-lede">
+            Write to <a href="mailto:admin@mmakf.in">admin@mmakf.in</a> and the
+            training office will answer directly.
+          </p>
+          <p class="pt-acts"><a class="btn btn-ghost" href={h('/learn')}>Back to training</a></p>
+        </>
+      )}
+
+      {gate === 'signed_out' && (
+        <>
+          <p class="eyebrow">MMAKF client portal</p>
+          <h1 class="display-2">Sign in to open your institution's portal.</h1>
+          <p class="pt-lede">
+            This portal shows one institution's own programmes, sessions,
+            coaches, documents and agreements. It has to know who is asking
+            before it can show anything, and it never accepts an institution
+            named in a link.
+          </p>
+          <p class="pt-lede">
+            MMAKF has one sign-in for everybody — the same account a member,
+            an official or a school's coordinator uses. If your institution has
+            an application in progress and no account yet, the acknowledgement
+            MMAKF sent carries its own status link.
+          </p>
+          <p class="pt-acts">
+            <a class="btn btn-primary" href={wwwHref('/my')}>Sign in</a>
+            <a class="btn btn-ghost" href={h('/learn/apply')}>Start an application</a>
+          </p>
+        </>
+      )}
+
+      {gate === 'shared_credential' && (
+        <>
+          <p class="eyebrow">MMAKF client portal</p>
+          <h1 class="display-2">A shared credential belongs to no institution.</h1>
+          <p class="pt-lede">
+            You are signed in with one of the federation's shared office
+            credentials. Those identify an office rather than a person, and this
+            portal is addressed to a named individual at a named client — so
+            there is no institution it could open.
+          </p>
+          <p class="pt-lede">
+            Sign in with your own account instead. Federation staff read the same
+            records through the administration console.
+          </p>
+          <p class="pt-acts"><a class="btn btn-ghost" href={wwwHref('/my')}>Sign in as yourself</a></p>
+        </>
+      )}
+
+      {gate === 'no_institution' && (
+        <>
+          <p class="eyebrow">MMAKF client portal</p>
+          <h1 class="display-2">Your account is not linked to an institution.</h1>
+          <p class="pt-lede">
+            You are signed in, and the account is in good order — it is simply
+            not attached to a client school, company or university, so there is
+            no institution for this page to show. That link is made by the MMAKF
+            training office when it invites somebody at an institution into the
+            portal; it is not something an account acquires on its own.
+          </p>
+          <p class="pt-lede">
+            If your institution has an application with MMAKF, its progress is on
+            the status link sent with the acknowledgement. If you expected access
+            here, write to <a href="mailto:admin@mmakf.in">admin@mmakf.in</a>
+            {' '}naming your institution.
+          </p>
+          <p class="pt-acts">
+            <a class="btn btn-ghost" href={h('/learn')}>Back to training</a>
+            <a class="btn btn-ghost" href={h('/learn/apply')}>Start an application</a>
+          </p>
+        </>
+      )}
+
+      {gate === 'invited_only' && (
+        <>
+          <p class="eyebrow">MMAKF client portal</p>
+          <h1 class="display-2">Your invitation has not been activated yet.</h1>
+          <p class="pt-lede">
+            Your account has been invited to the portal for
+            {invitedOnly.map((m, i) => (
+              <> {i > 0 ? 'and ' : ''}<strong>{m.institutionName}</strong></>
+            ))}, and the invitation is still outstanding. Until the training
+            office activates it, this page has nothing it is allowed to read —
+            which is the correct behaviour, not a fault.
+          </p>
+          <p class="pt-lede">
+            Write to <a href="mailto:admin@mmakf.in">admin@mmakf.in</a> if the
+            invitation should already have been activated.
+          </p>
+        </>
+      )}
+
+      {gate === 'no_binding' && (
+        <>
+          <p class="eyebrow">MMAKF client portal</p>
+          <h1 class="display-2">No portal role is active on your account.</h1>
+          <p class="pt-lede">
+            Your account is recorded against
+            {linkedButUnbound.map((m, i) => (
+              <> {i > 0 ? 'and ' : ''}<strong>{m.institutionName}</strong></>
+            ))}, but it carries no active role for that institution. MMAKF issues
+            the membership and the role separately, and holding one without the
+            other opens nothing — deliberately, because that is what makes
+            withdrawing access immediate.
+          </p>
+          <p class="pt-lede">
+            Ask the MMAKF training office to issue the role, or write to
+            {' '}<a href="mailto:admin@mmakf.in">admin@mmakf.in</a>.
+          </p>
+        </>
+      )}
+
+      {gate === 'refused' && me && (
+        <>
+          <p class="eyebrow">MMAKF client portal</p>
+          <h1 class="display-2">Your role does not open this portal.</h1>
+          <p class="pt-lede">
+            Your account belongs to <strong>{me.institutionName}</strong>, but the
+            role it holds there does not include reading programmes
+            (<code>program:read</code>), and every part of this page is built from
+            them. Nothing here is hidden from you by omission — there is simply
+            nothing you are authorised to be shown.
+          </p>
+          <p class="pt-lede">
+            The institution's own administrator can ask MMAKF to widen the role.
+          </p>
+        </>
+      )}
+
+      {gate === 'ok' && me && (
+        <>
+          <p class="eyebrow">MMAKF client portal</p>
+          <h1 class="display-2">{me.institutionName}</h1>
+          <p class="pt-sub">
+            <code>{me.institutionCode}</code>
+            <span class="pt-dot" aria-hidden="true">·</span>
+            You are signed in as {words(me.memberRole).toLowerCase()}{me.memberTitle ? `, ${me.memberTitle}` : ''}
+          </p>
+
+          {permitted.length > 1 && (
+            <nav class="pt-switch" aria-label="Your institutions">
+              {/* Positions in the caller's own list — never an institution id.
+                  See the note where this parameter is parsed. */}
+              {permitted.map((m, i) => (
+                <a
+                  href={`${h('/learn/portal')}?i=${i + 1}`}
+                  aria-current={m.institutionId === me!.institutionId ? 'page' : undefined}
+                  class={m.institutionId === me!.institutionId ? 'on' : ''}
+                >{m.institutionName}</a>
+              ))}
+            </nav>
+          )}
+
+          {loadError && (
+            <p class="pt-alert" role="alert">
+              Part of this page could not be loaded: {loadError}
+            </p>
+          )}
+
+          {/* ── Programmes ─────────────────────────────────────────────── */}
+          <section class="sec">
+            <h2 class="sec-h">Programmes</h2>
+            {programmes.length === 0 ? (
+              <p class="empty">
+                No programme has been recorded for {me.institutionName}. A
+                programme appears here once a proposal has been accepted and the
+                training office has set the delivery up — an enquiry or a
+                quotation on its own does not create one.
+              </p>
+            ) : (
+              <ul class="recs">
+                {programmes.map((p) => {
+                  const parts = participantCounts.get(p.id);
+                  return (
+                    <li>
+                      <p class="rec-top">
+                        <span class="rec-title">{p.title}</span>
+                        <span class="pill"><span class="pill-dot"></span>{words(p.status)}</span>
+                      </p>
+                      <dl class="rec-dl">
+                        <div><dt>Reference</dt><dd><code>{p.code}</code></dd></div>
+                        <div><dt>Delivery</dt><dd>{p.mode ? (MODE_LABEL[p.mode] ?? words(p.mode)) : 'Not recorded'}</dd></div>
+                        <div><dt>Runs</dt><dd>{p.startsOn ? day(p.startsOn) : 'Start not set'}{p.endsOn ? ` to ${day(p.endsOn)}` : ''}</dd></div>
+                        {p.venue && <div><dt>Where</dt><dd>{p.venue}</dd></div>}
+                        <div><dt>Lead coach</dt><dd>{p.leadCoachName ?? 'Not yet confirmed'}</dd></div>
+                        {/* Rendered only where MMAKF actually planned a number.
+                            A blank is honest; a zero would not be. */}
+                        {p.sessionsPlanned != null && (
+                          <div><dt>Sessions planned</dt><dd>{p.sessionsPlanned}</dd></div>
+                        )}
+                        {parts != null && (
+                          <div><dt>Participants on roll</dt><dd>{parts}</dd></div>
+                        )}
+                      </dl>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+
+          {/* ── Upcoming sessions ──────────────────────────────────────── */}
+          <section class="sec">
+            <h2 class="sec-h">Upcoming sessions</h2>
+            {sessions.length === 0 ? (
+              <p class="empty">
+                Nothing is scheduled ahead of today. Only sessions still standing
+                as scheduled are listed — one that has been delivered, cancelled
+                or moved is not upcoming, and a rescheduled session appears under
+                its new date once it is set.
+              </p>
+            ) : (
+              <ul class="recs">
+                {sessions.map((s) => (
+                  <li>
+                    <p class="rec-top">
+                      <span class="rec-title">{dayTime(s.startsAt)}</span>
+                      <span class="rec-tag">{s.programTitle}</span>
+                    </p>
+                    <dl class="rec-dl">
+                      <div><dt>Session</dt><dd>{s.title ?? `Session ${s.seq}`}{s.topic ? ` — ${s.topic}` : ''}</dd></div>
+                      <div><dt>Ends</dt><dd>{dayTime(s.endsAt)}</dd></div>
+                      <div><dt>Coach</dt><dd>{s.coachName ?? 'Not yet assigned'}</dd></div>
+                      <div><dt>Where</dt><dd>{s.venueName ? `${s.venueName}${s.venueCity ? `, ${s.venueCity}` : ''}` : 'Not recorded'}</dd></div>
+                    </dl>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {/* ── Coaches ────────────────────────────────────────────────── */}
+          <section class="sec">
+            <h2 class="sec-h">Coaches assigned to you</h2>
+            {coaches.length === 0 ? (
+              <p class="empty">
+                No coach has been confirmed for your programmes yet. A coach the
+                assignment engine has only recommended is not listed here: a
+                recommendation becomes an assignment when somebody at MMAKF
+                confirms it, and until then there is no name to give you.
+              </p>
+            ) : (
+              <ul class="recs">
+                {coaches.map((c) => (
+                  <li>
+                    <p class="rec-top">
+                      <span class="rec-title">{c.coachName}</span>
+                      <span class="pill"><span class="pill-dot"></span>{words(c.status)}</span>
+                    </p>
+                    <dl class="rec-dl">
+                      <div><dt>Programme</dt><dd>{c.programTitle}</dd></div>
+                      <div><dt>Role</dt><dd>{words(c.assignmentRole)}</dd></div>
+                    </dl>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {/* ── Attendance ─────────────────────────────────────────────── */}
+          <section class="sec">
+            <h2 class="sec-h">Attendance</h2>
+            {!mayReadAttendance ? (
+              <p class="empty">
+                Your role does not include attendance. The institution's
+                coordinator and administrator hold it.
+              </p>
+            ) : programmes.length === 0 ? (
+              <p class="empty">
+                There is no programme to record attendance against yet.
+              </p>
+            ) : (
+              <ul class="recs">
+                {programmes.map((p) => {
+                  const s = sessionCounts.get(p.id);
+                  const a = attendanceCounts.get(p.id);
+                  return (
+                    <li>
+                      <p class="rec-top"><span class="rec-title">{p.title}</span></p>
+                      {!s || s.total === 0 ? (
+                        <p class="empty tight">No session has been scheduled for this programme yet.</p>
+                      ) : (
+                        <dl class="rec-dl">
+                          <div><dt>Sessions scheduled</dt><dd>{s.total}</dd></div>
+                          <div><dt>Delivered</dt><dd>{s.delivered}</dd></div>
+                          {s.cancelled > 0 && <div><dt>Cancelled</dt><dd>{s.cancelled}</dd></div>}
+                          {/* A rate is shown only where marks exist to compute
+                              it from. With no marks the honest statement is
+                              that attendance has not been taken, not "0%". */}
+                          {a && a.recorded > 0 ? (
+                            <>
+                              <div><dt>Marks recorded</dt><dd>{a.recorded}</dd></div>
+                              <div>
+                                <dt>Present</dt>
+                                <dd>{a.present} of {a.recorded} ({Math.round((a.present / a.recorded) * 100)}%)</dd>
+                              </div>
+                            </>
+                          ) : (
+                            <div>
+                              <dt>Marks recorded</dt>
+                              <dd>None — attendance has not been taken for this programme.</dd>
+                            </div>
+                          )}
+                        </dl>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+
+          {/* ── Documents ──────────────────────────────────────────────── */}
+          <section class="sec">
+            <h2 class="sec-h">Documents released to you</h2>
+            {!mayReadDocuments ? (
+              <p class="empty">Your role does not include documents.</p>
+            ) : documents.length === 0 ? (
+              <p class="empty">
+                No document has been released to you. MMAKF may hold files about
+                your institution that are not listed: a document is internal
+                until a member of staff marks it visible to the client, and this
+                page shows only the ones that have been.
+              </p>
+            ) : (
+              <>
+                <ul class="recs">
+                  {documents.map((d) => (
+                    <li>
+                      <p class="rec-top">
+                        <span class="rec-title">{d.title}</span>
+                        <span class="rec-tag">{words(d.kind)}</span>
+                      </p>
+                      <dl class="rec-dl">
+                        <div><dt>Reference</dt><dd><code>{d.ref}</code></dd></div>
+                        {d.filename && <div><dt>File</dt><dd>{d.filename}</dd></div>}
+                        <div>
+                          <dt>{d.publishedAt ? 'Released' : 'Recorded'}</dt>
+                          <dd>{day(d.publishedAt ?? d.createdAt)}</dd>
+                        </div>
+                      </dl>
+                    </li>
+                  ))}
+                </ul>
+                {/* No download link is offered, because MMAKF has no route that
+                    serves these files yet. A link that 404s is worse than an
+                    instruction that works. */}
+                <p class="sec-note">
+                  Copies are sent by the training office. Quote the reference
+                  when you ask for one.
+                </p>
+              </>
+            )}
+          </section>
+
+          {/* ── Quotations ─────────────────────────────────────────────── */}
+          <section class="sec">
+            <h2 class="sec-h">Quotations</h2>
+            {!mayReadQuotes ? (
+              <p class="empty">
+                Your role does not include quotations. They are visible to the
+                institution's administrator.
+              </p>
+            ) : quotations.length === 0 ? (
+              <p class="empty">
+                No quotation has been issued to you. MMAKF does not publish a
+                price list: a figure is produced against your own configuration —
+                how many people, how often, for how long, where — and it appears
+                here once it has been issued. One still being prepared is not
+                shown, because it is not yet a figure you have been given.
+              </p>
+            ) : (
+              <ul class="recs">
+                {quotations.map((q) => {
+                  const total = q.requiresManualQuote ? null : money(q.totalMinor, q.currency);
+                  return (
+                    <li>
+                      <p class="rec-top">
+                        <span class="rec-title"><code>{q.ref}</code></span>
+                        <span class="pill"><span class="pill-dot"></span>{words(q.status)}</span>
+                      </p>
+                      <dl class="rec-dl">
+                        <div>
+                          <dt>Amount</dt>
+                          <dd>
+                            {/* requiresManualQuote means no rule could price the
+                                configuration. There is no number, and none is
+                                shown — a zero here would read as "free". */}
+                            {q.requiresManualQuote
+                              ? 'To be quoted by hand — no published rule covered this configuration.'
+                              : (total ?? 'Not recorded')}
+                          </dd>
+                        </div>
+                        <div><dt>Version</dt><dd>{q.version}</dd></div>
+                        {q.issuedAt && <div><dt>Issued</dt><dd>{day(q.issuedAt)}</dd></div>}
+                        {q.validUntil && <div><dt>Valid until</dt><dd>{day(q.validUntil)}</dd></div>}
+                      </dl>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+
+          {/* ── Agreements ─────────────────────────────────────────────── */}
+          <section class="sec">
+            <h2 class="sec-h">Agreements</h2>
+            {!mayReadContracts ? (
+              <p class="empty">
+                Your role does not include agreements. They are visible to the
+                institution's administrator.
+              </p>
+            ) : agreements.length === 0 ? (
+              <p class="empty">
+                No agreement is in place. A contract appears here once MMAKF has
+                issued it; one still in draft is a document being written rather
+                than an agreement you have been offered.
+              </p>
+            ) : (
+              <ul class="recs">
+                {agreements.map((c) => {
+                  const value = money(c.valueMinor, c.currency);
+                  return (
+                    <li>
+                      <p class="rec-top">
+                        <span class="rec-title"><code>{c.ref}</code></span>
+                        <span class="pill"><span class="pill-dot"></span>{words(c.status)}</span>
+                      </p>
+                      <dl class="rec-dl">
+                        <div><dt>Term</dt><dd>{c.startsOn ? day(c.startsOn) : 'Start not set'}{c.endsOn ? ` to ${day(c.endsOn)}` : ''}</dd></div>
+                        {/* Only where a value was actually recorded. */}
+                        {value && <div><dt>Value</dt><dd>{value}</dd></div>}
+                        {c.signedAt && (
+                          <div><dt>Signed</dt><dd>{day(c.signedAt)}{c.signedByName ? ` by ${c.signedByName}` : ''}</dd></div>
+                        )}
+                        {c.termsSummary && <div><dt>Terms</dt><dd>{c.termsSummary}</dd></div>}
+                      </dl>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+
+          {/* ── Support ────────────────────────────────────────────────── */}
+          <section class="sec">
+            <h2 class="sec-h">Support requests</h2>
+            {!mayReadSupport ? (
+              <p class="empty">Your role does not include support requests.</p>
+            ) : ticketNote ? (
+              <p class="pt-alert" role="alert">{ticketNote}</p>
+            ) : tickets.length === 0 ? (
+              <p class="empty">
+                No support request has been raised for your institution. A
+                request MMAKF has marked confidential is handled outside this
+                list and is not counted here.
+              </p>
+            ) : (
+              <ul class="recs">
+                {tickets.map((t) => (
+                  <li>
+                    <p class="rec-top">
+                      <span class="rec-title">{t.subject}</span>
+                      <span class="pill"><span class="pill-dot"></span>{words(t.status)}</span>
+                    </p>
+                    <dl class="rec-dl">
+                      <div><dt>Reference</dt><dd><code>{t.ticketNo}</code></dd></div>
+                      <div><dt>About</dt><dd>{words(t.category)}</dd></div>
+                      <div><dt>Raised</dt><dd>{day(t.createdAt)}</dd></div>
+                      {/* No deadline is shown. MMAKF has published no response
+                          standard, so every such column is null — and a portal
+                          that printed one would be inventing a commitment. */}
+                      {t.resolvedAt && <div><dt>Resolved</dt><dd>{day(t.resolvedAt)}</dd></div>}
+                    </dl>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p class="sec-note">
+              To raise something new, use <a href={wwwHref('/contact')}>the contact page</a>
+              {' '}or write to <a href="mailto:admin@mmakf.in">admin@mmakf.in</a> quoting
+              {' '}<code>{me.institutionCode}</code>.
+            </p>
+          </section>
+        </>
+      )}
+
+    </div>
+  </div>
+</Base>
+
+<style>
+  /* There is no wide table on this page at all. Every list is a record from the
+     start, so PART AL is satisfied by construction rather than by a second
+     mobile rendering of a nine-column grid. */
+
+  .pt { padding: 96px 0 80px; }
+  .pt-inner { max-width: 52rem; }
+
+  .pt-lede { color: var(--muted); line-height: 1.75; max-width: 62ch; margin: 16px 0; }
+  .pt-sub { margin: 14px 0 0; color: var(--muted); font-size: .92rem; }
+  .pt-dot { margin: 0 8px; color: var(--muted-2); }
+  .pt-acts { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+
+  .pt-alert {
+    margin: 22px 0; padding: 16px 20px;
+    border-left: 3px solid var(--red); background: var(--card);
+    color: var(--off-white); line-height: 1.6;
+  }
+
+  code {
+    font-family: var(--font-accent, monospace);
+    background: var(--bg-2); padding: 2px 7px; border-radius: var(--radius);
+    font-size: .95em;
+  }
+
+  .pt-switch { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 22px 0 0; }
+  .pt-switch a {
+    font-size: .9rem; color: var(--muted); text-decoration: none;
+    padding-bottom: 4px; border-bottom: 2px solid transparent;
+  }
+  .pt-switch a:hover { color: var(--gold-2); }
+  .pt-switch a.on { color: var(--white); border-bottom-color: var(--gold); }
+
+  .sec { margin-top: 56px; }
+  .sec-h {
+    font-family: var(--font-display);
+    font-size: 1.2rem; letter-spacing: .04em;
+    margin: 0 0 6px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .sec-note { margin: 16px 0 0; font-size: .88rem; color: var(--muted); line-height: 1.65; }
+
+  .empty {
+    margin: 18px 0 0; color: var(--muted);
+    line-height: 1.7; max-width: 62ch;
+  }
+  .empty.tight { margin: 8px 0 0; font-size: .9rem; }
+
+  /* Hairline-separated records, the house index shape — deliberately not a grid
+     of identical rectangles. */
+  .recs { list-style: none; margin: 0; padding: 0; }
+  .recs > li { padding: 20px 0; border-bottom: 1px solid var(--border); }
+
+  .rec-top {
+    display: flex; flex-wrap: wrap; align-items: baseline;
+    justify-content: space-between; gap: 8px 14px; margin: 0 0 10px;
+  }
+  .rec-title { font-family: var(--font-display); font-size: 1.06rem; line-height: 1.3; }
+  .rec-tag {
+    font-size: .8rem; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .rec-dl { margin: 0; display: grid; gap: 6px; }
+  .rec-dl > div {
+    display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+    gap: 2px 20px; font-size: .92rem;
+  }
+  .rec-dl dt { color: var(--muted); }
+  .rec-dl dd { margin: 0; line-height: 1.55; }
+
+  @media (max-width: 900px) {
+    .pt { padding: 76px 0 60px; }
+    .sec { margin-top: 44px; }
+    /* The label above the value, rather than a two-column pair squeezed into a
+       360px viewport where the value gets three characters of width. */
+    .rec-dl > div { grid-template-columns: 1fr; gap: 1px; }
+    .rec-dl dt {
+      font-size: .74rem; letter-spacing: .07em; text-transform: uppercase;
+    }
+    .rec-dl dd { margin-bottom: 6px; }
+    .pt-acts .btn { flex: 1 1 100%; text-align: center; }
+  }
+</style>

@@ -73,7 +73,35 @@ third-party publication that confirms anything. It is being wasted by being desc
 it is not. "Awarded the title *Junior Tiger Lee*, 2021" is both true and more impressive than a
 lineage nobody can trace.
 
-**Recommendation:** restate it as a conferred honour. **REQUIRES YOUR CONFIRMATION.**
+**Recommendation:** restate it as a conferred honour. ~~**REQUIRES YOUR CONFIRMATION.**~~
+
+### RESOLVED — 2026-08-13
+
+The federation confirmed it twice, in writing:
+
+> "he is itself Grandmaster Jr. Tiger lee — a name awarded by his master —
+> gradmaster S n T Lee" *(12 August 2026)*
+>
+> "Yes his Master awarded" *(13 August 2026)*
+
+So the record now holds a **named person who conferred a name on his student**,
+not a lineage. `leadership[].master` in `src/data/seed.ts` carries the master's
+name, the relation, the name conferred, and the basis on which it is stated —
+and no grade, school, nationality or dates, because none has been supplied.
+`/people/[slug]` renders it under "The master, and the name conferred".
+
+`master` is deliberately NOT `federation.lineage`, and must never be moved
+there. A master conferring a title on his student, and a *school* of Shotokan
+that MMAKF descends from, are two different claims. The site asserted the second
+in nine places with nothing behind it and withdrew it. Only the first has ever
+been stated, so only the first is recorded.
+
+**Still open, and left open on purpose.** The *Johar Jharkhand* clipping says
+the name was given in 2021 *"वर्ल्ड मार्शल आर्ट की ओर से"* — by or on behalf of World
+Martial Art — naming no person. The federation says his master awarded it. These
+are plausibly one event described from two sides; that reconciliation is not
+written anywhere in the system, because a plausible explanation is not a source.
+See [PENDING-FEDERATION-VERIFICATION.md §2.1](PENDING-FEDERATION-VERIFICATION.md).
 
 ---
 

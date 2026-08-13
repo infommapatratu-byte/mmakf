@@ -1,0 +1,554 @@
+---
+// The agenda: every booking in a window, in the order it actually happens.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY AN AGENDA AND NOT A LIST
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A booking register sorted by reference or by creation date answers "what have
+// we taken?" — which nobody in the office asks. The question is "what is
+// happening, and who is standing where when it does". So the ordering is by
+// start time, the grouping is by IST calendar day, and the window is a
+// parameter rather than "everything ever", because an agenda that begins in
+// 2024 is a report, not an agenda.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// TIME IS IST, AND THAT IS NOT A FORMATTING CHOICE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The day boundaries come from istDayRange() in src/db/booking.ts, not from
+// `new Date(iso)`. Midnight UTC is 05:30 in Patratu, so a window built the
+// naive way silently drops the first five and a half hours of the day the
+// administrator asked for and silently includes the last five and a half of the
+// day before — a 07:00 class missing from Tuesday and present on Monday.
+//
+// OVERLAP IS HALF-OPEN, everywhere on this page: [10:00,11:00) and
+// [11:00,12:00) do not overlap. That is why the window predicate is
+// `startsAt < to AND endsAt > from` with a strict `>`, and why the collision
+// test below is `a.start < b.end && b.start < a.end`. A back-to-back pair is
+// two bookings, not a clash, and reporting it as one would train the office to
+// ignore the warning that matters.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE IS A WHERE CLAUSE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// visibleScopes() is applied inside the query, never by filtering the result.
+// A booking reaches a scoped administrator through the coach's unit, the dojo
+// it is held at, or the client institution — a district administrator sees a
+// session in their district because the SQL says so, and sees nothing else
+// because the SQL says that too. A booking attached to none of the three is
+// invisible to anyone but a national reader, which is the fail-closed reading
+// and is deliberate.
+
+import AdminShell from '@/components/AdminShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import * as s from '@/db/schema';
+import { and, or, eq, gt, lt, inArray, asc } from 'drizzle-orm';
+import {
+  BOOKING_KINDS, BLOCKING_STATUSES, RELEASING_STATUSES,
+  istDayRange, istDayOf, istTimeOf,
+} from '@/db/booking';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+// The status list is DERIVED from the two lists src/db/booking.ts already
+// maintains rather than retyped here. Retyping it is how a page ends up
+// offering a filter for a status the domain no longer has.
+const STATUSES: string[] = [...BLOCKING_STATUSES, ...RELEASING_STATUSES];
+const KINDS: string[] = [...BOOKING_KINDS];
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const params = Astro.url.searchParams;
+
+// The default window. Today is the only non-arbitrary anchor an agenda has; the
+// fortnight after it is a VIEW LENGTH, chosen so the page opens on something
+// and changeable in the query string. It is not a federation rule about how far
+// ahead booking runs — MMAKF has published no such rule and this page does not
+// imply one.
+const todayIst = istDayOf(new Date());
+const defaultTo = istDayOf(new Date(Date.now() + 13 * 86_400_000));
+
+const askedFrom = params.get('from') ?? '';
+const askedTo = params.get('to') ?? '';
+const from = ISO_DATE.test(askedFrom) ? askedFrom : todayIst;
+const to = ISO_DATE.test(askedTo) ? askedTo : defaultTo;
+const datesIgnored = (askedFrom !== '' && !ISO_DATE.test(askedFrom))
+  || (askedTo !== '' && !ISO_DATE.test(askedTo));
+
+// An unknown status or kind is dropped rather than passed to the query: the
+// column is an enum, and Postgres rejects a value outside it with an error that
+// would read to an administrator as "the bookings module is broken".
+const askedStatus = params.get('status') ?? '';
+const askedKind = params.get('kind') ?? '';
+const status = STATUSES.includes(askedStatus) ? askedStatus : '';
+const kind = KINDS.includes(askedKind) ? askedKind : '';
+
+// A ceiling, so one enormous window cannot make this page the slowest thing in
+// the federation. When it bites the reader is told, rather than shown a
+// truncated agenda that looks complete.
+const LIMIT = 400;
+
+let rows: any[] = [];
+let unavailable: string | null = null;
+let noScope = false;
+
+if (principal && canAnywhere(principal, 'booking:read')) {
+  if (!isConfigured()) {
+    unavailable = 'The federation database is not reachable from this deployment, so no agenda can be assembled. Bookings are held in the database, not in this page.';
+  } else {
+    try {
+      const window = istDayRange(from, to);
+      const conds: any[] = [
+        // Half-open, and padded by nothing: a booking that ends exactly when the
+        // window opens is not in the window.
+        lt(s.bookings.startsAt, window.to),
+        gt(s.bookings.endsAt, window.from),
+      ];
+      if (status) conds.push(eq(s.bookings.status, status as any));
+      if (kind) conds.push(eq(s.bookings.kind, kind as any));
+
+      const scopes = visibleScopes(principal, 'booking:read');
+      if (scopes.kind === 'none') {
+        noScope = true;
+      } else {
+        if (scopes.kind === 'scoped') {
+          const clauses: any[] = [];
+          if (scopes.states.length) {
+            clauses.push(
+              inArray(s.persons.stateUnitId, scopes.states),
+              inArray(s.institutions.stateUnitId, scopes.states),
+              inArray(s.dojos.stateUnitId, scopes.states),
+            );
+          }
+          if (scopes.districts.length) {
+            clauses.push(
+              inArray(s.persons.districtUnitId, scopes.districts),
+              inArray(s.institutions.districtUnitId, scopes.districts),
+              inArray(s.dojos.districtUnitId, scopes.districts),
+            );
+          }
+          if (scopes.dojos.length) {
+            clauses.push(
+              inArray(s.bookings.dojoId, scopes.dojos),
+              inArray(s.persons.dojoId, scopes.dojos),
+            );
+          }
+          if (scopes.institutions.length) {
+            clauses.push(inArray(s.bookings.institutionId, scopes.institutions));
+          }
+          conds.push(or(...clauses));
+        }
+
+        rows = await (db() as any)
+          .select({
+            b: s.bookings,
+            coachName: s.persons.fullName,
+            dojoName: s.dojos.name,
+            institutionName: s.institutions.name,
+          })
+          .from(s.bookings)
+          .leftJoin(s.persons, eq(s.persons.id, s.bookings.coachPersonId))
+          .leftJoin(s.dojos, eq(s.dojos.id, s.bookings.dojoId))
+          .leftJoin(s.institutions, eq(s.institutions.id, s.bookings.institutionId))
+          .where(and(...conds))
+          .orderBy(asc(s.bookings.startsAt), asc(s.bookings.endsAt))
+          .limit(LIMIT);
+      }
+    } catch (err: any) {
+      unavailable = String(err?.message ?? err);
+    }
+  }
+}
+
+const truncated = rows.length >= LIMIT;
+
+// ── Grouping ────────────────────────────────────────────────────────────────
+// One tbody per IST calendar day. The rows arrive ordered by start time, so a
+// single pass is enough and the day order is the time order by construction.
+const days: Array<{ iso: string; items: any[] }> = [];
+for (const r of rows) {
+  const iso = istDayOf(r.b.startsAt);
+  const last = days[days.length - 1];
+  if (last && last.iso === iso) last.items.push(r);
+  else days.push({ iso, items: [r] });
+}
+
+// ── Collisions ──────────────────────────────────────────────────────────────
+//
+// Two bookings collide when their OCCUPANCY overlaps — the session plus the
+// travel and setup buffer either side, which is the interval the coach and the
+// hall are actually spoken for — and they share a coach or a venue.
+//
+// Only statuses that CONSUME time are compared. A cancelled booking gave the
+// slot back; a completed one did not, because the coach stood in the hall
+// either way. That is BLOCKING_STATUSES, and it is imported rather than
+// restated so the two cannot drift apart.
+const BLOCKING = new Set<string>(BLOCKING_STATUSES as readonly string[]);
+
+const occupancy = (b: any) => ({
+  s: new Date(b.startsAt).getTime() - (b.bufferBeforeMinutes ?? 0) * 60_000,
+  e: new Date(b.endsAt).getTime() + (b.bufferAfterMinutes ?? 0) * 60_000,
+});
+
+// A booking records its venue as a dojo OR as free text — there is no venueId
+// on `bookings`, so the venue register cannot be joined to it. Two bookings
+// therefore share a venue only when they name the same dojo, or the same text.
+// Case and surrounding space are normalised; nothing else is guessed at.
+const venueKey = (b: any): string | null => {
+  if (b.dojoId != null) return `dojo:${b.dojoId}`;
+  const t = typeof b.venue === 'string' ? b.venue.trim().toLowerCase() : '';
+  return t ? `venue:${t}` : null;
+};
+
+const blocking = rows.filter((r) => BLOCKING.has(r.b.status));
+const collisions: Array<{ a: any; b: any; shared: string; what: 'coach' | 'venue' }> = [];
+
+// O(n squared) over at most LIMIT rows. An early break is not safe here: a
+// buffer moves a booking's occupancy earlier than its start, so occupancy start
+// is not monotonic even though start time is.
+for (let i = 0; i < blocking.length; i++) {
+  for (let j = i + 1; j < blocking.length; j++) {
+    const A = blocking[i];
+    const B = blocking[j];
+    const oa = occupancy(A.b);
+    const ob = occupancy(B.b);
+    if (!(oa.s < ob.e && ob.s < oa.e)) continue;      // half-open overlap
+
+    const sharedCoach = A.b.coachPersonId != null && A.b.coachPersonId === B.b.coachPersonId;
+    const ka = venueKey(A.b);
+    const sharedVenue = ka != null && ka === venueKey(B.b);
+    if (!sharedCoach && !sharedVenue) continue;
+
+    collisions.push({
+      a: A,
+      b: B,
+      what: sharedCoach ? 'coach' : 'venue',
+      shared: sharedCoach
+        ? (A.coachName ?? `coach #${A.b.coachPersonId}`)
+        : (A.b.venue ?? A.dojoName ?? 'the same venue'),
+    });
+  }
+}
+const clashing = new Set<number>();
+for (const c of collisions) { clashing.add(c.a.b.id); clashing.add(c.b.b.id); }
+
+// ── Presentation helpers ────────────────────────────────────────────────────
+
+const label = (v: unknown) => String(v ?? '').replace(/_/g, ' ');
+
+// The day label is formatted in UTC on purpose: `iso` is already the IST
+// calendar day, so re-applying a timezone here would shift it a second time.
+const dayLabel = (iso: string) => {
+  const d = new Date(`${iso}T00:00:00Z`);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString('en-IN', {
+        weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
+      });
+};
+
+const clock = (r: any) => `${istTimeOf(r.b.startsAt)}–${istTimeOf(r.b.endsAt)}`;
+
+const buffers = (b: any) => {
+  const before = b.bufferBeforeMinutes ?? 0;
+  const after = b.bufferAfterMinutes ?? 0;
+  if (!before && !after) return null;
+  return `${before} min before, ${after} min after`;
+};
+
+const whereOf = (r: any) => r.b.venue ?? r.dojoName ?? null;
+
+const qs = (over: Record<string, string>) => {
+  const merged: Record<string, string> = { from, to, status, kind, ...over };
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(merged)) if (v) p.set(k, v);
+  const q = p.toString();
+  return q ? `${h('/admin/bookings')}?${q}` : h('/admin/bookings');
+};
+---
+
+<AdminShell
+  title="Agenda"
+  requires="booking:read"
+  intro="Bookings in a date window, in the order they happen. Times are India Standard Time, which is what the coach and the hall are working to."
+>
+  <form class="range" method="get" action={h('/admin/bookings')}>
+    <div class="fld">
+      <label class="input-label" for="from">From</label>
+      <input class="input" type="date" id="from" name="from" value={from} />
+    </div>
+    <div class="fld">
+      <label class="input-label" for="to">To</label>
+      <input class="input" type="date" id="to" name="to" value={to} />
+    </div>
+    {status ? <input type="hidden" name="status" value={status} /> : null}
+    {kind ? <input type="hidden" name="kind" value={kind} /> : null}
+    <button class="btn btn-primary" type="submit">Show window</button>
+  </form>
+
+  {datesIgnored && (
+    <p class="note warn" role="status">
+      A date in the address was not a calendar date, so it was ignored and the
+      default window is shown. Dates are written as YYYY-MM-DD.
+    </p>
+  )}
+
+  <nav class="filters" aria-label="Filter by status">
+    <span class="f-h">Status</span>
+    <a href={qs({ status: '' })} class={!status ? 'on' : ''}>any</a>
+    {STATUSES.map((v) => (
+      <a href={qs({ status: v })} class={status === v ? 'on' : ''}>{label(v)}</a>
+    ))}
+  </nav>
+
+  <nav class="filters" aria-label="Filter by kind">
+    <span class="f-h">Kind</span>
+    <a href={qs({ kind: '' })} class={!kind ? 'on' : ''}>any</a>
+    {KINDS.map((v) => (
+      <a href={qs({ kind: v })} class={kind === v ? 'on' : ''}>{label(v)}</a>
+    ))}
+  </nav>
+
+  {unavailable ? (
+    <p class="note" role="alert">{unavailable}</p>
+  ) : noScope ? (
+    <p class="note">
+      This account holds the right to read bookings, but in no unit that has
+      any. Reading bookings is granted within a state, a district, a dojo or a
+      client institution, and none of this account's bindings covers one.
+    </p>
+  ) : (
+    <>
+      {collisions.length > 0 && (
+        <section class="clash" role="status">
+          <h2 class="sec-h">
+            {collisions.length === 1 ? 'One collision in this window' : `${collisions.length} collisions in this window`}
+          </h2>
+          <p class="sec-p">
+            The same coach or the same venue is spoken for twice at once. Buffers
+            count: a session that fits the hour but not the travel time either
+            side is still a collision, and it is still somebody driving across a
+            city they cannot cross.
+          </p>
+          <ul>
+            {collisions.map((c) => (
+              <li>
+                <strong>{c.what === 'coach' ? c.shared : `Venue: ${c.shared}`}</strong>
+                <span class="muted"> — {dayLabel(istDayOf(c.a.b.startsAt))}</span>
+                <br />
+                <code>{c.a.b.ref}</code> {clock(c.a)} ({label(c.a.b.kind)})
+                <span class="muted"> overlaps </span>
+                <code>{c.b.b.ref}</code> {clock(c.b)} ({label(c.b.b.kind)})
+              </li>
+            ))}
+          </ul>
+          <p class="sec-p small">
+            Compared here: the bookings on this page, against each other. Not
+            programme sessions, not coach leave, and not anything outside this
+            window or outside what this account may see — so this is a floor on
+            the collisions that exist, not a certificate that there are no
+            others.
+          </p>
+        </section>
+      )}
+
+      {rows.length === 0 ? (
+        <p class="note">
+          No booking falls between {dayLabel(from)} and {dayLabel(to)} under this
+          filter. An empty agenda is an empty diary, not a refusal — bookings
+          appear here the moment a slot is taken, because taking the slot is what
+          creates the row.
+        </p>
+      ) : (
+        <>
+          {truncated && (
+            <p class="note warn" role="status">
+              This window holds more than {LIMIT} bookings and only the first
+              {' '}{LIMIT} are shown, earliest first. Narrow the dates to see the
+              rest — and read the collisions above as covering only what is
+              listed.
+            </p>
+          )}
+
+          <p class="tbl-hint">Scroll the table sideways to see every column.</p>
+          <div class="tbl-scroll">
+            <table class="tbl">
+              <caption class="sr-only">
+                Bookings from {dayLabel(from)} to {dayLabel(to)}, in order of start time
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Time</th>
+                  <th scope="col">Reference</th>
+                  <th scope="col">Kind</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Coach</th>
+                  <th scope="col">Venue</th>
+                  <th scope="col">For</th>
+                  <th scope="col">Mode</th>
+                </tr>
+              </thead>
+              {days.map((d) => (
+                <tbody>
+                  <tr class="dayrow">
+                    <th scope="rowgroup" colspan="8">{dayLabel(d.iso)}</th>
+                  </tr>
+                  {d.items.map((r) => (
+                    <tr class={clashing.has(r.b.id) ? 'is-clash' : ''}>
+                      <td class="when">
+                        {clock(r)}
+                        {buffers(r.b) && <span class="buf">{buffers(r.b)}</span>}
+                      </td>
+                      <td>
+                        <code>{r.b.ref}</code>
+                        {clashing.has(r.b.id) && <span class="tag">clash</span>}
+                      </td>
+                      <td>{label(r.b.kind)}</td>
+                      <td><span class="pill"><span class="pill-dot"></span>{label(r.b.status)}</span></td>
+                      <td class="strong">{r.coachName ?? <span class="muted">none recorded</span>}</td>
+                      <td>{whereOf(r) ?? <span class="muted">not recorded</span>}</td>
+                      <td>{r.institutionName ?? <span class="muted">—</span>}</td>
+                      <td>{r.b.mode ? label(r.b.mode) : <span class="muted">—</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              ))}
+            </table>
+          </div>
+
+          {/* On a phone the eight columns are unreadable however far the table
+              slides, so the same rows are recomposed as records. PART AL. */}
+          <ol class="agenda" aria-label="Agenda">
+            {days.map((d) => (
+              <li class="day">
+                <p class="day-h">{dayLabel(d.iso)}</p>
+                <ul class="cards">
+                  {d.items.map((r) => (
+                    <li class={clashing.has(r.b.id) ? 'is-clash' : ''}>
+                      <p class="c-top">
+                        <span class="c-time">{clock(r)}</span>
+                        <span class="pill"><span class="pill-dot"></span>{label(r.b.status)}</span>
+                      </p>
+                      <p class="c-name">
+                        {label(r.b.kind)}
+                        {clashing.has(r.b.id) && <span class="tag">clash</span>}
+                      </p>
+                      <dl>
+                        <div><dt>Reference</dt><dd><code>{r.b.ref}</code></dd></div>
+                        <div><dt>Coach</dt><dd>{r.coachName ?? 'none recorded'}</dd></div>
+                        <div><dt>Venue</dt><dd>{whereOf(r) ?? 'not recorded'}</dd></div>
+                        {r.institutionName && <div><dt>For</dt><dd>{r.institutionName}</dd></div>}
+                        {r.b.mode && <div><dt>Mode</dt><dd>{label(r.b.mode)}</dd></div>}
+                        {buffers(r.b) && <div><dt>Buffer</dt><dd>{buffers(r.b)}</dd></div>}
+                      </dl>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .range {
+    display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px;
+    margin: 0 0 20px; padding: 16px 18px;
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  }
+  .fld { display: flex; flex-direction: column; gap: 5px; }
+  .range .input { min-width: 11rem; }
+  .range .btn { min-height: 44px; }
+
+  .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .f-h {
+    font-size: .7rem; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); margin-right: 4px; min-width: 5ch;
+  }
+  .filters a {
+    padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
+    font-size: .8rem; text-decoration: none; color: var(--muted);
+    text-transform: capitalize; line-height: 1.5;
+  }
+  .filters a:hover { border-color: var(--gold); }
+  .filters a.on { background: var(--gold); color: #FFFFFF; border-color: var(--gold); }
+
+  .note, .clash {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
+  }
+  .note { margin: 18px 0 0; }
+  .note.warn { border-left-color: var(--red); }
+  .clash { border-left-color: var(--red); margin: 22px 0 26px; }
+  .sec-h { font-family: var(--font-display); font-size: 1rem; margin: 0 0 8px; color: var(--off-white); }
+  .sec-p { margin: 0 0 12px; font-size: .9rem; }
+  .sec-p.small { font-size: .82rem; margin: 12px 0 0; }
+  .clash ul { margin: 0; padding-left: 18px; }
+  .clash li { margin: 8px 0; font-size: .88rem; line-height: 1.6; }
+
+  .tbl-hint { font-size: .78rem; color: var(--muted); margin: 22px 0 6px; }
+  .tbl-scroll { overflow-x: auto; }
+  .tbl { width: 100%; border-collapse: collapse; font-size: .9rem; min-width: 860px; }
+  .tbl th, .tbl td {
+    padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border);
+    white-space: nowrap; vertical-align: top;
+  }
+  .tbl thead th {
+    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); font-weight: 400;
+  }
+  .dayrow th {
+    font-family: var(--font-display); font-size: .82rem;
+    letter-spacing: .1em; text-transform: uppercase;
+    color: var(--gold); background: var(--bg-2); padding-top: 16px;
+  }
+  .tbl .strong { font-family: var(--font-display); white-space: normal; min-width: 14ch; }
+  .when { font-variant-numeric: tabular-nums; }
+  .buf { display: block; font-size: .72rem; color: var(--muted); margin-top: 3px; }
+  .is-clash td { box-shadow: inset 2px 0 0 var(--red); }
+  .tag {
+    display: inline-block; margin-left: 7px; padding: 1px 7px;
+    border: 1px solid var(--red); border-radius: 999px;
+    font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; color: var(--red);
+  }
+  .muted { color: var(--muted); }
+  code { font-family: var(--font-accent, monospace); font-size: .95em; }
+
+  .agenda, .cards { list-style: none; margin: 0; padding: 0; }
+  .agenda { display: none; }
+
+  @media (max-width: 900px) {
+    .tbl-scroll, .tbl-hint { display: none; }
+    .agenda { display: block; }
+    .day { margin: 0 0 22px; }
+    .day-h {
+      font-family: var(--font-display); font-size: .82rem;
+      letter-spacing: .1em; text-transform: uppercase; color: var(--gold);
+      margin: 0 0 6px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+    }
+    .cards li { padding: 14px 0; border-bottom: 1px solid var(--border); }
+    .cards li.is-clash { box-shadow: inset 2px 0 0 var(--red); padding-left: 12px; }
+    .c-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 6px; }
+    .c-time { font-variant-numeric: tabular-nums; font-size: .95rem; }
+    .c-name { font-family: var(--font-display); font-size: 1.02rem; margin: 0 0 10px; text-transform: capitalize; }
+    .cards dl { margin: 0; display: grid; gap: 4px; }
+    .cards dl > div { display: grid; grid-template-columns: 11ch 1fr; gap: 10px; font-size: .87rem; }
+    .cards dt { color: var(--muted); }
+    .cards dd { margin: 0; }
+    .range { flex-direction: column; align-items: stretch; }
+    .range .input, .range .btn { width: 100%; }
+  }
+</style>

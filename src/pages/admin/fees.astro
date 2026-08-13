@@ -1,0 +1,993 @@
+---
+// /admin/fees — where the federation's one fee framework is authored.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS SCREEN EXISTS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// MMAKF has published no fee rules. That is not a gap in the software: the
+// engine in src/db/fees.ts ships deliberately empty, because seeding a
+// "reasonable" starting framework would be inventing the federation's own
+// commercial policy. The consequence is that computeFee() has nothing to price
+// against, so EVERY quotation path in the system currently ends at "request a
+// quotation".
+//
+// This is the screen that ends that state. Nothing else in the codebase writes
+// a fee rule.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THREE THINGS THIS PAGE HAS TO MAKE UNMISSABLE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//  1. PUBLISHING IS IRREVERSIBLE. A published framework can never be edited,
+//     because a quote stores the framework it was computed under and re-derives
+//     its figure from it. Editing a published rule would silently rewrite every
+//     quotation ever issued under it — a school that accepted a figure in March
+//     would find its own quotation saying something else in June. src/db/fees.ts
+//     enforces it (addRule refuses a non-draft framework); this page says so
+//     next to the control, and makes the publisher type the framework's code
+//     rather than click once.
+//
+//  2. MONEY IS INTEGER PAISE. Every amount field here refuses a decimal point
+//     outright rather than rounding one silently. applyFactor() throws on a
+//     non-integer for the reason written in its doc comment: a rupee expressed
+//     as a float is a rounding error waiting for a large enough contract, and
+//     the multiplication runs in BigInt precisely so the last rupee of a big
+//     institutional total is exact.
+//
+//  3. MULTIPLIERS ARE PARTS-PER-MILLION, NOT PER CENT. There is no percentage
+//     field on this form and there is not going to be one — a per-cent box that
+//     quietly multiplied by 10,000 to store it would be one conversion away
+//     from a factor of a hundred in the wrong direction.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTHORITY
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Reading the rules and changing them are different authorities. The page is
+// gated on 'feeframework:read' (which FEDERATION_ADMIN, SUPER_ADMIN,
+// TRAINING_DIRECTOR and AUDITOR hold), and the authoring controls are guarded
+// separately on 'feeframework:write' and 'feeframework:publish' — which only
+// SUPER_ADMIN and FEDERATION_ADMIN hold. A training director may read the rules
+// their quotes are computed from and may not change them, which is the point.
+//
+// NOTE ONE MISMATCH, RATHER THAN PAPERING OVER IT: createFramework(), addRule()
+// and publishFramework() assert 'finance:write', not 'feeframework:write'. The
+// two coincide today (both national roles hold both), but if they ever stop
+// coinciding this page will offer a control the module refuses. So the refusal
+// is caught below and reported with the action the module actually demanded,
+// instead of a generic failure.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// FORMS POST TO THIS PAGE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Not to /api/. src/middleware.ts requires application/json on /api/ paths, and
+// a form with JavaScript switched off cannot send that. Posting to the page
+// itself keeps the whole screen working without a line of client script, which
+// for the one screen that configures the federation's prices is worth more than
+// a fetch(). CSRF is already handled: the middleware refuses any mutating
+// request that is not same-origin before this code runs.
+
+import AdminShell from '@/components/AdminShell.astro';
+import { asc, desc, eq } from 'drizzle-orm';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, visibleScopes, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  activeFramework, createFramework, addRule, publishFramework,
+  formatINR, isFeeError, PPM,
+} from '@/db/fees';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/fees');
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const configured = isConfigured();
+
+const mayRead = Boolean(principal) && canAnywhere(principal, 'feeframework:read');
+const mayWrite = Boolean(principal) && canAnywhere(principal, 'feeframework:write');
+const mayPublish = Boolean(principal) && canAnywhere(principal, 'feeframework:publish');
+
+// A FEE FRAMEWORK IS A NATIONAL INSTRUMENT. There is no state's copy of it and
+// no column on fee_frameworks to filter by, so a scope filter here cannot be a
+// WHERE clause — it can only be the whole table or none of it. A credential
+// bound at state, district, dojo or institution scope therefore reads nothing,
+// which is the fail-closed reading and is stated on the page rather than left
+// as an empty list somebody would read as "no rules exist".
+const scopes = visibleScopes(principal, 'feeframework:read');
+const nationalReach = scopes.kind === 'all';
+
+// ─── The rule kinds, described from the enum itself ─────────────────────────
+//
+// Driven off s.feeRuleKind.enumValues rather than a hand-written list, so a
+// kind added to the schema appears on this form instead of being silently
+// unauthorable. `needs` is what computeFee() will require of the rule when it
+// runs — validated at authoring time below, because addRule() does not check
+// it and an incomplete rule would otherwise publish cleanly and then throw
+// rule_incomplete at the moment somebody asks for a quotation.
+
+type Needs = 'amount' | 'unit' | 'factor';
+
+const KIND_NOTES: Record<string, { needs: Needs; note: string }> = {
+  base: { needs: 'amount', note: 'A starting amount for the request.' },
+  per_participant: { needs: 'unit', note: 'Unit amount × the participants input.' },
+  per_session: { needs: 'unit', note: 'Unit amount × the sessions input.' },
+  per_batch: { needs: 'unit', note: 'Unit amount × the batches input.' },
+  per_campus: { needs: 'unit', note: 'Unit amount × the campuses input.' },
+  per_instructor: { needs: 'unit', note: 'Unit amount × the instructors input.' },
+  per_km: { needs: 'unit', note: 'Unit amount × the travelKm input.' },
+  multiplier: { needs: 'factor', note: 'Applied to the running subtotal at this point in the order.' },
+  fixed_add: { needs: 'amount', note: 'A flat addition — equipment, assessment, certification.' },
+  discount: { needs: 'amount', note: 'A negative adjustment. Enter the amount as a negative number of paise.' },
+  tax: { needs: 'factor', note: 'A rate applied to the running subtotal, recorded separately on the quote.' },
+};
+
+const RULE_KINDS = s.feeRuleKind.enumValues.map((k) => ({
+  kind: k,
+  needs: KIND_NOTES[k]?.needs ?? null,
+  note: KIND_NOTES[k]?.note ?? 'See src/db/fees.ts for what this kind requires.',
+}));
+
+// A per-unit rule is skipped, not priced at zero, when its quantity was not
+// supplied. Naming the input each kind reads makes that predictable.
+const QUANTITY_INPUT: Record<string, string> = {
+  per_participant: 'participants',
+  per_session: 'sessions',
+  per_batch: 'batches',
+  per_campus: 'campuses',
+  per_instructor: 'instructors',
+  per_km: 'travelKm',
+};
+
+// ─── Strict input parsing ───────────────────────────────────────────────────
+
+type Parsed = { ok: true; value: number | null } | { ok: false; message: string };
+
+/**
+ * An amount, in integer paise, or nothing.
+ *
+ * A decimal point is REFUSED rather than rounded. Accepting "450.50" and
+ * quietly storing 45050 would work until the day somebody types "450.5"
+ * meaning fifty paise more, and the two readings differ by a factor of ten.
+ * The unit is stated on the field; the parser holds the person to it.
+ */
+function parsePaise(raw: string, field: string): Parsed {
+  const v = raw.trim();
+  if (!v) return { ok: true, value: null };
+  if (/[.,]/.test(v)) {
+    return {
+      ok: false,
+      message: `${field} is in integer paise, so a decimal point is not accepted. One rupee is 100.`,
+    };
+  }
+  if (!/^-?\d+$/.test(v)) return { ok: false, message: `${field} must be a whole number of paise.` };
+  const n = Number(v);
+  if (!Number.isSafeInteger(n)) return { ok: false, message: `${field} is out of range.` };
+  return { ok: true, value: n };
+}
+
+/** A parts-per-million factor. Same discipline, different unit. */
+function parsePpm(raw: string, field: string): Parsed {
+  const v = raw.trim();
+  if (!v) return { ok: true, value: null };
+  if (/[.,]/.test(v)) {
+    return {
+      ok: false,
+      message: `${field} is in parts-per-million, not per cent, so a decimal point is not accepted. ×1.0 is ${PPM}.`,
+    };
+  }
+  if (!/^-?\d+$/.test(v)) return { ok: false, message: `${field} must be a whole number of parts-per-million.` };
+  const n = Number(v);
+  if (!Number.isSafeInteger(n)) return { ok: false, message: `${field} is out of range.` };
+  return { ok: true, value: n };
+}
+
+function parseCount(raw: string, field: string): Parsed {
+  const v = raw.trim();
+  if (!v) return { ok: true, value: null };
+  if (!/^\d+$/.test(v)) return { ok: false, message: `${field} must be a whole number.` };
+  return { ok: true, value: Number(v) };
+}
+
+/**
+ * Refuse a condition the engine cannot understand, at authoring time.
+ *
+ * matchConditions() treats an unrecognised form as NOT MATCHING — the
+ * fail-closed reading, which is right at compute time and useless as feedback:
+ * the rule simply never fires and nobody finds out why. Checking the shape here
+ * turns a silent dead rule into a message while it is still being written.
+ */
+function conditionProblem(value: unknown): string | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return 'Conditions must be a JSON object.';
+  }
+  for (const [key, want] of Object.entries(value as Record<string, unknown>)) {
+    if (Array.isArray(want)) continue;
+    if (want !== null && typeof want === 'object') {
+      const keys = Object.keys(want as Record<string, unknown>);
+      const known = keys.length > 0 && keys.every((k) => ['min', 'max', 'not'].includes(k));
+      if (!known) {
+        return `The condition on "${key}" uses a form the engine does not understand, so the rule would never match anything. Only min, max and not are recognised inside an object.`;
+      }
+      continue;
+    }
+    if (typeof want === 'string' || typeof want === 'number' || typeof want === 'boolean') continue;
+    return `The condition on "${key}" must be a value, a list of values, or an object of min / max / not.`;
+  }
+  return null;
+}
+
+// ─── The action ─────────────────────────────────────────────────────────────
+//
+// Success REDIRECTS (303) and failure re-renders. That split is deliberate: a
+// refresh after a successful publish must not attempt a second one, and a
+// refusal must keep everything the person typed so they can correct one field
+// rather than retype a rule.
+
+const DONE_MESSAGES: Record<string, string> = {
+  framework: 'The draft framework was created. It prices nothing until it has rules and is published.',
+  rule: 'The rule was added to the draft. It takes effect when the framework is published, and not before.',
+  published: 'The framework is published and is now frozen. Any change from here means a new version.',
+};
+
+type Posted = Record<string, string>;
+let posted: Posted = {};
+let error: string | null = null;
+let focusForm: 'framework' | 'rule' | 'publish' | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  posted = Object.fromEntries([...form.entries()].map(([k, v]) => [k, String(v)]));
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const action = get('action');
+  focusForm = action === 'create_framework' ? 'framework' : action === 'add_rule' ? 'rule' : action === 'publish' ? 'publish' : null;
+
+  const rl = await rateLimit(Astro.request, 'fee-author', 30, 60);
+
+  if (!rl.ok) {
+    // Rendered rather than returned as JSON: this form is meant to work with
+    // JavaScript off, and a person who meets a limit should see the page they
+    // were on, not a machine-readable body.
+    Astro.response.status = 429;
+    error = `Too many attempts in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so there is nowhere to record a framework.';
+  } else if (!mayWrite) {
+    // Re-checked server-side against the session on every action. The rendered
+    // page is not evidence of authority: it may be minutes old, and the request
+    // may not have come from it at all.
+    Astro.response.status = 403;
+    error = 'Authoring the fee framework requires feeframework:write, which this account does not hold in any scope.';
+  } else if (!nationalReach) {
+    Astro.response.status = 403;
+    error = 'The fee framework is a national instrument. This account holds its authority at a narrower scope, which does not contain a national record.';
+  } else if (action === 'publish' && !mayPublish) {
+    Astro.response.status = 403;
+    error = 'Publishing a framework requires feeframework:publish, which this account does not hold in any scope.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: get('reason') || null,
+    };
+
+    try {
+      if (action === 'create_framework') {
+        const title = get('title');
+        const versionRaw = get('version');
+        if (!title) throw new Error('Give the framework a title.');
+        if (!/^\d+$/.test(versionRaw) || Number(versionRaw) < 1) {
+          throw new Error('A framework version is a positive whole number. Versions are unique, so the next one is the lowest number not already taken.');
+        }
+        const row = await createFramework(db(), ctx, {
+          title,
+          version: Number(versionRaw),
+          effectiveFrom: get('effectiveFrom') || null,
+          notes: get('notes') || undefined,
+        });
+        return Astro.redirect(`${SELF}?framework=${row.id}&done=framework`, 303);
+      }
+
+      if (action === 'add_rule') {
+        const frameworkId = Number(get('frameworkId'));
+        if (!Number.isInteger(frameworkId) || frameworkId <= 0) throw new Error('Say which draft the rule belongs to.');
+
+        const kind = get('kind');
+        const meta = RULE_KINDS.find((k) => k.kind === kind);
+        if (!meta) throw new Error('That is not a rule kind this engine implements.');
+
+        const code = get('code');
+        const label = get('label');
+        if (!code) throw new Error('Give the rule a code. It is printed on every quotation line the rule produces, and it is how a figure is traced back four years later.');
+        if (!label) throw new Error('Give the rule a label. It is the wording the recipient of the quotation reads.');
+
+        const amount = parsePaise(get('amountMinor'), 'The amount');
+        if (!amount.ok) throw new Error(amount.message);
+        const factor = parsePpm(get('factorPpm'), 'The factor');
+        if (!factor.ok) throw new Error(factor.message);
+        const minQty = parseCount(get('minQuantity'), 'The minimum quantity');
+        if (!minQty.ok) throw new Error(minQty.message);
+        const maxQty = parseCount(get('maxQuantity'), 'The maximum quantity');
+        if (!maxQty.ok) throw new Error(maxQty.message);
+        const sortOrder = parseCount(get('sortOrder'), 'The order');
+        if (!sortOrder.ok) throw new Error(sortOrder.message);
+
+        // Completeness, checked here because computeFee() checks it at the
+        // moment somebody asks for a price — which is the worst possible time
+        // to discover a rule was saved without its amount.
+        if ((meta.needs === 'amount' || meta.needs === 'unit') && amount.value == null) {
+          throw new Error(`A ${kind} rule needs an amount in paise. Without one, computeFee() refuses the whole framework the first time it is asked for a figure.`);
+        }
+        if (meta.needs === 'factor' && factor.value == null) {
+          throw new Error(`A ${kind} rule needs a factor in parts-per-million. ×1.0 is ${PPM}.`);
+        }
+        if (meta.needs === 'amount' || meta.needs === 'unit') {
+          if (kind === 'discount' && (amount.value ?? 0) > 0) {
+            throw new Error('A discount reduces the total, so its amount is negative paise. A positive number here would add to the bill under the word "discount".');
+          }
+          if (kind !== 'discount' && (amount.value ?? 0) < 0) {
+            throw new Error('Only a discount carries a negative amount.');
+          }
+        }
+
+        let conditions: Record<string, unknown> = {};
+        const conditionsRaw = get('conditions');
+        if (conditionsRaw) {
+          try {
+            conditions = JSON.parse(conditionsRaw);
+          } catch {
+            throw new Error('The conditions are not valid JSON. Leave the field empty for a rule that applies to every request.');
+          }
+          const problem = conditionProblem(conditions);
+          if (problem) throw new Error(problem);
+        }
+
+        const serviceRaw = get('serviceId');
+        const audienceRaw = get('audience');
+
+        await addRule(db(), ctx, frameworkId, {
+          code,
+          label,
+          kind,
+          serviceId: serviceRaw ? Number(serviceRaw) : null,
+          audience: audienceRaw || null,
+          conditions,
+          amountMinor: amount.value,
+          factorPpm: factor.value,
+          minQuantity: minQty.value,
+          maxQuantity: maxQty.value,
+          sortOrder: sortOrder.value ?? 100,
+          requiresApproval: get('requiresApproval') === 'on',
+        });
+        return Astro.redirect(`${SELF}?framework=${frameworkId}&done=rule`, 303);
+      }
+
+      if (action === 'publish') {
+        const frameworkId = Number(get('frameworkId'));
+        if (!Number.isInteger(frameworkId) || frameworkId <= 0) throw new Error('Say which draft is being published.');
+        // The typed confirmation is not decoration. Publishing cannot be undone
+        // and it freezes the arithmetic behind every future quotation, so it is
+        // deliberately not a single click made in passing.
+        if (get('confirm') !== get('expectedCode')) {
+          throw new Error('The framework was not published. To publish it, type its code exactly as shown next to the field — publishing cannot be undone.');
+        }
+        await publishFramework(db(), ctx, frameworkId);
+        return Astro.redirect(`${SELF}?framework=${frameworkId}&done=published`, 303);
+      }
+
+      throw new Error('Unknown action.');
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        // Named, because the two authorities do not have to stay aligned — see
+        // the note at the top of this file.
+        Astro.response.status = 403;
+        error = `The fee engine refused this: it requires ${err.action}, which this account does not hold. Nothing was changed.`;
+      } else if (isFeeError(err)) {
+        Astro.response.status = 400;
+        error = err.message;
+      } else if (err instanceof Error && !/^[A-Z][a-z]+Error:/.test(err.message)) {
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        // A driver fault or a constraint name is a fact about the server, not
+        // about the person authoring a rule.
+        console.error('[admin/fees] authoring failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was recorded. The database refused the write — a duplicate code or version is the usual cause.';
+      }
+    }
+  }
+}
+
+// ─── The read ───────────────────────────────────────────────────────────────
+
+type Row = Record<string, any>;
+
+let frameworks: Row[] = [];
+let rules: Row[] = [];
+let services: Row[] = [];
+let inForce: Row | null = null;
+let selected: Row | null = null;
+let readError: string | null = null;
+
+// Effective dates on a framework are plain dates, so "today" is today in the
+// federation's own timezone rather than the server's.
+const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+if (mayRead && nationalReach && configured) {
+  try {
+    // A plain read of the register. No arithmetic happens on this page: every
+    // figure shown below was authored through src/db/fees.ts, and every figure
+    // computed from it is computed there too.
+    frameworks = await db().select().from(s.feeFrameworks).orderBy(desc(s.feeFrameworks.version));
+    inForce = await activeFramework(db(), today);
+
+    const wanted = Number(Astro.url.searchParams.get('framework'));
+    selected = frameworks.find((f) => f.id === wanted) ?? frameworks[0] ?? null;
+
+    if (selected) {
+      rules = await db().select().from(s.feeRules)
+        .where(eq(s.feeRules.frameworkId, selected.id))
+        .orderBy(asc(s.feeRules.sortOrder), asc(s.feeRules.id));
+    }
+
+    services = await db().select({
+      id: s.services.id, code: s.services.code, title: s.services.title,
+    }).from(s.services).orderBy(asc(s.services.title));
+  } catch (err: any) {
+    readError = String(err?.message ?? err);
+  }
+}
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done ? DONE_MESSAGES[done] ?? null : null;
+
+const drafts = frameworks.filter((f) => f.status === 'draft');
+const selectedIsDraft = selected?.status === 'draft';
+const publishTarget = selectedIsDraft ? selected : null;
+
+const v = (k: string, fallback = '') => (posted[k] !== undefined ? posted[k] : fallback);
+const dateLabel = (value: unknown) => {
+  if (!value) return null;
+  const d = new Date(String(value));
+  return Number.isNaN(d.getTime())
+    ? null
+    : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+};
+const conditionsLabel = (c: unknown) => {
+  if (!c || typeof c !== 'object' || !Object.keys(c as object).length) return null;
+  return JSON.stringify(c);
+};
+---
+
+<AdminShell
+  title="Fee framework"
+  requires="feeframework:read"
+  intro="The federation's single fee framework, versioned. Nothing else in this system sets a price: a figure either comes from a rule here, or the answer is that a quotation must be prepared by hand."
+>
+  {error && <p class="msg msg-bad" role="alert">{error}</p>}
+  {doneMessage && <p class="msg msg-ok" role="status">{doneMessage}</p>}
+
+  {!nationalReach ? (
+    <p class="note">
+      A fee framework is a national instrument — there is no state, district or
+      dojo copy of it, and no column to filter one by. This account holds
+      <code>feeframework:read</code> at a narrower scope than national, so
+      nothing is listed. That is a refusal, not an empty register.
+    </p>
+  ) : !configured ? (
+    <p class="note">
+      The federation database is not configured on this deployment, so there is
+      no framework register to read and none can be authored here. Until
+      <code>DATABASE_URL</code> is set and this page is used, the fee engine has
+      no rules at all, and every quotation path in the system ends at
+      &ldquo;request a quotation&rdquo;.
+    </p>
+  ) : readError ? (
+    <p class="note" role="alert">{readError}</p>
+  ) : (
+    <>
+      {/* ── What is in force ────────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="in-force-h">
+        <h2 id="in-force-h" class="band-h">In force today</h2>
+        {inForce ? (
+          <p class="band-p">
+            <strong>{inForce.code}</strong> — {inForce.title}. Published
+            {inForce.publishedAt ? <> on {dateLabel(inForce.publishedAt)}</> : null}
+            {inForce.effectiveFrom ? <>, effective from {dateLabel(inForce.effectiveFrom)}</> : null}
+            {inForce.effectiveTo ? <> until {dateLabel(inForce.effectiveTo)}</> : null}.
+            Every quotation issued from today computes against this version and
+            keeps computing against it for as long as the quotation exists.
+          </p>
+        ) : (
+          <p class="band-p">
+            No framework is in force. The federation has published no fee rules,
+            so <code>computeFee()</code> has nothing to price against and every
+            quotation path in the system — public estimator, training request,
+            institutional enquiry — ends at &ldquo;a quotation will be
+            prepared&rdquo;. That is the true state of this system, not a display
+            fault, and this page is where it is changed.
+          </p>
+        )}
+      </section>
+
+      {/* ── The versions ────────────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="versions-h">
+        <h2 id="versions-h" class="band-h">Versions</h2>
+        {frameworks.length === 0 ? (
+          <p class="note">
+            No framework has ever been authored. Not an empty list — nothing
+            exists yet. Create a draft below, give it rules, and publish it.
+          </p>
+        ) : (
+          <ul class="versions">
+            {frameworks.map((f) => (
+              <li class={selected && f.id === selected.id ? 'on' : ''}>
+                <a href={`${SELF}?framework=${f.id}`}>
+                  <span class="v-code">{f.code}</span>
+                  <span class="v-title">{f.title}</span>
+                </a>
+                <span class={`pill st-${f.status}`}><span class="pill-dot"></span>{f.status}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {/* ── The rules of the selected version ───────────────────────────── */}
+      {selected && (
+        <section class="band" aria-labelledby="rules-h">
+          <h2 id="rules-h" class="band-h">{selected.code} — rules</h2>
+
+          <p class="band-p">
+            {selected.status === 'draft' ? (
+              <>This version is a draft. It prices nothing: <code>computeFee()</code> refuses
+              any framework that is not published, because quoting from a draft would produce
+              a figure the federation has not approved.</>
+            ) : (
+              <>This version is {selected.status} and frozen. Its rules can no longer be changed —
+              every quotation issued under it must keep computing to the figure it was issued at.
+              A change means a new version.</>
+            )}
+            {selected.notes ? <> {selected.notes}</> : null}
+          </p>
+
+          {rules.length === 0 ? (
+            <p class="note">
+              This version has no rules, so it prices nothing. Publishing it in
+              this state is refused outright: an empty published framework would
+              send every request to &ldquo;requires a quotation&rdquo; while
+              appearing on this screen to be configured.
+            </p>
+          ) : (
+            <>
+              <p class="tbl-hint">Scroll the table sideways to see every column.</p>
+              <div class="tbl-scroll">
+                <table class="tbl">
+                  <caption class="sr-only">Rules in {selected.code}, in the order they are applied</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Order</th>
+                      <th scope="col">Code</th>
+                      <th scope="col">Label</th>
+                      <th scope="col">Kind</th>
+                      <th scope="col">Amount</th>
+                      <th scope="col">Factor</th>
+                      <th scope="col">Audience</th>
+                      <th scope="col">Conditions</th>
+                      <th scope="col">Approval</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rules.map((r) => (
+                      <tr>
+                        <td class="num">{r.sortOrder}</td>
+                        <td><code>{r.code}</code></td>
+                        <td class="strong">{r.label}</td>
+                        <td>{String(r.kind).replace(/_/g, ' ')}</td>
+                        <td class="num">
+                          {r.amountMinor == null
+                            ? <span class="muted">—</span>
+                            : <><span class="figure">{formatINR(r.amountMinor)}</span><span class="minor">{r.amountMinor} paise</span></>}
+                        </td>
+                        <td class="num">
+                          {r.factorPpm == null
+                            ? <span class="muted">—</span>
+                            : <><span class="figure">×{(r.factorPpm / PPM).toFixed(6)}</span><span class="minor">{r.factorPpm} ppm</span></>}
+                        </td>
+                        <td>{r.audience ?? <span class="muted">all</span>}</td>
+                        <td>{conditionsLabel(r.conditions) ? <code>{conditionsLabel(r.conditions)}</code> : <span class="muted">unconditional</span>}</td>
+                        <td>{r.requiresApproval ? 'required' : <span class="muted">no</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* On a phone nine columns are unreadable however far they slide,
+                  so the same rules are recomposed as records. PART AL. */}
+              <ul class="cards" aria-label={`Rules in ${selected.code}`}>
+                {rules.map((r) => (
+                  <li>
+                    <p class="c-top"><code>{r.code}</code><span class="muted">order {r.sortOrder}</span></p>
+                    <p class="c-name">{r.label}</p>
+                    <dl>
+                      <div><dt>Kind</dt><dd>{String(r.kind).replace(/_/g, ' ')}</dd></div>
+                      {r.amountMinor != null && (
+                        <div><dt>Amount</dt><dd>{formatINR(r.amountMinor)} <span class="muted">({r.amountMinor} paise)</span></dd></div>
+                      )}
+                      {r.factorPpm != null && (
+                        <div><dt>Factor</dt><dd>×{(r.factorPpm / PPM).toFixed(6)} <span class="muted">({r.factorPpm} ppm)</span></dd></div>
+                      )}
+                      <div><dt>Audience</dt><dd>{r.audience ?? 'all'}</dd></div>
+                      <div><dt>Conditions</dt><dd>{conditionsLabel(r.conditions) ?? 'unconditional'}</dd></div>
+                      <div><dt>Approval</dt><dd>{r.requiresApproval ? 'required' : 'no'}</dd></div>
+                    </dl>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </section>
+      )}
+
+      {/* ── Authoring ───────────────────────────────────────────────────── */}
+      {!mayWrite ? (
+        <p class="note">
+          This account reads the framework and does not change it. Authoring a
+          version or a rule needs <code>feeframework:write</code>, and
+          publishing needs <code>feeframework:publish</code> — held nationally,
+          because a pricing rule alters every future quotation at once.
+        </p>
+      ) : (
+        <>
+          <section class="band" aria-labelledby="new-fw-h">
+            <h2 id="new-fw-h" class="band-h">Author a new version</h2>
+            <p class="band-p">
+              A new version starts as a draft and prices nothing until it is
+              published. Version numbers are unique across the federation and
+              the code is derived from the number.
+            </p>
+            <form method="post" class="form">
+              <input type="hidden" name="action" value="create_framework" />
+              <div class="fields">
+                <p class="field">
+                  <label class="input-label" for="fw-title">Title</label>
+                  <input class="input" id="fw-title" name="title" required value={focusForm === 'framework' ? v('title') : ''} />
+                </p>
+                <p class="field field-sm">
+                  <label class="input-label" for="fw-version">Version number</label>
+                  <input class="input" id="fw-version" name="version" inputmode="numeric" pattern="[0-9]+" required value={focusForm === 'framework' ? v('version') : ''} />
+                </p>
+                <p class="field field-sm">
+                  <label class="input-label" for="fw-from">Effective from</label>
+                  <input class="input" id="fw-from" name="effectiveFrom" type="date" value={focusForm === 'framework' ? v('effectiveFrom') : ''} />
+                  <span class="help">Optional. Left empty, the version applies from the moment it is published.</span>
+                </p>
+                <p class="field field-wide">
+                  <label class="input-label" for="fw-notes">Notes</label>
+                  <textarea class="input" id="fw-notes" name="notes" rows="2">{focusForm === 'framework' ? v('notes') : ''}</textarea>
+                  <span class="help">What this version changed and on whose authority. Read by whoever has to defend a figure later.</span>
+                </p>
+              </div>
+              <button class="btn btn-ghost" type="submit">Create draft</button>
+            </form>
+          </section>
+
+          <section class="band" aria-labelledby="new-rule-h">
+            <h2 id="new-rule-h" class="band-h">Add a rule to a draft</h2>
+
+            {drafts.length === 0 ? (
+              <p class="note">
+                There is no draft to add a rule to. A published version cannot
+                be edited — that is what makes an issued quotation reproducible
+                — so changing the rules means authoring a new version above.
+              </p>
+            ) : (
+              <>
+                <div class="units">
+                  <p><strong>Amounts are integer paise.</strong> One rupee is 100. A decimal point is refused rather than rounded, because the multiplication that follows runs in exact integer arithmetic and a float would put the error back.</p>
+                  <p><strong>Factors are parts-per-million.</strong> ×1.0 is {PPM}. There is no per-cent field on this form.</p>
+                  <p><strong>Order matters.</strong> Rules run from the lowest order upwards and multipliers are not commutative, so the sequence is part of the answer.</p>
+                </div>
+
+                <form method="post" class="form">
+                  <input type="hidden" name="action" value="add_rule" />
+                  <div class="fields">
+                    <p class="field">
+                      <label class="input-label" for="r-framework">Draft version</label>
+                      <select class="input" id="r-framework" name="frameworkId" required>
+                        {drafts.map((f) => (
+                          <option value={f.id} selected={publishTarget ? f.id === publishTarget.id : false}>{f.code} — {f.title}</option>
+                        ))}
+                      </select>
+                    </p>
+                    <p class="field field-sm">
+                      <label class="input-label" for="r-code">Rule code</label>
+                      <input class="input" id="r-code" name="code" required value={focusForm === 'rule' ? v('code') : ''} />
+                      <span class="help">Unique within the version. Printed on every quotation line this rule produces.</span>
+                    </p>
+                    <p class="field">
+                      <label class="input-label" for="r-label">Label</label>
+                      <input class="input" id="r-label" name="label" required value={focusForm === 'rule' ? v('label') : ''} />
+                      <span class="help">The wording the recipient of the quotation reads.</span>
+                    </p>
+                    <p class="field field-sm">
+                      <label class="input-label" for="r-kind">Kind</label>
+                      <select class="input" id="r-kind" name="kind" required>
+                        {RULE_KINDS.map((k) => (
+                          <option value={k.kind} selected={focusForm === 'rule' && v('kind') === k.kind}>{k.kind.replace(/_/g, ' ')}</option>
+                        ))}
+                      </select>
+                    </p>
+                    <p class="field field-sm">
+                      <label class="input-label" for="r-amount">Amount, in paise</label>
+                      <input class="input" id="r-amount" name="amountMinor" inputmode="numeric" pattern="-?[0-9]+" value={focusForm === 'rule' ? v('amountMinor') : ''} />
+                      <span class="help">Whole paise. For a per-unit kind this is the amount per one unit. A discount is negative.</span>
+                    </p>
+                    <p class="field field-sm">
+                      <label class="input-label" for="r-factor">Factor, in parts-per-million</label>
+                      <input class="input" id="r-factor" name="factorPpm" inputmode="numeric" pattern="-?[0-9]+" value={focusForm === 'rule' ? v('factorPpm') : ''} />
+                      <span class="help">For a multiplier or a tax only. ×1.0 is {PPM}.</span>
+                    </p>
+                    <p class="field field-sm">
+                      <label class="input-label" for="r-audience">Audience</label>
+                      <select class="input" id="r-audience" name="audience">
+                        <option value="">every audience</option>
+                        {s.audienceKind.enumValues.map((a) => (
+                          <option value={a} selected={focusForm === 'rule' && v('audience') === a}>{a}</option>
+                        ))}
+                      </select>
+                    </p>
+                    <p class="field field-sm">
+                      <label class="input-label" for="r-service">Service</label>
+                      <select class="input" id="r-service" name="serviceId">
+                        <option value="">every service</option>
+                        {services.map((sv) => (
+                          <option value={sv.id} selected={focusForm === 'rule' && v('serviceId') === String(sv.id)}>{sv.title}</option>
+                        ))}
+                      </select>
+                      {services.length === 0 && (
+                        <span class="help">No services are recorded yet, so a rule can only be written to apply to every service.</span>
+                      )}
+                    </p>
+                    <p class="field field-sm">
+                      <label class="input-label" for="r-min">Minimum quantity</label>
+                      <input class="input" id="r-min" name="minQuantity" inputmode="numeric" pattern="[0-9]+" value={focusForm === 'rule' ? v('minQuantity') : ''} />
+                      <span class="help">Optional floor for a per-unit kind.</span>
+                    </p>
+                    <p class="field field-sm">
+                      <label class="input-label" for="r-max">Maximum quantity</label>
+                      <input class="input" id="r-max" name="maxQuantity" inputmode="numeric" pattern="[0-9]+" value={focusForm === 'rule' ? v('maxQuantity') : ''} />
+                      <span class="help">Optional ceiling, so a bad input cannot run a per-unit rule away.</span>
+                    </p>
+                    <p class="field field-sm">
+                      <label class="input-label" for="r-order">Order</label>
+                      <input class="input" id="r-order" name="sortOrder" inputmode="numeric" pattern="[0-9]+" value={focusForm === 'rule' ? v('sortOrder', '100') : '100'} />
+                    </p>
+                    <p class="field field-wide">
+                      <label class="input-label" for="r-conditions">Conditions, as JSON</label>
+                      <textarea class="input" id="r-conditions" name="conditions" rows="3">{focusForm === 'rule' ? v('conditions') : ''}</textarea>
+                      <span class="help">
+                        Empty means the rule applies to every request. The engine
+                        understands a value, a list of values, and an object of
+                        min, max or not — and treats anything else as no match at
+                        all, so a form it cannot read is refused here rather than
+                        becoming a rule that never fires.
+                      </span>
+                    </p>
+                    <p class="field field-wide check">
+                      <label for="r-approval">
+                        <input type="checkbox" id="r-approval" name="requiresApproval" />
+                        A quotation containing this rule must be approved before it is issued
+                      </label>
+                    </p>
+                  </div>
+                  <button class="btn btn-ghost" type="submit">Add rule to draft</button>
+                </form>
+
+                <h3 class="sub-h">What each kind needs</h3>
+                <ul class="kinds">
+                  {RULE_KINDS.map((k) => (
+                    <li>
+                      <span class="k-name">{k.kind.replace(/_/g, ' ')}</span>
+                      <span class="k-note">
+                        {k.note}
+                        {QUANTITY_INPUT[k.kind] ? <> If <code>{QUANTITY_INPUT[k.kind]}</code> is not supplied, the rule is skipped rather than priced at zero.</> : null}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </section>
+
+          {/* ── Publishing ────────────────────────────────────────────────── */}
+          <section class="band band-danger" aria-labelledby="publish-h">
+            <h2 id="publish-h" class="band-h">Publish</h2>
+
+            <div class="warn">
+              <p><strong>Publishing cannot be undone, and a published version can never be edited.</strong></p>
+              <p>
+                A quotation stores the framework it was computed under and is
+                re-derived from it whenever anybody asks how a figure was
+                reached. If a published rule could be changed, every quotation
+                ever issued under it would silently change with it — a school
+                that accepted a figure in March would open its own quotation in
+                June and find a different number. So the rules freeze here.
+              </p>
+              <p>
+                Correcting a published framework means authoring a NEW version.
+                Everything already issued keeps computing to the figure it was
+                issued at, which is the only version of this that a federation
+                can defend.
+              </p>
+            </div>
+
+            {!mayPublish ? (
+              <p class="note">
+                Publishing needs <code>feeframework:publish</code>, which this
+                account does not hold. A draft can be prepared here and somebody
+                who holds it publishes.
+              </p>
+            ) : !publishTarget ? (
+              <p class="note">
+                {selected
+                  ? <>{selected.code} is {selected.status}, so there is nothing to publish. Select a draft version above.</>
+                  : <>There is no draft to publish.</>}
+              </p>
+            ) : rules.length === 0 ? (
+              <p class="note">
+                {publishTarget.code} has no rules. Publishing is refused while
+                that is true: the framework would price nothing and every request
+                would fall through to a manual quotation, while this screen
+                showed a published framework.
+              </p>
+            ) : (
+              <form method="post" class="form">
+                <input type="hidden" name="action" value="publish" />
+                <input type="hidden" name="frameworkId" value={publishTarget.id} />
+                <input type="hidden" name="expectedCode" value={publishTarget.code} />
+                <div class="fields">
+                  <p class="field">
+                    <label class="input-label" for="p-confirm">Type <code>{publishTarget.code}</code> to publish it</label>
+                    <input class="input" id="p-confirm" name="confirm" autocomplete="off" required />
+                    <span class="help">{rules.length} rule{rules.length === 1 ? '' : 's'} will be frozen.</span>
+                  </p>
+                  <p class="field field-wide">
+                    <label class="input-label" for="p-reason">On whose authority</label>
+                    <input class="input" id="p-reason" name="reason" />
+                    <span class="help">Recorded in the audit trail beside the publication.</span>
+                  </p>
+                </div>
+                <button class="btn btn-primary" type="submit">Publish {publishTarget.code} irreversibly</button>
+              </form>
+            )}
+          </section>
+        </>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .msg {
+    padding: 14px 18px; margin: 0 0 22px; line-height: 1.65;
+    border-left: 3px solid var(--gold); background: var(--card); max-width: 72ch;
+  }
+  .msg-bad { border-left-color: var(--red); }
+  .msg-ok { border-left-color: var(--gold); }
+
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 68ch;
+  }
+
+  .band { margin: 0 0 40px; }
+  .band + .band { padding-top: 34px; border-top: 1px solid var(--border); }
+  .band-h {
+    font-family: var(--font-display); font-size: 1.15rem;
+    margin: 0 0 12px; letter-spacing: .01em;
+  }
+  .band-p { color: var(--muted); line-height: 1.75; max-width: 68ch; margin: 0 0 18px; }
+  .sub-h {
+    font-family: var(--font-display); font-size: .95rem; margin: 30px 0 12px;
+  }
+
+  /* Versions read as a list of instruments, not a grid of identical tiles. */
+  .versions { list-style: none; margin: 0; padding: 0; }
+  .versions li {
+    display: flex; align-items: baseline; gap: 14px;
+    padding: 11px 0 11px 12px; border-bottom: 1px solid var(--border);
+    margin-left: -12px;
+  }
+  .versions li.on { box-shadow: inset 2px 0 0 var(--gold); background: var(--bg-2); }
+  .versions a { text-decoration: none; display: flex; gap: 14px; align-items: baseline; flex: 1; min-width: 0; }
+  .v-code { font-family: var(--font-accent, monospace); font-size: .86rem; color: var(--gold-2); white-space: nowrap; }
+  .v-title { color: var(--muted); font-size: .92rem; overflow: hidden; text-overflow: ellipsis; }
+  .st-draft { color: var(--muted); }
+  .st-published { color: var(--gold-2); border-color: var(--gold-dim); }
+
+  .tbl { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  .tbl th, .tbl td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: top; }
+  .tbl thead th {
+    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); font-weight: 400;
+  }
+  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tbl .strong { font-family: var(--font-display); white-space: normal; min-width: 16ch; }
+  .figure { display: block; }
+  /* The stored integer is shown under every figure. This screen is where paise
+     are authored, so the unit is never left to be inferred from a formatted
+     rupee amount. */
+  .minor { display: block; font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); }
+  code { font-family: var(--font-accent, monospace); font-size: .88em; }
+  .tbl-hint { font-size: .78rem; color: var(--muted); margin: 0 0 8px; }
+
+  .units {
+    margin: 0 0 22px; padding: 16px 20px; background: var(--bg-2);
+    border-left: 3px solid var(--gold); max-width: 72ch;
+  }
+  .units p { margin: 0 0 8px; color: var(--muted); line-height: 1.7; font-size: .9rem; }
+  .units p:last-child { margin-bottom: 0; }
+
+  .form { max-width: 900px; }
+  .fields { display: flex; flex-wrap: wrap; gap: 18px 20px; margin: 0 0 22px; }
+  .field { flex: 1 1 260px; margin: 0; }
+  .field-sm { flex: 0 1 200px; }
+  .field-wide { flex: 1 1 100%; }
+  .help { display: block; margin-top: 6px; font-size: .78rem; color: var(--muted); line-height: 1.6; }
+  .check label { display: flex; gap: 10px; align-items: flex-start; color: var(--muted); font-size: .9rem; line-height: 1.6; }
+  .check input { margin-top: 3px; }
+  textarea.input { resize: vertical; font-family: var(--font-accent, monospace); font-size: .86rem; }
+
+  .kinds { list-style: none; margin: 0; padding: 0; max-width: 72ch; }
+  .kinds li { padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .k-name { display: inline-block; min-width: 15ch; font-family: var(--font-accent, monospace); font-size: .84rem; color: var(--gold-2); }
+  .k-note { color: var(--muted); font-size: .86rem; line-height: 1.6; }
+
+  .band-danger .warn {
+    padding: 18px 22px; border: 1px solid var(--red); border-left-width: 3px;
+    background: var(--card); max-width: 72ch; margin: 0 0 22px;
+  }
+  .warn p { margin: 0 0 10px; line-height: 1.75; color: var(--muted); }
+  .warn p:first-child { color: var(--red); }
+  .warn p:last-child { margin-bottom: 0; }
+
+  .cards { display: none; list-style: none; margin: 0; padding: 0; }
+
+  /* ── Phone (PART AL) ──────────────────────────────────────────────────────
+     Nine columns cannot be read inside a 360px viewport however far they
+     slide, so the rules are recomposed as records. */
+  @media (max-width: 900px) {
+    .tbl-scroll, .tbl-hint { display: none; }
+    .cards { display: block; }
+    .cards li { padding: 16px 0; border-bottom: 1px solid var(--border); }
+    .c-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 6px; }
+    .c-name { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 10px; }
+    .cards dl { margin: 0; display: grid; gap: 4px; }
+    .cards dl > div { display: grid; grid-template-columns: 11ch 1fr; gap: 10px; font-size: .87rem; }
+    .cards dt { color: var(--muted); }
+    .cards dd { margin: 0; }
+
+    .versions li { flex-wrap: wrap; gap: 6px 12px; }
+    .field, .field-sm { flex: 1 1 100%; }
+    .k-name { display: block; min-width: 0; margin-bottom: 2px; }
+    .btn { width: 100%; }
+  }
+</style>

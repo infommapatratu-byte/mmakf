@@ -1,0 +1,609 @@
+---
+// The programme builder — the catalogue, and what is actually being delivered.
+//
+// TWO TABLES, NOT ONE, AND THEY ARE NOT THE SAME KIND OF THING.
+//
+//   programTemplates  — the menu. A configurable shape the federation can
+//                       offer: "school Shotokan, ages 8 to 12, twice a week,
+//                       twelve weeks, on site".
+//   trainingPrograms  — the meal. One template-shaped thing being delivered to
+//                       one named client, with dates and a status.
+//
+// They are kept visually separate on this page because collapsing them is the
+// mistake that makes an administrator think a draft template is a programme
+// somebody is running.
+//
+// A NOTE ON WHAT CANNOT BE SHOWN. There is no column joining a running
+// programme back to the template it was built from — trainingPrograms carries a
+// serviceId and a proposalId, and the template reference lives only on
+// institutionApplications.programTemplateId. So this page does not print a
+// "built from" column, because it would have to guess. That absence is stated
+// on the page rather than papered over: an administrator who expects the link
+// needs to know it does not exist.
+
+import AdminShell from '@/components/AdminShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes, type Action } from '@/lib/rbac';
+import { and, asc, desc, eq, inArray, or, sql } from 'drizzle-orm';
+import * as o from '@/db/operations.schema';
+import * as e from '@/db/engagement.schema';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+// The three authoring authorities, read once. They govern what this screen
+// OFFERS; they are not what enforces anything, which is the point AdminShell
+// makes about the menu and applies equally here.
+const mayWrite = !!principal && canAnywhere(principal, 'program:write');
+const mayApprove = !!principal && canAnywhere(principal, 'program:approve');
+const mayPublish = !!principal && canAnywhere(principal, 'program:publish');
+
+const TEMPLATE_STATUSES = ['draft', 'under_review', 'approved', 'published', 'archived'] as const;
+const statusFilter = Astro.url.searchParams.get('status') || '';
+
+let templates: any[] = [];
+let running: any[] = [];
+let participantCounts = new Map<number, number>();
+let audienceMismatch = new Set<number>();
+let unavailable: string | null = null;
+
+// True when this account's authority is scoped rather than national. It changes
+// what the empty catalogue MEANS, so it is tracked separately from "no rows".
+let catalogueIsNational = false;
+
+if (principal && canAnywhere(principal, 'program:read')) {
+  if (!isConfigured()) {
+    unavailable = 'The federation database is not reachable from this deployment, so neither the programme catalogue nor the running programmes can be listed.';
+  } else {
+    try {
+      const conn = db();
+      const scopes = visibleScopes(principal, 'program:read');
+
+      // ── The catalogue ────────────────────────────────────────────────────
+      // A template has no state, no district and no institution: it is a
+      // national artefact. rbac.scopeContains() already says what that means —
+      // a resource with no location is reachable only from a national binding —
+      // and this predicate is that rule expressed in SQL rather than re-decided
+      // here. A state administrator therefore sees an empty catalogue, and the
+      // page says why instead of implying the federation has published nothing.
+      const templateScope =
+        scopes.kind === 'all' ? sql`true` : sql`false`;
+      catalogueIsNational = scopes.kind !== 'all';
+
+      const templateWhere: any[] = [templateScope];
+      if (statusFilter && (TEMPLATE_STATUSES as readonly string[]).includes(statusFilter)) {
+        templateWhere.push(eq(o.programTemplates.status, statusFilter as any));
+      }
+
+      templates = await conn.select({
+        id: o.programTemplates.id,
+        code: o.programTemplates.code,
+        title: o.programTemplates.title,
+        audience: o.programTemplates.audience,
+        status: o.programTemplates.status,
+        summary: o.programTemplates.summary,
+        serviceId: o.programTemplates.serviceId,
+        serviceTitle: e.services.title,
+        minParticipants: o.programTemplates.minParticipants,
+        maxParticipants: o.programTemplates.maxParticipants,
+        sessionsPerWeek: o.programTemplates.sessionsPerWeek,
+        durationWeeks: o.programTemplates.durationWeeks,
+        sessionMinutes: o.programTemplates.sessionMinutes,
+        minInstructorGrade: o.programTemplates.minInstructorGrade,
+        instructorsRequired: o.programTemplates.instructorsRequired,
+        includesAssessment: o.programTemplates.includesAssessment,
+        includesGrading: o.programTemplates.includesGrading,
+        includesCertification: o.programTemplates.includesCertification,
+        includesCompetition: o.programTemplates.includesCompetition,
+        includesReporting: o.programTemplates.includesReporting,
+        modes: o.programTemplates.modes,
+        approvedAt: o.programTemplates.approvedAt,
+        publishedAt: o.programTemplates.publishedAt,
+        archivedAt: o.programTemplates.archivedAt,
+        updatedAt: o.programTemplates.updatedAt,
+      })
+        .from(o.programTemplates)
+        .leftJoin(e.services, eq(e.services.id, o.programTemplates.serviceId))
+        // Ordered by audience then title, not by status. An administrator opens
+        // this asking "what can we offer a school?"; grouping by status would
+        // scatter the answer across five blocks of the table.
+        .where(and(...templateWhere))
+        .orderBy(asc(o.programTemplates.audience), asc(o.programTemplates.title))
+        .limit(200);
+
+      // A template names an audience AND a service, and serviceAudiences records
+      // which audiences a service is offered to — where a row is absent, the
+      // schema says it is NOT offered to them. So a template can point at a
+      // service its own audience is not registered for. That is a real
+      // inconsistency in the federation's own records, derived entirely from
+      // stored rows, and it is flagged rather than quietly rendered as fine.
+      const serviceIds = [...new Set(templates.map((t) => t.serviceId).filter((v): v is number => v != null))];
+      if (serviceIds.length) {
+        const pairs = await conn.select({
+          serviceId: e.serviceAudiences.serviceId,
+          audience: e.serviceAudiences.audience,
+        }).from(e.serviceAudiences).where(inArray(e.serviceAudiences.serviceId, serviceIds));
+        const offered = new Set(pairs.map((p: any) => `${p.serviceId}:${p.audience}`));
+        for (const t of templates) {
+          if (t.serviceId != null && !offered.has(`${t.serviceId}:${t.audience}`)) audienceMismatch.add(t.id);
+        }
+      }
+
+      // ── What is actually being delivered ─────────────────────────────────
+      // Unlike a template, a running programme HAS a place and a client, so the
+      // scope filter is a real WHERE clause and a state administrator sees their
+      // own state's deliveries.
+      const runWhere: any[] = [];
+      if (scopes.kind === 'none') {
+        runWhere.push(sql`false`);
+      } else if (scopes.kind === 'scoped') {
+        const clauses: any[] = [];
+        if (scopes.states.length) clauses.push(inArray(e.trainingPrograms.stateUnitId, scopes.states));
+        if (scopes.districts.length) clauses.push(inArray(e.trainingPrograms.districtUnitId, scopes.districts));
+        if (scopes.institutions.length) clauses.push(inArray(e.trainingPrograms.institutionId, scopes.institutions));
+        runWhere.push(clauses.length ? or(...clauses) : sql`false`);
+      }
+
+      running = await conn.select({
+        id: e.trainingPrograms.id,
+        code: e.trainingPrograms.code,
+        title: e.trainingPrograms.title,
+        status: e.trainingPrograms.status,
+        mode: e.trainingPrograms.mode,
+        startsOn: e.trainingPrograms.startsOn,
+        endsOn: e.trainingPrograms.endsOn,
+        sessionsPlanned: e.trainingPrograms.sessionsPlanned,
+        venue: e.trainingPrograms.venue,
+        institutionId: e.trainingPrograms.institutionId,
+        institutionName: e.institutions.name,
+        institutionKind: e.institutions.kind,
+        serviceTitle: e.services.title,
+      })
+        .from(e.trainingPrograms)
+        .leftJoin(e.institutions, eq(e.institutions.id, e.trainingPrograms.institutionId))
+        .leftJoin(e.services, eq(e.services.id, e.trainingPrograms.serviceId))
+        .where(runWhere.length ? and(...runWhere) : undefined)
+        // Delivery first, history last. A completed programme from two years ago
+        // sorting above one running this week would make the screen useless for
+        // the job it is opened to do.
+        .orderBy(
+          sql`case ${e.trainingPrograms.status} when 'running' then 0 when 'scheduled' then 1 when 'planned' then 2 when 'paused' then 3 else 4 end`,
+          desc(e.trainingPrograms.startsOn)
+        )
+        .limit(200);
+
+      // Counted from the ids the scoped query already returned, so this cannot
+      // widen what the account may see however the counts are joined.
+      const programIds = running.map((r) => r.id);
+      if (programIds.length) {
+        const counts = await conn.select({
+          programId: e.programParticipants.programId,
+          n: sql<number>`count(*)::int`,
+        })
+          .from(e.programParticipants)
+          .where(inArray(e.programParticipants.programId, programIds))
+          .groupBy(e.programParticipants.programId);
+        participantCounts = new Map(counts.map((c: any) => [c.programId, Number(c.n)]));
+      }
+    } catch (err: any) {
+      unavailable = String(err?.message ?? err);
+    }
+  }
+}
+
+/**
+ * The lifecycle, and what entering each state actually does.
+ *
+ * `approved` and `published` are separate states, and the separation is the
+ * reason this list is on the screen rather than in a wiki. A programme can be
+ * approved internally — technically sound, deliverable, quotable — long before
+ * the federation wants it advertised. Collapsing the two would mean every
+ * internal approval immediately changes the public website, which is a decision
+ * the technical reviewer is not the right person to be taking by accident.
+ */
+const LIFECYCLE: Array<{ status: string; label: string; means: string }> = [
+  { status: 'draft', label: 'Draft', means: 'Being written. It cannot be selected on an application and appears nowhere outside this screen.' },
+  { status: 'under_review', label: 'Under review', means: 'Submitted for technical reading. Still not offered to anybody.' },
+  { status: 'approved', label: 'Approved', means: 'The federation stands behind it internally: it may be configured for a client and quoted. It is NOT on the public site.' },
+  { status: 'published', label: 'Published', means: 'Advertised publicly. This is the only state that changes what the outside world can see.' },
+  { status: 'archived', label: 'Archived', means: 'Withdrawn from the catalogue. No new application may select it; anything already being delivered is untouched.' },
+];
+
+/**
+ * The forward move from each state, and the authority it needs.
+ *
+ * Only the FORWARD move is listed. Archiving is reachable from several states
+ * and is not a step in a sequence, so printing it in a "next" column would
+ * suggest a progression that does not exist.
+ */
+const NEXT_MOVE: Record<string, { to: string; action: Action; note?: string } | null> = {
+  draft: { to: 'under review', action: 'program:write' },
+  under_review: { to: 'approved', action: 'program:approve' },
+  approved: { to: 'published', action: 'program:publish', note: 'changes the public site' },
+  published: null,
+  archived: null,
+};
+
+const holds = (a: Action) =>
+  a === 'program:write' ? mayWrite : a === 'program:approve' ? mayApprove : mayPublish;
+
+const label = (s: unknown) => String(s ?? '').replace(/_/g, ' ');
+const countIn = (s: string) => templates.filter((t) => t.status === s).length;
+
+const fmtDate = (v: unknown) => {
+  if (!v) return '—';
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+};
+
+// Nullable throughout, and rendered as an absence rather than as a zero. A
+// template the federation has not yet specified is INCOMPLETE, and "0 sessions
+// a week" reads as a decision somebody took.
+const shape = (t: any) => {
+  const bits: string[] = [];
+  if (t.sessionsPerWeek != null) bits.push(`${t.sessionsPerWeek}×/week`);
+  if (t.durationWeeks != null) bits.push(`${t.durationWeeks} weeks`);
+  if (t.sessionMinutes != null) bits.push(`${t.sessionMinutes} min`);
+  return bits.length ? bits.join(' · ') : null;
+};
+
+const groupSize = (t: any) => {
+  if (t.minParticipants == null && t.maxParticipants == null) return null;
+  if (t.minParticipants != null && t.maxParticipants != null) return `${t.minParticipants}–${t.maxParticipants}`;
+  return t.minParticipants != null ? `${t.minParticipants} or more` : `up to ${t.maxParticipants}`;
+};
+
+const includes = (t: any) => {
+  const bits: string[] = [];
+  if (t.includesAssessment) bits.push('assessment');
+  if (t.includesGrading) bits.push('grading');
+  if (t.includesCertification) bits.push('certification');
+  if (t.includesCompetition) bits.push('competition');
+  if (t.includesReporting) bits.push('reporting');
+  return bits.length ? bits.join(', ') : null;
+};
+
+const modesOf = (t: any) =>
+  Array.isArray(t.modes) && t.modes.length ? t.modes.map((m: unknown) => label(m)).join(', ') : null;
+---
+
+<AdminShell
+  title="Programmes"
+  requires="program:read"
+  intro="The catalogue of programmes the federation can offer, and the programmes actually being delivered to clients. The first is a menu; the second is what is on the table."
+>
+  {unavailable ? (
+    <p class="note" role="alert">{unavailable}</p>
+  ) : (
+    <>
+      {/* ── The catalogue ─────────────────────────────────────────────────── */}
+      <section class="block" aria-labelledby="tpl-h">
+        <h2 id="tpl-h">Templates</h2>
+        <p class="lede">
+          A configurable shape the federation can offer — an audience, a service,
+          a length, a group size and what it includes. A template
+          <strong> carries no price</strong>, and there is no column for one:
+          money comes from the fee framework when a configuration is quoted, so a
+          figure stored here would be a second, competing answer to the same
+          question.
+        </p>
+
+        <ol class="cycle" aria-label="Template lifecycle">
+          {LIFECYCLE.map((s) => (
+            <li>
+              <p class="cy-h">
+                <span class="cy-l">{s.label}</span>
+                {!catalogueIsNational && <span class="cy-n">{countIn(s.status)}</span>}
+              </p>
+              <p class="cy-m">{s.means}</p>
+            </li>
+          ))}
+        </ol>
+
+        <p class="authority">
+          This account may
+          {mayWrite ? <> <strong>author and edit</strong></> : <> not author</>},
+          {mayApprove ? <> <strong>approve</strong></> : <> not approve</>}, and
+          {mayPublish ? <> <strong>publish</strong></> : <> not publish</>} a
+          template. Publishing is the step that changes the public website, which
+          is why it is a separate authority from approval.
+        </p>
+
+        {/* §70. There is no endpoint behind these transitions yet, and a button
+            that silently does nothing is worse than no button. The authorities
+            are stated because they are what an administrator has to ask for; the
+            controls arrive with the endpoint. */}
+        <p class="note note-tight">
+          Moves are not yet made from this screen. The lifecycle above is the
+          record model and the authorities are real, but no route changes a
+          template's status, so a template is moved by whoever runs the database.
+        </p>
+
+        <nav class="filters" aria-label="Filter templates by status">
+          <a href={h('/admin/programs')} class={!statusFilter ? 'on' : ''}>All</a>
+          {TEMPLATE_STATUSES.map((s) => (
+            <a href={`${h('/admin/programs')}?status=${s}`} class={statusFilter === s ? 'on' : ''}>{label(s)}</a>
+          ))}
+        </nav>
+
+        {catalogueIsNational ? (
+          <p class="note">
+            The programme catalogue is national — a template belongs to no state,
+            district or institution — so it is only readable from a national
+            binding, and this account's authority is scoped. This is not an empty
+            catalogue; it is one you are not the reader of. Deliveries in your own
+            scope are listed below as normal.
+          </p>
+        ) : templates.length === 0 ? (
+          <p class="note">
+            {statusFilter
+              ? `No template is at "${label(statusFilter)}".`
+              : 'No programme template has been recorded. Until one exists here, every institutional enquiry is designed by hand from the service list, and nothing on the public site is generated from this catalogue.'}
+          </p>
+        ) : (
+          <>
+            <p class="tbl-hint">Scroll the table sideways to see every column.</p>
+            <div class="tbl-scroll">
+              <table class="tbl">
+                <caption class="sr-only">Programme templates</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Code</th>
+                    <th scope="col">Programme</th>
+                    <th scope="col">Audience</th>
+                    <th scope="col">Service</th>
+                    <th scope="col">Shape</th>
+                    <th scope="col">Group</th>
+                    <th scope="col">Includes</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Next move</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {templates.map((t) => (
+                    <tr>
+                      <td><code>{t.code}</code></td>
+                      <td class="strong">
+                        {t.title}
+                        {audienceMismatch.has(t.id) && (
+                          <span class="flag" title="serviceAudiences has no row for this audience">service not offered to this audience</span>
+                        )}
+                      </td>
+                      <td>{label(t.audience)}</td>
+                      <td>{t.serviceTitle ?? <span class="muted">none linked</span>}</td>
+                      <td>{shape(t) ?? <span class="muted">not specified</span>}</td>
+                      <td>{groupSize(t) ?? <span class="muted">not specified</span>}</td>
+                      <td class="wrap">{includes(t) ?? <span class="muted">not specified</span>}</td>
+                      <td><span class={`pill${t.status === 'published' ? ' live' : ''}`}><span class="pill-dot"></span>{label(t.status)}</span></td>
+                      <td>
+                        {NEXT_MOVE[t.status]
+                          ? holds(NEXT_MOVE[t.status]!.action)
+                            ? <>to {NEXT_MOVE[t.status]!.to}{NEXT_MOVE[t.status]!.note && <span class="muted"> — {NEXT_MOVE[t.status]!.note}</span>}</>
+                            : <span class="muted">needs <code>{NEXT_MOVE[t.status]!.action}</code></span>
+                          : <span class="muted">no forward move</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Nine columns inside a 360px viewport is unreadable however far it
+                slides, so the same rows are recomposed as records. PART AL. */}
+            <ul class="cards" aria-label="Programme templates">
+              {templates.map((t) => (
+                <li>
+                  <p class="c-top">
+                    <code>{t.code}</code>
+                    <span class={`pill${t.status === 'published' ? ' live' : ''}`}><span class="pill-dot"></span>{label(t.status)}</span>
+                  </p>
+                  <p class="c-name">{t.title}</p>
+                  {audienceMismatch.has(t.id) && <p class="flag-line">Service not offered to this audience.</p>}
+                  <dl>
+                    <div><dt>Audience</dt><dd>{label(t.audience)}</dd></div>
+                    <div><dt>Service</dt><dd>{t.serviceTitle ?? 'none linked'}</dd></div>
+                    <div><dt>Shape</dt><dd>{shape(t) ?? 'not specified'}</dd></div>
+                    <div><dt>Group</dt><dd>{groupSize(t) ?? 'not specified'}</dd></div>
+                    <div><dt>Delivery</dt><dd>{modesOf(t) ?? 'not specified'}</dd></div>
+                    <div><dt>Includes</dt><dd>{includes(t) ?? 'not specified'}</dd></div>
+                    <div><dt>Instructors</dt><dd>{t.instructorsRequired ?? 'not specified'}</dd></div>
+                    <div><dt>Approved</dt><dd>{fmtDate(t.approvedAt)}</dd></div>
+                    <div><dt>Published</dt><dd>{fmtDate(t.publishedAt)}</dd></div>
+                    <div>
+                      <dt>Next move</dt>
+                      <dd>
+                        {NEXT_MOVE[t.status]
+                          ? holds(NEXT_MOVE[t.status]!.action)
+                            ? `to ${NEXT_MOVE[t.status]!.to}`
+                            : `needs ${NEXT_MOVE[t.status]!.action}`
+                          : 'no forward move'}
+                      </dd>
+                    </div>
+                  </dl>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </section>
+
+      {/* ── Delivery ──────────────────────────────────────────────────────── */}
+      <section class="block" aria-labelledby="run-h">
+        <h2 id="run-h">Running programmes</h2>
+        <p class="lede">
+          Programmes being delivered to a named client. A row appears here when a
+          proposal has been accepted and turned into a delivery record — not when
+          an application is approved.
+        </p>
+        <p class="lede small">
+          A delivery record does not say which template it was built from: it
+          carries a service and a proposal, and the template reference is kept on
+          the application. So the two halves of this page cannot be joined, and
+          nothing below is inferred from anything above.
+        </p>
+
+        {running.length === 0 ? (
+          <p class="note">
+            No programme is being delivered in the scope this account can read.
+            The delivery register is empty rather than filtered — nothing has been
+            recorded as started.
+          </p>
+        ) : (
+          <>
+            <p class="tbl-hint">Scroll the table sideways to see every column.</p>
+            <div class="tbl-scroll">
+              <table class="tbl">
+                <caption class="sr-only">Programmes being delivered</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Code</th>
+                    <th scope="col">Programme</th>
+                    <th scope="col">Client</th>
+                    <th scope="col">Service</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Delivery</th>
+                    <th scope="col">Starts</th>
+                    <th scope="col">Ends</th>
+                    <th scope="col">Sessions</th>
+                    <th scope="col">Participants</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {running.map((r) => (
+                    <tr>
+                      <td><code>{r.code}</code></td>
+                      <td class="strong">{r.title}</td>
+                      <td>{r.institutionName ?? <span class="muted">not linked</span>}</td>
+                      <td>{r.serviceTitle ?? <span class="muted">none linked</span>}</td>
+                      <td><span class={`pill${r.status === 'running' ? ' live' : ''}`}><span class="pill-dot"></span>{label(r.status)}</span></td>
+                      <td>{r.mode ? label(r.mode) : <span class="muted">not specified</span>}</td>
+                      <td>{fmtDate(r.startsOn)}</td>
+                      <td>{fmtDate(r.endsOn)}</td>
+                      <td class="num">{r.sessionsPlanned ?? '—'}</td>
+                      {/* Every participant row, including those who have left.
+                          A current headcount is a different number, and calling
+                          this one "current" would be a small invention. */}
+                      <td class="num">{participantCounts.get(r.id) ?? 0}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <ul class="cards" aria-label="Programmes being delivered">
+              {running.map((r) => (
+                <li>
+                  <p class="c-top">
+                    <code>{r.code}</code>
+                    <span class={`pill${r.status === 'running' ? ' live' : ''}`}><span class="pill-dot"></span>{label(r.status)}</span>
+                  </p>
+                  <p class="c-name">{r.title}</p>
+                  <dl>
+                    <div><dt>Client</dt><dd>{r.institutionName ?? 'not linked'}</dd></div>
+                    <div><dt>Kind</dt><dd>{r.institutionKind ? label(r.institutionKind) : 'not recorded'}</dd></div>
+                    <div><dt>Service</dt><dd>{r.serviceTitle ?? 'none linked'}</dd></div>
+                    <div><dt>Delivery</dt><dd>{r.mode ? label(r.mode) : 'not specified'}</dd></div>
+                    <div><dt>Where</dt><dd>{r.venue ?? 'not recorded'}</dd></div>
+                    <div><dt>Starts</dt><dd>{fmtDate(r.startsOn)}</dd></div>
+                    <div><dt>Ends</dt><dd>{fmtDate(r.endsOn)}</dd></div>
+                    <div><dt>Sessions</dt><dd>{r.sessionsPlanned ?? 'not specified'}</dd></div>
+                    <div><dt>Participants</dt><dd>{participantCounts.get(r.id) ?? 0} on record</dd></div>
+                  </dl>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </section>
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .block { padding: 0; border: 0; }
+  .block + .block { margin-top: 52px; padding-top: 40px; border-top: 1px solid var(--border); }
+  h2 {
+    font-family: var(--font-display); font-size: 1.45rem; line-height: 1.25;
+    margin: 0 0 10px;
+  }
+  .lede { color: var(--muted); line-height: 1.75; max-width: 68ch; margin: 0 0 8px; }
+  .lede.small { font-size: .9rem; }
+  .lede strong { color: var(--off-white); }
+
+  /* The lifecycle, as a sequence rather than a grid of equal rectangles — the
+     order is the meaning, and five identical cards would hide it. */
+  .cycle {
+    list-style: none; margin: 22px 0 20px; padding: 0;
+    border-left: 1px solid var(--border);
+  }
+  .cycle li { padding: 0 0 16px 18px; position: relative; }
+  .cycle li::before {
+    content: ''; position: absolute; left: -4px; top: 7px;
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--bg-2); border: 1px solid var(--gold-dim);
+  }
+  .cy-h { display: flex; align-items: baseline; gap: 10px; margin: 0; }
+  .cy-l {
+    font-family: var(--font-display); font-size: .74rem;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--gold-2);
+  }
+  .cy-n { font-variant-numeric: tabular-nums; font-size: .92rem; color: var(--off-white); }
+  .cy-m { margin: 4px 0 0; color: var(--muted); font-size: .9rem; line-height: 1.65; max-width: 66ch; }
+
+  .authority { color: var(--muted); line-height: 1.7; max-width: 66ch; margin: 0 0 14px; }
+  .authority strong { color: var(--gold-2); }
+
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
+  }
+  .note-tight { padding: 14px 18px; font-size: .9rem; margin: 0 0 22px; }
+
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 22px; }
+  .filters a {
+    padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
+    font-size: .8rem; text-decoration: none; color: var(--muted);
+    text-transform: capitalize; line-height: 1.5;
+  }
+  .filters a:hover { border-color: var(--gold); }
+  .filters a.on { background: var(--gold); color: #1a1713; border-color: var(--gold); }
+
+  .tbl { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  .tbl th, .tbl td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .tbl thead th {
+    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); font-weight: 400;
+  }
+  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tbl .strong { font-family: var(--font-display); white-space: normal; min-width: 18ch; }
+  .tbl .wrap { white-space: normal; min-width: 16ch; }
+  .muted { color: var(--muted); }
+  code { font-family: var(--font-accent, monospace); font-size: .88em; }
+
+  .flag {
+    display: block; margin-top: 3px; font-size: .72rem; color: var(--red);
+    font-family: var(--font-body, inherit); white-space: normal;
+  }
+  .flag-line { margin: 0 0 8px; font-size: .8rem; color: var(--red); }
+
+  .cards { display: none; list-style: none; margin: 0; padding: 0; }
+
+  @media (max-width: 900px) {
+    .tbl-scroll, .tbl-hint { display: none; }
+    .cards { display: block; }
+    .cards li { padding: 16px 0; border-bottom: 1px solid var(--border); }
+    .c-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 6px; }
+    .c-name { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 10px; }
+    .cards dl { margin: 0; display: grid; gap: 4px; }
+    .cards dl > div { display: grid; grid-template-columns: 12ch 1fr; gap: 10px; font-size: .87rem; }
+    .cards dt { color: var(--muted); }
+    .cards dd { margin: 0; }
+  }
+</style>

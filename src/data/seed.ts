@@ -227,7 +227,21 @@ export const SEED = {
     { id: 2, title: 'Shihan Pramod Kumar Pathak conferred the title "Junior Tiger Lee"', date: 'Aug 2022', type: 'Honour',
       img: '/media/archive/press-sandhya-prahari.jpg',
       source: 'Sandhya Prahari, August 2022; Shivangan Publication, Jharkhand Current Affairs 2022',
-      body: 'The title "Junior Tiger Lee" was conferred on Shihan Pramod Kumar Pathak, founder of the federation, in recognition of four decades of teaching. The conferral was reported in the local press and recorded in a state current-affairs compendium.' },
+      // TWO CORRECTIONS, 13 August 2026.
+      //
+      // 1. THE DATE READ AS THOUGH THE CONFERRAL HAPPENED IN AUGUST 2022. It
+      //    did not. The title was conferred in 2021 — which is what the
+      //    honours record and the biography both say — and reported in the
+      //    press in August 2022. The `date` field on a news item is when it was
+      //    REPORTED, consistent with every other item here, but the body did
+      //    not say so, so the site stated 2021 in one place and implied 2022 in
+      //    another about the same event.
+      //
+      // 2. "IN RECOGNITION OF FOUR DECADES OF TEACHING" WAS NOT SOURCED. It is
+      //    a plausible rationale and no held clipping states it. It has been
+      //    replaced with what the federation has actually said: his master
+      //    conferred it.
+      body: 'The name "Junior Tiger Lee" was conferred on Shihan Pramod Kumar Pathak, founder of the federation, by his master, Grandmaster S N T Lee, in 2021. It was reported in the local press in August 2022 and recorded in a state current-affairs compendium.' },
     { id: 3, title: 'Bharat Gaurav Karate Khel Ratna awarded to Shihan Pramod Kumar Pathak', date: 'Aug 2022', type: 'Honour',
       img: '/media/archive/press-johar-jharkhand.jpg',
       source: 'Johar Jharkhand, August 2022',
