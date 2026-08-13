@@ -204,8 +204,31 @@ const NATIONAL_FULL: Action[] = [
 ];
 
 const GRANTS: Record<Role, Action[]> = {
-  // Full authority including safeguarding and role granting.
-  SUPER_ADMIN: [...NATIONAL_FULL, 'safeguarding:read', 'safeguarding:write'],
+  /**
+   * The root of the authority tree. Holds everything, including the three
+   * action families NATIONAL_FULL deliberately withholds.
+   *
+   * 'hr:*' and 'medical:*' were originally omitted here as well as from
+   * NATIONAL_FULL, on the reasoning that nobody should hold HR data casually.
+   * The effect was that NOBODY COULD GRANT HR_OFFICER OR MEDICAL_OFFICER AT
+   * ALL: canGrantRole() refuses to confer an action the granter does not
+   * already hold, so both roles existed, conferred real authority, and were
+   * unassignable. tests/tenant-isolation.test.ts found it by asking whether a
+   * SUPER_ADMIN could grant one.
+   *
+   * Restoring them here does not widen ordinary administration by one action.
+   * FEDERATION_ADMIN still holds neither, and both roles remain in
+   * RESTRICTED_ROLES, so conferring them stays a SUPER_ADMIN act — which is the
+   * separation PART X actually asked for. The root of a tree holding everything
+   * beneath it is the point of having a root; SUPER_ADMIN already holds
+   * safeguarding, which is more sensitive than either.
+   */
+  SUPER_ADMIN: [
+    ...NATIONAL_FULL,
+    'safeguarding:read', 'safeguarding:write',
+    'hr:read', 'hr:write',
+    'medical:read', 'medical:write',
+  ],
 
   // Operational national administration — no safeguarding case access.
   FEDERATION_ADMIN: NATIONAL_FULL,
