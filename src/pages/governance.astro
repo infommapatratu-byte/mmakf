@@ -92,7 +92,15 @@ const orgLevels = [
               <tr>
                 <td class="text-muted">{String(i + 1).padStart(2, '0')}</td>
                 <td style="font-family:var(--font-display);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold)">{p.role}</td>
-                <td style="font-family:var(--font-display);font-weight:600;font-size:.98rem">{p.name}</td>
+                {/* The register is the most-read thing on this page, and every
+                    name in it had no way through to the person. profileHref()
+                    returns null for a name that cannot make a URL, and a null
+                    renders as plain text rather than a link into a 404. */}
+                <td style="font-family:var(--font-display);font-weight:600;font-size:.98rem">
+                  {profileHref(p.name)
+                    ? <a class="ob-name" href={profileHref(p.name)}>{p.name}</a>
+                    : p.name}
+                </td>
                 <td class="text-muted">{p.rank}</td>
                 <td class="text-muted">{p.since || '—'}</td>
               </tr>
@@ -321,6 +329,8 @@ const orgLevels = [
     font-weight: 500;
   }
   .ob-tbl tr:last-child td { border-bottom: 0; }
+  .ob-name { color: var(--gold); text-decoration: none; }
+  .ob-name:hover { text-decoration: underline; }
 
   .org { display: flex; flex-direction: column; max-width: 860px; }
   .org-level {
