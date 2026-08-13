@@ -11,7 +11,7 @@ import {
   canonicalFor, href as surfaceHref, isIndexable, SURFACE_ORIGIN,
   type Surface,
 } from '@/lib/surface';
-import { isPrivatePath } from '@/lib/seo';
+import { isPrivatePath, breadcrumbGraph, type Crumb } from '@/lib/seo';
 
 // Official channels, loaded here so every page footer links to them. The site
 // previously had no outbound links at all, which is why none of the
@@ -23,9 +23,26 @@ export interface Props {
   description?: string;
   showNav?: boolean;
   showFooter?: boolean;
+  /**
+   * The page's place in the hierarchy, excluding the site root.
+   *
+   *   breadcrumbs={[{ name: 'Training', url: '/training' },
+   *                 { name: 'For schools', url: '/karate-for-schools' }]}
+   *
+   * The visible trail and the BreadcrumbList markup are BOTH generated from
+   * this one array, so they cannot disagree — which matters, because Google's
+   * structured-data guidance says markup must represent what the page actually
+   * shows, and a trail that exists only in JSON-LD does not.
+   *
+   * A single entry produces NOTHING, deliberately. A breadcrumb describes a
+   * hierarchy; "MMAKF > About" on a top-level page is one more block of markup
+   * and no more information. See breadcrumbGraph().
+   */
+  breadcrumbs?: Crumb[];
 }
 
 const {
+  breadcrumbs = [],
   title = 'MMAKF — Modern Martial Arts Karate-Do Federation of India',
   description = "Modern Martial Arts Karate-Do Federation of India (MMAKF). Established 1983. Shotokan Karate under Grandmaster Shihan Pramod Kumar Pathak. Patratu, Jharkhand. WKF international pathway.",
   showNav = true,
@@ -86,6 +103,12 @@ const canonical = canonicalFor(surface, currentPath);
  * sitemap cannot disagree about what is private.
  */
 const indexable = isIndexable(surface) && !isPrivatePath(currentPath);
+
+// Only on an indexable page. Emitting a breadcrumb for the operations platform
+// would describe a hierarchy to a crawler that is being told, in the same
+// <head>, not to index it.
+const crumbs: Crumb[] = indexable ? (breadcrumbs ?? []).filter((c) => c && c.name && c.url) : [];
+const crumbGraph = crumbs.length >= 2 ? breadcrumbGraph(crumbs, SITE) : null;
 
 // Organization structured data — only facts the federation itself publishes.
 const sameAs = social.map((a: any) => a.url);
@@ -152,6 +175,7 @@ const orgSchema = {
         braces — a header travels with the response, and cannot be missed by a
         crawler that never fetched robots.txt. */}
     {!indexable && <meta name="robots" content="noindex, nofollow" />}
+    {crumbGraph && <script type="application/ld+json" set:html={JSON.stringify(crumbGraph)} />}
     <script type="application/ld+json" set:html={JSON.stringify(orgSchema)} />
     <script is:inline>
       // P1-15: only enable the hidden-until-revealed state when JS is running.
@@ -223,6 +247,20 @@ const orgSchema = {
     )}
 
     <main id="main-content" tabindex="-1">
+      {crumbs.length >= 2 && (
+        <nav class="crumbs container" aria-label="Breadcrumb">
+          <ol>
+            <li><a href={surfaceHref(surface, '/')}>MMAKF</a></li>
+            {crumbs.map((c, i) => (
+              <li>
+                {i === crumbs.length - 1
+                  ? <span aria-current="page">{c.name}</span>
+                  : <a href={surfaceHref(surface, c.url)}>{c.name}</a>}
+              </li>
+            ))}
+          </ol>
+        </nav>
+      )}
       <slot />
     </main>
 
@@ -335,6 +373,30 @@ const orgSchema = {
         line-height: 1.35;
       }
       @media (max-width: 420px) { .nav-name-2 { max-width: 15ch; } }
+      /* The visible trail. Rendered from the same array as the JSON-LD above,
+         never separately — markup that describes a trail the page does not show
+         is the kind Google's guidance calls misleading.
+
+         The separator is a CSS ::before on all but the first item rather than a
+         character in the markup, so a screen reader announces "MMAKF, Training,
+         For schools" and not "MMAKF slash Training slash For schools". */
+      .crumbs { padding: 96px 0 0; }
+      .crumbs ol {
+        list-style: none; margin: 0; padding: 0;
+        display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px;
+        font-size: .82rem;
+      }
+      .crumbs li { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+      .crumbs li + li::before { content: '·'; color: var(--gold-dim); }
+      .crumbs a { color: var(--muted); text-decoration: none; }
+      .crumbs a:hover { color: var(--gold-2); text-decoration: underline; }
+      .crumbs [aria-current='page'] { color: var(--gold-2); }
+      /* The page below supplies its own top padding, so the trail replaces it
+         rather than adding to it. */
+      .crumbs + * > .container:first-child,
+      .crumbs ~ * > header:first-child { padding-top: 24px; }
+      @media (max-width: 640px) { .crumbs { padding-top: 78px; } }
+
       .nav-links { display: flex; align-items: center; gap: 2px; }
 
       /* ── Grouped navigation ────────────────────────────────────────────────

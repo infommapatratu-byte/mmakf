@@ -44,6 +44,10 @@ const schema = {
 <Base
   title={`${audience.title} — MMAKF`}
   description={audience.standfirst}
+  breadcrumbs={[
+    { name: 'Training', url: '/learn' },
+    { name: audience.navLabel, url: `/learn/${audience.slug}` },
+  ]}
 >
   <script type="application/ld+json" set:html={JSON.stringify(schema)} />
   <AudienceEditorial audience={audience} surface={surface} siblings={AUDIENCES} />

@@ -37,6 +37,10 @@ const schema = {
 <Base
   title="Train with MMAKF — individual karate training in India"
   description={audience.standfirst}
+  breadcrumbs={[
+    { name: 'Training', url: '/training' },
+    { name: 'For individuals', url: '/training/individual' },
+  ]}
 >
   <script type="application/ld+json" set:html={JSON.stringify(schema)} />
   <AudienceEditorial audience={audience} surface={surface} siblings={AUDIENCES} />

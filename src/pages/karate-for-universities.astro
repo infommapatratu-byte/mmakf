@@ -35,7 +35,14 @@ const schema = {
 };
 ---
 
-<Base title={audience.seoTitle ?? audience.title} description={audience.seoDescription ?? audience.standfirst}>
+<Base
+  title={audience.seoTitle ?? audience.title}
+  description={audience.seoDescription ?? audience.standfirst}
+  breadcrumbs={[
+    { name: 'Training', url: '/training' },
+    { name: 'For universities', url: '/karate-for-universities' },
+  ]}
+>
   <script type="application/ld+json" set:html={JSON.stringify(schema)} />
   <AudienceEditorial audience={audience} surface={surface} siblings={AUDIENCES} />
 </Base>

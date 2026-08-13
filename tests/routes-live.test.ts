@@ -242,6 +242,42 @@ describe('what the public pages must never say', () => {
   }
 });
 
+describe('breadcrumbs', () => {
+  it('renders a visible trail AND matching markup on a page with a hierarchy', async () => {
+    const { body } = await load('/karate-for-schools');
+
+    // Both, from the same array. Markup describing a trail the page does not
+    // show is what Google's structured-data guidance calls misleading.
+    expect(body, 'no visible breadcrumb trail').toMatch(/aria-label="Breadcrumb"/);
+    expect(body, 'no BreadcrumbList markup').toMatch(/"@type"\s*:\s*"BreadcrumbList"/);
+
+    const json = body.match(/\{[^<]*"BreadcrumbList"[\s\S]*?\}\s*<\/script>/)?.[0] ?? '';
+    expect(json).toMatch(/"name"\s*:\s*"MMAKF"/);
+    expect(json).toMatch(/"name"\s*:\s*"Training"/);
+    expect(json).toMatch(/"name"\s*:\s*"For schools"/);
+    // Absolute URLs, as the schema requires.
+    expect(json).toMatch(/https:\/\/www\.mmakf\.in\/training/);
+  }, 60_000);
+
+  it('renders NO breadcrumb on a top-level page', async () => {
+    // A breadcrumb describes a hierarchy. "MMAKF > About" on a top-level page
+    // is one more block of markup and no more information — which is the SEO
+    // padding the federation asked not to produce.
+    for (const path of ['/', '/about', '/verify']) {
+      const { body } = await load(path);
+      expect(body, `${path} emitted a breadcrumb it has no hierarchy for`)
+        .not.toMatch(/"@type"\s*:\s*"BreadcrumbList"/);
+    }
+  }, 60_000);
+
+  it('renders no breadcrumb on a page that is not indexed', async () => {
+    // Describing a hierarchy to a crawler that is being told, in the same
+    // <head>, not to index the page.
+    const { body } = await load('/admin/tasks');
+    expect(body).not.toMatch(/"@type"\s*:\s*"BreadcrumbList"/);
+  }, 60_000);
+});
+
 describe('the admin surface is never indexable', () => {
   it('sends noindex on an admin page', async () => {
     const res = await fetch(base + '/admin/tasks', { signal: AbortSignal.timeout(40_000) });
