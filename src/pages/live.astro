@@ -20,9 +20,12 @@
 //  · It will not claim attendance for someone who merely opened the page.
 //    Attendance is recorded when a member joins the class, and the page says
 //    plainly that it is being recorded.
+//  · It will not repeat the database's own words to the visitor. See
+//    loadFailure() below — this page answers strangers, and what postgres.js
+//    and drizzle put in `err.message` is a fact about the server.
 
 import Base from '@/layouts/Base.astro';
-import { identify } from '@/lib/session';
+import { identify, type Identity } from '@/lib/session';
 import { isConfigured, db } from '@/db';
 import * as s from '@/db/schema';
 import { eq, inArray } from 'drizzle-orm';

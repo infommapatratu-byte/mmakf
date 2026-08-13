@@ -1,0 +1,188 @@
+---
+// /portal/register — create an account.
+//
+// RULE 1 OF THE FEATURE, RENDERED: registration grants nothing. This page
+// creates a user with zero role bindings and then says so out loud, on the
+// success screen, using the count the module returns rather than a sentence
+// somebody typed. If a future change ever granted something at registration,
+// `roleBindingCount` stops being 0 and this page stops claiming otherwise.
+//
+// IT DOES NOT SAY "CHECK YOUR INBOX". No email transport is configured in this
+// project — src/lib/notifications.ts queues messages and marks them `queued`,
+// never `sent` — and registerAccount() reports that truth in
+// `verification.note`, which is printed verbatim. Telling somebody to wait for
+// a message that is never coming is a fake feature with a stamp on it.
+//
+// THE FORM POSTS TO ITSELF. There is no /api/register-account endpoint to
+// build, and the CSRF middleware already refuses any cross-origin POST — a
+// same-origin form carries Sec-Fetch-Site, which script cannot forge. The
+// endpoint an attacker would have to reach does not exist separately from the
+// page that draws it.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { registerAccount, isOnboardingError } from '@/db/onboarding';
+import { passwordProblem } from '@/lib/password';
+import { readableError, field } from './_lib';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+let error: string | null = null;
+let created: { email: string; roleBindingCount: number; note: string; transportConfigured: boolean } | null = null;
+let submittedEmail = '';
+
+if (Astro.request.method === 'POST' && configured) {
+  // Rate limited on the client IP before anything is written. Registration is a
+  // public write path, and a public write path with no ceiling is an invitation
+  // to fill the users table. The limiter never throws; on infrastructure
+  // failure it allows the request, which is the availability trade-off the rest
+  // of this site already takes.
+  const limit = await rateLimit(Astro.request, 'portal-register', 5, 3600);
+
+  const form = await Astro.request.formData();
+  submittedEmail = field(form, 'email') ?? '';
+  const password = String(form.get('password') ?? '');
+  const confirm = String(form.get('confirm') ?? '');
+
+  if (!limit.ok) {
+    error =
+      `Too many registration attempts from this address. Try again in about ${Math.ceil(limit.retryAfterSeconds / 60)} ` +
+      'minutes. Nothing has been created.';
+  } else if (!submittedEmail) {
+    error = 'An email address is required — it is how the federation office replies to you.';
+  } else if (password !== confirm) {
+    error = 'The two passwords do not match. Nothing has been created.';
+  } else if (passwordProblem(password)) {
+    error = `${passwordProblem(password)}. Nothing has been created.`;
+  } else {
+    try {
+      const result = await registerAccount(db(), {
+        email: submittedEmail,
+        password,
+        displayName: field(form, 'displayName'),
+        ip: clientIp(Astro.request),
+      });
+      created = {
+        email: result.email,
+        roleBindingCount: result.roleBindingCount,
+        note: result.verification.note,
+        transportConfigured: result.verification.transportConfigured,
+      };
+    } catch (err: any) {
+      error = isOnboardingError(err) ? err.message : readableError(err, 'Creating your account');
+    }
+  }
+}
+---
+
+<Base
+  title="Create an MMAKF account"
+  description="Create an account for the MMAKF portal. An account gives you your own record; roles are applied for and conferred by the federation."
+>
+  <section>
+    <div class="container">
+      <div style="max-width:560px;margin:0 auto">
+        <div style="text-align:center;margin-bottom:28px">
+          <div class="eyebrow center" style="justify-content:center">Portal</div>
+          <h1 class="display-2" style="margin-top:14px">Create an account.</h1>
+        </div>
+
+        {!configured && (
+          <div class="card">
+            <div class="card-title" style="margin-bottom:8px">Not available on this deployment.</div>
+            <div class="card-body">
+              Accounts are held in the federation's database, and none is configured for this deployment. A form that
+              could not create anything is not offered.
+            </div>
+          </div>
+        )}
+
+        {configured && identity && !created && (
+          <div class="card" style="margin-bottom:20px">
+            <div class="card-body">
+              You are already signed in. Creating a second account will not add authority to the one you are using —
+              go to <a class="text-gold" href="/portal">your portal</a> instead.
+            </div>
+          </div>
+        )}
+
+        {configured && created && (
+          <div class="card">
+            <div class="card-eyebrow">Account created</div>
+            <div class="card-title" style="margin-bottom:10px">{created.email}</div>
+            <div class="card-body">
+              <p>
+                The account exists and holds <strong>{created.roleBindingCount}</strong> role bindings — it can reach
+                its own record and nothing else. That is not a restriction to be lifted later by this page: authority
+                is conferred by MMAKF after a person has read an application.
+              </p>
+              <p style="margin-top:12px">{created.note}</p>
+              {!created.transportConfigured && (
+                <p style="margin-top:12px" class="text-muted">
+                  No verification message was sent or queued, so there is nothing to wait for. Sign in with the
+                  password you just chose.
+                </p>
+              )}
+            </div>
+            <div style="margin-top:18px">
+              <a class="btn btn-primary" href="/portal">Sign in and open the portal</a>
+            </div>
+          </div>
+        )}
+
+        {configured && !created && (
+          <form class="card" method="POST" action="/portal/register" style="padding:28px">
+            <div id="regErr" role="alert" style={`color:var(--red-2);font-size:.85rem;margin-bottom:14px;${error ? '' : 'display:none'}`}>
+              {error}
+            </div>
+
+            <label class="input-label" for="reg-email">Email address</label>
+            <input
+              class="input"
+              type="email"
+              id="reg-email"
+              name="email"
+              value={submittedEmail}
+              autocomplete="username"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              required
+              placeholder="you@example.com"
+            />
+
+            <label class="input-label" for="reg-name" style="margin-top:14px">Your name (optional)</label>
+            <input class="input" type="text" id="reg-name" name="displayName" autocomplete="name" />
+            <p class="text-muted" style="font-size:.74rem;margin-top:6px">
+              Recorded for a reviewer to read. It confers nothing and is not the same as a member record.
+            </p>
+
+            <label class="input-label" for="reg-password" style="margin-top:14px">Password</label>
+            <input class="input" type="password" id="reg-password" name="password" autocomplete="new-password" required minlength="12" />
+            <p class="text-muted" style="font-size:.74rem;margin-top:6px">
+              At least 12 characters. Length is what resists cracking; no character-class rules are imposed.
+            </p>
+
+            <label class="input-label" for="reg-confirm" style="margin-top:14px">Password again</label>
+            <input class="input" type="password" id="reg-confirm" name="confirm" autocomplete="new-password" required minlength="12" />
+
+            <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;min-height:44px">
+              Create account
+            </button>
+
+            <p class="text-muted" style="margin-top:18px;font-size:.78rem;line-height:1.7">
+              An account proves an email address. It does not make you a member, a coach, a referee or a seller —
+              each of those is applied for from the portal and decided by the federation.
+              Already have one? <a class="text-gold" href="/portal">Sign in</a>.
+            </p>
+          </form>
+        )}
+      </div>
+    </div>
+  </section>
+</Base>

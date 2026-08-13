@@ -1,0 +1,74 @@
+---
+/**
+ * PER-PAGE STRUCTURED DATA.
+ *
+ * THE FIRST RULE OF THIS COMPONENT IS WHAT IT REFUSES TO EMIT.
+ *
+ *  · NOT the organisation. src/layouts/Base.astro already emits the
+ *    SportsOrganization graph on every single page. A second copy is a second
+ *    entity: two organisations with one name and one URL, which is worse for
+ *    the federation's search presence than none.
+ *  · NOT a canonical link. Base.astro emits `rel="canonical"` per page. Two
+ *    canonicals is a self-conflicting signal and crawlers resolve it by
+ *    ignoring both.
+ *  · NOT og: or twitter: tags. Base.astro emits those too, from the same
+ *    `title` and `description` the page already passes it.
+ *  · NOT a profile graph for a person. /people/[slug] builds its own, with the
+ *    honours-and-sources rule that page enforces; duplicating it here would
+ *    lose the provenance.
+ *
+ * What is left is the markup that is genuinely per-page and that nothing else
+ * emits: a breadcrumb where a real hierarchy exists, fixtures the federation
+ * has actually scheduled, and affiliated units.
+ *
+ * AND THE SECOND RULE: THIS COMPONENT RENDERS NOTHING BY DEFAULT.
+ * Every builder returns null when the facts are not on record — an undated
+ * fixture, a lapsed club, a one-level "hierarchy". With today's data the units
+ * register is empty and the events list is empty, so on most pages this
+ * component contributes exactly zero bytes. That is the intended output, not a
+ * gap: markup emitted because a page ought to have some is the definition of
+ * the SEO spam the federation asked not to become.
+ *
+ * USAGE (nothing imports this yet — see `notes` for the per-page edits):
+ *
+ *     <StructuredData breadcrumb={[
+ *       { name: 'Governance', url: '/governance' },
+ *       { name: person.name,  url: `/people/${slug}` },
+ *     ]} />
+ */
+import { breadcrumbGraph, eventGraph, activityLocationGraph, type Crumb, type Graph } from '@/lib/seo';
+
+export interface Props {
+  /** The trail ABOVE and including this page, excluding the site root — the
+   *  root is prepended by the builder. Fewer than two levels emits nothing. */
+  breadcrumb?: Crumb[];
+  /** Editorial event records, in the shape the store holds them. Undated,
+   *  unnamed or unplaced fixtures are dropped rather than completed. */
+  events?: any[];
+  /** Affiliated units from the public directory. Units not currently
+   *  affiliated are dropped: /dojos lists them with their standing in words,
+   *  which is not the same claim as "this is an MMAKF location". */
+  units?: any[];
+}
+
+const { breadcrumb = [], events = [], units = [] } = Astro.props;
+
+const graphs: Graph[] = [];
+
+const crumbs = breadcrumbGraph(breadcrumb);
+if (crumbs) graphs.push(crumbs);
+
+for (const e of events) {
+  const g = eventGraph(e);
+  if (g) graphs.push(g);
+}
+
+for (const u of units) {
+  const g = activityLocationGraph(u);
+  if (g) graphs.push(g);
+}
+---
+
+{graphs.map((g) => (
+  <script type="application/ld+json" set:html={JSON.stringify(g)} />
+))}

@@ -50,6 +50,13 @@
       "when": 1786540810309,
       "tag": "0006_engagement_and_fees",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786545046236,
+      "tag": "0009_onboarding_and_marketplace",
+      "breakpoints": true
     }
   ]
 }

@@ -20,8 +20,41 @@ const MAX_AGE = 60 * 60 * 24 * 7; // 7 days
 
 type Audience = 'admin' | 'unit' | 'user';
 
+/**
+ * Is this a production runtime?
+ *
+ * Astro/Vite replaces `import.meta.env.PROD` at build time, which is what the
+ * deployed function sees. NODE_ENV covers the plain-node paths — scripts and
+ * tests — where `import.meta.env` does not exist, and matches how attrs()
+ * below already decides whether to set `Secure`.
+ */
+function isProductionRuntime(): boolean {
+  if (typeof import.meta.env !== 'undefined' && import.meta.env.PROD) return true;
+  return process.env.NODE_ENV === 'production';
+}
+
+/**
+ * The secret every audience key is derived from.
+ *
+ * The development fallback is a literal published in this repository, so a
+ * production deployment that fell back to it could be impersonated by anyone
+ * who can read the source: they derive keyFor('admin') on their own machine,
+ * mint a cookie and are a national administrator without touching the login
+ * route, its rate limit or its audit trail. The boot guard at
+ * src/pages/api/auth/login.ts only refuses to MINT — nothing there is consulted
+ * when a cookie is VERIFIED — so production has to refuse at the key itself.
+ *
+ * Throwing here fails closed in both directions: minting raises (an
+ * unconfigured deployment cannot hand out cookies) and verify() turns the throw
+ * into "no session" (an unconfigured deployment signs everyone out rather than
+ * trusting a key the whole world holds).
+ */
 function getSecret(): string {
-  const s = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD || 'dev-secret-change-me';
+  const configured = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD;
+  if (!configured && isProductionRuntime()) {
+    throw new Error('ADMIN_SESSION_SECRET is not set — refusing to sign or verify sessions');
+  }
+  const s = configured || 'dev-secret-change-me';
   if (s.length < 8) throw new Error('ADMIN_SESSION_SECRET too short');
   return s;
 }
@@ -67,7 +100,17 @@ function verify(token: string | undefined, aud: Audience): any | null {
   const [payload, sig] = token.split('.');
   if (!payload || !sig) return null;
 
-  const expected = sign(payload, aud);
+  // No usable signing key means no verifiable session. Returning null makes an
+  // unconfigured deployment signed-out; letting the throw escape would make
+  // every page a 500, and any caller that treats an error as "carry on" would
+  // turn a misconfiguration into the escalation this guard exists to stop.
+  let expected: string;
+  try {
+    expected = sign(payload, aud);
+  } catch {
+    return null;
+  }
+
   const a = Buffer.from(sig);
   const b = Buffer.from(expected);
   if (a.length !== b.length) return null;

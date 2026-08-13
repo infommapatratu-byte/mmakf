@@ -1,0 +1,462 @@
+---
+// /portal — the role-aware landing page.
+//
+// WHAT THE FEDERATION ASKED FOR: "make sure all should be able to create and
+// access their authorised section only — like coach, referee, seller."
+//
+// THE SHAPE THAT ANSWERS IT
+// ─────────────────────────
+//  1. NO ROLE IS NAMED ANYWHERE ON THIS PAGE'S MENU. The sections come from
+//     _sections.ts, which declares the ACTIONS each destination requires and
+//     asks src/lib/rbac.ts whether the caller holds one. A per-role menu —
+//     "a referee sees these four things" — is a second copy of the policy, and
+//     the copy drifts: rbac.ts is edited, the menu is not, and the federation
+//     ends up showing people links that 403. There is nothing to keep in step
+//     here because there is only one statement of the policy.
+//
+//  2. THE MENU IS NOT THE CONTROL, AND SAYS SO. Every destination re-checks on
+//     the server, several of them more narrowly than this page can see: the
+//     marketplace queues are restricted in SQL to the reviewer's own state,
+//     /admin/dashboard re-authorises the unit it resolved from the database,
+//     and reviewApplication() refuses a self-approval whatever authority the
+//     caller holds. Hiding a link is a courtesy. The refusal is the control.
+//
+//  3. NO IDENTIFIER COMES FROM THE CALLER. There is no id in the path, none in
+//     the query string, none in a form. identify() resolves who is asking, and
+//     every "your own" module — myApplications(), mySellerAccount() — takes no
+//     id parameter by construction. Same rule as /my, for the same reason.
+//
+//  4. A BRAND-NEW ACCOUNT IS NOT SHOWN AN EMPTY PAGE. Registration grants
+//     nothing; that is the point, not a fault, and an account with no bindings
+//     gets the explanation, the state of anything it has applied for, and the
+//     two things it can do next.
+//
+// WHAT IS DELIBERATELY ABSENT: any promise about how long a review takes, any
+// eligibility rule for a role, and any commission for a seller. The federation
+// has published none of the three. The modules export a sentence saying so, and
+// those sentences are printed verbatim rather than replaced by a plausible
+// default — a plausible default is the worst possible bug in this codebase.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { actionsForRole, type Action } from '@/lib/rbac';
+import {
+  myApplications, canReviewApplications,
+  REVIEW_TURNAROUND_NOT_SET, APPLICABLE_ROLES,
+} from '@/db/onboarding';
+import { mySellerAccount, LISTING_REVIEW_TURNAROUND_NOT_SET } from '@/db/marketplace';
+import { visibleSections, type PortalSection, admittingActions } from './_sections';
+import { readableError, fmtDate, scopeNames, scopeLabel, titleCase, ownPerson } from './_lib';
+
+export const prerender = false;
+
+const configured = isConfigured();
+
+// identify() is the only way this page learns who the caller is. A user cookie
+// that no longer resolves — disabled account, bumped session epoch, revoked
+// bindings — returns null rather than falling back to a shared credential, so
+// authority that has been withdrawn cannot come back as a lesser credential.
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+type Gate = 'no_database' | 'signed_out' | 'ok';
+const gate: Gate = !configured ? 'no_database' : !identity ? 'signed_out' : 'ok';
+
+const principal = identity?.principal ?? null;
+const bindings = principal?.bindings ?? [];
+const attributable = Boolean(identity) && identity!.userId != null;
+
+let person: any = null;
+let applications: any[] = [];
+let seller: any = null;
+let loadError: string | null = null;
+let names = new Map<string, string>();
+
+if (gate === 'ok' && principal) {
+  try {
+    names = await scopeNames(db(), bindings.map((b) => ({ scopeType: b.scopeType, scopeId: b.scopeId })));
+  } catch (err: any) {
+    loadError = readableError(err, 'Your bindings');
+  }
+
+  // Both of these take NO identifier. There is nothing here to point at another
+  // person's records with.
+  if (attributable) {
+    try {
+      person = await ownPerson(db(), identity!.userId);
+      applications = await myApplications(db(), principal);
+      seller = await mySellerAccount(db(), principal);
+    } catch (err: any) {
+      loadError = readableError(err, 'Your portal');
+    }
+  }
+}
+
+// The facts that gate the sections an action cannot express. Read fail-closed
+// by linkVisible(): a seller record that failed to load leaves sellerApproved
+// undefined, and the listings link is hidden rather than offered.
+const sections: PortalSection[] =
+  gate === 'ok'
+    ? visibleSections(principal, { attributable, sellerApproved: seller?.status === 'approved' })
+    : [];
+
+/**
+ * Every action the caller holds, derived from their bindings through rbac's own
+ * table. NOT a hand-written list: if a role's grants change, this changes with
+ * them on the next request.
+ */
+const heldActions: Action[] = [
+  ...new Set(bindings.flatMap((b) => actionsForRole(b.role))),
+].sort();
+
+const noBindings = gate === 'ok' && bindings.length === 0;
+const openApplications = applications.filter((a) => a.status === 'submitted' || a.status === 'under_review');
+const mayReviewApplications = canReviewApplications(principal);
+
+const displayName = person?.fullName || principal?.label || 'Your account';
+---
+
+<Base
+  title="MMAKF portal — your authorised sections"
+  description="The MMAKF portal: the sections of the federation system this account is authorised to reach, computed from its role bindings."
+>
+  <section>
+    <div class="container">
+      {gate === 'no_database' && (
+        <div class="card">
+          <div class="eyebrow">Portal</div>
+          <h1 class="display-2" style="margin-top:14px">Not available on this deployment.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            The portal reads the federation's system of record — accounts, role bindings, applications and
+            listings — and no federation database is configured for this deployment. Nothing can be shown, and a
+            page of controls that cannot work would be worse than this sentence.
+          </p>
+          <p class="body-txt" style="margin-top:14px">
+            The office can reach the federation at <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a>.
+          </p>
+        </div>
+      )}
+
+      {gate === 'signed_out' && (
+        <div style="max-width:460px;margin:0 auto">
+          <div style="text-align:center;margin-bottom:28px">
+            <div class="eyebrow center" style="justify-content:center">Portal</div>
+            <h1 class="display-2" style="margin-top:14px">Sign in.</h1>
+          </div>
+          <form id="signInForm" class="card" style="padding:28px">
+            <label class="input-label" for="portal-email">Email address</label>
+            <input
+              class="input"
+              type="email"
+              id="portal-email"
+              name="email"
+              autocomplete="username"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              required
+              placeholder="you@example.com"
+            />
+
+            <label class="input-label" for="portal-password" style="margin-top:14px">Password</label>
+            <input class="input" type="password" id="portal-password" name="password" autocomplete="current-password" required />
+
+            <div id="signInErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
+
+            <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;min-height:44px">Sign in</button>
+
+            <p class="text-muted" style="margin-top:18px;font-size:.78rem;line-height:1.7">
+              No account? <a class="text-gold" href="/portal/register">Create one</a>. Creating an account gives you
+              access to your own record and nothing else — a coach, referee, judge, examiner or seller role is
+              applied for afterwards and conferred by the federation.
+            </p>
+          </form>
+        </div>
+      )}
+
+      {gate === 'ok' && (
+        <>
+          <div class="section-head" style="margin-bottom:32px">
+            <div class="eyebrow">Portal</div>
+            <h1 class="display-2" style="margin-top:14px">{displayName}</h1>
+            <div class="rule"></div>
+            <p class="lead">
+              {identity!.shared
+                ? 'You are signed in with a shared federation credential. It carries authority but belongs to no ' +
+                  'individual, so the sections below are the federation’s work — not a personal record.'
+                : 'Everything below was decided by the federation’s permission rules against your role bindings at ' +
+                  'the moment you loaded this page. A section that is not here is one this account cannot reach.'}
+            </p>
+          </div>
+
+          {loadError && (
+            <div class="card" role="alert" style="border-left:3px solid var(--red);margin-bottom:24px">
+              <div class="card-title" style="font-size:.95rem">Part of this page could not be read</div>
+              <div class="card-body">{loadError}</div>
+            </div>
+          )}
+
+          {noBindings && (
+            <div class="card" style="border-left:3px solid var(--gold-dim);margin-bottom:28px">
+              <div class="card-eyebrow">Your standing</div>
+              <div class="card-title" style="margin-bottom:10px">This account holds no role in the federation.</div>
+              <div class="card-body">
+                <p>
+                  That is by design, and it is not a fault in your account. Creating an account proves an email
+                  address and nothing else: it gives you your own record and the ability to apply. Authority to act
+                  on anybody else's record — to score a grading, enter a result, review a licence, or offer an item
+                  for sale — is <strong>conferred by MMAKF after a person has read your evidence</strong>, never
+                  granted by registering.
+                </p>
+                <p style="margin-top:12px">
+                  You may apply for: {APPLICABLE_ROLES.map((r) => titleCase(r.toLowerCase())).join(', ')}. Every other
+                  role in the federation is administrative authority over other people's records, and is conferred by
+                  the federation rather than requested.
+                </p>
+                <p style="margin-top:12px" class="text-muted">{REVIEW_TURNAROUND_NOT_SET}</p>
+              </div>
+
+              {applications.length === 0 ? (
+                <div class="card-body" style="margin-top:12px">
+                  You have not applied for anything yet.
+                </div>
+              ) : (
+                <div class="card-body" style="margin-top:12px">
+                  <strong>{openApplications.length}</strong> of your <strong>{applications.length}</strong>
+                  {' '}application{applications.length === 1 ? '' : 's'} {openApplications.length === 1 ? 'is' : 'are'}
+                  {' '}still open. The decision, and the reason recorded with it, is on your applications page.
+                </div>
+              )}
+
+              <div style="margin-top:16px">
+                <a class="btn btn-gold" href="/portal/applications">Apply for a role</a>
+                <a class="btn btn-ghost" href="/portal/selling" style="margin-left:10px">Apply to sell</a>
+              </div>
+            </div>
+          )}
+
+          {sections.length === 0 && !noBindings && (
+            <div class="card">
+              <div class="card-body">
+                This credential reaches no section of the portal. If you believe that is wrong, the federation office
+                at <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a> can read the bindings recorded
+                against it — they are listed below exactly as the permission engine sees them.
+              </div>
+            </div>
+          )}
+
+          {sections.map((section) => (
+            <div style="margin-bottom:40px">
+              <div class="section-head" style="margin-bottom:20px">
+                <div class="eyebrow">{section.eyebrow}</div>
+                <h2 class="display-2" style="margin-top:12px;font-size:clamp(1.4rem,3vw,2rem)">{section.title}</h2>
+                <div class="rule"></div>
+                <p class="body-txt" style="margin-top:12px;max-width:70ch">{section.blurb}</p>
+              </div>
+
+              <div class="grid grid-3">
+                {section.links.map((link) => (
+                  <div class="card">
+                    <div class="card-title" style="margin-bottom:8px">{link.label}</div>
+                    <div class="card-body">{link.what}</div>
+                    {link.anyOf.length > 0 && (
+                      <div class="text-muted" style="font-size:.72rem;margin-top:10px;line-height:1.6">
+                        Reached with: {admittingActions(principal, link).join(', ')}
+                      </div>
+                    )}
+                    <div style="margin-top:14px">
+                      <a class="btn btn-ghost" href={link.href}>Open {link.label.toLowerCase()}</a>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {!mayReviewApplications && bindings.length > 0 && (
+            <div class="card" style="margin-top:8px">
+              <div class="card-eyebrow">Conferring roles</div>
+              <div class="card-body">
+                This account cannot decide role applications: under the federation's current authority model only a
+                nationally-bound administrator holds <code>role:grant</code>. Whether state and district offices
+                should be able to confer a coach or referee role in their own area is a governance decision MMAKF has
+                not taken. Nothing here works around it — the queue reports the position rather than widening it.
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  </section>
+
+  {gate === 'ok' && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Authority</div>
+          <h2 class="display-2">What this account <em class="r">actually holds</em>.</h2>
+          <div class="rule"></div>
+          <p class="body-txt" style="margin-top:12px;max-width:70ch">
+            Read from <code>role_bindings</code> on this request, not from your session cookie — which is why
+            withdrawing a binding takes effect immediately rather than when you next sign in.
+          </p>
+        </div>
+
+        {bindings.length === 0 ? (
+          <div class="card">
+            <div class="card-body">
+              No role bindings are recorded against this account, so it holds no action anywhere in the federation.
+            </div>
+          </div>
+        ) : (
+          <div class="card" style="padding:0">
+            <div class="tbl-scroll">
+              <table class="p-tbl">
+                <caption class="sr-only">Role bindings held by this account</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Role</th>
+                    <th scope="col">Scope</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Expires</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bindings.map((b) => (
+                    <tr>
+                      <td><strong>{titleCase(b.role)}</strong></td>
+                      <td>{scopeLabel(names, b.scopeType, b.scopeId)}</td>
+                      <td><span class="pill">{titleCase(b.status ?? 'active')}</span></td>
+                      <td>{b.expiresAt ? fmtDate(b.expiresAt) : 'No expiry recorded'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p class="tbl-hint" style="padding:0 18px 14px">Scroll the table sideways</p>
+          </div>
+        )}
+
+        {heldActions.length > 0 && (
+          <div class="card" style="margin-top:18px">
+            <div class="card-eyebrow">Actions conferred by those roles</div>
+            <div class="card-body">
+              <p style="margin-bottom:10px">
+                Derived from the same table the permission engine consults, so this list cannot disagree with the
+                decision it makes. A scoped binding holds these <em>inside its own scope only</em> — a state
+                administrator's <code>membership:issue</code> stops at the boundary of their state.
+              </p>
+              <div class="p-actions">
+                {heldActions.map((a) => <span class="pill">{a}</span>)}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {attributable && (
+          <div class="card" style="margin-top:18px">
+            <div class="card-eyebrow">What the federation has not published</div>
+            <div class="card-body">
+              <p>{REVIEW_TURNAROUND_NOT_SET}</p>
+              <p style="margin-top:8px">{LISTING_REVIEW_TURNAROUND_NOT_SET}</p>
+              <p style="margin-top:8px" class="text-muted">
+                These are stated rather than filled in with a plausible figure. Nobody at MMAKF has committed to a
+                turnaround, and a page that invents one commits the federation to it.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  )}
+</Base>
+
+<style>
+  /* House convention: every page defines its own alternating section ground. */
+  .bg2 { background: var(--bg-2); }
+
+  .p-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 640px;
+    font-size: 0.86rem;
+  }
+  .p-tbl th {
+    text-align: left;
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .p-tbl td {
+    padding: 15px 18px;
+    border-bottom: 1px solid var(--border);
+    color: var(--off-white);
+    vertical-align: top;
+  }
+  .p-tbl tr:last-child td { border-bottom: 0; }
+
+  .p-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .p-actions .pill { font-size: 0.62rem; }
+
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.86em;
+    color: var(--gold-2);
+  }
+
+  @media (max-width: 900px) {
+    .grid-3 { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 640px) {
+    .btn { width: 100%; margin-left: 0 !important; margin-top: 10px; }
+  }
+</style>
+
+<script>
+  // Sign-in. Posts JSON so the CSRF middleware accepts it, and repeats exactly
+  // what the server said rather than guessing at the reason. Same construction
+  // as the member area — deliberately, so there is one sign-in behaviour on the
+  // site rather than two that drift.
+  const form = document.getElementById('signInForm') as HTMLFormElement | null;
+  if (form) {
+    const err = document.getElementById('signInErr') as HTMLElement;
+    const button = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      err.style.display = 'none';
+      button.disabled = true;
+      button.textContent = 'Signing in…';
+
+      const email = (document.getElementById('portal-email') as HTMLInputElement).value.trim();
+      const password = (document.getElementById('portal-password') as HTMLInputElement).value;
+
+      try {
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.ok) {
+          window.location.reload();
+          return;
+        }
+        err.textContent = data.error || 'Sign-in failed.';
+        err.style.display = 'block';
+      } catch {
+        err.textContent = 'The sign-in request could not be sent. Check your connection and try again.';
+        err.style.display = 'block';
+      }
+      button.disabled = false;
+      button.textContent = 'Sign in';
+    });
+  }
+</script>

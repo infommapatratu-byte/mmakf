@@ -237,12 +237,79 @@ Listed as plainly as the rest. Tracked in `IMPLEMENTATION-QUEUE.md`.
 | **Backups, restore drill, RPO/RTO** | No tested recovery path | Q-26 |
 | **Upload validation / malware scanning** | No upload subsystem exists yet; it must not ship without them | Q-30 |
 | **Observability** | `/api/health` only. A quiet failure stays quiet | Q-29 |
-| **Postgres row-level security** | Enforcement is entirely in the application policy layer. Correct and tested, but a direct database connection bypasses it — relevant once more than one system touches the database | — |
+| **Row-level security *policies*** | The schema is now closed rather than governed. Migration `0010` enables RLS on every table and revokes the provider's Data API roles, which denies everyone except the owner role the application connects as — but no policy exists, so the database cannot yet express *who* may read *what*, and the Data API setting on the federation's own project is still unverified. §8.1 | Q-36 |
 | **Full WCAG 2.2 AA audit** | Specific fixes made; no systematic pass | Q-28 |
 
 **Two-person control** (Q-25) is in build. Until it lands, certificate revocation, Dan approval,
 result correction and financial settlement are single-authority acts — which is a real exposure, not
 a theoretical one.
+
+### 8.1 The second system is not a future condition
+
+This row previously deferred the risk to a future in which "more than one system touches the database". That framing was wrong the day it was written: Supabase publishes the `public` schema over HTTP with a key that ships to browsers, so a SECOND system already touched it — the managed platform itself. Closed by `drizzle/0010_data_api_lockdown.sql`, which enables row-level security on every table and revokes the PostgREST roles. An em
+dash where every other gap carried a queue number. Both halves were wrong in the same direction, and
+the direction was deferral.
+
+The federation has provisioned a **Supabase** project. Supabase installs **PostgREST**. It is not
+opted into, it listens on the public internet at a URL derived from the project ref, and its
+anonymous key is documented by the vendor as safe to publish — on the stated assumption that RLS is
+on. The condition the register described as a future trigger is satisfied by the act of
+provisioning.
+
+The application policy layer does not help here. [`src/lib/rbac.ts`](../src/lib/rbac.ts) is reached
+only over HTTP to mmakf.in; a PostgREST request never executes a line of it. Nothing the application
+does would notice either — `/api/health` opens a TCP connection as the app role and reports
+`"database":"ok"` whether or not the same tables are also being served to the world.
+
+**Measured, on a real Postgres engine on a developer machine, with all migrations applied:** before
+`0010`, **117 tables, 0 with RLS, 0 policies**. After it, RLS is on for all of them and the
+`anon` / `authenticated` grants — present *and* default — are gone. Two layers, because either alone
+fails: a grant is one pasted `GRANT` wide, and RLS hides rows but not the data model, so with a
+grant intact `anon` still enumerates every table and column and the API answers `200 []` instead of
+refusing.
+
+`FORCE ROW LEVEL SECURITY` is deliberately **not** set. The app connects as the table owner, and an
+owner is exempt from RLS unless FORCE is set; forcing it with no policies would not harden the
+federation, it would take it offline.
+
+**What has NOT been measured, and must not be written as though it had.** No database password has
+been supplied for the federation's project, and nothing in this repository has connected to it.
+Whether its Data API is enabled, and what its default privileges currently are, is **unknown
+here**. (The project ref is deliberately not written down in this repository: it is what the
+PostgREST endpoint's URL is built from, and until the check below has been run there is no reason to
+publish the address of an unverified endpoint.) Before `DATABASE_URL` is pointed at it, the operator
+must run the check below against the
+project, record the result, and switch the project-level Data API off — this app uses PostgREST for
+nothing, so the switch costs the federation nothing. The dashboard setting is not a substitute for
+the migration: a setting is mutable, unreviewable, invisible to CI, and not carried into a restored
+or rebuilt project.
+
+```sql
+-- Must return no rows. Any row is a table the Data API can serve.
+SELECT c.relname, pg_get_userbyid(a.grantee) AS role, a.privilege_type
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+CROSS JOIN LATERAL aclexplode(c.relacl) a
+WHERE n.nspname = 'public' AND c.relkind = 'r'
+  AND pg_get_userbyid(a.grantee) IN ('anon', 'authenticated');
+
+-- Must return no rows. Any row re-grants every table created from now on.
+SELECT pg_get_userbyid(a.grantee) AS role, a.privilege_type
+FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+WHERE pg_get_userbyid(a.grantee) IN ('anon', 'authenticated');
+
+-- Must return 0. Any table without RLS was added behind the lockdown.
+SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity;
+```
+
+**Re-verify after every new migration.** `ENABLE ROW LEVEL SECURITY` is a per-table act, so a
+migration that adds a table adds it *unsecured* unless a fresh lockdown migration follows. A
+comment asking the next author to remember is not an enforcement mechanism; the RLS assertion in
+the Data API suite is, and it fails the moment a table is left open.
+
+`service_role` is left with its grants on purpose: it is the **secret** key, the vendor documents it
+as bypassing RLS, and it must be handled with the same care as the database password itself.
 
 ---
 

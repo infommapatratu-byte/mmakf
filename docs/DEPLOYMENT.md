@@ -83,18 +83,76 @@ vendor; `DATABASE_URL` is the only input.
 
 > **Never reintroduce Neon or Vercel Postgres.** The federation rejected it.
 
-Collect **two** connection strings:
+The federation has supplied a Supabase project, ref `srmlqtdntkizxwnkttvz`. **No database password
+has been supplied with it**, so no command in this section has been run against that project. What
+follows is DNS lookups and local reproductions, which are labelled as such; anything that needs the
+credential is marked **verify at cutover** rather than stated as fact.
 
-- **Transaction pooler**, port `6543` → the app. Serverless opens a connection per invocation, which
-  a direct connection limit cannot absorb.
-- **Direct**, port `5432` → migrations only. DDL through a transaction pooler is unreliable.
+Supabase publishes **three** endpoints. Two are used; the third cannot be used here.
 
-### Step 2 — Migrate, from a workstation, using the DIRECT string
+| Endpoint | Host and port | Used for |
+|---|---|---|
+| **Transaction pooler** | `aws-N-ap-south-1.pooler.supabase.com:6543` | The app — `DATABASE_URL` in Vercel. Serverless opens a connection per invocation, which a direct connection limit cannot absorb. `prepare: false` in `src/db/index.ts` exists for this pooler |
+| **Session pooler** | the **same host**, port `5432` | Everything an operator runs from a workstation: `db:migrate`, `backup`, `user:create`. Session mode holds one backend for the life of the connection, so DDL and out-of-transaction statements behave as on a direct connection |
+| **Direct** | `db.<project-ref>.supabase.co:5432` | **Not usable on this project — no A record.** See below |
+
+> **The two pooler strings differ only in the port.** `6543` is the app, `5432` is the operator. That
+> one digit is the mistake to expect. Copy both out of the project's **Connect** dialog rather than
+> composing them: the pooler username is project-qualified (`postgres.<project-ref>`), a shape no
+> other provider uses, and the host prefix is `aws-0` on some projects and `aws-1` on others.
+
+**Why the direct connection is not an option here.** Measured on this workstation, 2026-08-12, DNS
+only — nothing was connected to, because no password exists:
+
+```
+$ nslookup db.srmlqtdntkizxwnkttvz.supabase.co
+Address:  2406:da1a:314:7102:cb52:44a4:70e5:bc13     # AAAA. `-type=A` returns no address at all
+
+$ nslookup aws-0-ap-south-1.pooler.supabase.com
+Addresses:  3.111.105.85, 65.0.195.55                # IPv4, reachable
+```
+
+Supabase publishes AAAA only for `db.<ref>.supabase.co` **by design**, unless the paid **IPv4
+add-on** is enabled. Buying that add-on restores the direct host and is a legitimate route — a choice
+to make deliberately, not something to discover at 9pm. Until it is bought, an IPv4-only workstation
+and a Vercel function both fail to reach that host, before authentication and before any statement
+runs: `getaddrinfo ENOTFOUND` where the machine has no IPv6 at all, `ENETUNREACH` where it has an
+address but no route. Reproduced here with `net.connect` to an unreachable IPv6 address: the OS
+rejected it immediately, so the runner's `connect_timeout: 15` (`scripts/migrate.mjs:46`) never
+engages — an instant failure is the normal shape of this fault, not a sign of a different one.
+
+> **Do not paste the IPv6 address in as a workaround.** postgres.js 3.4.9 mis-parses a bracketed
+> literal: `postgresql://u:p@[2001:db8::1]:5432/postgres` parses to host `[2001` with port `NaN`, and
+> the process dies at connect with `RangeError [ERR_SOCKET_BAD_PORT]: Port should be >= 0 and <
+> 65536. Received type number (NaN)`. Reproduced locally; `tests/deployment-runbook.test.ts` pins the
+> parse so this warning cannot quietly go stale. Use the session pooler instead.
+
+### Step 2 — Migrate, from a workstation, using the SESSION pooler string
+
+Run from the **repository root**: `scripts/migrate.mjs:81` reads `drizzle/` relative to the working
+directory, so from anywhere else the runner reports no migrations rather than a bad path.
 
 ```bash
-DATABASE_URL="postgresql://…:5432/postgres" npm run db:status    # what would run
-DATABASE_URL="postgresql://…:5432/postgres" npm run db:migrate   # applies, then lists tables
+DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-N-ap-south-1.pooler.supabase.com:5432/postgres" npm run db:status    # what would run
+DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-N-ap-south-1.pooler.supabase.com:5432/postgres" npm run db:migrate   # applies, then lists tables
 ```
+
+**Verify at cutover, with `db:status` first.** That Supabase serves *session* mode on port 5432 of
+the pooler host is its documented architecture, not something measured for this project — nobody here
+has held the password. `db:status` connects, prints the target and the pending list, and writes
+nothing. It is a ten-second check that turns the assumption into a fact, run before the command that
+matters rather than after it.
+
+**If only the transaction pooler (`6543`) can be reached**, know exactly what is being traded. Every
+migration file is applied inside one explicit transaction (`scripts/migrate.mjs:112`) with
+`prepare: false` (`:45`), and a transaction pooler pins one backend for the length of a transaction —
+so the migration bodies themselves are safe, and the runner's own comment says as much. What is not
+safe is the two statements the runner executes **outside** any transaction, `CREATE SCHEMA IF NOT
+EXISTS` and `SET search_path` (`:66-67`): transaction-mode pooling is free to hand the next
+transaction a different backend, and that `SET` need not survive. At the default
+`DATABASE_SCHEMA=public` losing it changes nothing — `public` is already on the default `search_path`
+and the runner's verification query is hardcoded to `public` (`:135`). With **any other schema, do
+not migrate over 6543**: the pin that keeps DDL out of the wrong schema is the thing being lost.
 
 **Never reconstruct the schema by hand in a provider's dashboard.** The migration chain is the only
 sanctioned path; a manually-created schema cannot be reasoned about afterwards.
@@ -107,6 +165,10 @@ npm run backup -- --verify backups/<file>
 ```
 
 An untested backup is a file, not a backup.
+
+`scripts/backup.mjs` opens the database with the same driver and the same pooler-safe options as the
+application (`:40-41`), so it runs over whatever `DATABASE_URL` holds — the session string still in
+the shell from step 2 needs no change.
 
 ### Step 4 — Set `DATABASE_URL` in Vercel
 
@@ -122,10 +184,19 @@ curl https://www.mmakf.in/api/health     # database must read "ok"
 `"not_configured"` means step 4 has not taken effect. `"error"` means the URL is set but unreachable
 — check the pooler string and that the password is URL-encoded.
 
+**`ENOTFOUND` or `ENETUNREACH` from any command in this section is a different fault**, and not a
+credentials one: the host did not resolve, or there is no route to it, and the failure happens before
+authentication is even attempted. Re-checking the password will find nothing. On a
+`db.<project-ref>.supabase.co` target it means the direct, IPv6-only host — switch to the session
+pooler on port `5432` of `aws-N-ap-south-1.pooler.supabase.com`.
+
 ### Step 6 — Create the first account
 
+The same session string as step 2. (This one is plain DML and would also run over the app's `6543`
+string; keeping every operator command on one string is what stops the port from being guessed.)
+
 ```bash
-DATABASE_URL="…:5432/…" npm run user:create -- --email you@mmakf.in --role SUPER_ADMIN
+DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-N-ap-south-1.pooler.supabase.com:5432/postgres" npm run user:create -- --email you@mmakf.in --role SUPER_ADMIN
 ```
 
 The password is generated and shown **once**. The account is flagged must-change-on-first-use.
@@ -211,6 +282,7 @@ applied history is how environments silently diverge.
 | **`https://mmakf.in` redirects to `http://` www** — a protocol downgrade. HSTS preload mitigates it; the redirect target still needs fixing in the Vercel dashboard |
 | **A status code does not prove a link works.** `wkf.net` serves a superseded PDF as HTTP 200 with `image/png` and 1.6KB. `npm run links:check` verifies content type and size |
 | **Local Node 25 vs Vercel Node 22** produces a build warning. Harmless — the deploy uses 22 |
+| **Supabase's direct host is IPv6-only.** `db.<project-ref>.supabase.co` publishes AAAA and no A record, so a migration aimed at it fails `ENOTFOUND`/`ENETUNREACH` before one statement runs — from a workstation and from a Vercel function alike. Operator commands go through the **session** pooler, `aws-N-ap-south-1.pooler.supabase.com:5432`; the app uses the same host on `6543`. §3 step 1 has the measurements, and why pasting the IPv6 literal makes it worse |
 
 ---
 

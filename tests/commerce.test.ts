@@ -566,3 +566,139 @@ describe('provider selection reports the truth (§70)', () => {
     delete process.env.RAZORPAY_KEY_ID; delete process.env.RAZORPAY_KEY_SECRET;
   });
 });
+
+// ─── Atomicity of a confirmation ────────────────────────────────────────────
+//
+// Confirming a payment is six kinds of write: the payment, the order, the
+// stock, the ledger, the receipt, the audit trail. Any one of them landing
+// without the others is money taken with nothing issued for it — and because
+// the payment row is what the replay guard reads, a half-finished confirmation
+// used to answer "already processed" to every retry that came afterwards, so
+// nothing ever repaired it.
+
+/**
+ * A database handle whose first ledger insert fails, the way a dropped backend
+ * or a constraint violation does part-way through a confirmation. Everything
+ * else passes straight through to the real database, so whatever survives the
+ * fault is exactly what the code actually committed.
+ */
+function faultyAtLedger(real: any): any {
+  const trap = (target: any): any => new Proxy(target, {
+    get(t: any, prop: string | symbol) {
+      if (prop === 'insert') {
+        return (table: any) => {
+          if (table === s.ledgerEntries) throw new Error('connection terminated unexpectedly');
+          return t.insert(table);
+        };
+      }
+      if (prop === 'transaction') {
+        return (fn: any, ...rest: any[]) => t.transaction((tx: any) => fn(trap(tx)), ...rest);
+      }
+      const value = Reflect.get(t, prop);
+      return typeof value === 'function' ? value.bind(t) : value;
+    },
+  });
+  return trap(real);
+}
+
+describe('confirming a payment is all-or-nothing', () => {
+  it('commits nothing when a fault interrupts it, and the retry completes the job', async () => {
+    const [v] = await db.insert(s.productVariants).values({
+      productId: PRODUCT, sku: 'GI-ATOMIC', label: 'Atomicity', pricePaise: 120000, stockQty: 3, status: 'active',
+    }).returning({ id: s.productVariants.id });
+
+    const order = await createOrder(db, null, {
+      email: 'payer@example.in',
+      lines: [{ kind: 'product', description: 'Gi', variantId: v.id }],
+    });
+    const payment = await beginPayment(db, order.id, {
+      provider: 'razorpay', providerOrderId: `order_${crypto.randomBytes(5).toString('hex')}`,
+      amountPaise: order.totalPaise, idempotencyKey: crypto.randomUUID(),
+    });
+    const event = captured({
+      providerOrderId: payment.providerOrderId, amountPaise: order.totalPaise, feePaise: 2360,
+    });
+
+    await expect(confirmPayment(faultyAtLedger(db), null, event)).rejects.toThrow(/connection terminated/i);
+
+    // Nothing may have survived — least of all the capture flag, which is the
+    // one the replay guard reads.
+    const [paymentAfterFault] = await db.select().from(s.payments).where(eq(s.payments.id, payment.id));
+    expect(paymentAfterFault.status).not.toBe('captured');
+    const [orderAfterFault] = await db.select().from(s.orders).where(eq(s.orders.id, order.id));
+    expect(orderAfterFault.status).toBe('awaiting_payment');
+    const [stockAfterFault] = await db.select().from(s.productVariants).where(eq(s.productVariants.id, v.id));
+    expect(stockAfterFault.stockQty).toBe(3);        // not sold
+    expect(stockAfterFault.reservedQty).toBe(1);     // still held for this order
+    expect((await db.select().from(s.invoices).where(eq(s.invoices.orderId, order.id))).length).toBe(0);
+    expect((await db.select().from(s.ledgerEntries).where(eq(s.ledgerEntries.orderId, order.id))).length).toBe(0);
+
+    // The retry — the gateway's, or the hourly cron's — must finish the work,
+    // not report that there was nothing to do.
+    const retry = await confirmPayment(db, null, event);
+    expect(retry!.alreadyProcessed).toBe(false);
+
+    const [orderAfter] = await db.select().from(s.orders).where(eq(s.orders.id, order.id));
+    expect(orderAfter.status).toBe('paid');
+    expect((await db.select().from(s.invoices).where(eq(s.invoices.orderId, order.id))).length).toBe(1);
+
+    const ledger = await db.select().from(s.ledgerEntries).where(eq(s.ledgerEntries.orderId, order.id));
+    const debit = ledger.filter((l: any) => l.direction === 'debit').reduce((n: number, l: any) => n + l.amountPaise, 0);
+    const credit = ledger.filter((l: any) => l.direction === 'credit').reduce((n: number, l: any) => n + l.amountPaise, 0);
+    const fees = ledger.filter((l: any) => l.account === 'expense.gateway_fees').reduce((n: number, l: any) => n + l.amountPaise, 0);
+    expect(credit).toBe(order.totalPaise);
+    expect(debit - fees).toBe(credit);               // the treasurer's report balances
+    expect(fees).toBe(2360);
+
+    const [stockAfter] = await db.select().from(s.productVariants).where(eq(s.productVariants.id, v.id));
+    expect(stockAfter.stockQty).toBe(2);             // reserved stock became sold stock
+    expect(stockAfter.reservedQty).toBe(0);
+  });
+
+  it('refuses to call a half-finished confirmation a replay', async () => {
+    const order = await createOrder(db, null, {
+      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+    });
+    const payment = await beginPayment(db, order.id, {
+      provider: 'razorpay', providerOrderId: `order_${crypto.randomBytes(5).toString('hex')}`,
+      amountPaise: order.totalPaise, idempotencyKey: crypto.randomUUID(),
+    });
+    const event = captured({ providerOrderId: payment.providerOrderId, amountPaise: order.totalPaise });
+
+    // Exactly the wreck the un-transacted sequence could leave behind: the
+    // capture flag committed, and not one of the writes that follow it.
+    await db.update(s.payments)
+      .set({ status: 'captured', providerPaymentId: event.providerPaymentId, capturedAt: new Date() })
+      .where(eq(s.payments.id, payment.id));
+
+    await expect(confirmPayment(db, null, event)).rejects.toThrow(/did not complete/i);
+
+    // Because it throws, the webhook and the cron record it as still failing
+    // instead of clearing the error and counting it as recovered.
+    const [after] = await db.select().from(s.orders).where(eq(s.orders.id, order.id));
+    expect(after.status).toBe('awaiting_payment');
+  });
+
+  it('never expires an order that money was taken for', async () => {
+    const [v] = await db.insert(s.productVariants).values({
+      productId: PRODUCT, sku: 'BELT-STUCK', label: 'Stuck', pricePaise: 40000, stockQty: 1, status: 'active',
+    }).returning({ id: s.productVariants.id });
+
+    const order = await createOrder(db, null, { lines: [{ kind: 'product', description: 'Belt', variantId: v.id }] });
+    const payment = await beginPayment(db, order.id, {
+      provider: 'razorpay', providerOrderId: `order_${crypto.randomBytes(5).toString('hex')}`,
+      amountPaise: order.totalPaise, idempotencyKey: crypto.randomUUID(),
+    });
+    await db.update(s.payments)
+      .set({ status: 'captured', providerPaymentId: `pay_${crypto.randomBytes(6).toString('hex')}`, capturedAt: new Date() })
+      .where(eq(s.payments.id, payment.id));
+    await db.update(s.orders).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(s.orders.id, order.id));
+
+    await expireStaleOrders(db);
+
+    const [after] = await db.select().from(s.orders).where(eq(s.orders.id, order.id));
+    expect(after.status).toBe('awaiting_payment');   // not 'expired'
+    const [variant] = await db.select().from(s.productVariants).where(eq(s.productVariants.id, v.id));
+    expect(variant.reservedQty).toBe(1);             // the reservation is not released
+  });
+});

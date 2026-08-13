@@ -1,0 +1,884 @@
+---
+// /join — apply to MMAKF.
+//
+// THE PAGE EXISTS BECAUSE OF ONE FAILURE MODE. Somebody creates an account,
+// lands in a portal with nothing in it, and concludes the site is broken. It is
+// not broken: registration grants nothing, by design, and authority arrives only
+// when a person at MMAKF decides to confer it. That is a good rule and a
+// terrible surprise, so it is written here in plain words before anybody signs
+// up, and again after they have.
+//
+// WHAT IT DOES NOT DO: invent a requirement. MMAKF has not published what grade,
+// licence or experience qualifies a coach, a referee or an examiner, has not
+// published a review turnaround, has not set a commission, and has not said
+// which commercial details a seller must supply. Every one of those is a
+// federation decision. Where one is absent this page prints the module's own
+// "not set" sentence rather than a plausible-looking default — a default here
+// would be read as policy by the first applicant who saw it.
+//
+// AUTHORISATION. Nothing on this page is a control. The forms are hidden when
+// there is no session because showing them would be pointless, but the refusal
+// lives in applyForRole() / applyToSell(), which read the applicant from
+// ctx.principal and refuse outright when it is absent. Deleting the `identity &&`
+// guards below would change what the page looks like and nothing about what it
+// can do.
+//
+// NO IDENTIFIER OF WHOSE RECORD THIS IS COMES FROM THE CALLER. myApplications()
+// and mySellerAccount() take no id — they cannot be asked about somebody else.
+// The one id a form does submit is an application id for withdrawal, and that
+// is not "whose record": withdrawApplication() matches on the caller's own user
+// id in the same WHERE clause, and answers "no open application of yours with
+// that id" identically for somebody else's, a decided one and one that never
+// existed. See src/db/onboarding.ts.
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import Icon from '@/components/Icon.astro';
+import { identify, clientIp } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { asc } from 'drizzle-orm';
+import {
+  APPLICABLE_ROLES,
+  EVIDENCE_REQUIREMENTS_NOT_SET,
+  REVIEW_TURNAROUND_NOT_SET,
+  applyForRole,
+  isOnboardingError,
+  myApplications,
+  withdrawApplication,
+  actionsConferredBy,
+} from '@/db/onboarding';
+import {
+  SELLER_REQUIREMENTS_NOT_SET,
+  COMMISSION_NOT_SET,
+  LISTING_REVIEW_TURNAROUND_NOT_SET,
+  applyToSell,
+  isMarketplaceError,
+  mySellerAccount,
+} from '@/db/marketplace';
+import { rateLimit } from '@/lib/ratelimit';
+import type { Role, ScopeType } from '@/lib/rbac';
+
+export const prerender = false;
+
+// The page renders the caller's own applications and their own seller record.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+// A shared office credential is attributable to no person, so it cannot apply
+// for anything: there is nobody for the role to be bound to.
+const canApply = Boolean(identity && identity.userId != null);
+
+type Banner = { tone: 'ok' | 'bad'; text: string };
+let banner: Banner | null = null;
+
+/**
+ * What an applicant may be told about a failure.
+ *
+ * The onboarding and marketplace modules write their refusals to be read by the
+ * person who hit them, so those are printed verbatim. Anything else is a fact
+ * about the server — a driver fault, a constraint name — and putting it on the
+ * page is how a connection string reaches a stranger.
+ */
+function readableError(err: any, context: string): string {
+  if (isOnboardingError(err) || isMarketplaceError(err)) return String(err.message);
+  console.error(`[join] ${context}`, err);
+  return `${context} could not be completed. The fault has been logged for the federation office; nothing has been changed.`;
+}
+
+// ── The form post ───────────────────────────────────────────────────────────
+//
+// Posted to this page rather than to an /api/ route so it works with JavaScript
+// switched off: the CSRF middleware requires application/json on /api/ paths,
+// which a plain form cannot send. The Origin check in the same middleware is
+// NOT scoped to /api/, so this post is still origin-checked. There is no script
+// on this page.
+if (Astro.request.method === 'POST') {
+  const rl = await rateLimit(Astro.request, 'join-apply', 12, 3600);
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    Astro.response.headers.set('Retry-After', String(Math.max(1, rl.retryAfterSeconds)));
+    banner = {
+      tone: 'bad',
+      text: 'Too many applications from this connection in the last hour. Wait a little and try again.',
+    };
+  } else if (!canApply) {
+    // The modules would refuse this anyway. Saying so here means the person
+    // reads a sentence instead of a stack trace.
+    Astro.response.status = 403;
+    banner = {
+      tone: 'bad',
+      text: identity
+        ? 'You are signed in with a shared office credential, which belongs to no person. An application binds a role to an individual, so it must be filed from that individual’s own account.'
+        : 'Applying requires a signed-in account of your own. Create one, or sign in, and the forms below will appear.',
+    };
+  } else {
+    const form = await Astro.request.formData().catch(() => null);
+    const intent = String(form?.get('intent') ?? '');
+    const ctx = { principal: principal!, ip: clientIp(Astro.request), requestId: null };
+
+    try {
+      if (!form) throw new Error('unreadable form');
+
+      if (intent === 'role') {
+        const requestedRole = String(form.get('requestedRole') ?? '') as Role;
+        const scopeRaw = String(form.get('scope') ?? '');
+        // The scope arrives as one field — "national" or "state:12" — so a
+        // scope type can never be submitted with an id belonging to a different
+        // kind of unit. applyForRole() re-checks that the unit exists.
+        const scopeType: ScopeType = scopeRaw.startsWith('state:') ? 'state' : 'national';
+        const scopeId = scopeRaw.startsWith('state:') ? Number(scopeRaw.slice(6)) : null;
+
+        const note = String(form.get('evidenceNote') ?? '').trim();
+        const links = String(form.get('evidenceLinks') ?? '').trim();
+        const evidence: Record<string, unknown> = {};
+        if (note) evidence.note = note;
+        if (links) evidence.links = links.split(/[\s,]+/).filter(Boolean).slice(0, 20);
+
+        const result = await applyForRole(db(), ctx, {
+          requestedRole,
+          scopeType,
+          scopeId,
+          evidence: Object.keys(evidence).length ? evidence : null,
+        });
+        banner = {
+          tone: 'ok',
+          text: `Application ${result.ref} has been filed for ${requestedRole}. It confers nothing until MMAKF decides it. ${REVIEW_TURNAROUND_NOT_SET}`,
+        };
+      } else if (intent === 'withdraw') {
+        const id = Number(form.get('applicationId'));
+        await withdrawApplication(db(), ctx, id, String(form.get('reason') ?? '').trim() || null);
+        banner = { tone: 'ok', text: 'Application withdrawn. You may file another for that role and scope.' };
+      } else if (intent === 'seller') {
+        const stateRaw = String(form.get('stateUnitId') ?? '');
+        const text = (name: string) => String(form.get(name) ?? '').trim() || null;
+        const result = await applyToSell(db(), ctx, {
+          tradingName: String(form.get('tradingName') ?? '').trim(),
+          contactEmail: text('contactEmail'),
+          contactPhone: text('contactPhone'),
+          addressLine: text('addressLine'),
+          city: text('city'),
+          postcode: text('postcode'),
+          stateUnitId: stateRaw ? Number(stateRaw) : null,
+          gstin: text('gstin'),
+          pan: text('pan'),
+          bankAccountName: text('bankAccountName'),
+          bankAccountNumber: text('bankAccountNumber'),
+          bankIfsc: text('bankIfsc'),
+          evidence: text('sellerNote') ? { note: text('sellerNote') } : null,
+        });
+        banner = {
+          tone: 'ok',
+          text:
+            `Seller application ${result.ref} has been filed. You cannot list anything until MMAKF approves the seller record, ` +
+            `and an approved seller still cannot put an item in front of the public until that item is approved.` +
+            (result.missingCommercialDetails.length
+              ? ` Not supplied: ${result.missingCommercialDetails.join(', ')}. ${SELLER_REQUIREMENTS_NOT_SET}`
+              : ''),
+        };
+      } else {
+        banner = { tone: 'bad', text: 'That form was not understood. Nothing has been changed.' };
+        Astro.response.status = 400;
+      }
+    } catch (err: any) {
+      Astro.response.status = 400;
+      banner = { tone: 'bad', text: readableError(err, 'That application') };
+    }
+  }
+}
+
+// ── What to show ────────────────────────────────────────────────────────────
+
+let states: Array<{ id: number; state: string; name: string }> = [];
+let mine: any[] = [];
+let seller: any = null;
+let loadError: string | null = null;
+
+if (configured) {
+  try {
+    states = await db()
+      .select({ id: s.stateUnits.id, state: s.stateUnits.state, name: s.stateUnits.name })
+      .from(s.stateUnits)
+      .orderBy(asc(s.stateUnits.state));
+  } catch (err) {
+    console.error('[join] state units', err);
+    loadError = 'The federation’s list of state units could not be read, so only a national application can be filed right now.';
+  }
+
+  if (principal && canApply) {
+    try {
+      mine = await myApplications(db(), principal);
+      seller = await mySellerAccount(db(), principal);
+    } catch (err) {
+      loadError = readableError(err, 'Your applications');
+    }
+  }
+}
+
+const stateById = new Map(states.map((u) => [u.id, u]));
+const openStatuses = new Set(['submitted', 'under_review']);
+
+const fmt = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? String(v)
+    : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+const titleCase = (v: string) => String(v).replace(/_/g, ' ');
+
+function scopeLabel(scopeType: string, scopeId: number | null): string {
+  if (scopeType === 'national') return 'National';
+  if (scopeType === 'state') {
+    const u = scopeId == null ? null : stateById.get(scopeId);
+    return u ? `${u.state} — ${u.name}` : `State unit #${scopeId}`;
+  }
+  return `${titleCase(scopeType)} #${scopeId}`;
+}
+
+/**
+ * The paths a person can take into the federation.
+ *
+ * `role` is the entry in src/lib/rbac.ts this path files an application for, or
+ * null where the path is not a role application at all. Nothing here states a
+ * qualification: every card prints EVIDENCE_REQUIREMENTS_NOT_SET, because the
+ * federation has published none, and what it says instead is what the EVIDENCE
+ * FIELD is for — which is a fact about this form, not a rule about applicants.
+ */
+const PATHS: Array<{
+  icon: string;
+  heading: string;
+  role: Role | null;
+  body: string;
+  evidence: string;
+  route?: { href: string; label: string };
+}> = [
+  {
+    icon: 'kata',
+    heading: 'Coach',
+    role: 'INSTRUCTOR',
+    body:
+      'The federation’s register has no role called “coach”. The nearest entry in it is INSTRUCTOR, and MMAKF has not published a mapping between the two, ' +
+      'so nothing here decides that for you: file under INSTRUCTOR and say in your own words what you coach, where, and since when. A person reads it.',
+    evidence: 'Whatever supports it — where you teach, how long, under whom, any certification you hold, and links to anything the federation can check.',
+  },
+  {
+    icon: 'karate-gi',
+    heading: 'Instructor',
+    role: 'INSTRUCTOR',
+    body:
+      'Teaching under the MMAKF syllabus at a dojo, a school programme or the online academy. An approved INSTRUCTOR binding is scoped: it applies in the ' +
+      'unit the application named, and nowhere wider.',
+    evidence: 'Your grade and who awarded it, the dojo or programme you teach at, and any instructor certification.',
+  },
+  {
+    icon: 'shield',
+    heading: 'Referee or judge',
+    role: 'REFEREE',
+    body:
+      'Officiating at MMAKF competition. The register holds REFEREE and JUDGE separately — apply for the one you officiate as, or file both; ' +
+      'they are decided independently.',
+    evidence: 'Any officiating licence and its registry, the level you hold, courses attended, and the events you have officiated at.',
+  },
+  {
+    icon: 'black-belt',
+    heading: 'Examiner',
+    role: 'EXAMINER',
+    body:
+      'Sitting on grading panels. This is authority over other people’s grade records, so it is conferred deliberately and never granted on request.',
+    evidence: 'Your own grade and its provenance, panels you have sat on, and who can vouch for it.',
+  },
+  {
+    icon: 'medal',
+    heading: 'Athlete',
+    role: 'ATHLETE',
+    body:
+      'Competing under MMAKF. An ATHLETE binding is what attaches results, entries and rankings to your name rather than to a slip of paper at the desk.',
+    evidence: 'Your dojo, your grade, your events, and any WKF SportsID or Sportdata registration you already hold.',
+  },
+  {
+    icon: 'users',
+    heading: 'Member',
+    role: 'MEMBER',
+    body:
+      'The plain membership binding. It carries no authority over anybody else’s record and is where most people belong.',
+    evidence: 'Your dojo or unit and, if you have one, your existing member ID.',
+  },
+  {
+    icon: 'star',
+    heading: 'Seller',
+    role: null,
+    body:
+      'Selling through the federation shop. TWO separate approvals stand between an application and a public listing: MMAKF approves the seller, ' +
+      'and then MMAKF approves each item. An approved seller with an unapproved item sells nothing, and editing an approved item takes it back out ' +
+      'of public view until it is reviewed again — the shop shows what MMAKF actually saw.',
+    evidence: 'A trading name is the only thing this form requires, because it is what the public will see. Everything else is captured and reported to a reviewer.',
+  },
+  {
+    icon: 'school',
+    heading: 'A dojo, club or school',
+    role: null,
+    body:
+      'A dojo is not a person, and this queue binds roles to people. Clubs, schools and district or state units come under the banner by CHARTER, ' +
+      'which the federation office issues — a different process with a different record.',
+    evidence: 'The affiliation page sets out the ladder — national, state, district, club — and the office issues the charter requirements.',
+    route: { href: '/affiliation', label: 'Affiliation and charters' },
+  },
+];
+
+// Printed beside each applicable role so an applicant can see exactly what a
+// binding would let the account do. Read from rbac.ts, never restated here.
+const conferred = new Map<Role, string[]>(
+  APPLICABLE_ROLES.map((r) => [r, [...actionsConferredBy(r)]])
+);
+---
+
+<Base
+  title="Apply to MMAKF"
+  description="Apply to the Modern Martial Arts Karate-Do Federation of India as an instructor, referee, judge, examiner, athlete, member or seller. Applications are reviewed by MMAKF staff; an account on its own grants nothing."
+>
+  <PageHero
+    eyebrow="Joining"
+    title={`Apply to <em class="r">MMAKF</em>.`}
+    lead="Anyone may create an account. Nobody gets authority by creating one. You apply for what you actually do, a person at MMAKF reads the application and decides, and only then does your account hold anything at all."
+  />
+
+  {/* ═══════ THE RULE, STATED BEFORE ANYTHING ELSE ═══════ */}
+  <section>
+    <div class="container">
+      {banner && (
+        <div class:list={['join-banner', banner.tone]} role={banner.tone === 'bad' ? 'alert' : 'status'}>
+          {banner.text}
+        </div>
+      )}
+
+      <div class="grid grid-3">
+        <div class="card">
+          <div class="card-eyebrow">01 — Account</div>
+          <div class="card-title" style="font-size:1rem;margin-bottom:10px">An account grants nothing.</div>
+          <p class="card-body">
+            A new account holds no role bindings whatsoever. It can read its own record and nothing else. Every admin
+            surface, every other person’s record and every review queue refuses it — because the authority is absent,
+            not because a button is hidden.
+          </p>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">02 — Application</div>
+          <div class="card-title" style="font-size:1rem;margin-bottom:10px">You apply. A person decides.</div>
+          <p class="card-body">
+            An application records what you are asking for, in which part of the federation, and whatever evidence you
+            attach. Nobody may decide their own application, whatever authority they hold, and a reviewer can only
+            confer a role inside their own scope and never one they do not hold themselves.
+          </p>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">03 — Decision</div>
+          <div class="card-title" style="font-size:1rem;margin-bottom:10px">Approved or refused, with a reason.</div>
+          <p class="card-body">
+            Both outcomes are recorded with a written reason, so the record can still answer “why was this refused?” a
+            year later. {REVIEW_TURNAROUND_NOT_SET}
+          </p>
+        </div>
+      </div>
+
+      {!configured && (
+        <div class="card" style="margin-top:24px">
+          <div class="card-eyebrow">Not available on this deployment</div>
+          <p class="card-body">
+            Applications are written to the federation’s system of record, and no federation database is configured
+            here. Nothing can be filed — not even provisionally. The office can be reached at
+            <a class="text-gold" href="mailto:admin@mmakf.in"> admin@mmakf.in</a>.
+          </p>
+        </div>
+      )}
+
+      {loadError && (
+        <div class="card" role="alert" style="margin-top:24px;border-left:3px solid var(--red)">
+          <p class="card-body">{loadError}</p>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ THE PATHS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head">
+        <div class="eyebrow">Ways in</div>
+        <h2 class="display-2">Apply to MMAKF <em class="r">as…</em></h2>
+        <div class="rule"></div>
+        <p class="lead">
+          What each path is, and what the evidence box is for. MMAKF has published no qualification requirement for any
+          of them, so none is stated here.
+        </p>
+      </div>
+
+      <div class="grid grid-3">
+        {PATHS.map((p) => (
+          <div class="card">
+            <div class="card-icon"><Icon name={p.icon} size={30} color="var(--gold)" /></div>
+            <div class="card-title" style="font-size:1rem;margin-bottom:6px">{p.heading}</div>
+            {p.role && <div style="margin-bottom:10px"><span class="pill">{p.role}</span></div>}
+            <p class="card-body">{p.body}</p>
+            <p class="card-body" style="margin-top:12px"><strong>Useful evidence:</strong> {p.evidence}</p>
+            <p class="not-set">{EVIDENCE_REQUIREMENTS_NOT_SET}</p>
+            {p.route && (
+              <div style="margin-top:14px"><a class="btn btn-ghost" href={p.route.href}>{p.route.label}</a></div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ FILE ONE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head">
+        <div class="eyebrow">The form</div>
+        <h2 class="display-2">File an <em>application</em>.</h2>
+        <div class="rule"></div>
+      </div>
+
+      {!configured ? (
+        <div class="card"><p class="card-body">Not available on this deployment — see above.</p></div>
+      ) : !identity ? (
+        <div class="card">
+          <div class="card-eyebrow">Sign in first</div>
+          <p class="card-body">
+            An application binds a role to a person, so it has to come from that person’s own account. Creating one
+            takes an email address and a password, and — worth repeating — grants nothing on its own.
+          </p>
+          <div style="margin-top:18px">
+            <a class="btn btn-primary" href="/register">Create an account</a>
+            <a class="btn btn-ghost" href="/my" style="margin-left:10px">Sign in</a>
+          </div>
+        </div>
+      ) : !canApply ? (
+        <div class="card">
+          <div class="card-eyebrow">Shared credential</div>
+          <p class="card-body">
+            This session is a shared office credential. It belongs to no individual, so there is nobody for a role to be
+            bound to. Sign in with your own account to apply.
+          </p>
+        </div>
+      ) : (
+        <div class="join-cols">
+          {/* ── Role application ─────────────────────────────────────────── */}
+          <form method="post" action="/join" class="card join-form">
+            <input type="hidden" name="intent" value="role" />
+            <div class="card-eyebrow">Role application</div>
+            <h3 class="blk-h">What are you applying to be?</h3>
+
+            <div class="join-field">
+              <label class="input-label" for="ap-role">Role <span class="req" aria-hidden="true">*</span></label>
+              <select class="input" id="ap-role" name="requestedRole" required aria-describedby="ap-role-help">
+                {APPLICABLE_ROLES.map((r) => <option value={r}>{r}</option>)}
+              </select>
+              <p class="field-help" id="ap-role-help">
+                Only these six may be applied for. Every other role in the federation’s register is administrative
+                authority over other people’s records, and administrative authority is conferred by MMAKF, never
+                requested through a public form.
+              </p>
+            </div>
+
+            <div class="join-field">
+              <label class="input-label" for="ap-scope">Where does it apply? <span class="req" aria-hidden="true">*</span></label>
+              <select class="input" id="ap-scope" name="scope" required aria-describedby="ap-scope-help">
+                <option value="national">National — the whole federation</option>
+                {states.map((u) => <option value={`state:${u.id}`}>{u.state} — {u.name}</option>)}
+              </select>
+              <p class="field-help" id="ap-scope-help">
+                {states.length === 0
+                  ? 'The federation’s register lists no state units on this deployment, so only a national application can be filed.'
+                  : 'A binding applies inside the scope the application names and nowhere wider. A reviewer cannot widen it — the scope is read from the application, never typed by the person deciding it.'}
+              </p>
+            </div>
+
+            <div class="join-field">
+              <label class="input-label" for="ap-note">Evidence <span class="opt">(optional)</span></label>
+              <textarea
+                class="input"
+                id="ap-note"
+                name="evidenceNote"
+                rows="5"
+                maxlength="4000"
+                aria-describedby="ap-note-help"
+              ></textarea>
+              <p class="field-help" id="ap-note-help">{EVIDENCE_REQUIREMENTS_NOT_SET}</p>
+            </div>
+
+            <div class="join-field">
+              <label class="input-label" for="ap-links">Links <span class="opt">(optional)</span></label>
+              <input class="input" type="text" id="ap-links" name="evidenceLinks" maxlength="1000" aria-describedby="ap-links-help" />
+              <p class="field-help" id="ap-links-help">
+                Separated by spaces or commas. A certificate, a licence record, a results page — anything a reviewer can
+                open. Nothing is fetched or verified automatically; a person looks.
+              </p>
+            </div>
+
+            <button type="submit" class="btn btn-primary join-submit">File this application</button>
+          </form>
+
+          {/* ── Seller application ───────────────────────────────────────── */}
+          <div>
+            <div class="card">
+              <div class="card-eyebrow">Selling</div>
+              <h3 class="blk-h">Two gates, not one.</h3>
+              <p class="card-body">
+                MMAKF approves the SELLER, and then MMAKF approves each LISTING. Editing an approved listing returns it
+                to review and it leaves the public shop until a reviewer has seen the change. {LISTING_REVIEW_TURNAROUND_NOT_SET}
+              </p>
+              <p class="not-set">{COMMISSION_NOT_SET}</p>
+
+              {seller ? (
+                <div style="margin-top:16px">
+                  <div><span class="pill">{titleCase(seller.status)}</span></div>
+                  <p class="card-body" style="margin-top:10px">
+                    Seller record <strong>{seller.ref}</strong>, trading as {seller.tradingName}.
+                    {seller.mayCreateListings
+                      ? ' Approved — you may create listings, and each one is reviewed before the public sees it.'
+                      : ' You cannot create listings until this record is approved.'}
+                  </p>
+                  {seller.commercialDetails.missing.length > 0 && (
+                    <p class="not-set">
+                      Not supplied: {seller.commercialDetails.missing.join(', ')}. {seller.commercialDetails.note}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <details class="join-details">
+                  <summary class="join-summary">Apply to sell</summary>
+                  <form method="post" action="/join" class="join-form" style="padding:0;margin-top:18px">
+                    <input type="hidden" name="intent" value="seller" />
+
+                    <div class="join-field">
+                      <label class="input-label" for="se-name">Trading name <span class="req" aria-hidden="true">*</span></label>
+                      <input class="input" type="text" id="se-name" name="tradingName" required maxlength="160" aria-describedby="se-name-help" />
+                      <p class="field-help" id="se-name-help">What the public will see beside your items.</p>
+                    </div>
+
+                    <div class="join-2col">
+                      <div class="join-field">
+                        <label class="input-label" for="se-email">Contact email <span class="opt">(optional)</span></label>
+                        <input class="input" type="email" id="se-email" name="contactEmail" maxlength="254" autocomplete="email" />
+                      </div>
+                      <div class="join-field">
+                        <label class="input-label" for="se-phone">Contact phone <span class="opt">(optional)</span></label>
+                        <input class="input" type="tel" id="se-phone" name="contactPhone" maxlength="40" autocomplete="tel" />
+                      </div>
+                    </div>
+
+                    <div class="join-field">
+                      <label class="input-label" for="se-state">State unit <span class="opt">(optional)</span></label>
+                      <select class="input" id="se-state" name="stateUnitId" aria-describedby="se-state-help">
+                        <option value="">Not stated</option>
+                        {states.map((u) => <option value={String(u.id)}>{u.state} — {u.name}</option>)}
+                      </select>
+                      <p class="field-help" id="se-state-help">
+                        Naming your state puts the application in front of that state’s office as well as the national
+                        one. Left blank, only a national reviewer can see it.
+                      </p>
+                    </div>
+
+                    <div class="join-2col">
+                      <div class="join-field">
+                        <label class="input-label" for="se-address">Address <span class="opt">(optional)</span></label>
+                        <input class="input" type="text" id="se-address" name="addressLine" maxlength="200" autocomplete="street-address" />
+                      </div>
+                      <div class="join-field">
+                        <label class="input-label" for="se-city">City <span class="opt">(optional)</span></label>
+                        <input class="input" type="text" id="se-city" name="city" maxlength="120" autocomplete="address-level2" />
+                      </div>
+                    </div>
+
+                    <div class="join-2col">
+                      <div class="join-field">
+                        <label class="input-label" for="se-postcode">PIN code <span class="opt">(optional)</span></label>
+                        <input class="input" type="text" id="se-postcode" name="postcode" maxlength="16" autocomplete="postal-code" inputmode="numeric" />
+                      </div>
+                      <div class="join-field">
+                        <label class="input-label" for="se-gstin">GSTIN <span class="opt">(optional)</span></label>
+                        <input class="input" type="text" id="se-gstin" name="gstin" maxlength="20" />
+                      </div>
+                    </div>
+
+                    <div class="join-2col">
+                      <div class="join-field">
+                        <label class="input-label" for="se-pan">PAN <span class="opt">(optional)</span></label>
+                        <input class="input" type="text" id="se-pan" name="pan" maxlength="16" />
+                      </div>
+                      <div class="join-field">
+                        <label class="input-label" for="se-acname">Bank account name <span class="opt">(optional)</span></label>
+                        <input class="input" type="text" id="se-acname" name="bankAccountName" maxlength="160" />
+                      </div>
+                    </div>
+
+                    <div class="join-2col">
+                      <div class="join-field">
+                        <label class="input-label" for="se-acno">Bank account number <span class="opt">(optional)</span></label>
+                        <input class="input" type="text" id="se-acno" name="bankAccountNumber" maxlength="34" aria-describedby="se-acno-help" />
+                        <p class="field-help" id="se-acno-help">Never shown back in full — not even to you.</p>
+                      </div>
+                      <div class="join-field">
+                        <label class="input-label" for="se-ifsc">IFSC <span class="opt">(optional)</span></label>
+                        <input class="input" type="text" id="se-ifsc" name="bankIfsc" maxlength="16" />
+                      </div>
+                    </div>
+
+                    <div class="join-field">
+                      <label class="input-label" for="se-note">Anything else <span class="opt">(optional)</span></label>
+                      <textarea class="input" id="se-note" name="sellerNote" rows="3" maxlength="2000" aria-describedby="se-note-help"></textarea>
+                      <p class="field-help" id="se-note-help">{SELLER_REQUIREMENTS_NOT_SET}</p>
+                    </div>
+
+                    <button type="submit" class="btn btn-gold join-submit">File a seller application</button>
+                  </form>
+                </details>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ THE APPLICANT'S OWN RECORD ═══════ */}
+  {canApply && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head">
+          <div class="eyebrow">Your applications</div>
+          <h2 class="display-2">What you have <em>filed</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            Read from your own account. This list takes no identifier of any kind — it cannot be asked about anybody
+            else’s applications.
+          </p>
+        </div>
+
+        {mine.length === 0 ? (
+          <div class="card">
+            <p class="card-body">
+              You have filed nothing yet. Until you do, your account holds no roles — which is why the member area looks
+              empty. That is the system working as designed, not a fault.
+            </p>
+          </div>
+        ) : (
+          <div class="card" style="padding:0">
+            <div class="tbl-scroll">
+              <table class="join-tbl">
+                <caption class="sr-only">Applications filed from your account</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Reference</th>
+                    <th scope="col">Role</th>
+                    <th scope="col">Scope</th>
+                    <th scope="col">Filed</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Decision</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {mine.map((a: any) => (
+                    <tr>
+                      <td class="text-muted" style="font-size:.78rem">{a.ref}</td>
+                      <td><strong>{a.requestedRole}</strong></td>
+                      <td>{scopeLabel(a.scopeType, a.scopeId)}</td>
+                      <td>{fmt(a.submittedAt)}</td>
+                      <td><span class="pill">{titleCase(a.status)}</span></td>
+                      <td>
+                        {a.decisionReason
+                          ? <span>{a.decisionReason}</span>
+                          : openStatuses.has(a.status)
+                            ? <span class="text-muted">Not yet decided.</span>
+                            : <span class="text-muted">—</span>}
+                        {openStatuses.has(a.status) && (
+                          <form method="post" action="/join" style="margin-top:10px">
+                            <input type="hidden" name="intent" value="withdraw" />
+                            <input type="hidden" name="applicationId" value={String(a.id)} />
+                            <button type="submit" class="btn btn-ghost btn-sm">Withdraw</button>
+                          </form>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p class="tbl-hint" style="padding:0 18px 14px">Scroll the table sideways</p>
+          </div>
+        )}
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ WHAT A ROLE ACTUALLY CONFERS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head">
+        <div class="eyebrow">Transparency</div>
+        <h2 class="display-2">What each role <em class="r">can do</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Read out of the federation’s permission rules themselves, not written by hand here. None of these six can
+          confer a role on anybody, read another person’s private data, or touch money — which is why they are the six
+          that may be applied for at all.
+        </p>
+      </div>
+
+      <div class="card" style="padding:0">
+        <div class="tbl-scroll">
+          <table class="join-tbl">
+            <caption class="sr-only">The permissions each applicable role confers</caption>
+            <thead>
+              <tr>
+                <th scope="col">Role</th>
+                <th scope="col">Permissions it confers</th>
+              </tr>
+            </thead>
+            <tbody>
+              {APPLICABLE_ROLES.map((r) => (
+                <tr>
+                  <td><strong>{r}</strong></td>
+                  <td class="text-muted" style="font-size:.8rem">
+                    {(conferred.get(r) ?? []).length === 0 ? 'Nothing beyond reading your own record.' : (conferred.get(r) ?? []).join(' · ')}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p class="tbl-hint" style="padding:0 18px 14px">Scroll the table sideways</p>
+      </div>
+
+      <p class="not-set" style="margin-top:18px">
+        {EVIDENCE_REQUIREMENTS_NOT_SET} {REVIEW_TURNAROUND_NOT_SET} {COMMISSION_NOT_SET}
+      </p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .bg2 { background: var(--bg-2); }
+
+  .join-banner {
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    margin-bottom: 26px;
+    font-size: 0.88rem;
+    line-height: 1.65;
+    border: 1px solid var(--border);
+    background: var(--card-2);
+    color: var(--off-white);
+  }
+  .join-banner.ok { border-left: 3px solid var(--gold-dim); }
+  .join-banner.bad { border-left: 3px solid var(--red); color: var(--red-2); border-color: var(--red-3); }
+
+  .join-cols {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 28px;
+    align-items: start;
+  }
+  @media (max-width: 980px) { .join-cols { grid-template-columns: minmax(0, 1fr); } }
+
+  .join-form { padding: 28px; }
+  @media (max-width: 480px) { .join-form { padding: 22px 18px; } }
+
+  .join-2col {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0 16px;
+  }
+  @media (max-width: 620px) { .join-2col { grid-template-columns: minmax(0, 1fr); } }
+
+  .blk-h {
+    font-family: var(--font-display);
+    font-size: 1.02rem;
+    font-weight: 600;
+    color: var(--white);
+    margin: 10px 0 20px;
+  }
+
+  .join-field { margin-bottom: 20px; }
+
+  .field-help {
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.65;
+    margin-top: 8px;
+  }
+
+  /* Where the federation has published no policy. Same voice everywhere it
+     appears, so a reader learns to recognise it. */
+  .not-set {
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.6;
+    margin-top: 12px;
+    padding-left: 12px;
+    border-left: 2px solid var(--border-2);
+  }
+
+  .req { color: var(--red-2); }
+  .opt {
+    font-family: var(--font-body);
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--muted);
+  }
+
+  .join-submit { width: 100%; min-height: 48px; margin-top: 6px; }
+
+  .join-details { margin-top: 18px; }
+  .join-summary {
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    cursor: pointer;
+    padding: 12px 0;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+  .join-summary:focus-visible { outline: 2px solid var(--gold-2); outline-offset: 2px; }
+
+  .join-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 720px;
+    font-size: 0.86rem;
+  }
+  .join-tbl th {
+    text-align: left;
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .join-tbl td {
+    padding: 15px 18px;
+    border-bottom: 1px solid var(--border);
+    color: var(--off-white);
+    vertical-align: top;
+  }
+  .join-tbl tr:last-child td { border-bottom: 0; }
+
+  .btn-sm { padding: 9px 18px; font-size: 0.66rem; min-height: 44px; }
+
+  @media (max-width: 620px) {
+    .btn { width: 100%; margin-left: 0 !important; }
+    .btn + .btn { margin-top: 10px; }
+  }
+</style>

@@ -1,0 +1,832 @@
+---
+// /portal/listings — the seller's own section.
+//
+// THE STRUCTURAL FACT THIS PAGE IS BUILT ON, and the one it shares with
+// /my/index.astro: it takes no identifier of any kind. There is no seller id in
+// the path, none in the query string and none in a form. mySellerAccount() and
+// myListings() both resolve the caller's seller row from the session inside
+// their own SQL, and neither accepts an id to be asked about. A surface that
+// takes "whose shop?" as input is a surface that will eventually be sent
+// somebody else's, and no amount of checking afterwards undoes that shape.
+//
+// TWO GATES, SHOWN AS TWO GATES. The federation asked for exactly this:
+//
+//     "If onboarded they can list their items after approval by our people in
+//      admin."
+//
+// Gate one is the SELLER. Until MMAKF approves the seller there is no create
+// form on this page at all — not a disabled button that posts anyway, because a
+// disabled button is a decoration and `fetch` does not read it. The control is
+// absent, and the server refuses the act regardless (see
+// requireApprovedSeller() in src/db/marketplace.ts).
+//
+// Gate two is the LISTING. An approved seller may create and edit freely; what
+// they cannot do is put an item in front of the public without a human at MMAKF
+// looking at that item. The `publiclyVisible` column below is computed from the
+// same three SQL conditions the public shop uses, so this page and the shop
+// cannot disagree about whether something is on sale.
+//
+// WHERE THE FEDERATION HAS DECIDED NOTHING, THIS PAGE SAYS SO — in the module's
+// own words, not a paraphrase. There is no commission, no list of mandatory
+// documents and no review turnaround anywhere in this file, because MMAKF has
+// published none of them and inventing a plausible one is the worst bug this
+// codebase can carry.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { asc, eq } from 'drizzle-orm';
+import { formatINR } from '@/db/orders';
+import {
+  mySellerAccount,
+  myListings,
+  LISTING_CATEGORIES,
+  COMMISSION_NOT_SET,
+  SELLER_REQUIREMENTS_NOT_SET,
+  LISTING_REVIEW_TURNAROUND_NOT_SET,
+  isMarketplaceError,
+} from '@/db/marketplace';
+
+export const prerender = false;
+
+type Gate =
+  | 'no_database'
+  | 'signed_out'
+  | 'shared_credential'
+  | 'no_seller'
+  | 'seller';
+
+const configured = isConfigured();
+
+// identify() is the only place this request becomes an identity. A cookie that
+// no longer resolves — disabled account, bumped epoch, revoked bindings —
+// returns null rather than falling back to a shared credential.
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+let gate: Gate = 'seller';
+let seller: any = null;
+let listings: any[] = [];
+let states: any[] = [];
+let loadError: string | null = null;
+
+/** What a seller may be told about a failure. A driver fault, a timeout or a
+ *  constraint name is a fact about the server, not about them, and putting
+ *  `err.message` on the page is how a connection string reaches a stranger. */
+function readableError(err: any, context: string): string {
+  if (isMarketplaceError(err)) return String(err.message);
+  console.error(`[portal/listings] ${context}`, err);
+  return `${context} could not be read. The fault has been logged for the federation office; nothing has been changed.`;
+}
+
+if (!configured) {
+  gate = 'no_database';
+} else if (!identity) {
+  gate = 'signed_out';
+} else if (identity.userId == null) {
+  // A shared office credential is attributable to no person, so it cannot hold
+  // a seller record — there is nothing here for it to show.
+  gate = 'shared_credential';
+} else {
+  try {
+    seller = await mySellerAccount(db(), identity.principal);
+    if (!seller) {
+      gate = 'no_seller';
+      // Offered so a seller can declare where they trade, which is what makes a
+      // review by their own state office possible at all. Left blank the row is
+      // unlocated, and an unlocated row is reachable only from a national
+      // binding — the fail-closed reading, stated on the form.
+      states = await db()
+        .select({ id: s.stateUnits.id, name: s.stateUnits.name, state: s.stateUnits.state })
+        .from(s.stateUnits)
+        .where(eq(s.stateUnits.status, 'active'))
+        .orderBy(asc(s.stateUnits.name));
+    } else {
+      gate = 'seller';
+      // No seller id passed. The caller's user id resolves the shop inside the
+      // query, so reading another seller's listings is not refused — it is
+      // impossible to ask for.
+      listings = await myListings(db(), identity.principal);
+    }
+  } catch (err: any) {
+    loadError = readableError(err, 'Your seller record');
+  }
+}
+
+const approved = seller?.status === 'approved';
+const suspended = seller?.status === 'suspended';
+
+const titleCase = (v: string) => String(v ?? '').replace(/_/g, ' ');
+
+const fmt = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? String(v)
+    : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+/**
+ * The sentence a seller reads about their own standing.
+ *
+ * Five states, not two, for the same reason the member area carries eight: a
+ * seller who has been refused and a seller who is merely waiting are in
+ * completely different positions, and telling them the same thing wastes the
+ * time of whichever one was owed a different answer. None of these invents a
+ * turnaround, a requirement or a next step MMAKF has not stated.
+ */
+const SELLER_STANDING: Record<string, { label: string; tone: 'good' | 'wait' | 'bad'; body: string }> = {
+  applied: {
+    label: 'Awaiting review',
+    tone: 'wait',
+    body:
+      'Your seller application is with MMAKF. Until somebody at the federation approves it you cannot create a listing — ' +
+      'not a draft, and not a hidden one.',
+  },
+  approved: {
+    label: 'Approved to sell',
+    tone: 'good',
+    body:
+      'MMAKF has approved this account as a seller. That is the first of two decisions: each item you list is reviewed ' +
+      'separately before the public can see it.',
+  },
+  rejected: {
+    label: 'Not approved',
+    tone: 'bad',
+    body: 'MMAKF did not approve this account as a seller. The reason the federation recorded is below.',
+  },
+  suspended: {
+    label: 'Suspended',
+    tone: 'bad',
+    body:
+      'MMAKF has suspended this seller account. Every one of your listings has left public view, in the same instant and ' +
+      'without anything being deleted — the items and their history are all still here. A suspension can be lifted; ' +
+      'deletion could not be undone.',
+  },
+  withdrawn: {
+    label: 'Withdrawn',
+    tone: 'bad',
+    body:
+      'You withdrew this account from selling. Your listings are no longer public. Nothing has been deleted.',
+  },
+};
+
+const standing = seller ? SELLER_STANDING[seller.status] : null;
+
+const visibleCount = listings.filter((l: any) => l.publiclyVisible).length;
+const inReview = listings.filter((l: any) => l.status === 'submitted').length;
+---
+
+<Base
+  title="Sell with MMAKF — your listings"
+  description="The MMAKF seller area: your seller application, your listings, and the review each item passes before the public can see it."
+>
+  <section>
+    <div class="container">
+
+      {gate === 'no_database' && (
+        <div class="card">
+          <div class="eyebrow">Seller area</div>
+          <h1 class="display-2" style="margin-top:14px">Not available on this deployment.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            The seller area reads and writes the federation's system of record, and no federation database is configured
+            here. Nothing can be shown — not an empty shop, and not a placeholder one.
+          </p>
+          <p class="body-txt" style="margin-top:14px">
+            The office can reach the federation at <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a>.
+          </p>
+        </div>
+      )}
+
+      {gate === 'signed_out' && (
+        <div style="max-width:440px;margin:0 auto">
+          <div style="text-align:center;margin-bottom:28px">
+            <div class="eyebrow center" style="justify-content:center">Seller area</div>
+            <h1 class="display-2" style="margin-top:14px">Sign in.</h1>
+          </div>
+          <form id="signInForm" class="card" style="padding:28px">
+            <label class="input-label" for="seller-email">Email address</label>
+            <input
+              class="input"
+              type="email"
+              id="seller-email"
+              name="email"
+              autocomplete="username"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              required
+              placeholder="you@example.com"
+            />
+
+            <label class="input-label" for="seller-password" style="margin-top:14px">Password</label>
+            <input class="input" type="password" id="seller-password" name="password" autocomplete="current-password" required />
+
+            <div id="loginErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
+
+            <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;min-height:44px">Sign in</button>
+
+            <p class="text-muted" style="margin-top:18px;font-size:.78rem;line-height:1.7">
+              Any account can sign in here. Signing in confers nothing: applying to sell is a separate step, and MMAKF
+              decides it.
+            </p>
+          </form>
+        </div>
+      )}
+
+      {gate === 'shared_credential' && (
+        <div class="card">
+          <div class="eyebrow">Seller area</div>
+          <h1 class="display-2" style="margin-top:14px">This credential belongs to no person.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            You are signed in with a shared office credential. A shared credential identifies no individual, so it cannot
+            hold a seller record and cannot be held responsible for what a shop sells.
+          </p>
+          <p class="body-txt" style="margin-top:14px">
+            Sign in with your own account to reach your own seller record.
+          </p>
+        </div>
+      )}
+
+      {loadError && (
+        <div class="card" role="alert" style="border-left:3px solid var(--red);margin-bottom:24px">
+          <div class="card-title" style="font-size:.95rem">Your seller record could not be read</div>
+          <div class="card-body">{loadError}</div>
+        </div>
+      )}
+
+      {/* ── No seller record: apply ────────────────────────────────────── */}
+      {gate === 'no_seller' && (
+        <>
+          <div class="section-head" style="margin-bottom:32px">
+            <div class="eyebrow">Seller area</div>
+            <h1 class="display-2" style="margin-top:14px">Apply to <em class="r">sell</em>.</h1>
+            <div class="rule"></div>
+            <p class="lead">
+              This account has no seller record. Anyone may ask; nobody becomes a seller by asking. MMAKF reviews the
+              application and decides, and only then can you list anything.
+            </p>
+          </div>
+
+          <div class="card" style="margin-bottom:22px">
+            <div class="card-eyebrow">What the federation has not set</div>
+            <div class="card-body">
+              <p>{SELLER_REQUIREMENTS_NOT_SET}</p>
+              <p style="margin-top:10px">{COMMISSION_NOT_SET}</p>
+              <p style="margin-top:10px">{LISTING_REVIEW_TURNAROUND_NOT_SET}</p>
+              <p style="margin-top:10px">
+                These are federation decisions, not settings in this software. Where one arrives, it will appear here.
+              </p>
+            </div>
+          </div>
+
+          <form id="applyForm" class="card" style="padding:28px">
+            <div class="card-eyebrow">Seller application</div>
+
+            <label class="input-label" for="tradingName" style="margin-top:16px">Trading name</label>
+            <input class="input" type="text" id="tradingName" name="tradingName" required maxlength="160" />
+            <p class="hint">This is the name the public will see against your items.</p>
+
+            <div class="fieldgrid">
+              <div>
+                <label class="input-label" for="contactEmail">Contact email</label>
+                <input class="input" type="email" id="contactEmail" name="contactEmail" autocomplete="email" />
+              </div>
+              <div>
+                <label class="input-label" for="contactPhone">Contact phone</label>
+                <input class="input" type="tel" id="contactPhone" name="contactPhone" autocomplete="tel" />
+              </div>
+            </div>
+
+            <label class="input-label" for="addressLine" style="margin-top:14px">Address</label>
+            <input class="input" type="text" id="addressLine" name="addressLine" autocomplete="street-address" />
+
+            <div class="fieldgrid">
+              <div>
+                <label class="input-label" for="city">City</label>
+                <input class="input" type="text" id="city" name="city" autocomplete="address-level2" />
+              </div>
+              <div>
+                <label class="input-label" for="postcode">PIN code</label>
+                <input class="input" type="text" id="postcode" name="postcode" autocomplete="postal-code" inputmode="numeric" />
+              </div>
+            </div>
+
+            <label class="input-label" for="stateUnitId" style="margin-top:14px">State unit</label>
+            <select class="input" id="stateUnitId" name="stateUnitId">
+              <option value="">Not declared — national office only</option>
+              {states.map((u: any) => <option value={String(u.id)}>{u.name}</option>)}
+            </select>
+            <p class="hint">
+              Where you trade, so your own state office can review this. Left undeclared, only the national office can
+              see the application — which is the safer reading, not a faster one.
+            </p>
+
+            <div class="rule" style="margin:26px 0 18px"></div>
+            <div class="card-eyebrow">Tax and payout details</div>
+            <p class="hint" style="margin-top:8px">
+              {SELLER_REQUIREMENTS_NOT_SET} Whatever you leave blank is recorded as absent and shown to the reviewer as
+              absent — no field here is refused for being empty.
+            </p>
+
+            <div class="fieldgrid">
+              <div>
+                <label class="input-label" for="gstin">GSTIN</label>
+                <input class="input" type="text" id="gstin" name="gstin" autocapitalize="characters" spellcheck="false" />
+              </div>
+              <div>
+                <label class="input-label" for="pan">PAN</label>
+                <input class="input" type="text" id="pan" name="pan" autocapitalize="characters" spellcheck="false" />
+              </div>
+            </div>
+
+            <div class="fieldgrid">
+              <div>
+                <label class="input-label" for="bankAccountName">Bank account name</label>
+                <input class="input" type="text" id="bankAccountName" name="bankAccountName" />
+              </div>
+              <div>
+                <label class="input-label" for="bankIfsc">IFSC</label>
+                <input class="input" type="text" id="bankIfsc" name="bankIfsc" autocapitalize="characters" spellcheck="false" />
+              </div>
+            </div>
+
+            <label class="input-label" for="bankAccountNumber" style="margin-top:14px">Bank account number</label>
+            <input class="input" type="text" id="bankAccountNumber" name="bankAccountNumber" autocomplete="off" inputmode="numeric" />
+            <p class="hint">
+              Stored for the federation office. It is never shown back to you or to anybody else — only the last four
+              digits are ever displayed.
+            </p>
+
+            <div id="applyErr" role="alert" class="form-err"></div>
+
+            <button type="submit" class="btn btn-primary" style="margin-top:20px;min-height:44px">
+              Send this application to MMAKF
+            </button>
+          </form>
+        </>
+      )}
+
+      {/* ── A seller record exists ─────────────────────────────────────── */}
+      {gate === 'seller' && seller && (
+        <>
+          <div class="section-head" style="margin-bottom:32px">
+            <div class="eyebrow">Seller area</div>
+            <h1 class="display-2" style="margin-top:14px">{seller.tradingName}</h1>
+            <div class="rule"></div>
+            <p class="lead">
+              Seller reference <strong>{seller.ref}</strong>. Everything below is read from the federation's system of
+              record at the moment you loaded this page.
+            </p>
+          </div>
+
+          <div class="grid grid-3" style="margin-bottom:22px">
+            <div class="card">
+              <div class="card-eyebrow">Seller standing</div>
+              <div class="pf-standing" data-tone={standing?.tone ?? 'wait'}>{standing?.label ?? titleCase(seller.status)}</div>
+              <div class="card-body" style="margin-top:12px">{standing?.body}</div>
+
+              {seller.status === 'approved' && seller.approvedAt && (
+                <div class="card-body" style="margin-top:8px">Approved {fmt(seller.approvedAt)}.</div>
+              )}
+
+              {/* A refusal without a recorded reason cannot answer "why?" a year
+                  later. The federation records one for every decision, and this
+                  is where the seller reads it. */}
+              {(seller.status === 'rejected' || seller.status === 'approved') && seller.decisionReason && (
+                <div class="card-body" style="margin-top:8px">
+                  <span class="text-muted">The federation recorded:</span> {seller.decisionReason}
+                </div>
+              )}
+
+              {seller.status === 'suspended' && (
+                <div class="card-body" style="margin-top:8px">
+                  <span class="text-muted">Reason recorded {fmt(seller.suspendedAt)}:</span>{' '}
+                  {seller.suspendedReason || 'The federation recorded no reason against this suspension.'}
+                </div>
+              )}
+            </div>
+
+            <div class="card">
+              <div class="card-eyebrow">On the site right now</div>
+              <div class="card-title" style="margin-bottom:8px">{visibleCount} of {listings.length}</div>
+              <div class="card-body">
+                {listings.length === 0
+                  ? 'You have no listings yet.'
+                  : `${visibleCount} of your ${listings.length} listings are visible to the public. ${inReview} are with MMAKF for review.`}
+              </div>
+              <div class="card-body" style="margin-top:10px">
+                An item is public only when MMAKF has approved the seller, approved that item, and the item has not been
+                edited since.
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-eyebrow">Commission and fees</div>
+              <div class="card-body">{COMMISSION_NOT_SET}</div>
+              <div class="card-body" style="margin-top:10px">{LISTING_REVIEW_TURNAROUND_NOT_SET}</div>
+              {seller.commercialDetails?.missing?.length > 0 && (
+                <div class="card-body" style="margin-top:10px">
+                  Not supplied: {seller.commercialDetails.missing.join(', ')}. {SELLER_REQUIREMENTS_NOT_SET}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* GATE ONE, MADE VISIBLE. No create form exists on the page until
+              MMAKF has approved the seller. Not a disabled one — `fetch` cannot
+              read a `disabled` attribute, and a control that is only decoration
+              teaches whoever maintains this that the gate is in the markup. */}
+          {!approved && (
+            <div class="card" style="border-left:3px solid var(--gold-dim)">
+              <div class="card-title" style="font-size:.95rem">There is no listing form on this page yet</div>
+              <div class="card-body">
+                A seller must be approved by MMAKF before creating a listing. The form is absent rather than disabled,
+                because the refusal lives on the server: the same request sent by hand is refused there too.
+              </div>
+              {suspended && listings.length > 0 && (
+                <div class="card-body" style="margin-top:10px">
+                  Your {listings.length} {listings.length === 1 ? 'listing is' : 'listings are'} listed below. They are
+                  withdrawn from public view while the suspension stands, and nothing has been deleted.
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  </section>
+
+  {/* ── The create form ───────────────────────────────────────────────── */}
+  {gate === 'seller' && approved && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head" style="margin-bottom:28px">
+          <div class="eyebrow">Gate two</div>
+          <h2 class="display-2">List an <em class="r">item</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            A new item is created as a draft. It reaches the public only after you submit it and somebody at MMAKF
+            approves that item — being an approved seller is not the same as having an approved listing.
+          </p>
+        </div>
+
+        <form id="createForm" class="card" style="padding:28px">
+          <label class="input-label" for="title">Title</label>
+          <input class="input" type="text" id="title" name="title" required maxlength="200" />
+
+          <label class="input-label" for="description" style="margin-top:14px">Description</label>
+          <textarea class="input" id="description" name="description" rows="4"></textarea>
+
+          <div class="fieldgrid">
+            <div>
+              <label class="input-label" for="category">Category</label>
+              <select class="input" id="category" name="category" required>
+                {LISTING_CATEGORIES.map((c) => <option value={c}>{titleCase(c)}</option>)}
+              </select>
+              <p class="hint">The federation's four categories. There are no others.</p>
+            </div>
+            <div>
+              <label class="input-label" for="priceRupees">Price in rupees</label>
+              <input
+                class="input"
+                type="text"
+                id="priceRupees"
+                name="priceRupees"
+                inputmode="decimal"
+                required
+                placeholder="450.50"
+              />
+              <p class="hint">
+                Rupees and paise, e.g. 450.50. Stored as whole paise — the conversion happens once, on the server.
+              </p>
+            </div>
+          </div>
+
+          <label class="input-label" for="stockQty" style="margin-top:14px">Stock</label>
+          <input class="input" type="number" id="stockQty" name="stockQty" min="0" step="1" value="0" />
+          <p class="hint">
+            Whole units. Changing stock later never sends an approved item back for review — a stock count cannot
+            mislead anybody about what the item is.
+          </p>
+
+          <div id="createErr" role="alert" class="form-err"></div>
+
+          <button type="submit" class="btn btn-primary" style="margin-top:20px;min-height:44px">Create as a draft</button>
+          <p class="hint" style="margin-top:12px">
+            Photographs are added on the item's own page, where the effect of editing an approved item is spelled out.
+          </p>
+        </form>
+      </div>
+    </section>
+  )}
+
+  {/* ── The seller's listings ─────────────────────────────────────────── */}
+  {gate === 'seller' && seller && (
+    <section>
+      <div class="container">
+        <div class="section-head" style="margin-bottom:28px">
+          <div class="eyebrow">Your items</div>
+          <h2 class="display-2">Everything you have <em class="r">listed</em>.</h2>
+          <div class="rule"></div>
+        </div>
+
+        {listings.length === 0 ? (
+          <div class="card">
+            <div class="card-body">
+              You have no listings. {approved
+                ? 'Create one above; it starts as a draft that only you can see.'
+                : 'You will be able to create one once MMAKF has approved this seller account.'}
+            </div>
+          </div>
+        ) : (
+          <div class="card" style="padding:0">
+            <div class="tbl-scroll">
+              <table class="pf-tbl">
+                <thead>
+                  <tr>
+                    <th scope="col">Item</th>
+                    <th scope="col">Category</th>
+                    <th scope="col">Price</th>
+                    <th scope="col">Stock</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">On the public site</th>
+                    <th scope="col">Open</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {listings.map((l: any) => (
+                    <tr>
+                      <td>
+                        <strong>{l.title}</strong>
+                        <div class="text-muted" style="font-size:.74rem">{l.ref}</div>
+                      </td>
+                      <td>{titleCase(l.category)}</td>
+                      <td>{formatINR(l.priceMinor)}</td>
+                      <td>{l.stockQty}</td>
+                      <td>
+                        <span class="pill">{titleCase(l.status)}</span>
+                        {l.status === 'rejected' && l.decisionReason && (
+                          <div class="text-muted" style="font-size:.72rem;margin-top:6px">{l.decisionReason}</div>
+                        )}
+                      </td>
+                      <td>
+                        {/* Computed from the same three conditions as the public
+                            shop, so this column and the shop cannot disagree. */}
+                        {l.publiclyVisible ? (
+                          <span class="pf-vis" data-on="yes">Visible</span>
+                        ) : (
+                          <span class="pf-vis" data-on="no">Not visible</span>
+                        )}
+                        {!l.publiclyVisible && suspended && (
+                          <div class="text-muted" style="font-size:.72rem;margin-top:6px">Withdrawn — seller suspended</div>
+                        )}
+                      </td>
+                      <td><a class="text-gold" href={`/portal/listings/${l.id}`}>Open</a></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p class="tbl-hint" style="padding:0 18px 14px">Scroll the table sideways</p>
+          </div>
+        )}
+
+        {approved && (
+          <div class="card" style="margin-top:22px;border-left:3px solid var(--gold-dim)">
+            <div class="card-title" style="font-size:.95rem">Before you edit an item that is already approved</div>
+            <div class="card-body">
+              Changing an approved item's title, description, category, price or photographs takes it off the public site
+              immediately and sends it back to MMAKF for review. It stays off the site until somebody approves it again.
+            </div>
+            <div class="card-body" style="margin-top:10px">
+              This is deliberate, and it is the whole point of reviewing listings: otherwise a plain gi is approved and
+              then edited into something the federation never saw. Changing the stock count is not an edit of that kind
+              and never disturbs an approval.
+            </div>
+          </div>
+        )}
+
+        {approved && (
+          <form id="withdrawSellerForm" class="card" style="margin-top:22px;padding:24px">
+            <div class="card-eyebrow">Stop selling</div>
+            <label class="input-label" for="withdrawReason" style="margin-top:12px">Reason (optional)</label>
+            <input class="input" type="text" id="withdrawReason" name="reason" maxlength="300" />
+            <p class="hint">
+              Withdrawing takes your items off the public site. Nothing is deleted, and the record of what MMAKF approved
+              stays where it is.
+            </p>
+            <div id="withdrawErr" role="alert" class="form-err"></div>
+            <button type="submit" class="btn btn-ghost" style="margin-top:16px;min-height:44px">
+              Withdraw this account from selling
+            </button>
+          </form>
+        )}
+      </div>
+    </section>
+  )}
+</Base>
+
+<style>
+  /* House convention: every page declares its own alternating section ground. */
+  .bg2 { background: var(--bg-2); }
+
+  .hint {
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.7;
+    margin-top: 7px;
+  }
+
+  .form-err {
+    color: var(--red-2);
+    font-size: 0.85rem;
+    margin-top: 12px;
+    display: none;
+  }
+
+  .fieldgrid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-top: 14px;
+  }
+  @media (max-width: 600px) { .fieldgrid { grid-template-columns: 1fr; } }
+
+  textarea.input { min-height: 96px; resize: vertical; font-family: inherit; }
+
+  .pf-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 860px;
+    font-size: 0.86rem;
+  }
+  .pf-tbl th {
+    text-align: left;
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .pf-tbl td {
+    padding: 15px 18px;
+    border-bottom: 1px solid var(--border);
+    color: var(--off-white);
+    vertical-align: top;
+  }
+  .pf-tbl tr:last-child td { border-bottom: 0; }
+
+  /* Three tones, because "waiting" and "refused" are not the same news. The
+     SENTENCE beside it carries the distinction; the colour cannot and does not
+     try to. */
+  .pf-standing {
+    font-family: var(--font-display); font-size: .68rem;
+    letter-spacing: .16em; text-transform: uppercase;
+    display: inline-flex; padding: 5px 13px; border-radius: 100px;
+    border: 1px solid var(--border-2); color: var(--muted);
+  }
+  .pf-standing[data-tone='good'] { color: var(--gold-2); border-color: var(--gold-dim); }
+  .pf-standing[data-tone='wait'] { color: var(--off-white); }
+  .pf-standing[data-tone='bad']  { color: var(--red-2); border-color: var(--red-3); }
+
+  .pf-vis {
+    font-family: var(--font-display); font-size: .6rem;
+    letter-spacing: .16em; text-transform: uppercase;
+    display: inline-flex; padding: 4px 10px; border-radius: 100px;
+    border: 1px solid var(--border-2); color: var(--muted);
+    white-space: nowrap;
+  }
+  .pf-vis[data-on='yes'] { color: var(--gold-2); border-color: var(--gold-dim); }
+  .pf-vis[data-on='no']  { color: var(--off-white); }
+
+  @media (max-width: 640px) {
+    .btn { width: 100%; }
+  }
+</style>
+
+<script>
+  // Every control here is a convenience. The refusal that matters is the one
+  // /api/marketplace makes after this script has stopped being involved, and
+  // whatever the server says is what gets shown — this file never guesses at a
+  // reason it was not given.
+
+  function show(el: HTMLElement | null, message: string) {
+    if (!el) return;
+    el.textContent = message;
+    el.style.display = 'block';
+  }
+
+  async function post(action: string, body: Record<string, unknown>) {
+    const response = await fetch(`/api/marketplace/${action}`, {
+      method: 'POST',
+      // JSON, so the site's CSRF middleware accepts it. A cross-site form
+      // cannot produce this content type without a preflight nobody answers.
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    return { ok: response.ok && data.ok === true, data };
+  }
+
+  function wire(
+    formId: string,
+    errId: string,
+    busyLabel: string,
+    collect: () => Record<string, unknown>,
+    action: string,
+  ) {
+    const form = document.getElementById(formId) as HTMLFormElement | null;
+    if (!form) return;
+    const err = document.getElementById(errId) as HTMLElement | null;
+    const button = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+    const original = button.textContent;
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (err) err.style.display = 'none';
+      button.disabled = true;
+      button.textContent = busyLabel;
+
+      try {
+        const { ok, data } = await post(action, collect());
+        if (ok) {
+          window.location.reload();
+          return;
+        }
+        show(err, data.error || 'That could not be recorded.');
+      } catch {
+        show(err, 'The request could not be sent. Check your connection and try again.');
+      }
+      button.disabled = false;
+      button.textContent = original;
+    });
+  }
+
+  const val = (id: string): string => {
+    const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null;
+    return el ? el.value.trim() : '';
+  };
+
+  // Sign-in.
+  const signIn = document.getElementById('signInForm') as HTMLFormElement | null;
+  if (signIn) {
+    const err = document.getElementById('loginErr') as HTMLElement | null;
+    const button = signIn.querySelector('button[type="submit"]') as HTMLButtonElement;
+    signIn.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (err) err.style.display = 'none';
+      button.disabled = true;
+      button.textContent = 'Signing in…';
+      try {
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: val('seller-email'), password: val('seller-password') }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.ok) { window.location.reload(); return; }
+        show(err, data.error || 'Sign-in failed.');
+      } catch {
+        show(err, 'The sign-in request could not be sent. Check your connection and try again.');
+      }
+      button.disabled = false;
+      button.textContent = 'Sign in';
+    });
+  }
+
+  wire('applyForm', 'applyErr', 'Sending…', () => ({
+    tradingName: val('tradingName'),
+    contactEmail: val('contactEmail'),
+    contactPhone: val('contactPhone'),
+    addressLine: val('addressLine'),
+    city: val('city'),
+    postcode: val('postcode'),
+    stateUnitId: val('stateUnitId'),
+    gstin: val('gstin'),
+    pan: val('pan'),
+    bankAccountName: val('bankAccountName'),
+    bankAccountNumber: val('bankAccountNumber'),
+    bankIfsc: val('bankIfsc'),
+  }), 'seller/apply');
+
+  // NOTE THE ABSENCE OF `priceMinor`. The form sends rupees exactly as they
+  // were typed; the one conversion to paise lives in the API route.
+  wire('createForm', 'createErr', 'Creating…', () => ({
+    title: val('title'),
+    description: val('description'),
+    category: val('category'),
+    priceRupees: val('priceRupees'),
+    stockQty: Number(val('stockQty') || '0'),
+  }), 'listing/create');
+
+  wire('withdrawSellerForm', 'withdrawErr', 'Withdrawing…', () => ({
+    reason: val('withdrawReason'),
+  }), 'seller/withdraw');
+</script>

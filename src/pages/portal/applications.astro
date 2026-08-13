@@ -1,0 +1,373 @@
+---
+// /portal/applications — apply for a role, and see where your applications stand.
+//
+// THE FEDERATION'S SENTENCE THIS SURFACE SERVES: "If onboarded they can list
+// their items after approval by our people in admin." Onboarding starts here.
+// Anyone may ask. Nobody is granted anything by asking.
+//
+// WHAT THIS PAGE REFUSES TO DECIDE
+// ────────────────────────────────
+// It never says who QUALIFIES. There is no minimum grade for an instructor, no
+// licence prerequisite for a referee, no years-of-experience field — because
+// MMAKF has published none of those and inventing one would turn this page into
+// a policy the federation never wrote. The evidence box is free-form, the note
+// beside it is EVIDENCE_REQUIREMENTS_NOT_SET printed verbatim, and a human at
+// MMAKF reads what was attached and decides.
+//
+// It also never promises a turnaround. REVIEW_TURNAROUND_NOT_SET is printed
+// instead, because nobody at the federation has committed to one and a page
+// that says "within 48 hours" commits them to it.
+//
+// STRUCTURAL NOTES
+// ────────────────
+//  · applyForRole() and withdrawApplication() take NO applicant id. The
+//    applicant is ctx.principal.userId. There is no field on this form, hidden
+//    or otherwise, that says whose application this is — so applying on
+//    somebody else's behalf is not "checked", it is unrepresentable.
+//  · myApplications() takes no id either, so this table cannot be asked about
+//    another person's applications.
+//  · The withdraw form does carry an application id, and that is safe for the
+//    same reason: withdrawApplication() matches on the caller's own user id in
+//    the WHERE clause, so an id belonging to somebody else simply matches no
+//    row. Knowing an id is never sufficient.
+//  · Success redirects (POST/redirect/GET) so a refresh cannot file a second
+//    application. Failures render in place, because the module's own refusal is
+//    the most useful thing on the screen and a redirect would lose it.
+
+import Base from '@/layouts/Base.astro';
+import { identify, clientIp } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import type { Role, ScopeType } from '@/lib/rbac';
+import {
+  applyForRole, withdrawApplication, myApplications,
+  APPLICABLE_ROLES, EVIDENCE_REQUIREMENTS_NOT_SET, REVIEW_TURNAROUND_NOT_SET,
+} from '@/db/onboarding';
+import { readableError, fmtDateTime, scopeNames, scopeLabel, titleCase, field, intField, unitOptions } from './_lib';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+const attributable = Boolean(identity) && identity!.userId != null;
+
+let formError: string | null = null;
+
+// ─── Acts ───────────────────────────────────────────────────────────────────
+//
+// Authorisation is not re-implemented here. Both calls below go to the module,
+// which resolves the applicant from the principal and refuses on its own terms;
+// this page's only job is to hand over what the person typed and print what
+// came back.
+
+if (Astro.request.method === 'POST') {
+  if (!configured || !principal) {
+    formError = 'You are not signed in, so nothing was submitted.';
+  } else {
+    const form = await Astro.request.formData();
+    const intent = String(form.get('intent') ?? '');
+    const ctx = { principal, ip: clientIp(Astro.request) };
+
+    try {
+      if (intent === 'apply') {
+        // NOT validated against APPLICABLE_ROLES here. applyForRole() refuses an
+        // administrative role with a sentence written for the person who hit it,
+        // and a second copy of that check on this page would be a second place
+        // for the two lists to disagree. The cast hands the module a string it
+        // is expecting to have to refuse.
+        const requestedRole = String(form.get('requestedRole') ?? '') as Role;
+
+        // "state:7" | "national". Parsed, never trusted: applyForRole() proves
+        // the unit exists, and reviewApplication() later takes the scope from
+        // the stored row rather than from anything a request supplies.
+        const rawScope = String(form.get('scope') ?? 'national');
+        const [scopeTypeRaw, scopeIdRaw] = rawScope.split(':');
+        const scopeType = scopeTypeRaw as ScopeType;
+        const scopeId = scopeIdRaw ? Number(scopeIdRaw) : null;
+
+        const note = field(form, 'evidence');
+        await applyForRole(db(), ctx, {
+          requestedRole,
+          scopeType,
+          scopeId: Number.isSafeInteger(scopeId as number) ? scopeId : null,
+          // Free-form, and stored as the applicant wrote it. No field here is
+          // required, and none is interpreted as meeting a requirement.
+          evidence: note ? { note } : null,
+        });
+        return Astro.redirect('/portal/applications?done=applied', 303);
+      } else if (intent === 'withdraw') {
+        const applicationId = intField(form, 'applicationId');
+        if (applicationId == null) {
+          formError = 'That withdrawal did not name an application.';
+        } else {
+          await withdrawApplication(db(), ctx, applicationId, field(form, 'reason'));
+          return Astro.redirect('/portal/applications?done=withdrawn', 303);
+        }
+      } else {
+        formError = 'Unknown action.';
+      }
+    } catch (err: any) {
+      formError = readableError(err, 'Your application');
+    }
+  }
+}
+
+// ─── Read ───────────────────────────────────────────────────────────────────
+
+let applications: any[] = [];
+let units: { options: any[]; capped: boolean } = { options: [], capped: false };
+let names = new Map<string, string>();
+let loadError: string | null = null;
+
+if (configured && principal && attributable) {
+  try {
+    applications = await myApplications(db(), principal);
+    units = await unitOptions(db());
+    names = await scopeNames(db(), applications.map((a) => ({ scopeType: a.scopeType, scopeId: a.scopeId })));
+  } catch (err: any) {
+    loadError = readableError(err, 'Your applications');
+  }
+}
+
+const done = Astro.url.searchParams.get('done');
+const OPEN = new Set(['submitted', 'under_review']);
+const flash =
+  done === 'applied'
+    ? 'Your application has been recorded. It is open until somebody at MMAKF decides it.'
+    : done === 'withdrawn'
+      ? 'That application has been withdrawn. The record is kept — withdrawn, not deleted.'
+      : null;
+---
+
+<Base
+  title="Role applications — MMAKF portal"
+  description="Apply for a coaching, officiating, examining or membership role with MMAKF, and see where your applications stand."
+>
+  <section>
+    <div class="container">
+      <div class="section-head" style="margin-bottom:32px">
+        <div class="eyebrow">Portal</div>
+        <h1 class="display-2" style="margin-top:14px">Role <em class="r">applications</em>.</h1>
+        <div class="rule"></div>
+        <p class="lead">
+          Anyone may apply. Nobody is granted anything by applying — a person at MMAKF reads the evidence and
+          decides, and only then does the role binding exist.
+        </p>
+      </div>
+
+      {!configured && (
+        <div class="card">
+          <div class="card-body">
+            Applications are held in the federation's database, and none is configured for this deployment. No form is
+            offered, because it could not record anything.
+          </div>
+        </div>
+      )}
+
+      {configured && !identity && (
+        <div class="card">
+          <div class="card-title" style="margin-bottom:8px">Sign in first.</div>
+          <div class="card-body">
+            An application belongs to an account. <a class="text-gold" href="/portal">Sign in</a>, or
+            <a class="text-gold" href="/portal/register"> create an account</a> — which grants nothing on its own.
+          </div>
+        </div>
+      )}
+
+      {configured && identity && !attributable && (
+        <div class="card">
+          <div class="card-title" style="margin-bottom:8px">This credential belongs to no person.</div>
+          <div class="card-body">
+            You are signed in with a shared federation credential. An application is made by an individual and
+            conferred on an individual, so a shared credential has none and can make none. Sign in with your own
+            account to apply.
+          </div>
+        </div>
+      )}
+
+      {configured && attributable && (
+        <>
+          {flash && (
+            <div class="card" role="status" style="border-left:3px solid var(--gold-dim);margin-bottom:20px">
+              <div class="card-body">{flash}</div>
+            </div>
+          )}
+
+          {formError && (
+            <div class="card" role="alert" style="border-left:3px solid var(--red);margin-bottom:20px">
+              <div class="card-title" style="font-size:.95rem">That was refused</div>
+              <div class="card-body">{formError}</div>
+            </div>
+          )}
+
+          {loadError && (
+            <div class="card" role="alert" style="border-left:3px solid var(--red);margin-bottom:20px">
+              <div class="card-body">{loadError}</div>
+            </div>
+          )}
+
+          <div class="card" style="margin-bottom:28px">
+            <div class="card-eyebrow">Your applications</div>
+            {applications.length === 0 ? (
+              <div class="card-body">You have not applied for anything yet.</div>
+            ) : (
+              <div style="margin-top:14px">
+                <div class="tbl-scroll">
+                  <table class="p-tbl">
+                    <caption class="sr-only">Every role application made from this account</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Reference</th>
+                        <th scope="col">Role</th>
+                        <th scope="col">Scope</th>
+                        <th scope="col">Status</th>
+                        <th scope="col">Submitted</th>
+                        <th scope="col">Decision</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {applications.map((a) => (
+                        <tr>
+                          <td class="p-mono">{a.ref}</td>
+                          <td><strong>{titleCase(a.requestedRole)}</strong></td>
+                          <td>{scopeLabel(names, a.scopeType, a.scopeId)}</td>
+                          <td><span class="pill">{titleCase(a.status)}</span></td>
+                          <td>{fmtDateTime(a.submittedAt)}</td>
+                          <td>
+                            {a.reviewedAt ? fmtDateTime(a.reviewedAt) : OPEN.has(a.status) ? 'Not yet decided' : '—'}
+                            {a.decisionReason && (
+                              <div class="text-muted" style="font-size:.76rem;margin-top:6px;line-height:1.6">
+                                {a.decisionReason}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p class="tbl-hint">Scroll the table sideways</p>
+
+                {applications.some((a) => OPEN.has(a.status)) && (
+                  <details style="margin-top:16px">
+                    <summary>Withdraw an open application</summary>
+                    <div class="card-body" style="margin-top:10px">
+                      Withdrawing does not delete the record. It is marked withdrawn, with your reason, and stays in
+                      the federation's history.
+                    </div>
+                    {applications.filter((a) => OPEN.has(a.status)).map((a) => (
+                      <form method="POST" action="/portal/applications" class="p-form">
+                        <input type="hidden" name="intent" value="withdraw" />
+                        <input type="hidden" name="applicationId" value={a.id} />
+                        <label class="input-label" for={`wd-${a.id}`}>
+                          Why are you withdrawing {a.ref} ({titleCase(a.requestedRole)})?
+                        </label>
+                        <input class="input" type="text" id={`wd-${a.id}`} name="reason" maxlength="300" placeholder="Optional" />
+                        <button type="submit" class="btn btn-ghost" style="margin-top:10px">Withdraw {a.ref}</button>
+                      </form>
+                    ))}
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div class="card">
+            <div class="card-eyebrow">Apply for a role</div>
+            <div class="card-body" style="margin-bottom:16px">
+              <p>
+                These six are the roles a person may put themselves forward for: what somebody does on the mat, at the
+                table or in the ring. Every other role in the federation is administrative authority over other
+                people's records, and is conferred by MMAKF rather than requested through a form.
+              </p>
+              <p style="margin-top:10px">{EVIDENCE_REQUIREMENTS_NOT_SET}</p>
+              <p style="margin-top:10px" class="text-muted">{REVIEW_TURNAROUND_NOT_SET}</p>
+            </div>
+
+            <form method="POST" action="/portal/applications" class="p-form">
+              <input type="hidden" name="intent" value="apply" />
+
+              <label class="input-label" for="ap-role">Role applied for</label>
+              <select class="input" id="ap-role" name="requestedRole" required>
+                {APPLICABLE_ROLES.map((r) => <option value={r}>{titleCase(r)}</option>)}
+              </select>
+
+              <label class="input-label" for="ap-scope" style="margin-top:14px">Where you are applying to act</label>
+              <select class="input" id="ap-scope" name="scope" required>
+                <option value="national">National — the whole federation</option>
+                {units.options.map((u) => <option value={`${u.scopeType}:${u.scopeId}`}>{u.label}</option>)}
+              </select>
+              <p class="text-muted" style="font-size:.74rem;margin-top:6px">
+                A reviewer can only decide applications inside their own scope, and can only bind the role inside that
+                same scope. Applying nationally does not widen anybody's authority to approve it.
+                {units.options.length === 0 && ' No units are recorded in this deployment yet, so only a national application can be made.'}
+              </p>
+
+              <label class="input-label" for="ap-evidence" style="margin-top:14px">Evidence (optional)</label>
+              <textarea
+                class="input"
+                id="ap-evidence"
+                name="evidence"
+                rows="5"
+                placeholder="Grades, licences, years teaching, the dojo you train at, anyone at MMAKF who knows your work — whatever supports the application."
+              ></textarea>
+              <p class="text-muted" style="font-size:.74rem;margin-top:6px">
+                Stored exactly as you write it, and read by a person. Nothing here is required, and nothing here is
+                treated as meeting a requirement.
+              </p>
+
+              <button type="submit" class="btn btn-primary" style="margin-top:18px;min-height:44px">
+                Submit application
+              </button>
+            </form>
+          </div>
+
+          <p class="body-txt" style="margin-top:24px">
+            <a class="text-gold" href="/portal">Back to the portal</a>
+          </p>
+        </>
+      )}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .p-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 820px;
+    font-size: 0.86rem;
+  }
+  .p-tbl th {
+    text-align: left;
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .p-tbl td {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    color: var(--off-white);
+    vertical-align: top;
+  }
+  .p-tbl tr:last-child td { border-bottom: 0; }
+  .p-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; }
+
+  .p-form { margin-top: 16px; }
+  .p-form + .p-form { border-top: 1px solid var(--border); padding-top: 16px; }
+
+  select.input { appearance: none; }
+  textarea.input { min-height: 120px; line-height: 1.7; resize: vertical; }
+
+  summary { cursor: pointer; color: var(--gold-2); font-size: 0.86rem; }
+
+  @media (max-width: 640px) {
+    .btn { width: 100%; }
+  }
+</style>

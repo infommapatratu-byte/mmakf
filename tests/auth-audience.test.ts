@@ -8,6 +8,13 @@ import {
   getUnitSession,
 } from '../src/lib/auth';
 
+// Pin the signing key rather than leaning on the development fallback, which
+// production now refuses outright (P0-2). The expiry case below has to forge
+// under the key the module actually signs with, or it would pass for the wrong
+// reason — a bad signature rather than an expired timestamp.
+process.env.ADMIN_SESSION_SECRET = 'test-secret-for-auth-audience-suite';
+const SECRET = process.env.ADMIN_SESSION_SECRET;
+
 const value = (setCookie: string) => setCookie.split(';')[0];          // name=token
 const token = (setCookie: string) => value(setCookie).split('=')[1];   // token only
 
@@ -47,10 +54,7 @@ describe('session audience separation (P0-1)', () => {
     // Pre-fix admin payload shape: {t: <ms>} signed with the raw secret.
     const crypto = require('node:crypto');
     const payload = Buffer.from(JSON.stringify({ t: Date.now() })).toString('base64url');
-    const legacySig = crypto
-      .createHmac('sha256', 'dev-secret-change-me')
-      .update(payload)
-      .digest('base64url');
+    const legacySig = crypto.createHmac('sha256', SECRET).update(payload).digest('base64url');
     expect(isAuthenticated(`mmakf_admin=${payload}.${legacySig}`)).toBe(false);
   });
 
@@ -67,7 +71,7 @@ describe('session audience separation (P0-1)', () => {
   it('expired session is rejected', () => {
     const crypto = require('node:crypto');
     const key = crypto
-      .createHmac('sha256', 'dev-secret-change-me')
+      .createHmac('sha256', SECRET)
       .update('mmakf:session:admin:v2')
       .digest();
     const old = Buffer.from(

@@ -57,7 +57,15 @@ export type Action =
   // training requests. NOT folded into 'unit:*' — a state unit is part of the
   // federation and a school that buys a term of karate is a client, and giving
   // one action authority over both puts a customer inside the hierarchy.
-  | 'engagement:read' | 'engagement:write';
+  | 'engagement:read' | 'engagement:write'
+  // The marketplace review queues: seller applications and item listings.
+  // NOT folded into 'content:write' — content authority is national in this
+  // model, and folding review into it would mean no scoped administrator could
+  // ever approve a seller in their own state. NOT folded into 'finance:*'
+  // either: approving what may be offered for sale is an editorial and
+  // standing decision, and a finance officer reconciling settlements has no
+  // business deciding whether a gi may be advertised.
+  | 'marketplace:read' | 'marketplace:review' | 'marketplace:suspend';
 
 export interface Binding {
   role: Role;
@@ -99,6 +107,7 @@ const NATIONAL_FULL: Action[] = [
   'audit:read',
   'user:read', 'user:write', 'role:grant',
   'engagement:read', 'engagement:write',
+  'marketplace:read', 'marketplace:review', 'marketplace:suspend',
 ];
 
 const GRANTS: Record<Role, Action[]> = {
@@ -145,6 +154,13 @@ const GRANTS: Record<Role, Action[]> = {
     'competition:read', 'competition:write', 'result:read', 'result:enter',
     'content:read',
     'engagement:read', 'engagement:write',
+    // Scoped by their binding, so a state administrator reviews the sellers and
+    // listings of their own state and no other. Note this does NOT include
+    // 'role:grant': a state administrator still cannot confer a role, so the
+    // role-application queue is empty for them. That is the existing authority
+    // model, not a decision taken here — see reviewApplication() in
+    // src/db/onboarding.ts, which says so out loud rather than widening it.
+    'marketplace:read', 'marketplace:review', 'marketplace:suspend',
   ],
 
   DISTRICT_ADMIN: [

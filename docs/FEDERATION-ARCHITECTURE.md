@@ -471,23 +471,73 @@ automated one.
 1. **Create the database.** Any Postgres provider works; Supabase is the recommendation
    (supabase.com → New project → region **Mumbai / ap-south-1**, closest to the federation's
    users). Set a strong database password and store it in the federation's password manager, not
-   in a message.
-2. **Collect two connection strings** from Settings → Database:
+   in a message. **Record the date the project was created** in the same place — the provider's
+   defaults for step 2 have not been the same in every year, so the age of the project is part of
+   the answer to what it is currently doing.
+2. **Close the Data API, before there is anything in it.** A managed Postgres can serve these
+   tables over HTTP without the application taking any part in it. Supabase's PostgREST layer
+   assumes the role `anon` for anyone holding the project's publishable key, and `authenticated`
+   for anyone its Auth service has signed in; if the project carries the default-privilege grant
+   that hands those roles new tables in `public`, then step 5 creates the entire federation
+   register already published — persons, guardians, safeguarding cases, payments, audit events.
+
+   MMAKF uses **no Supabase SDK and no publishable key**. The driver is `postgres.js` over TCP
+   (§1.1), so PostgREST is attack surface with nothing on the other side of it. In the dashboard:
+   **Project Settings → Data API → turn the Data API off**, and leave *Automatically expose new
+   tables* unticked wherever the project offers it.
+
+   Turning it off in the dashboard is the switch; migration `0010_data_api_lockdown.sql`
+   is the latch. It revokes every privilege those two roles hold in `public` **and** the standing
+   default-privilege grant that would otherwise re-expose each table a later migration adds. It is
+   guarded on the roles existing, so on any other provider it applies as a no-op.
+3. **Collect two connection strings** from Settings → Database:
    - **Transaction pooler** (port `6543`) → this is the app's `DATABASE_URL`. Serverless functions
      open a connection per invocation, which a direct connection limit cannot absorb.
    - **Direct connection** (port `5432`) → used only to run migrations. DDL through a transaction
      pooler is unreliable.
-3. **Set the app variable in Vercel:** project `mmakf` → Settings → Environment Variables →
+4. **Set the app variable in Vercel:** project `mmakf` → Settings → Environment Variables →
    `DATABASE_URL` = the pooler string, applied to Production, Preview and Development. Redeploy so
    functions pick it up.
-4. **Run migrations from a workstation** using the *direct* string:
+5. **Run migrations from a workstation** using the *direct* string:
    ```
    DATABASE_URL="postgresql://...:5432/postgres" npm run db:status   # shows what would run
    DATABASE_URL="postgresql://...:5432/postgres" npm run db:migrate  # applies, then lists tables
    ```
    Never commit either string. `.env.local` is gitignored if you prefer a file.
-5. **Confirm from production:** `curl https://www.mmakf.in/api/health` must report
-   `"database":"ok"`. While it reports `"not_configured"`, step 3 has not taken effect; `"error"`
+6. **Prove the register is not published.** Step 2 is a dashboard setting and a migration; this is
+   the database's own answer. In the SQL editor (or through `psql` on the direct string):
+
+   ```sql
+   -- Every privilege a PostgREST identity holds on a federation table.
+   -- MUST return zero rows.
+   SELECT c.relname AS table_name,
+          pg_get_userbyid(a.grantee) AS role,
+          a.privilege_type
+     FROM pg_class c
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     CROSS JOIN LATERAL aclexplode(c.relacl) a
+    WHERE n.nspname = 'public'
+      AND c.relkind = 'r'
+      AND pg_get_userbyid(a.grantee) IN ('anon', 'authenticated');
+
+   -- The standing instruction that would re-expose every table added later.
+   -- MUST also return zero rows.
+   SELECT d.defaclobjtype, pg_get_userbyid(a.grantee) AS role, a.privilege_type
+     FROM pg_default_acl d
+     CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+    WHERE pg_get_userbyid(a.grantee) IN ('anon', 'authenticated');
+   ```
+
+   Both are what migration `0010` makes true, so this is a confirmation rather than a hope. A
+   non-zero count means the migration did not run, or something re-granted afterwards; do not
+   proceed to step 7 until both are empty. (`anon` or `authenticated` not existing at all is the
+   normal answer on a non-Supabase provider, and the queries return nothing.)
+
+   No RLS policies are involved and none are wanted here: enforcement is the application policy
+   layer (`src/lib/rbac.ts`), and revoking the grant is the control that matches it. Writing 112
+   tables of policy for an interface the application never speaks would be work in the wrong place.
+7. **Confirm from production:** `curl https://www.mmakf.in/api/health` must report
+   `"database":"ok"`. While it reports `"not_configured"`, step 4 has not taken effect; `"error"`
    means the URL is set but unreachable — check the pooler string and that the password is
    URL-encoded.
 

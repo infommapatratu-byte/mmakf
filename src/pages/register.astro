@@ -1,0 +1,388 @@
+---
+// /register — create an MMAKF account.
+//
+// IT WORKS WITH JAVASCRIPT OFF, and not as a fallback: there is no script on
+// this page at all. The form is a plain POST back to this same URL and the
+// server renders the answer. A federation site is read on a cheap Android
+// phone on a bad connection, in a dojo with no wifi, and a sign-up that needs
+// 40kB of JavaScript to run before it will accept an email address is a sign-up
+// that does not work for the people this federation is for.
+//
+// WHY IT POSTS TO ITSELF RATHER THAN TO /api/auth/register. The CSRF middleware
+// requires `application/json` on every /api/ path — a real control, because it
+// is what a cross-site form cannot send without a preflight we never answer. A
+// form without JavaScript can only send `application/x-www-form-urlencoded`.
+// So the form posts here. The Origin check in the same middleware still applies
+// (it is not scoped to /api/), so this page is no less CSRF-protected than the
+// endpoint; it simply satisfies the second rule differently.
+//
+// THERE IS STILL EXACTLY ONE HANDLER. This page reads the form encoding and
+// then calls submitRegistration() — the same function POST /api/auth/register
+// calls, carrying the rate limit, the validation, the timing equalisation and
+// the deliberately identical answer for "created" and "already existed". A
+// second copy of that logic here is how one of the two ends up weaker; the
+// precedent is /application.astro, which calls the GET handler of
+// /api/application rather than repeating its constant-time compare.
+//
+// NO IDENTIFIER IS ACCEPTED. There is nothing to identify — this page creates
+// an account, it does not read one. When somebody who is ALREADY signed in
+// loads it, whose account they hold comes from identify() and the cookie, never
+// from the URL, exactly as /my/index.astro resolves the member it shows.
+//
+// WHAT IT PROMISES: nothing. An account is not a membership, not a licence and
+// not an authority. That sentence is on the page in the first screenful,
+// because a person who signs up and lands in an empty portal with no
+// explanation concludes the site is broken — and then writes to the office.
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { identify } from '@/lib/session';
+import { isConfigured } from '@/db';
+import { submitRegistration, statusFor, type RegistrationOutcome } from './api/auth/register';
+import { APPLICABLE_ROLES } from '@/db/onboarding';
+
+export const prerender = false;
+
+// The page echoes an address that was just typed and, when signed in, the
+// caller's own email. Neither belongs in a shared cache.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+const identity = isConfigured() ? await identify(Astro.request.headers.get('cookie')) : null;
+
+let outcome: RegistrationOutcome | null = null;
+// Kept so the form can be re-rendered with what the person typed rather than
+// making them start again. The password is NEVER echoed back into the markup.
+let typedEmail = '';
+let typedName = '';
+
+if (Astro.request.method === 'POST') {
+  let form: FormData | null = null;
+  try {
+    form = await Astro.request.formData();
+  } catch {
+    form = null;
+  }
+
+  if (!form) {
+    outcome = { kind: 'invalid', field: null, message: 'That form could not be read. Please try again.' };
+  } else {
+    typedEmail = String(form.get('email') ?? '').trim();
+    typedName = String(form.get('displayName') ?? '').trim();
+    outcome = await submitRegistration(Astro.request, {
+      email: typedEmail,
+      password: String(form.get('password') ?? ''),
+      confirm: String(form.get('confirm') ?? ''),
+      displayName: typedName,
+    });
+  }
+
+  Astro.response.status = statusFor(outcome);
+  if (outcome.kind === 'rate_limited') {
+    Astro.response.headers.set('Retry-After', String(outcome.retryAfterSeconds));
+  }
+  // A refusal must not be kept by anything, and neither must the acceptance.
+  Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+}
+
+const accepted = outcome?.kind === 'accepted';
+const problem = outcome && outcome.kind !== 'accepted' ? outcome : null;
+const badField = problem?.kind === 'invalid' ? problem.field : null;
+
+// Shown so the page can say what an account is for without inventing a
+// requirement for any of it. The list comes from the module, not from here.
+const applicable = APPLICABLE_ROLES.join(', ');
+---
+
+<Base
+  title="Create an MMAKF account"
+  description="Create an account with the Modern Martial Arts Karate-Do Federation of India. An account carries no authority in the federation until MMAKF approves an application."
+>
+  <PageHero
+    eyebrow="Accounts"
+    title={`Create an <em class="r">account</em>.`}
+    lead="An account is how the federation knows which record is yours. It is not a membership, not a licence and not an appointment — those are decisions MMAKF takes about a person, and an account is only where the answer arrives."
+  />
+
+  <section>
+    <div class="container reg-grid">
+      {/* ── The form, or the answer to the last post ─────────────────────── */}
+      <div>
+        {identity && !accepted && (
+          <div class="card" style="margin-bottom:24px">
+            <div class="card-eyebrow">Already signed in</div>
+            <div class="card-body">
+              This browser is already signed in to MMAKF. You do not need a second account — and a second account would
+              hold no more authority than the first, because accounts hold none.
+              <span style="display:block;margin-top:10px">
+                Go to <a class="text-gold" href="/my">your member area</a>, or
+                <a class="text-gold" href="/join"> apply to the federation</a>.
+              </span>
+            </div>
+          </div>
+        )}
+
+        {accepted && outcome?.kind === 'accepted' && (
+          <div class="card acc-ok" role="status">
+            <div class="card-eyebrow">Registration processed</div>
+            <h2 class="card-title" style="font-size:1.05rem;margin-bottom:10px">Now sign in.</h2>
+            <p class="card-body">{outcome.message}</p>
+            <div style="margin-top:20px">
+              <a class="btn btn-primary" href={outcome.nextHref}>Sign in</a>
+              <a class="btn btn-ghost" href="/join" style="margin-left:10px">See what you can apply for</a>
+            </div>
+            <p class="card-body" style="margin-top:18px">
+              If you cannot sign in with the password you just chose, that address already had an account and its own
+              password still applies. Nobody but the account holder can be told which of the two happened, which is
+              deliberate — write to <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a> and the office
+              will help.
+            </p>
+          </div>
+        )}
+
+        {!accepted && (
+          <form method="post" action="/register" class="card acc-form" novalidate>
+            <div class="card-eyebrow">New account</div>
+            <h2 class="blk-h">Your details</h2>
+
+            {problem && (
+              <p class="form-banner" id="reg-error" role="alert">{problem.message}</p>
+            )}
+
+            <div class="acc-field">
+              <label class="input-label" for="reg-email">Email address <span class="req" aria-hidden="true">*</span></label>
+              <input
+                class="input"
+                type="email"
+                id="reg-email"
+                name="email"
+                value={typedEmail}
+                required
+                maxlength="254"
+                autocomplete="email"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck="false"
+                aria-describedby={badField === 'email' ? 'reg-email-help reg-error' : 'reg-email-help'}
+                aria-invalid={badField === 'email' ? 'true' : undefined}
+              />
+              <p class="field-help" id="reg-email-help">
+                This is the address you will sign in with. The federation sends no verification message to it — no email
+                transport is configured — so an address you mistype simply will not sign in.
+              </p>
+            </div>
+
+            <div class="acc-field">
+              <label class="input-label" for="reg-password">Password <span class="req" aria-hidden="true">*</span></label>
+              <input
+                class="input"
+                type="password"
+                id="reg-password"
+                name="password"
+                required
+                minlength="12"
+                maxlength="256"
+                autocomplete="new-password"
+                aria-describedby={badField === 'password' ? 'reg-password-help reg-error' : 'reg-password-help'}
+                aria-invalid={badField === 'password' ? 'true' : undefined}
+              />
+              <p class="field-help" id="reg-password-help">
+                At least 12 characters. Length is what resists cracking, so there is no rule about capitals or symbols —
+                a phrase you can remember is stronger than <span class="mono">Passw0rd!</span> and easier to type on a
+                phone. Paste from a password manager works.
+              </p>
+            </div>
+
+            <div class="acc-field">
+              <label class="input-label" for="reg-confirm">Repeat the password <span class="req" aria-hidden="true">*</span></label>
+              <input
+                class="input"
+                type="password"
+                id="reg-confirm"
+                name="confirm"
+                required
+                maxlength="256"
+                autocomplete="new-password"
+                aria-describedby={badField === 'confirm' ? 'reg-confirm-help reg-error' : 'reg-confirm-help'}
+                aria-invalid={badField === 'confirm' ? 'true' : undefined}
+              />
+              <p class="field-help" id="reg-confirm-help">
+                Checked on the server. There is no password reset by email on this deployment, so a mistyped password is
+                a trip to the federation office.
+              </p>
+            </div>
+
+            <div class="acc-field">
+              <label class="input-label" for="reg-name">Your name <span class="opt">(optional)</span></label>
+              <input
+                class="input"
+                type="text"
+                id="reg-name"
+                name="displayName"
+                value={typedName}
+                maxlength="120"
+                autocomplete="name"
+                aria-describedby="reg-name-help"
+              />
+              <p class="field-help" id="reg-name-help">
+                Recorded against the account so a reviewer reading a later application knows who filed it. It confers
+                nothing, and it does not link the account to a member record — the federation office does that.
+              </p>
+            </div>
+
+            <button type="submit" class="btn btn-primary acc-submit">Create my account</button>
+
+            <p class="field-help" style="margin-top:16px">
+              Already have one? <a class="text-gold" href="/my">Sign in</a>.
+            </p>
+          </form>
+        )}
+      </div>
+
+      {/* ── What an account is, stated before anybody signs up ───────────── */}
+      <aside class="acc-aside">
+        <div class="card">
+          <div class="card-eyebrow">Read this first</div>
+          <h2 class="card-title" style="font-size:1rem;margin-bottom:12px">An account grants nothing.</h2>
+          <p class="card-body">
+            Creating an account does not make you a member, a coach, a referee, an official or a seller. A new account
+            holds no authority at all: it can read its own record, and every other page in the federation system refuses
+            it — not because a screen hides a button, but because the authority is genuinely absent.
+          </p>
+          <p class="card-body" style="margin-top:12px">
+            Authority arrives one way. You apply, a person at MMAKF reads the application and decides, and only then does
+            the account hold anything. Until that decision, your portal will look empty. That is the system working, not
+            a fault.
+          </p>
+          <div style="margin-top:18px">
+            <a class="btn btn-gold" href="/join">What you can apply for</a>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:20px">
+          <div class="card-eyebrow">What happens next</div>
+          <ol class="acc-steps">
+            <li><strong>You create an account.</strong> It holds nothing.</li>
+            <li><strong>You apply</strong> for what you actually do — {applicable.toLowerCase()} — or to sell through the
+              federation shop. Each application carries whatever evidence you choose to attach.</li>
+            <li><strong>MMAKF reviews it.</strong> A named person with the authority to confer that role decides, and
+              records a reason either way.</li>
+            <li><strong>If approved</strong>, the account holds that role, in the scope the application named and no
+              wider. If refused, you are told why.</li>
+          </ol>
+          <p class="card-body" style="margin-top:12px">
+            The federation has not set a review turnaround time, so this page does not promise one.
+          </p>
+        </div>
+
+        <div class="card" style="margin-top:20px">
+          <div class="card-eyebrow">Privacy</div>
+          <p class="card-body">
+            Your address and password are all this page stores. Passwords are hashed with scrypt and are never
+            recoverable — not by you, and not by the federation office. No verification email is sent, because this
+            deployment has no email transport; nothing here will tell you to check an inbox for a message that is never
+            coming.
+          </p>
+        </div>
+      </aside>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .reg-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    gap: 44px;
+    align-items: start;
+  }
+  @media (max-width: 980px) {
+    .reg-grid { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+  }
+
+  .acc-form { padding: 30px; }
+  @media (max-width: 480px) { .acc-form { padding: 22px 18px; } }
+
+  .blk-h {
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--white);
+    margin: 10px 0 22px;
+  }
+
+  .acc-field { margin-bottom: 22px; }
+
+  .field-help {
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.65;
+    margin-top: 8px;
+  }
+
+  .req { color: var(--red-2); }
+  .opt {
+    font-family: var(--font-body);
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--muted);
+  }
+
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86em; }
+
+  /* A refusal is announced (role="alert" on the element) and also looks like
+     one. --red-2 is the text-safe red; --red-3 is a hairline only. */
+  .form-banner {
+    border: 1px solid var(--red-3);
+    border-left: 3px solid var(--red);
+    background: var(--card-2);
+    color: var(--red-2);
+    padding: 13px 16px;
+    border-radius: var(--radius);
+    font-size: 0.86rem;
+    line-height: 1.6;
+    margin-bottom: 22px;
+  }
+
+  .acc-ok { border-left: 3px solid var(--gold-dim); padding: 30px; }
+  @media (max-width: 480px) { .acc-ok { padding: 22px 18px; } }
+
+  .acc-submit { width: 100%; min-height: 48px; margin-top: 6px; }
+
+  .acc-steps {
+    counter-reset: step;
+    list-style: none;
+    padding: 0;
+    margin: 4px 0 0;
+  }
+  .acc-steps li {
+    position: relative;
+    padding-left: 34px;
+    margin-bottom: 14px;
+    color: var(--off-white);
+    font-size: 0.88rem;
+    line-height: 1.7;
+  }
+  .acc-steps li::before {
+    counter-increment: step;
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 1px;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--gold-dim);
+    border-radius: 100px;
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    color: var(--gold-2);
+  }
+  .acc-steps strong { color: var(--white); }
+
+  @media (max-width: 620px) {
+    .btn { width: 100%; margin-left: 0 !important; }
+    .btn + .btn { margin-top: 10px; }
+  }
+</style>

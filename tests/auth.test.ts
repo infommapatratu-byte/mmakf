@@ -8,8 +8,12 @@ import {
   checkPassword,
 } from '../src/lib/auth';
 
-// Dev-default secret (no env vars set in test runs)
-const SECRET = 'dev-secret-change-me';
+// Pin the signing key this suite forges with, instead of leaning on the
+// development fallback: production refuses that fallback outright (P0-2), and a
+// suite that shares a worker with one which sets this variable would otherwise
+// be forging under a different key than the module signs with.
+process.env.ADMIN_SESSION_SECRET = 'test-secret-for-auth-suite';
+const SECRET = process.env.ADMIN_SESSION_SECRET;
 
 // Since P0-1 (audience separation) each cookie type signs with a derived key
 // and carries an audience claim `k`. The forge helper mirrors that scheme.

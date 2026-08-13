@@ -1,0 +1,762 @@
+---
+// /admin/onboarding — the queue where authority is conferred, or refused.
+//
+// THE FEDERATION'S SENTENCE THIS SCREEN SERVES: "make sure all should be able
+// to create and access their authorised section only." Creating an account
+// grants nothing. Authority arrives here, when a human being who already holds
+// it decides to pass some of it on, and records why.
+//
+// FOUR THINGS THIS PAGE DOES NOT DO, each of which would be a hole:
+//
+//  1. IT DOES NOT DECIDE ANYTHING ITSELF. Every decision goes through
+//     reviewApplication() in src/db/onboarding.ts, which claims the row with a
+//     conditional UPDATE, refuses self-review against identity, and creates the
+//     binding only through grantRole() + canGrantRole(). This page has no write
+//     of its own and no second path to role_bindings.
+//
+//  2. IT DOES NOT TRUST WHAT IT RENDERED. The Approve control is withheld for a
+//     role the reader cannot grant — that is a convenience — and the POST
+//     handler below re-identifies the caller from the cookie and re-checks
+//     authority before calling the module, which checks it again. A hidden
+//     control is never a control.
+//
+//  3. IT DOES NOT SHOW A REVIEWER THEIR OWN APPLICATION. The module would
+//     refuse the decision (`self_review`), so offering the row would be
+//     offering a button that always errors. The row is removed and the removal
+//     is COUNTED and STATED — see "What this queue is not showing you" — rather
+//     than silently dropped, the same discipline /search uses for `skipped`.
+//
+//  4. IT DOES NOT INVENT A POLICY. What grade, licence or experience qualifies
+//     somebody as a coach or a referee is a federation decision MMAKF has not
+//     published, and neither is a turnaround time. Both print the module's own
+//     "not set" sentence rather than a plausible one.
+//
+// WHY THERE IS NO applicantUserId ANYWHERE IN A REQUEST. The only identifier
+// this page accepts is an application id, and it is never used to decide WHOSE
+// record is read: the queue is filtered in SQL by visibleScopes(principal,
+// 'role:grant'), and the decision re-derives applicant, role and scope from the
+// stored row. The reviewer is always Astro's own session — resolved by
+// identify(), never sent by the browser.
+
+import Base from '@/layouts/Base.astro';
+import { identify, clientIp } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { rateLimit, tooManyRequests } from '@/lib/ratelimit';
+import { ForbiddenError, visibleScopes, type Role } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  applicationQueue,
+  reviewApplication,
+  canReviewApplications,
+  actionsConferredBy,
+  isApplicableRole,
+  isOnboardingError,
+  APPLICABLE_ROLES,
+  EVIDENCE_REQUIREMENTS_NOT_SET,
+  REVIEW_TURNAROUND_NOT_SET,
+} from '@/db/onboarding';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+
+function json(body: unknown, status: number) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+}
+
+/**
+ * OnboardingError code → HTTP status.
+ *
+ * `self_review` and `cannot_grant` are 403 rather than 409: both are refusals
+ * of AUTHORITY, not state clashes, and a caller who reached them went around a
+ * screen that does not offer the control.
+ */
+function statusFor(code: string): number {
+  switch (code) {
+    case 'not_found': return 404;
+    case 'forbidden':
+    case 'self_review':
+    case 'cannot_grant':
+    case 'anonymous_reviewer': return 403;
+    case 'already_decided': return 409;
+    default: return 400;
+  }
+}
+
+// ─── The action ─────────────────────────────────────────────────────────────
+//
+// Handled on the page rather than in a shared API route so that the decision
+// lives beside the queue that offers it: one file to read to know what this
+// screen can do. CSRF is already handled — src/middleware.ts refuses any
+// mutating request that is not same-origin, before this runs.
+
+if (Astro.request.method === 'POST') {
+  const rl = await rateLimit(Astro.request, 'onboarding-decide', 60, 60);
+  if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
+
+  if (!identity) {
+    return json({ error: 'Your session has ended. Sign in again — nothing was changed.' }, 401);
+  }
+  if (!configured) {
+    return json({
+      error: 'The federation database is not configured on this deployment. There is no application register to decide against.',
+      code: 'unavailable',
+    }, 503);
+  }
+
+  // RE-CHECKED SERVER-SIDE, against the session, on every single action. The
+  // rendered page is not evidence of anything: it may be minutes old, the
+  // reader's bindings may have been revoked since, or the request may not have
+  // come from the page at all.
+  if (!canReviewApplications(identity.principal)) {
+    return json({
+      error: 'Deciding a role application requires role:grant. Your credential does not hold it, in any scope.',
+      code: 'forbidden',
+    }, 403);
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    const raw = await Astro.request.text();
+    if (raw.length > 8192) return json({ error: 'Request too large.' }, 413);
+    body = JSON.parse(raw);
+  } catch {
+    return json({ error: 'Invalid request.' }, 400);
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return json({ error: 'Invalid request.' }, 400);
+  }
+
+  const applicationId = Number(body.applicationId);
+  if (!Number.isInteger(applicationId) || applicationId <= 0) {
+    return json({ error: 'Give the application to decide.' }, 400);
+  }
+  const decision = body.decision === 'approve' ? 'approve' : body.decision === 'reject' ? 'reject' : null;
+  if (!decision) return json({ error: 'A decision must be "approve" or "reject".' }, 400);
+
+  const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 2000) : '';
+  if (!reason) {
+    // The module refuses this too, and its refusal is the gate that holds. This
+    // one exists so the reviewer is told before the round trip.
+    return json({
+      error: 'A decision requires a recorded reason — for an approval as much as a refusal. Without one the register cannot answer "why?" a year later.',
+      code: 'reason_required',
+    }, 400);
+  }
+
+  const ctx: AuditContext = {
+    principal: identity.principal,
+    ip: clientIp(Astro.request),
+    reason,
+    authority: identity.shared ? `shared:${identity.via}` : 'user',
+  };
+
+  try {
+    const result = await reviewApplication(db(), ctx, applicationId, { decision, reason } as any);
+    return json({ ok: true, result }, 200);
+  } catch (err: any) {
+    if (err instanceof ForbiddenError) {
+      return json({
+        error: 'Your credential does not hold the authority this decision requires, in its scope.',
+        code: 'forbidden',
+      }, 403);
+    }
+    if (isOnboardingError(err)) {
+      return json({ error: err.message, code: err.code }, statusFor(err.code));
+    }
+    // A driver fault, a timeout or a constraint name is a fact about the server,
+    // not about the reviewer. Logged, summarised.
+    console.error('[admin/onboarding] decision failed', err);
+    return json({ error: 'The decision was not recorded. Nothing was changed.' }, 500);
+  }
+}
+
+// ─── The read ───────────────────────────────────────────────────────────────
+
+const myUserId = identity?.userId ?? null;
+const mayReview = Boolean(identity) && canReviewApplications(identity!.principal);
+
+type QueueRow = Record<string, any>;
+
+let open: QueueRow[] = [];
+let openTruncated = false;
+let decided: QueueRow[] = [];
+let ownWithheld = 0;
+let readError: string | null = null;
+
+if (identity && configured && mayReview) {
+  try {
+    const q = await applicationQueue(db(), identity.principal, { limit: 100 });
+    openTruncated = q.truncated;
+    // RULE 2 AT THE SURFACE. The module refuses a self-decision; this stops the
+    // screen from offering one. Counted, not hidden — the count is printed.
+    ownWithheld = q.rows.filter((r: QueueRow) => myUserId != null && r.applicantUserId === myUserId).length;
+    open = q.rows.filter((r: QueueRow) => !(myUserId != null && r.applicantUserId === myUserId));
+
+    const d = await applicationQueue(db(), identity.principal, {
+      statuses: ['approved', 'rejected', 'withdrawn', 'superseded'],
+      limit: 25,
+    });
+    decided = d.rows;
+  } catch (err: any) {
+    readError = isOnboardingError(err)
+      ? err.message
+      : 'The application queue could not be read. The fault has been logged for the federation office; nothing has been changed.';
+    if (!isOnboardingError(err)) console.error('[admin/onboarding] queue read failed', err);
+  }
+}
+
+/** What the reader can reach, stated plainly rather than left to be inferred. */
+const scopes = identity ? visibleScopes(identity.principal, 'role:grant') : { kind: 'none' as const };
+const scopeReach =
+  scopes.kind === 'all'
+    ? 'Your binding is national, so every application in the country is in scope for you.'
+    : scopes.kind === 'none'
+      ? 'You hold role:grant in no scope at all, so no application is in scope for you.'
+      : `Your reach is limited in SQL to ${[
+          scopes.states.length ? `state unit${scopes.states.length > 1 ? 's' : ''} ${scopes.states.join(', ')}` : '',
+          scopes.districts.length ? `district unit${scopes.districts.length > 1 ? 's' : ''} ${scopes.districts.join(', ')}` : '',
+          scopes.dojos.length ? `dojo${scopes.dojos.length > 1 ? 's' : ''} ${scopes.dojos.join(', ')}` : '',
+        ].filter(Boolean).join('; ')}. Applications outside it are withheld from this page by the query, not by the template.`;
+
+const signedInAs = identity
+  ? identity.shared
+    ? `${identity.principal.label} — shared credential (${identity.via}), not attributable to a person`
+    : `${identity.principal.label} — personal account #${identity.userId}`
+  : '';
+
+function scopeText(scopeType: string, scopeId: number | null): string {
+  if (scopeType === 'national' || scopeId == null) return 'National';
+  return `${scopeType} #${scopeId}`;
+}
+
+const fmt = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? String(v)
+    : d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+
+/** Evidence is free-form jsonb. It is DISPLAYED, never validated into a policy. */
+function evidenceEntries(evidence: unknown): Array<{ key: string; value: string }> {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return [];
+  return Object.entries(evidence as Record<string, unknown>).map(([key, value]) => ({
+    key,
+    value:
+      value == null
+        ? '—'
+        : typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+          ? String(value)
+          : JSON.stringify(value),
+  }));
+}
+---
+
+<Base title="MMAKF Admin — Onboarding queue" showNav={false} showFooter={false}>
+  {!identity ? (
+    <section class="signin-wrap">
+      <div class="signin-box">
+        <div class="signin-brand">
+          <div class="signin-brand-1">MMAKF</div>
+          <div class="signin-brand-2">Onboarding queue</div>
+        </div>
+        <form id="loginForm" class="card signin-card">
+          <h1 class="card-title signin-h">Sign in</h1>
+          <label class="input-label" for="login-email">Email address</label>
+          <input class="input" type="email" id="login-email" name="email" autocomplete="username"
+                 autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="you@mmakf.in" />
+          <label class="input-label" for="login-password" style="margin-top:14px">Password</label>
+          <input class="input" type="password" id="login-password" name="password" autocomplete="current-password" required />
+          <div id="loginErr" role="alert" class="signin-err" hidden></div>
+          <button type="submit" class="btn btn-primary signin-btn">Sign in</button>
+          <p class="signin-note">
+            Conferring a role is attributed to the person who conferred it. A shared office credential
+            cannot identify an individual, and the server refuses an unattributable decision.
+          </p>
+        </form>
+      </div>
+    </section>
+  ) : (
+    <div class="admin-wrap">
+      <aside class="admin-side">
+        <div class="admin-brand">
+          <div class="admin-brand-1">MMAKF</div>
+          <div class="admin-brand-2">Onboarding queue</div>
+        </div>
+        <nav class="admin-nav" aria-label="Sections">
+          <a href="#queue">Applications waiting</a>
+          <a href="#withheld">What is not shown</a>
+          <a href="#decided">Recent decisions</a>
+          <a href="#unset">What the federation has not set</a>
+          <a href="/admin/listings" class="nav-sep">Marketplace review →</a>
+          <a href="/admin/approvals">Two-person control →</a>
+          <a href="/admin/governance">Governance →</a>
+          <a href="/admin">← Content admin</a>
+        </nav>
+        <div class="admin-foot">
+          <button class="btn btn-ghost admin-foot-btn" id="logoutBtn">Logout</button>
+        </div>
+      </aside>
+
+      <div class="admin-main">
+        <header class="admin-panel admin-panel-first">
+          <h1 class="admin-h">Applications for a role</h1>
+          <p class="admin-sub">
+            Anybody may create an account, and an account confers nothing. People APPLY to be an
+            instructor, an examiner, a referee, a judge, an athlete or a member; a person with the
+            authority to confer that role reads the evidence and decides, with a reason that stays on
+            the record. Approving here creates the role binding through exactly the same gate an
+            administrator's manual grant goes through — never a second, softer path.
+          </p>
+          <p class="a-signed">Signed in as {signedInAs}</p>
+
+          {!configured && (
+            <div class="a-warn" role="alert">
+              <strong>The federation database is not configured on this deployment.</strong>
+              Applications live in Postgres, so there is no register to read and none to decide
+              against until <code>DATABASE_URL</code> is set. No control is offered below, because
+              none could work.
+            </div>
+          )}
+
+          {configured && !mayReview && (
+            <div class="a-warn" role="alert">
+              <strong>This account cannot confer roles.</strong>
+              Deciding an application requires <code>role:grant</code>, and your bindings hold it in no
+              scope. Under the federation's current authority model only a nationally-bound SUPER_ADMIN
+              or FEDERATION_ADMIN holds it — so a state office can review sellers and listings in its
+              own state but cannot yet approve a coach or a referee. Whether state offices should hold
+              it is a governance decision MMAKF has not taken; this page reports the position rather
+              than working around it. You are shown an explanation instead of an empty inbox, because
+              an empty inbox looks like "no applications" and this is not that.
+            </div>
+          )}
+
+          {configured && mayReview && identity.shared && (
+            <div class="a-warn" role="alert">
+              <strong>This is a shared credential.</strong>
+              A decision must be attributable to a person, and a shared login cannot be told apart from
+              anybody else using it. The server refuses an unattributable decision
+              (<code>anonymous_reviewer</code>), so the controls below will not succeed from this
+              credential. Sign in with your own account.
+            </div>
+          )}
+
+          {readError && (
+            <div class="a-warn" role="alert"><strong>The queue could not be read.</strong> {readError}</div>
+          )}
+        </header>
+
+        {configured && mayReview && (
+          <>
+          <!-- ─── The queue ──────────────────────────────────────────── -->
+          <section class="admin-panel" id="queue">
+            <h2 class="admin-h2">Applications waiting</h2>
+            <p class="admin-sub">
+              Open applications only — submitted and under review — oldest first. Every row here is one
+              you may read; not every row is one you may decide, and the difference is stated on the row
+              rather than discovered by pressing a button.
+            </p>
+
+            {openTruncated && (
+              <div class="a-warn" role="alert">
+                <strong>This list is INCOMPLETE.</strong> More open applications match your scope than
+                this page will draw at once, so an application you are expecting may not be below.
+              </div>
+            )}
+
+            {open.length === 0 ? (
+              <p class="a-empty">
+                No open application is waiting inside your scope. That is a statement about this
+                account's reach, not about the federation: {scopeReach}
+              </p>
+            ) : (
+              <div class="a-items">
+                {open.map((row) => {
+                  const conferred = isApplicableRole(row.requestedRole) ? actionsConferredBy(row.requestedRole as Role) : [];
+                  const evidence = evidenceEntries(row.evidence);
+                  return (
+                    <article class="a-item" id={`app-${row.id}`}>
+                      <header class="a-item-head">
+                        <div>
+                          <h3 class="a-item-title">{row.requestedRole} — {scopeText(row.scopeType, row.scopeId)}</h3>
+                          <p class="a-mono">{row.ref}</p>
+                        </div>
+                        <span class={`a-tag a-tag-${row.status}`}>{row.status}</span>
+                      </header>
+
+                      <dl class="a-dl">
+                        <div><dt>Applicant</dt><dd>{row.applicantEmail} <span class="a-mono">account #{row.applicantUserId}</span></dd></div>
+                        <div><dt>Person record</dt><dd>{row.personId == null ? 'No person record is linked to this account. Approving still binds the role to the account; the office links the person record separately.' : `person #${row.personId}`}</dd></div>
+                        <div><dt>Applied for</dt><dd>{row.requestedRole}</dd></div>
+                        <div><dt>At scope</dt><dd>{scopeText(row.scopeType, row.scopeId)} — the binding is made HERE, and this page has no control that could move it. The scope was never the reviewer's to type.</dd></div>
+                        <div><dt>Submitted</dt><dd>{fmt(row.submittedAt)}</dd></div>
+                        <div>
+                          <dt>What approving would confer</dt>
+                          <dd>
+                            {conferred.length === 0
+                              ? 'This role is not one the application queue may confer. The server refuses it; no control is offered.'
+                              : conferred.join(', ')}
+                          </dd>
+                        </div>
+                      </dl>
+
+                      <div class="a-ev">
+                        <h4 class="a-ev-h">Evidence the applicant supplied</h4>
+                        {evidence.length === 0 ? (
+                          <p class="a-hint">
+                            Nothing was supplied. That is not a refusal in itself — MMAKF has published no
+                            evidence requirement, so an empty submission is not an incomplete one. Decide
+                            on what you know, and record why.
+                          </p>
+                        ) : (
+                          <div class="tbl-scroll">
+                            <table class="a-tbl">
+                              <caption class="sr-only">Evidence supplied with application {row.ref}, exactly as submitted</caption>
+                              <thead><tr><th scope="col">Field</th><th scope="col">As submitted</th></tr></thead>
+                              <tbody>
+                                {evidence.map((e) => (
+                                  <tr><th scope="row" class="a-th-row">{e.key}</th><td class="a-reason">{e.value}</td></tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                        <p class="a-hint">{row.evidenceRequirement ?? EVIDENCE_REQUIREMENTS_NOT_SET}</p>
+                      </div>
+
+                      {row.canDecide ? (
+                        <div class="a-controls">
+                          <form class="a-form" data-decide="approve" data-application={row.id}>
+                            <p class="a-hint">
+                              Approving binds <strong>{row.requestedRole}</strong> at
+                              {' '}<strong>{scopeText(row.scopeType, row.scopeId)}</strong> to account
+                              {' '}#{row.applicantUserId}. The reason is recorded against the binding and the
+                              audit entry, and stays there.
+                            </p>
+                            <label class="input-label" for={`approve-why-${row.id}`}>Reason for approving (required)</label>
+                            <textarea class="input" id={`approve-why-${row.id}`} name="reason" rows="2" required></textarea>
+                            <div class="a-ok" hidden></div><div class="a-err" role="alert" hidden></div>
+                            <button type="submit" class="btn btn-primary a-submit">Approve and confer {row.requestedRole}</button>
+                          </form>
+                          <form class="a-form" data-decide="reject" data-application={row.id}>
+                            <label class="input-label" for={`reject-why-${row.id}`}>Reason for refusing (required)</label>
+                            <textarea class="input" id={`reject-why-${row.id}`} name="reason" rows="2" required></textarea>
+                            <div class="a-ok" hidden></div><div class="a-err" role="alert" hidden></div>
+                            <button type="submit" class="btn btn-ghost a-submit">Refuse this application</button>
+                          </form>
+                        </div>
+                      ) : (
+                        <p class="a-hint" role="note">
+                          <strong>No decision control is offered on this application.</strong> You may read
+                          it, but you could not confer {row.requestedRole} at
+                          {' '}{scopeText(row.scopeType, row.scopeId)} — either the role holds an authority
+                          your own bindings do not, or the scope is outside them. A refusal is held to the
+                          same authority as an approval, so neither control appears. This is the rule
+                          holding, not a fault.
+                        </p>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          <!-- ─── What is withheld ───────────────────────────────────── -->
+          <section class="admin-panel" id="withheld">
+            <h2 class="admin-h2">What this queue is not showing you</h2>
+            <p class="admin-sub">
+              A queue that quietly omits things teaches its readers to believe it is complete. These are
+              the omissions, named.
+            </p>
+            <ul class="a-list-block">
+              <li>
+                <strong>Applications outside your scope are withheld.</strong> {scopeReach} They are not
+                absent from the federation and they are not deleted; this account cannot decide them, so
+                the query does not return them.
+              </li>
+              <li>
+                <strong>
+                  {ownWithheld === 0
+                    ? 'Your own applications would be withheld — you have none open.'
+                    : `${ownWithheld} application${ownWithheld > 1 ? 's' : ''} of your own ${ownWithheld > 1 ? 'are' : 'is'} withheld.`}
+                </strong>
+                {' '}Nobody decides their own application, whatever authority they hold — the same rule
+                two-person control applies to a SUPER_ADMIN. The server refuses it against identity;
+                this page does not offer it. Your own applications are readable on your member area, and
+                you may withdraw one there.
+              </li>
+              <li>
+                <strong>Decided applications are not in the working queue.</strong> They are listed
+                below, read-only. A decided application is not re-decidable — an approval cannot be
+                edited into a refusal, and a second reviewer pressing Approve at the same instant is
+                told they lost the race rather than creating a second binding.
+              </li>
+              <li>
+                <strong>Applications for administrative roles do not exist to be shown.</strong> Only
+                the credential roles may be applied for at all: {APPLICABLE_ROLES.join(', ')}. Authority
+                over other people's records is conferred by the federation, never requested through a
+                form, so the queue cannot become a route to it.
+              </li>
+            </ul>
+          </section>
+
+          <!-- ─── Recent decisions ───────────────────────────────────── -->
+          <section class="admin-panel" id="decided">
+            <h2 class="admin-h2">Recent decisions in your scope</h2>
+            {decided.length === 0 ? (
+              <p class="a-empty">No application in your scope has been decided yet.</p>
+            ) : (
+              <div class="tbl-scroll">
+                <table class="a-tbl a-tbl-wide">
+                  <caption class="sr-only">Applications already decided within your scope</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Reference</th>
+                      <th scope="col">Role</th>
+                      <th scope="col">Scope</th>
+                      <th scope="col">Applicant</th>
+                      <th scope="col">Outcome</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {decided.map((row) => (
+                      <tr>
+                        <td class="a-mono">{row.ref}</td>
+                        <td>{row.requestedRole}</td>
+                        <td>{scopeText(row.scopeType, row.scopeId)}</td>
+                        <td>{row.applicantEmail}</td>
+                        <td><span class={`a-tag a-tag-${row.status}`}>{row.status}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p class="tbl-hint">Scroll the table sideways</p>
+          </section>
+
+          <!-- ─── Unset policy ───────────────────────────────────────── -->
+          <section class="admin-panel" id="unset">
+            <h2 class="admin-h2">What the federation has not set</h2>
+            <p class="admin-sub">
+              Printed rather than filled in. A plausible default here — "a 1st Dan is required", "we
+              reply within 48 hours" — would be this screen inventing federation policy, and it would be
+              wrong quietly.
+            </p>
+            <dl class="a-dl">
+              <div><dt>Evidence requirement</dt><dd>{EVIDENCE_REQUIREMENTS_NOT_SET}</dd></div>
+              <div><dt>Review turnaround</dt><dd>{REVIEW_TURNAROUND_NOT_SET}</dd></div>
+              <div><dt>Who may confer roles</dt><dd>Held nationally today. Widening it to state offices is one line in GRANTS in src/lib/rbac.ts and a decision only MMAKF can take; the data model needs no change either way.</dd></div>
+            </dl>
+          </section>
+          </>
+        )}
+      </div>
+    </div>
+  )}
+</Base>
+
+<script>
+  const loginForm = document.getElementById('loginForm');
+  if (loginForm instanceof HTMLFormElement) {
+    const loginErr = document.getElementById('loginErr');
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (loginErr) loginErr.hidden = true;
+      const fd = new FormData(loginForm);
+      const email = String(fd.get('email') || '').trim();
+      const password = String(fd.get('password') || '');
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(email ? { email, password } : { password }),
+      }).catch(() => null);
+      if (r && r.ok) { location.reload(); return; }
+      const body = r ? await r.json().catch(() => null) : null;
+      if (loginErr) {
+        loginErr.hidden = false;
+        loginErr.textContent = (body && body.error) ? String(body.error) : 'Sign-in failed. Check your details and try again.';
+      }
+    });
+  }
+
+  document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
+    location.reload();
+  });
+
+  // One listener for every decision form on the page. Posts to this same URL;
+  // the page's own POST handler answers with JSON. The reason check here is a
+  // courtesy — the server refuses a reasonless decision, and so does the module
+  // behind it.
+  document.addEventListener('submit', async (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    const decide = form.getAttribute('data-decide');
+    if (!decide) return;
+    event.preventDefault();
+
+    const applicationId = Number(form.getAttribute('data-application') || '0');
+    const ok = form.querySelector('.a-ok');
+    const err = form.querySelector('.a-err');
+    const button = form.querySelector('.a-submit');
+    const reasonEl = form.querySelector('textarea[name=reason]');
+    if (ok instanceof HTMLElement) { ok.hidden = true; ok.textContent = ''; }
+    if (err instanceof HTMLElement) { err.hidden = true; err.textContent = ''; }
+
+    const fail = (message, focus) => {
+      if (err instanceof HTMLElement) { err.hidden = false; err.textContent = message; }
+      if (focus instanceof HTMLElement) focus.focus();
+    };
+
+    const reason = reasonEl instanceof HTMLTextAreaElement ? reasonEl.value.trim() : '';
+    if (!reason) {
+      fail('A decision must state its reason — for an approval as much as a refusal. Nothing has been sent to the server.', reasonEl);
+      return;
+    }
+
+    const label = button instanceof HTMLButtonElement ? button.textContent : '';
+    if (button instanceof HTMLButtonElement) { button.disabled = true; button.textContent = 'Recording…'; }
+
+    const response = await fetch(location.pathname, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ applicationId, decision: decide, reason }),
+    }).catch(() => null);
+
+    if (button instanceof HTMLButtonElement) { button.disabled = false; button.textContent = label; }
+
+    if (!response) { fail('Could not reach the server. NOTHING was recorded. Check your connection and try again.'); return; }
+
+    const body = await response.json().catch(() => null);
+
+    if (response.ok && body && body.ok) {
+      const result = body.result || {};
+      const bound = result.boundAt;
+      if (ok instanceof HTMLElement) {
+        ok.hidden = false;
+        ok.textContent = bound
+          ? 'Recorded. ' + String(bound.role) + ' is now bound at ' + String(bound.scopeType) +
+            (bound.scopeId == null ? '' : ' ' + String(bound.scopeId)) +
+            ' — binding #' + String(result.roleBindingId) + '. Reload to see the queue as it now stands.'
+          : 'Recorded. This application is now "' + String(result.status) + '". No role was conferred. Reload to see the queue as it now stands.';
+      }
+      form.querySelectorAll('button, textarea').forEach((el) => {
+        if (el instanceof HTMLButtonElement || el instanceof HTMLTextAreaElement) el.disabled = true;
+      });
+      return;
+    }
+
+    let message = (body && body.error) ? String(body.error) : '';
+    if (!message) {
+      if (response.status === 401) message = 'Your session has ended.';
+      else if (response.status === 429) message = 'Too many decisions in a short time. Wait a minute and try again.';
+      else message = 'The server refused this (HTTP ' + response.status + ').';
+    }
+    fail(message + ' NOTHING was changed.');
+  });
+</script>
+
+<style is:global>
+  body { background: var(--bg); }
+
+  .signin-wrap { min-height: 90vh; display: flex; align-items: center; justify-content: center; padding: 64px 24px; }
+  .signin-box { width: 100%; max-width: 420px; }
+  .signin-brand { text-align: center; margin-bottom: 36px; }
+  .signin-brand-1 { font-family: var(--font-display); font-size: 1.8rem; font-weight: 700; letter-spacing: .06em; }
+  .signin-brand-2 { font-family: var(--font-display); font-size: .7rem; letter-spacing: .22em; text-transform: uppercase; color: var(--gold); margin-top: 6px; }
+  .signin-card { padding: 32px; }
+  .signin-h { font-size: 1.2rem; margin-bottom: 24px; }
+  .signin-err { color: var(--red-2); font-size: .85rem; margin-top: 12px; }
+  .signin-btn { width: 100%; margin-top: 20px; justify-content: center; min-height: 44px; }
+  .signin-note { margin-top: 20px; font-size: .75rem; color: var(--muted); text-align: center; line-height: 1.6; }
+
+  .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  /* WCAG 1.4.10: a grid item defaults to min-width:auto, so it cannot shrink
+     below its content and the whole console scrolls sideways at 320px. */
+  .admin-wrap > * { min-width: 0; }
+  @media (max-width: 800px) { .admin-wrap { grid-template-columns: 1fr; } }
+  .admin-side {
+    background: var(--bg-2); border-right: 1px solid var(--border); padding: 24px 0;
+    display: flex; flex-direction: column; position: sticky; top: 0; align-self: start; height: 100vh;
+  }
+  @media (max-width: 800px) { .admin-side { position: static; height: auto; } }
+  .admin-brand { padding: 0 24px 24px; border-bottom: 1px solid var(--border); }
+  .admin-brand-1 { font-family: var(--font-display); font-size: 1.4rem; font-weight: 700; letter-spacing: .06em; }
+  .admin-brand-2 { font-family: var(--font-display); font-size: .66rem; letter-spacing: .22em; text-transform: uppercase; color: var(--gold); margin-top: 4px; }
+  .admin-nav { flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .admin-nav a {
+    padding: 12px 14px; min-height: 44px; display: flex; align-items: center;
+    font-family: var(--font-display); font-size: .78rem; letter-spacing: .08em;
+    color: var(--off-white); border-radius: var(--radius); transition: all .18s;
+  }
+  .admin-nav a:hover { background: var(--card); color: var(--gold); }
+  .admin-nav .nav-sep { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .admin-foot { padding: 16px; border-top: 1px solid var(--border); }
+  .admin-foot-btn { width: 100%; justify-content: center; min-height: 44px; }
+
+  .admin-main { padding: 32px 36px 64px; max-width: 1100px; }
+  @media (max-width: 600px) { .admin-main { padding: 24px 16px 48px; } }
+  .admin-panel { padding: 36px 0; border-bottom: 1px solid var(--border); scroll-margin-top: 20px; }
+  .admin-panel-first { padding-top: 0; }
+  .admin-h { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; letter-spacing: .02em; }
+  .admin-h2 { font-family: var(--font-display); font-size: 1.2rem; font-weight: 600; letter-spacing: .02em; }
+  .admin-sub { color: var(--muted); font-size: .88rem; margin-top: 6px; line-height: 1.7; max-width: 76ch; }
+
+  .a-signed { margin-top: 14px; font-size: .76rem; letter-spacing: .04em; color: var(--off-white); overflow-wrap: anywhere; }
+  .a-empty { font-size: .86rem; color: var(--muted); margin-top: 14px; line-height: 1.75; max-width: 68ch; }
+  .a-hint { font-size: .78rem; color: var(--muted); line-height: 1.7; margin-top: 10px; max-width: 72ch; }
+  .a-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .74rem; color: var(--muted); overflow-wrap: anywhere; }
+  .a-list-block { margin: 16px 0 0 18px; font-size: .85rem; line-height: 1.8; color: var(--off-white); max-width: 76ch; }
+  .a-list-block li + li { margin-top: 10px; }
+  .a-list-block strong { color: var(--white); }
+
+  .a-warn {
+    margin-top: 16px; background: rgba(142,18,18,.05); border: 1px solid var(--red-3);
+    border-left: 3px solid var(--red); border-radius: var(--radius);
+    padding: 14px 16px; font-size: .85rem; line-height: 1.7; color: var(--off-white); max-width: 76ch;
+  }
+  .a-warn strong { color: var(--red-2); }
+
+  .a-items { display: grid; gap: 16px; margin-top: 18px; }
+  .a-item { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--gold-dim); border-radius: var(--radius); padding: 20px; }
+  .a-item-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  .a-item-title { font-family: var(--font-display); font-size: 1.02rem; font-weight: 600; }
+  .a-tag {
+    font-family: var(--font-display); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase;
+    padding: 4px 9px; border: 1px solid var(--border-2); border-radius: var(--radius); white-space: nowrap;
+  }
+  .a-tag-submitted, .a-tag-under_review, .a-tag-approved { color: var(--gold-3); border-color: var(--gold-dim); }
+  .a-tag-withdrawn, .a-tag-superseded { color: var(--off-white); }
+  .a-tag-rejected { color: #fff; background: var(--red); border-color: var(--red); }
+
+  .a-dl { margin-top: 16px; display: grid; gap: 8px; }
+  .a-dl div { display: grid; grid-template-columns: 210px 1fr; gap: 10px; font-size: .84rem; line-height: 1.65; }
+  @media (max-width: 620px) { .a-dl div { grid-template-columns: 1fr; gap: 2px; } }
+  .a-dl dt { font-family: var(--font-display); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .a-dl dd { overflow-wrap: anywhere; color: var(--off-white); }
+  .a-reason { white-space: pre-wrap; }
+
+  .a-ev { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .a-ev-h { font-family: var(--font-display); font-size: .74rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+
+  .a-controls { margin-top: 18px; display: grid; gap: 14px; }
+  .a-form { padding-top: 4px; }
+  .a-form + .a-form { border-top: 1px solid var(--border); padding-top: 16px; }
+  .a-submit { margin-top: 12px; min-height: 44px; }
+  .a-ok { margin-top: 12px; font-size: .84rem; color: var(--gold-3); line-height: 1.65; }
+  .a-err { margin-top: 12px; font-size: .84rem; color: var(--red-2); line-height: 1.65; }
+
+  .a-tbl { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: .84rem; }
+  .a-tbl-wide { min-width: 720px; }
+  .a-tbl th, .a-tbl td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--off-white); }
+  .a-tbl thead th { font-family: var(--font-display); font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+  .a-th-row { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; font-weight: 500; color: var(--muted); }
+</style>

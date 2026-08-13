@@ -1,0 +1,434 @@
+---
+/**
+ * One kata, in depth.
+ *
+ * Everything on this page comes from src/data/kata.ts. The page writes no
+ * martial-arts content of its own, which is what keeps twenty-six pages saying
+ * the same thing the same way.
+ *
+ * Two absences are rendered LOUDLY rather than skipped:
+ *
+ *  · The grade. MMAKF has not published a syllabus, so `gradeAssociation` is
+ *    null on every kata and this page prints that as a stated fact with a link
+ *    to /belt-system. A page that simply omitted it would read as an
+ *    oversight; one that names the gap is credible, and it is also honest.
+ *
+ *  · The video. A kata with no checked recording says so in the same size type
+ *    as everything else. The failure being prevented is the one this project
+ *    has already committed once: publishing a link whose evidence was never
+ *    gathered. No search URL is dressed up as a recording here either.
+ *
+ * An unknown slug 404s. It does not render an empty kata.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import {
+  kataBySlug, kataTerms, kataNeighbours,
+  FEDERATION_KATA_FOOTAGE, MOVEMENT_COUNT_NOTE, VIDEO_POSITION,
+} from '@/data/kata';
+
+export const prerender = false;
+
+const { slug } = Astro.params;
+const kata = kataBySlug(slug);
+
+// A slug that is not in the canon is not a kata. Rendering a blank page for it
+// would put an empty, indexable URL into search for every typo anyone makes.
+if (!kata) {
+  return new Response(null, { status: 404, statusText: 'No such kata' });
+}
+
+const terms = kataTerms(kata);
+const { prev, next } = kataNeighbours(kata);
+
+const jsonLd: Record<string, unknown> = {
+  '@context': 'https://schema.org',
+  '@type': 'CreativeWork',
+  name: kata.name,
+  url: `https://www.mmakf.in/kata/${kata.slug}`,
+  inLanguage: 'en',
+  genre: 'Shotokan karate kata',
+  description: kata.character,
+  isPartOf: { '@type': 'CollectionPage', name: 'The Shotokan kata library', url: 'https://www.mmakf.in/kata' },
+};
+if (kata.kanji) jsonLd.alternateName = kata.kanji;
+---
+
+<Base
+  title={`${kata.name} — Shotokan Kata — MMAKF`}
+  description={`${kata.name} (${kata.kanji ?? kata.name}), "${kata.meaning}". What the form is, what it develops, and the Japanese terminology it uses, translated and explained.`}
+>
+  <PageHero
+    eyebrow={kata.series ? `${kata.series} series` : 'Shotokan kata'}
+    title={`${kata.name} <em class="r">${kata.kanji ?? ''}</em>`}
+    lead={kata.meaning}
+    pills={[
+      ...(kata.movements !== null ? [`${kata.movements} movements`] : []),
+      ...(kata.kiai ? [`Kiai on ${kata.kiai.join(' and ')}`] : []),
+      ...(kata.formerName ? [`Formerly ${kata.formerName}`] : []),
+    ]}
+  />
+
+  {/* ═══════ WHAT IT IS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="kata-grid">
+        <div class="fade">
+          <div class="eyebrow">The form</div>
+          <h2 class="display-2" style="margin-top:16px">What <em class="r">{kata.name}</em> is.</h2>
+          <div class="rule"></div>
+          <p class="body-txt kata-lede">{kata.character}</p>
+
+          {kata.note && (
+            <p class="caveat"><strong>Worth knowing.</strong> {kata.note}</p>
+          )}
+
+          <h3 class="sub-h">What it develops</h3>
+          <ul class="develops">
+            {kata.develops.map((d) => <li>{d}</li>)}
+          </ul>
+        </div>
+
+        <aside class="fade facts" aria-labelledby="facts-h">
+          <h3 id="facts-h" class="facts-h">On the record</h3>
+          <dl class="facts-dl">
+            <dt>Name</dt>
+            <dd>{kata.name}{kata.kanji && <span lang="ja" class="facts-kanji"> {kata.kanji}</span>}</dd>
+
+            <dt>Meaning</dt>
+            <dd>{kata.meaning}</dd>
+
+            <dt>Okinawan name</dt>
+            <dd>{kata.formerName ?? <span class="text-muted">Not renamed, or no earlier name is recorded here.</span>}</dd>
+
+            <dt>Series</dt>
+            <dd>{kata.series ?? <span class="text-muted">Stands alone.</span>}</dd>
+
+            <dt>Movements</dt>
+            <dd>{kata.movements !== null ? kata.movements : <span class="text-muted">Not published here — the counts differ too much to state one.</span>}</dd>
+
+            <dt>Kiai</dt>
+            <dd>{kata.kiai ? `On movements ${kata.kiai.join(' and ')}` : <span class="text-muted">Not published here — no single placing is standard enough to print.</span>}</dd>
+
+            <dt>MMAKF grade</dt>
+            <dd><span class="text-muted">Not published by the federation.</span></dd>
+          </dl>
+          <p class="facts-note">{MOVEMENT_COUNT_NOTE}</p>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE SYLLABUS GAP ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="gap-panel fade">
+        <div class="eyebrow">The honest gap</div>
+        <h2 class="gap-h">MMAKF has not published a grading syllabus.</h2>
+        <p class="gap-p">
+          So this page tells you nothing about where {kata.name} sits in an examination, because the federation
+          has not decided it. There is a named, empty place in the library for that association, and it stays
+          empty until the federation fills it. What the federation <em>has</em> published about belts and
+          progression is on the belt system page.
+        </p>
+        <a class="btn btn-ghost" href="/belt-system">The belt system &amp; grading &rarr;</a>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE TERMINOLOGY ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Terminology</div>
+        <h2 class="display-2">The Japanese in <em class="r">{kata.name}</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          The words a student meets in this form, with the English beside them and an explanation of what each
+          one actually is. These definitions are shared across the whole library, so they mean the same thing
+          on every page.
+        </p>
+      </div>
+      <div class="tbl-scroll fade">
+        <table class="terms-tbl">
+          <caption class="sr-only">Japanese terminology used in {kata.name}, with English and an explanation</caption>
+          <thead>
+            <tr>
+              <th scope="col">Term</th>
+              <th scope="col">Kanji</th>
+              <th scope="col">English</th>
+              <th scope="col">What it is</th>
+            </tr>
+          </thead>
+          <tbody>
+            {terms.map((t) => (
+              <tr>
+                <th scope="row" class="term-romaji">{t.romaji}</th>
+                <td lang="ja" class="term-kanji">{t.kanji}</td>
+                <td class="text-gold">{t.english}</td>
+                <td class="text-muted">{t.explain}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p class="mt-6 text-muted" style="font-size:.82rem">
+        The full glossary, and every kata that uses each term, is on <a href="/kata">the kata library index</a>.
+      </p>
+    </div>
+  </section>
+
+  {/* ═══════ VIDEO ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Video</div>
+        <h2 class="display-2">Watching <em class="r">{kata.name}</em>.</h2>
+        <div class="rule"></div>
+      </div>
+
+      {kata.video ? (
+        <div class="card fade">
+          <div class="card-title" style="font-size:1rem">{kata.video.title}</div>
+          <div class="card-body">
+            <a href={kata.video.channelUrl} rel="noopener">{kata.video.channel}</a>
+          </div>
+          <p class="evidence"><strong>Checked {kata.video.verifiedOn}.</strong> {kata.video.verifiedBy}</p>
+          <a class="btn btn-gold" href={`https://www.youtube.com/watch?v=${kata.video.youtubeId}`} rel="noopener">
+            Watch on YouTube &rarr;
+          </a>
+        </div>
+      ) : (
+        <div class="gap-panel fade">
+          <h3 class="gap-h">There is no verified video of {kata.name} here.</h3>
+          <p class="gap-p">{VIDEO_POSITION}</p>
+          <p class="gap-p">
+            This page would rather carry no recording than a guessed one. A video is published here only with
+            the evidence of its check attached &mdash; the id, the channel it actually resolved to, the date and
+            the method &mdash; and nothing that has not been loaded and read is linked as though it had been.
+          </p>
+          {FEDERATION_KATA_FOOTAGE.length > 0 && (
+            <p class="gap-p">
+              The federation&rsquo;s own kata training footage &mdash; general practice, not a performance of this
+              or any other single form &mdash; is listed on <a href="/kata">the library index</a>.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ WALK THE CANON ═══════ */}
+  <section>
+    <div class="container">
+      <nav class="neighbours fade" aria-label="Other kata in the canon">
+        {prev ? (
+          <a class="neighbour" href={`/kata/${prev.slug}`}>
+            <span class="neighbour-dir">&larr; Previous</span>
+            <span class="neighbour-name">{prev.name}</span>
+            <span class="text-muted">{prev.meaning}</span>
+          </a>
+        ) : <span></span>}
+        <a class="btn btn-ghost" href="/kata">All 26 kata</a>
+        {next ? (
+          <a class="neighbour right" href={`/kata/${next.slug}`}>
+            <span class="neighbour-dir">Next &rarr;</span>
+            <span class="neighbour-name">{next.name}</span>
+            <span class="text-muted">{next.meaning}</span>
+          </a>
+        ) : <span></span>}
+      </nav>
+    </div>
+  </section>
+
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} is:inline />
+</Base>
+
+<style>
+  .kata-grid {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr;
+    gap: 48px;
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    .kata-grid { grid-template-columns: 1fr; gap: 32px; }
+  }
+
+  .kata-lede { font-size: 1.02rem; line-height: 1.85; }
+
+  .caveat {
+    margin: 20px 0;
+    padding: 14px 16px;
+    background: var(--card-2);
+    border-left: 3px solid var(--gold-dim);
+    border-radius: var(--radius);
+    color: var(--off-white);
+    font-size: 0.86rem;
+    line-height: 1.75;
+  }
+
+  .sub-h {
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--white);
+    margin: 32px 0 14px;
+  }
+  .develops { list-style: none; padding: 0; margin: 0; }
+  .develops li {
+    position: relative;
+    padding: 10px 0 10px 22px;
+    border-bottom: 1px solid var(--border);
+    color: var(--off-white);
+    font-size: 0.92rem;
+    line-height: 1.7;
+  }
+  .develops li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 19px;
+    width: 8px;
+    height: 1px;
+    background: var(--gold-2);
+  }
+
+  .facts {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--red);
+    border-radius: var(--radius);
+    padding: 26px;
+  }
+  .facts-h {
+    font-family: var(--font-display);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--white);
+    margin-bottom: 18px;
+  }
+  .facts-dl { margin: 0; }
+  .facts-dl dt {
+    font-family: var(--font-display);
+    font-size: 0.64rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--muted);
+    margin-top: 16px;
+  }
+  .facts-dl dt:first-child { margin-top: 0; }
+  .facts-dl dd {
+    margin: 4px 0 0;
+    color: var(--off-white);
+    font-size: 0.92rem;
+    line-height: 1.6;
+  }
+  .facts-kanji { color: var(--gold-2); font-size: 1.05rem; }
+  .facts-note {
+    margin: 22px 0 0;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.74rem;
+    line-height: 1.7;
+  }
+
+  .gap-panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--red);
+    border-radius: var(--radius);
+    padding: 32px;
+    max-width: 820px;
+  }
+  .gap-h {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--white);
+    margin: 12px 0 16px;
+    line-height: 1.25;
+  }
+  .gap-p {
+    color: var(--off-white);
+    font-size: 0.94rem;
+    line-height: 1.8;
+    margin-bottom: 16px;
+  }
+
+  .evidence {
+    margin: 14px 0 18px;
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--off-white);
+    font-size: 0.76rem;
+    line-height: 1.7;
+  }
+
+  .terms-tbl {
+    width: 100%;
+    min-width: 720px;
+    border-collapse: collapse;
+    font-size: 0.86rem;
+  }
+  .terms-tbl th,
+  .terms-tbl td {
+    text-align: left;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .terms-tbl thead th {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--white);
+    border-bottom: 1px solid var(--border-2);
+    white-space: nowrap;
+  }
+  .term-romaji { font-weight: 600; color: var(--white); white-space: nowrap; }
+  .term-kanji { font-size: 1.05rem; color: var(--off-white); white-space: nowrap; }
+  .terms-tbl td.text-muted { line-height: 1.7; min-width: 320px; }
+
+  .neighbours {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 24px;
+    align-items: center;
+  }
+  @media (max-width: 760px) {
+    .neighbours { grid-template-columns: 1fr; }
+  }
+  .neighbour {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 18px 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    text-decoration: none;
+    font-size: 0.86rem;
+  }
+  .neighbour:hover { border-color: var(--gold-dim); }
+  .neighbour.right { text-align: right; }
+  .neighbour-dir {
+    font-family: var(--font-display);
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--gold-2);
+  }
+  .neighbour-name { font-weight: 600; color: var(--white); }
+  .neighbour .text-muted { font-size: 0.78rem; }
+</style>

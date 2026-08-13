@@ -339,3 +339,8 @@ export * from './governance.schema';
 // independent monthly prices typed into a content file with ONE versioned fee
 // framework whose output depends on who is asking and what they need.
 export * from './engagement.schema';
+
+// Onboarding, seller standing and the marketplace review spine. Registration
+// confers nothing; authority and the right to sell are both the output of a
+// human decision, and a listing is reviewed separately from the seller.
+export * from './onboarding.schema';

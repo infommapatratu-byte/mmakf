@@ -40,6 +40,25 @@ const statusOnly = process.argv.includes('--status');
 // must never land in a schema by accident.
 const schema = process.env.DATABASE_SCHEMA || 'public';
 
+// REFUSED, not created. Every migration in drizzle/ writes unqualified names
+// into whatever search_path points at, and the Drizzle schema, the app and
+// scripts/verify-migrate.mjs all assume `public`. Honouring some other value
+// would put 112 tables somewhere the application will never look, and the
+// failure would present as an empty federation rather than as an error.
+//
+// Nor is the schema created here: doing so demands CREATE on the
+// database itself, which a managed provider often withholds from the role in
+// the connection string. Failing on a privilege the operator cannot grant is a
+// worse first experience than being told the variable is unsupported.
+if (schema !== 'public') {
+  console.error(
+    `DATABASE_SCHEMA is set to "${schema}", and these migrations only target public.
+` +
+    'Unset DATABASE_SCHEMA, or point DATABASE_URL at a database whose public schema you may use.'
+  );
+  process.exit(1);
+}
+
 const sql = postgres(url, {
   max: 1,
   prepare: false,
@@ -61,9 +80,9 @@ let exitCode = 0;
 try {
   console.log(`Target: ${describeTarget(url)} (schema: ${schema})`);
 
-  // Create it if absent, then pin it for this session, so the run is unaffected
-  // by whatever the connection's default happened to be.
-  await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+  // The schema is pinned for this session, never provisioned — see the refusal
+  // above. Pinning still matters: a pooler or a previous session can leave
+  // search_path pointing somewhere unexpected.
   await sql.unsafe(`SET search_path TO ${schema}`);
 
   await sql`

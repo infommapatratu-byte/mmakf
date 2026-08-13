@@ -1,0 +1,309 @@
+---
+/**
+ * The kata library index.
+ *
+ * The federation asked for a section covering each kata: what it is, its
+ * benefits, the Japanese terms explained, and a video. Three of those four are
+ * here in full. The fourth is stated as missing rather than filled with a
+ * stranger's recording, and this page says which is which.
+ *
+ * The one thing this page must never do is imply a syllabus. MMAKF has not
+ * published which form it examines at which grade, so the library carries no
+ * ordering that could be read as one: the two named series are grouped because
+ * they ARE series, and the rest are listed as a canon, not as a ladder.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { KATA, TERMS, FEDERATION_KATA_FOOTAGE, kataGroups, VIDEO_POSITION, MOVEMENT_COUNT_NOTE } from '@/data/kata';
+
+export const prerender = false;
+
+const groups = kataGroups();
+const termCount = Object.keys(TERMS).length;
+
+/**
+ * Structured data for the library as a collection. Only what is on the page:
+ * no ratings, no "difficulty", and above all no grade — a search engine that
+ * repeated an invented grade would spread the fabrication further than the
+ * page ever could.
+ */
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'CollectionPage',
+  name: 'The Shotokan kata library',
+  url: 'https://www.mmakf.in/kata',
+  description: `All ${KATA.length} kata of the Shotokan canon: the name and its meaning, the kanji, the character of the form, and the Japanese terminology explained.`,
+  isPartOf: { '@type': 'WebSite', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
+  hasPart: KATA.map((k) => ({
+    '@type': 'CreativeWork',
+    name: k.name,
+    alternateName: k.kanji ?? undefined,
+    url: `https://www.mmakf.in/kata/${k.slug}`,
+  })),
+};
+---
+
+<Base
+  title="The Shotokan Kata Library — MMAKF"
+  description={`All ${KATA.length} kata of the Shotokan canon, explained: the name and what it means, the kanji, the number of movements, what each form develops, and ${termCount} Japanese terms translated and explained.`}
+>
+  <PageHero
+    eyebrow="Kata"
+    title={`The <em class="r">twenty-six</em> forms of Shotokan.`}
+    lead="Every kata in the canon: what it is, where its name comes from, what it builds in the person who practises it, and the Japanese a student meets on the way through it — translated and explained."
+    pills={['26 kata', `${termCount} terms explained`, 'Public martial-arts knowledge']}
+  />
+
+  {/* ═══════ WHAT THIS IS, AND WHAT IT IS NOT ═══════ */}
+  <section>
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">What this library is</div>
+          <h2 class="display-2" style="margin-top:16px">Public knowledge, <em class="r">stated plainly</em>.</h2>
+          <div class="rule"></div>
+          <p class="body-txt">
+            The Shotokan canon is not the property of any one organisation. The names, the characters they
+            are written with, the Okinawan names Gichin Funakoshi renamed most of them from, the shape each
+            form travels on the floor and the vocabulary it teaches are common to every Shotokan dojo in the
+            world. That is what is written here, at length, and it is written for a reader who is learning
+            rather than for a reader who already knows.
+          </p>
+          <p class="body-txt">
+            {MOVEMENT_COUNT_NOTE}
+          </p>
+        </div>
+
+        <aside class="fade panel" aria-labelledby="syllabus-gap">
+          <div class="eyebrow">What this library is not</div>
+          <h3 id="syllabus-gap" class="panel-h">It is not a syllabus.</h3>
+          <p class="panel-p">
+            <strong>MMAKF has not published its grading syllabus.</strong> Nothing on these pages says which
+            form belongs to which belt, which one is examined when, or what standard a candidate is measured
+            against — because the federation has not decided it, and inventing it here would put words in the
+            federation&rsquo;s mouth about the one thing members plan their training around.
+          </p>
+          <p class="panel-p">
+            The library holds an empty, named place for that association on every entry. The day the federation
+            publishes it, it gets filled in. Until then each page says it is absent.
+          </p>
+          <a class="btn btn-ghost" href="/belt-system">The belt system &amp; grading &rarr;</a>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE CANON ═══════ */}
+  {groups.map((g) => (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">{g.members.length} kata</div>
+          <h2 class="display-2">{g.title}</h2>
+          <div class="rule"></div>
+          <p class="lead">{g.blurb}</p>
+        </div>
+        <div class="grid grid-3">
+          {g.members.map((k) => (
+            <a class="card hoverable kata-card fade" href={`/kata/${k.slug}`}>
+              <div class="kata-card-top">
+                <span class="kata-kanji" lang="ja">{k.kanji}</span>
+                {k.movements !== null && <span class="pill">{k.movements} movements</span>}
+              </div>
+              <div class="card-title" style="font-size:1.05rem">{k.name}</div>
+              <div class="kata-meaning">{k.meaning}</div>
+              <div class="card-body">{k.character.split('. ')[0]}.</div>
+              <div class="kata-card-foot">
+                {k.formerName && <span class="text-muted">formerly {k.formerName}</span>}
+                <span class="text-gold">Read &rarr;</span>
+              </div>
+            </a>
+          ))}
+        </div>
+      </div>
+    </section>
+  ))}
+
+  {/* ═══════ FOOTAGE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Footage</div>
+        <h2 class="display-2">The federation&rsquo;s <em class="r">own</em> kata video.</h2>
+        <div class="rule"></div>
+        <p class="lead">{VIDEO_POSITION}</p>
+      </div>
+
+      {FEDERATION_KATA_FOOTAGE.length === 0 ? (
+        <div class="panel fade">
+          <p class="panel-p">No federation kata footage has been checked and published here yet.</p>
+        </div>
+      ) : (
+        <div class="grid grid-2">
+          {FEDERATION_KATA_FOOTAGE.map((f) => (
+            <div class="card fade">
+              <div class="card-eyebrow">Training footage &mdash; not a named kata</div>
+              <div class="card-title" style="font-size:1rem">{f.title}</div>
+              <div class="card-body">
+                <a href={f.channelUrl} rel="noopener">{f.channel}</a> &middot; {Math.round(f.durationSeconds / 60)} min
+                &middot; published {f.publishedOn}
+              </div>
+              <p class="evidence">
+                <strong>Checked {f.verifiedOn}.</strong> {f.verifiedBy}
+              </p>
+              <a class="btn btn-gold" href={`https://www.youtube.com/watch?v=${f.youtubeId}`} rel="noopener">
+                Watch on YouTube &rarr;
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ THE VOCABULARY ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Terminology</div>
+        <h2 class="display-2">{termCount} Japanese terms, <em class="r">explained</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Defined once and referenced by every kata that uses them, so the same stance is never explained two
+          different ways. A translation is not an explanation: each entry says what the technique actually is
+          and what it is for. Every kata page prints the terms that form uses.
+        </p>
+      </div>
+      <div class="tbl-scroll fade">
+        <table class="terms-tbl">
+          <caption class="sr-only">Japanese terms used across the kata library, with English and an explanation</caption>
+          <thead>
+            <tr>
+              <th scope="col">Term</th>
+              <th scope="col">Kanji</th>
+              <th scope="col">English</th>
+              <th scope="col">What it is</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(TERMS).map(([key, t]) => (
+              <tr id={`term-${key}`}>
+                <td class="term-romaji">{t.romaji}</td>
+                <td lang="ja" class="term-kanji">{t.kanji}</td>
+                <td class="text-gold">{t.english}</td>
+                <td class="text-muted">{t.explain}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} is:inline />
+</Base>
+
+<style>
+  .two-col {
+    display: grid;
+    grid-template-columns: 1.35fr 1fr;
+    gap: 48px;
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    .two-col { grid-template-columns: 1fr; gap: 32px; }
+  }
+
+  .panel {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--red);
+    border-radius: var(--radius);
+    padding: 28px;
+  }
+  .panel-h {
+    font-family: var(--font-display);
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--white);
+    margin: 12px 0 14px;
+  }
+  .panel-p {
+    color: var(--off-white);
+    font-size: 0.92rem;
+    line-height: 1.75;
+    margin-bottom: 14px;
+  }
+
+  .kata-card { display: block; text-decoration: none; }
+  .kata-card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .kata-kanji {
+    font-size: 1.6rem;
+    line-height: 1;
+    color: var(--gold-2);
+    letter-spacing: 0.04em;
+  }
+  .kata-meaning {
+    font-family: var(--font-accent);
+    font-style: italic;
+    font-size: 1rem;
+    color: var(--off-white);
+    margin: 4px 0 12px;
+  }
+  .kata-card-foot {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 0.74rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .evidence {
+    margin: 14px 0 18px;
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--off-white);
+    font-size: 0.76rem;
+    line-height: 1.7;
+  }
+
+  .terms-tbl {
+    width: 100%;
+    min-width: 720px;
+    border-collapse: collapse;
+    font-size: 0.86rem;
+  }
+  .terms-tbl th,
+  .terms-tbl td {
+    text-align: left;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .terms-tbl thead th {
+    font-family: var(--font-display);
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--white);
+    border-bottom: 1px solid var(--border-2);
+    white-space: nowrap;
+  }
+  .term-romaji { font-weight: 600; color: var(--white); white-space: nowrap; }
+  .term-kanji { font-size: 1.05rem; color: var(--off-white); white-space: nowrap; }
+  .terms-tbl td.text-muted { line-height: 1.7; min-width: 320px; }
+</style>

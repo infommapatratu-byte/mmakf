@@ -274,6 +274,13 @@ export async function confirmPayment(
   if (!payment) return null;
 
   if (payment.status === 'captured') {
+    // A replay is only a replay if the FIRST confirmation actually finished.
+    // Before the confirmation became one transaction, the capture flag could
+    // commit while the order status, the stock, the ledger and the receipt did
+    // not — and this guard then answered "already processed" to every retry
+    // that followed, the gateway's and the cron's alike, so the money stayed
+    // taken and nothing was ever issued for it. Prove it finished first.
+    await assertConfirmationComplete(db, payment);
     return { orderId: payment.orderId, alreadyProcessed: true };   // replay
   }
 
@@ -308,40 +315,105 @@ export async function confirmPayment(
     throw new OrderError('amount_mismatch', 'Captured amount does not match the order total');
   }
 
-  await db.update(s.payments).set({
-    status: 'captured',
-    providerPaymentId: verified.providerPaymentId,
-    method: verified.method ?? null,
-    providerFeePaise: verified.feePaise ?? null,
-    providerTaxPaise: verified.taxPaise ?? null,
-    capturedAt: new Date(),
-    updatedAt: new Date(),
-  }).where(eq(s.payments.id, payment.id));
+  // ONE TRANSACTION, or none of it.
+  //
+  // Taking money is six writes — the payment, the order, the stock, the ledger,
+  // the receipt, the audit trail — and as separate awaited statements each one
+  // was its own transaction. Any fault between two of them (a dropped backend,
+  // a unique violation from the invoice sequence under concurrency, a rejected
+  // audit payload) left money captured with no receipt, no ledger postings and
+  // an order still awaiting payment. Wrapped, a fault rolls the whole thing
+  // back and the retry does it properly.
+  //
+  // This also matters on the transaction-mode pooler the deployment uses: an
+  // explicit BEGIN pins one backend for the duration, which is exactly the
+  // guarantee that mode gives, whereas consecutive loose statements may each be
+  // served by a different backend.
+  let alreadyProcessed = false;
 
-  await db.update(s.orders).set({ status: 'paid', paidAt: new Date(), updatedAt: new Date() })
-    .where(eq(s.orders.id, order.id));
+  await db.transaction(async (tx: DB) => {
+    // Lock the payment row for the rest of the transaction. Two confirmations
+    // of the same payment arriving together — the webhook and the cron retry,
+    // which happens — would otherwise both pass the guard above and issue two
+    // receipts and two sets of ledger postings.
+    const locked = (await tx.select().from(s.payments)
+      .where(eq(s.payments.id, payment.id)).limit(1).for('update'))[0];
+    if (!locked || locked.status === 'captured') {
+      alreadyProcessed = true;
+      return;
+    }
 
-  // Reserved stock becomes sold stock.
-  const lines = await db.select().from(s.orderLines).where(eq(s.orderLines.orderId, order.id));
-  for (const line of lines) {
-    if (!line.variantId) continue;
-    await db.update(s.productVariants).set({
-      stockQty: sql`${s.productVariants.stockQty} - ${line.quantity}`,
-      reservedQty: sql`GREATEST(0, ${s.productVariants.reservedQty} - ${line.quantity})`,
-    }).where(eq(s.productVariants.id, line.variantId));
+    await tx.update(s.orders).set({ status: 'paid', paidAt: new Date(), updatedAt: new Date() })
+      .where(eq(s.orders.id, order.id));
+
+    // Reserved stock becomes sold stock.
+    const lines = await tx.select().from(s.orderLines).where(eq(s.orderLines.orderId, order.id));
+    for (const line of lines) {
+      if (!line.variantId) continue;
+      await tx.update(s.productVariants).set({
+        stockQty: sql`${s.productVariants.stockQty} - ${line.quantity}`,
+        reservedQty: sql`GREATEST(0, ${s.productVariants.reservedQty} - ${line.quantity})`,
+      }).where(eq(s.productVariants.id, line.variantId));
+    }
+
+    await postLedger(tx, order, payment, verified);
+    await issueInvoice(tx, order.id);
+
+    if (ctx) {
+      await writeAudit(tx, ctx, {
+        entityType: 'order', entityId: order.id, action: 'update',
+        oldValue: { status: order.status },
+        newValue: { status: 'paid', paymentId: payment.id, amountPaise: verified.amountPaise },
+      });
+    }
+
+    // LAST, deliberately. This is the write the replay guard at the top reads,
+    // so it is the one that must never outlive the work it stands for.
+    await tx.update(s.payments).set({
+      status: 'captured',
+      providerPaymentId: verified.providerPaymentId,
+      method: verified.method ?? null,
+      providerFeePaise: verified.feePaise ?? null,
+      providerTaxPaise: verified.taxPaise ?? null,
+      capturedAt: new Date(),
+      updatedAt: new Date(),
+    }).where(eq(s.payments.id, payment.id));
+  });
+
+  return { orderId: order.id, alreadyProcessed };
+}
+
+/** Order statuses that are only reachable once a confirmation has completed. */
+const CONFIRMED_ORDER_STATUSES = new Set([
+  'paid', 'fulfilled', 'refunded', 'partially_refunded', 'cancelled',
+]);
+
+/**
+ * Refuse to describe a half-finished confirmation as a replay.
+ *
+ * A captured payment whose order never became paid, or that issued no receipt,
+ * is money taken with nothing given for it. Reporting that as "already
+ * processed" is what let the webhook handler and the reconcile cron clear the
+ * error and count the wreck as recovered. Throwing instead keeps it in the
+ * exceptions queue, where a human sees it.
+ */
+async function assertConfirmationComplete(db: DB, payment: any): Promise<void> {
+  const order = (await db.select().from(s.orders).where(eq(s.orders.id, payment.orderId)).limit(1))[0];
+  const invoice = (await db.select({ id: s.invoices.id }).from(s.invoices)
+    .where(eq(s.invoices.orderId, payment.orderId)).limit(1))[0];
+
+  const missing: string[] = [];
+  if (!order || !CONFIRMED_ORDER_STATUSES.has(order.status)) {
+    missing.push(`the order is ${order ? order.status : 'missing'}`);
   }
+  if (!invoice) missing.push('no receipt was issued');
+  if (!missing.length) return;
 
-  await postLedger(db, order, payment, verified);
-  await issueInvoice(db, order.id);
-
-  if (ctx) {
-    await writeAudit(db, ctx, {
-      entityType: 'order', entityId: order.id, action: 'update',
-      oldValue: { status: order.status },
-      newValue: { status: 'paid', paymentId: payment.id, amountPaise: verified.amountPaise },
-    });
-  }
-  return { orderId: order.id, alreadyProcessed: false };
+  throw new OrderError(
+    'incomplete_confirmation',
+    `Payment ${payment.id} is captured but its confirmation did not complete (${missing.join('; ')}). ` +
+    'Money was taken and nothing was issued for it — this needs a human, and is not a replay.'
+  );
 }
 
 /** Double-entry postings so the treasurer's report derives from one record. */
@@ -476,12 +548,23 @@ export async function listOrders(db: DB, principal: Principal, limit = 100) {
 /**
  * Release reservations held by orders that were never paid, so an abandoned
  * checkout does not hold the last item forever. Safe to run repeatedly.
+ *
+ * "Never paid" is checked against the payments, not only against the order's
+ * own status: an order whose confirmation was interrupted still reads
+ * `awaiting_payment` while the money is captured, and expiring it would release
+ * the stock of an order somebody has already been charged for. Those are left
+ * alone, awaiting_payment and visible, rather than quietly written off.
  */
 export async function expireStaleOrders(db: DB): Promise<number> {
   const stale = await db.select().from(s.orders)
     .where(and(eq(s.orders.status, 'awaiting_payment'), sql`${s.orders.expiresAt} < now()`));
 
+  let expired = 0;
   for (const order of stale) {
+    const paid = await db.select({ id: s.payments.id }).from(s.payments)
+      .where(and(eq(s.payments.orderId, order.id), eq(s.payments.status, 'captured'))).limit(1);
+    if (paid.length) continue;
+
     const lines = await db.select().from(s.orderLines).where(eq(s.orderLines.orderId, order.id));
     for (const line of lines) {
       if (!line.variantId) continue;
@@ -490,8 +573,9 @@ export async function expireStaleOrders(db: DB): Promise<number> {
         .where(eq(s.productVariants.id, line.variantId));
     }
     await db.update(s.orders).set({ status: 'expired', updatedAt: new Date() }).where(eq(s.orders.id, order.id));
+    expired++;
   }
-  return stale.length;
+  return expired;
 }
 
 /** Refunds require authority and a reason, and never delete the payment (§78). */
