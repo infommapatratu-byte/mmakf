@@ -61,6 +61,12 @@ export const EXCLUSIONS: Record<string, string> = {
     'without ever reading what MMAKF does for schools — /karate-for-schools and /learn/schools are ' +
     'the pages that should meet a searcher, and both link here.',
   '/application': 'Sets X-Robots-Tag: noindex on its own response. A sitemap entry would contradict the page itself.',
+  '/learn/portal':
+    'The client portal. It sits under /learn, which is a public section, but it is a per-tenant ' +
+    'surface: signed in it renders one institution’s own programmes, documents and agreements, ' +
+    'and signed out it renders a sign-in explanation. It sets X-Robots-Tag: noindex on its own ' +
+    'response, so a sitemap entry would contradict the page. /learn links to it for the clients ' +
+    'who need it.',
   '/checkout': 'A transactional step that only means anything with a basket behind it; on its own it renders the reasons it cannot take an order.',
   '/unit': 'The Unit Portal sign-in. Same class of surface as /admin — an access-code gate, not a page for readers.',
   '/calendar.ics': 'A subscription feed, not a page. It is linked from /calendar, which is what a reader should find.',
@@ -77,6 +83,8 @@ export const EXCLUSIONS: Record<string, string> = {
 export const DYNAMIC_ROUTE_POLICY: Record<string, string> = {
   '/people/[slug]': 'Expanded from the leadership register. These profiles are published content and are already linked from /governance.',
   '/athlete/[id]': 'NOT expanded. The public register is a LOOKUP — one identifier, one person. Many of its subjects are children (docs/PRIVACY.md), and turning it into a bulk crawl of every athlete is a decision for the federation, not for this endpoint. The profiles remain reachable and linked from /athletes.',
+  '/learn/[audience]': 'Expanded from AUDIENCES in src/data/audiences.ts. These are the six substantive pages describing what MMAKF does for schools, corporates, universities, government bodies, communities and individuals — they are how an institution finds the federation at all, and PART AN is explicit that discovery content must not sit behind a login or out of the index. The set is small, fixed and editorial, which is what makes expanding it safe: unlike /athlete/[id] there is no register of real people behind it.',
+  '/learn/applications/[ref]': 'NOT expanded, and never should be. Each URL is one institution\'s own submission, reachable only with the private token issued to it. Listing these would publish the reference numbers of every applicant.',
 };
 
 // ── path rules ──────────────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ import type { APIRoute } from 'astro';
 import { get } from '@/lib/storage';
 import { slugify } from '@/lib/people';
 import { classifyRoute, renderSitemap, routeFromPageFile, SITE_ORIGIN } from '@/lib/seo';
+import { AUDIENCES } from '@/data/audiences';
 
 export const prerender = false;
 
@@ -70,6 +71,25 @@ async function peopleRoutes(): Promise<string[]> {
   }
 }
 
+/**
+ * The six audience pages on the learn surface.
+ *
+ * Expanded from the SAME array the pages render from, so the sitemap cannot
+ * advertise a slug that returns 404 — which is precisely what happened twice in
+ * the navigation before the route list was derived rather than hand-written.
+ *
+ * These are the most search-valuable pages the federation has: they are how a
+ * school looking for karate finds MMAKF at all. They were missing from the
+ * sitemap entirely, because /learn/[audience] is dynamic and a dynamic route
+ * contributes nothing without an expansion policy — the safe default, and the
+ * wrong outcome here.
+ *
+ * No editorial store, no database, no failure mode: the array is compiled in.
+ */
+function audienceRoutes(): string[] {
+  return AUDIENCES.map((a) => `/learn/${a.slug}`);
+}
+
 export const GET: APIRoute = async ({ site }) => {
   const origin = (site?.href || SITE_ORIGIN).replace(/\/$/, '');
 
@@ -77,6 +97,7 @@ export const GET: APIRoute = async ({ site }) => {
   const paths = routes.filter((r) => classifyRoute(r).kind === 'public');
 
   if (routes.includes('/people/[slug]')) paths.push(...(await peopleRoutes()));
+  if (routes.includes('/learn/[audience]')) paths.push(...audienceRoutes());
 
   const body = renderSitemap(paths, origin);
   return new Response(body, {
