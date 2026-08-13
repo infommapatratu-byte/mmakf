@@ -18,8 +18,8 @@ HTTP request. Nothing is marked BUILT because a page or a table exists.
 |---|---|
 | Database tables | **144** (117 before this session) |
 | Migrations | 12, all applied through the production runner in CI |
-| Tests | **2,226** across 68 files, all passing |
-| Routes | 105 |
+| Tests | **2,391** across 70 files, all passing |
+| Routes | 115 |
 | Live 404s from links the site publishes | **0** (was 2) |
 
 ---
@@ -49,32 +49,59 @@ HTTP request. Nothing is marked BUILT because a page or a table exists.
 
 ---
 
-## SCAFFOLDED — data model and domain logic exist, no surface yet
+## BUILT — the second wave of surfaces
 
-These have tables, typed functions and tests. What they do not have is a page.
-They are **deliberately absent from the admin menu** rather than listed and
-broken — see the note in `ADMIN_GROUPS`.
+Nine capabilities moved out of SCAFFOLDED. Every one was **fetched over HTTP
+before its menu entry was added** — `/learn/coaches` and `/learn/request` both
+shipped as 404s from a menu entry added ahead of the page, and that is the
+discipline that stops a third.
+
+| Surface | Gated on | Notes |
+|---|---|---|
+| `/admin/leads` | `engagement:read` | Pipeline by status, source attribution. Read-only: nothing here changes a lead, so it renders no controls rather than disabled ones. |
+| `/admin/fees` | `feeframework:read` | **The one that unblocks everything.** Author a framework, add rules, publish. Publishing is irreversible and the page says so beside the control. |
+| `/admin/quotes` | `quote:read` | Versions, validity, and how each total was reached. |
+| `/admin/programs` | `program:read` | Templates with `draft → under_review → approved → published → archived`, and the programmes actually running. |
+| `/admin/bookings` | `booking:read` | Agenda with collisions. |
+| `/admin/venues` | `venue:read` | Register, capacity, blackouts. Absent accessibility data reads as UNRECORDED, never as absent facilities. |
+| `/admin/attendance` | `attendance:read` | Sessions **and the correction trail** — both what was recorded and what it was changed to, with who changed it. |
+| `/admin/workflows` | `workflow:read` | Definitions, runs, steps, failures. How the federation answers "what did the system do on our behalf?" without reading TypeScript. |
+| `/learn/portal` | institution scope | The client portal. Institution resolved from the caller's binding, never from a query parameter. |
+
+### What these surfaces deliberately do NOT do
+
+Stated because a page that exists is not the same as a capability that is
+finished:
+
+- **`/admin/leads` is read-only.** No status transition, no owner assignment, no
+  note. Those need `engagement:write` and a POST endpoint; neither exists.
+- **`/admin/quotes` cannot approve a version.** `src/db/fees.ts` has no
+  `approveQuoteVersion()`, so a version that used a requires-approval rule sits
+  at `awaiting_approval` indefinitely. The page says so rather than showing a
+  control that would write outside the module that owns quotations.
+- **A draft fee rule cannot be edited or deleted.** Correcting one means
+  authoring a new version. `fees.ts` exposes no `updateRule`.
+- **Publishing V2 does not mark V1 superseded.** `activeFramework()` picks the
+  highest version whose date window is open.
+- **The fee framework is national-only by construction** — `fee_frameworks` has
+  no scope column, so a scoped holder is refused rather than shown a filtered
+  list. That is the fail-closed reading, not a filter anybody wrote.
+- **Counts on `/admin/leads` are a floor past 500 rows**, and the page says so
+  when the cap is hit. There is no `leadCounts()` aggregate and writing raw SQL
+  in a page would move the scope predicate out of the domain module.
+
+## SCAFFOLDED — model and domain logic, still no surface
 
 | Capability | Model | Missing |
 |---|---|---|
-| CRM pipeline | `leads`, `leadActivities`, `leadPipeline()` | `/admin/leads` |
-| Quotes and proposals | `quotes`, `quoteVersions`, `quoteLines`, `proposals`, `issueQuote()`, `explainQuote()` | `/admin/quotes` |
-| Programme management | `trainingPrograms`, `programTemplates` | `/admin/programs` |
-| Bookings and calendar | `bookings`, `bookingResources`, `coachAvailability` | `/admin/bookings` |
-| Venues | `venues`, `venueBlackouts` | `/admin/venues` |
-| Attendance | `programSessions`, `programAttendance` | `/admin/attendance` |
-| Contracts | `contracts` | Surface, and the quote → contract transition |
-| Client documents | `clientDocuments` | Storage binding and the portal view |
-| Institution client portal | `institutionUsers` + institution RBAC scope | `/learn/portal` |
-| Workflow inspection | `workflowRuns`, `workflowSteps` | `/admin/workflows` |
+| Contracts | `contracts` | The quote → contract transition, and a surface |
+| Client documents | `clientDocuments` | Storage binding |
 | External calendar sync | `calendarConnections`, `calendarEvents`, `calendarSyncLog` | Google/Microsoft OAuth |
 
 ---
 
 ## NOT STARTED
 
-- Coach application form on the learn surface (`applyAsCoach()` exists and is
-  tested; nothing calls it from a page yet)
 - Participant and parent portals (PART AA, AB)
 - Institutional analytics surfaces (PART V)
 - HR module (PART X) — `hr:*` actions and `HR_OFFICER` exist; no tables
