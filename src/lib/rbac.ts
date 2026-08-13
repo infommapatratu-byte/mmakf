@@ -323,6 +323,12 @@ const GRANTS: Record<Role, Action[]> = {
     // issues neither. Reading the money a programme will bring in is a
     // different authority from setting it.
     'quote:read', 'contract:read', 'report:read', 'export:run', 'document:read',
+    // Restored explicitly when src/db/fees.ts stopped gating the fee framework
+    // on 'finance:write'. Finance could author and publish a framework through
+    // that action, so it keeps both — and now holds them by name, where the
+    // grant can be argued with, rather than as a side effect of a payments
+    // permission.
+    'feeframework:read', 'feeframework:write', 'feeframework:publish',
   ],
   SAFEGUARDING_OFFICER: ['safeguarding:read', 'safeguarding:write', 'person:read', 'person:read_pii', 'audit:read'],
 

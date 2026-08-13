@@ -4,13 +4,20 @@
 //
 // A LEAD AND AN INSTITUTIONAL APPLICATION ARE NOT THE SAME OBJECT, and this
 // page must never present them as one. An application (/admin/applications) is
-// a school formally asking for a programme, and submitting one CREATES a lead.
+// a school formally asking for a programme, and submitting one also records the
+// enquiry here — though NOT always as a new row. submitApplication() calls
+// captureLead(), which folds the enquiry into the applicant's open lead when
+// they already have one, and which is wrapped in a try/catch: an application
+// whose lead could not be written is filed with a `lead_failed` event against
+// itself and never appears here at all. So the count of applications and the
+// count of leads are not two views of one number, and this page must not be
+// read as if they were.
 // A lead can exist with no application behind it at all — somebody who found a
 // video, sent one email, and has filled in nothing. Collapsing the two screens
 // would either hide those enquiries or imply an application nobody submitted.
 // They are shown as linked, never as equal: a lead's training requests appear
 // on its detail panel, and an application reaches this page only as the lead it
-// created.
+// was folded into.
 //
 // A LEAD IS ALSO NOT A MEMBER. Until somebody identifies it against a canonical
 // institution or person, an enquiry is an enquiry — it is not on the register
@@ -24,11 +31,14 @@
 import AdminShell from '@/components/AdminShell.astro';
 import { isConfigured, db } from '@/db';
 import { identify } from '@/lib/session';
-import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import { canAnywhere, visibleScopes, ForbiddenError } from '@/lib/rbac';
 import {
-  leadPipeline, leadDetail, sourceAttribution,
+  leadPipeline, leadDetail, sourceAttribution, isEngagementError,
   LEAD_SOURCES, AUDIENCES, type Audience,
 } from '@/db/engagement';
+// Whether a fee framework is published is a fact about the database, and
+// /admin/fees can change it. Read it rather than assert it — see below.
+import { activeFramework } from '@/db/fees';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 
 export const prerender = false;
@@ -77,6 +87,11 @@ let attributionExact = true;
 let detail: any = null;
 let detailProblem: string | null = null;
 let unavailable: string | null = null;
+
+// Three states, not two. "Could not tell" is a real answer here: the pipeline
+// does not depend on the fee framework, so a failure to read it must not take
+// the page down — and it must not be reported as "none is published" either.
+let framework: 'published' | 'none' | 'unknown' = 'unknown';
 
 if (principal && canAnywhere(principal, 'engagement:read')) {
   if (!isConfigured()) {
@@ -139,16 +154,37 @@ if (principal && canAnywhere(principal, 'engagement:read')) {
       if (leadId != null) {
         try {
           detail = await leadDetail(db(), principal, leadId);
-        } catch {
-          // ONE message for "no such lead" and for "outside your scope". They
-          // are different failures and telling them apart would let anyone with
-          // engagement:read count the federation's leads in states that are not
-          // theirs by walking the identifiers.
-          detailProblem = 'No lead with that identifier is visible to this account.';
+        } catch (err: any) {
+          if (isEngagementError(err) || err instanceof ForbiddenError) {
+            // ONE message for "no such lead" and for "outside your scope". They
+            // are different failures and telling them apart would let anyone
+            // with engagement:read count the federation's leads in states that
+            // are not theirs by walking the identifiers.
+            detailProblem = 'No lead with that identifier is visible to this account.';
+          } else {
+            // Anything else is the read failing, which is not a judgement about
+            // the lead. Reporting it as "not visible to this account" would be a
+            // claim about authorisation that nothing here established.
+            detailProblem = `That lead could not be read: ${String(err?.message ?? err)}`;
+          }
         }
       }
     } catch (err: any) {
       unavailable = String(err?.message ?? err);
+    }
+
+    // Separate from the pipeline read, and deliberately after it: the page is
+    // about leads, and a fee framework that cannot be read is a footnote rather
+    // than a reason to show nothing. Skipped once the pipeline itself has
+    // failed, since the sentence it feeds is not rendered on that branch.
+    if (!unavailable) {
+      try {
+        framework = (await activeFramework(db(), new Date().toISOString().slice(0, 10)))
+          ? 'published'
+          : 'none';
+      } catch {
+        framework = 'unknown';
+      }
     }
   }
 }
@@ -187,8 +223,18 @@ const listHref = (over: { status?: string; audience?: string; lead?: number }) =
 // Channels the enum knows about that have introduced nobody. Worth naming: a
 // channel with no leads is a finding about the federation's outreach, and it is
 // invisible if the table only lists the channels that did produce something.
+//
+// It is only SAID when the counts behind it are complete. A channel missing
+// from the 500 most recently changed leads has not been shown to have
+// introduced nobody — it has been shown to be absent from a sample — and
+// printing "no lead has arrived through youtube" on that basis would be a
+// finding this page invented. Hence the attributionExact guard at the call
+// site, and the scoped wording below.
 const heard = new Set(attribution.map((a) => a.source));
 const silent = LEAD_SOURCES.filter((s) => !heard.has(s));
+const silentLead = scope === 'scoped'
+  ? 'No lead in this account’s own states and districts has arrived through'
+  : 'No lead has arrived through';
 
 /** utm is open JSON; only string-able, non-empty entries are shown. */
 const utmEntries = (v: unknown): [string, string][] =>
@@ -236,10 +282,13 @@ const utmEntries = (v: unknown): [string, string][] =>
       <p class="legend">
         Counted over {boardTruncated ? `the ${BOARD_LIMIT} most recently changed leads in scope` : 'the leads in scope'}.
         Won, lost and disqualified are closed: a further enquiry from the same
-        contact opens a new lead rather than reviving one of these. And nothing
-        reaches <em>quoted</em> on its own — the federation has published no fee
-        framework, so a lead is quoted when somebody prepares a quotation by
-        hand.
+        contact opens a new lead rather than reviving one of these. Nothing
+        reaches <em>quoted</em> on its own: a lead is quoted when somebody
+        prepares and sends a quotation.
+        {framework === 'none' && (
+          <> No fee framework is published for today, so every one of those
+          quotations is prepared by hand.</>
+        )}
       </p>
 
       <nav class="filters" aria-label="Filter by audience">
@@ -252,12 +301,17 @@ const utmEntries = (v: unknown): [string, string][] =>
       {listed.length === 0 ? (
         board.length === 0 ? (
           <p class="note">
-            No lead has been recorded in this scope. A lead is created when
-            somebody enquires — through an enquiry path on the site, or as a
-            by-product of an institutional application, which always creates
-            one. Nothing on this page is seeded or sampled, so an empty pipeline
-            is a fact about the enquiries the federation has received and not a
-            fact about the database.
+            No lead has been recorded in this scope. A lead is recorded when
+            somebody enquires — through an enquiry path on the site, or
+            alongside an institutional application. An application does not
+            always add a row here: an enquiry from a contact who already has an
+            open lead is folded into that lead, and an application whose lead
+            could not be written is filed against the application itself, so
+            check <a href={h('/admin/applications')}>applications</a> as well
+            before concluding that nobody has been in touch. Nothing on this
+            page is seeded or sampled, so an empty pipeline is a fact about the
+            enquiries the federation has received and not a fact about the
+            database.
           </p>
         ) : (
           <p class="note">
@@ -374,9 +428,9 @@ const utmEntries = (v: unknown): [string, string][] =>
               </tbody>
             </table>
 
-            {silent.length > 0 && (
+            {silent.length > 0 && attributionExact && (
               <p class="sec-p">
-                No lead has arrived through {silent.map(label).join(', ')}.
+                {silentLead} {silent.map(label).join(', ')}.
               </p>
             )}
             {!attributionExact && (

@@ -446,7 +446,11 @@ export async function createFramework(
   db: DB, ctx: AuditContext,
   input: { title: string; version: number; effectiveFrom?: string | null; notes?: string }
 ) {
-  assertCan(ctx.principal, 'finance:write', {});
+  // WAS 'finance:write'. Gating the fee framework on a payments action meant
+  // the three authorities this module actually distinguishes — read the rules,
+  // change the rules, freeze the rules — were one, and that whoever could
+  // record a payment could rewrite every future quotation.
+  assertCan(ctx.principal, 'feeframework:write', {});
   if (!Number.isInteger(input.version) || input.version < 1) {
     throw new FeeError('bad_version', 'A framework version must be a positive whole number.');
   }
@@ -473,7 +477,7 @@ export async function addRule(
     sortOrder?: number; requiresApproval?: boolean;
   }
 ) {
-  assertCan(ctx.principal, 'finance:write', {});
+  assertCan(ctx.principal, 'feeframework:write', {});
   const [framework] = await db.select().from(s.feeFrameworks)
     .where(eq(s.feeFrameworks.id, frameworkId)).limit(1);
   if (!framework) throw new FeeError('unknown_framework', 'No such fee framework.');
@@ -516,7 +520,11 @@ export async function addRule(
 
 /** Publish a framework. After this it is frozen; a change means a new version. */
 export async function publishFramework(db: DB, ctx: AuditContext, frameworkId: number) {
-  assertCan(ctx.principal, 'finance:write', {});
+  // A SEPARATE ACTION FROM WRITING ONE, deliberately. Publishing is
+  // irreversible — after it, a change means a new version — so the person who
+  // drafts a framework and the person who freezes it can be different people.
+  // Under 'finance:write' they could not be.
+  assertCan(ctx.principal, 'feeframework:publish', {});
   const [framework] = await db.select().from(s.feeFrameworks)
     .where(eq(s.feeFrameworks.id, frameworkId)).limit(1);
   if (!framework) throw new FeeError('unknown_framework', 'No such fee framework.');
@@ -580,7 +588,11 @@ export async function issueQuote(
     validUntil?: string | null;
   }
 ): Promise<IssuedQuote> {
-  assertCan(ctx.principal, 'finance:write', {});
+  // Issuing a quotation is not editing the rules it is computed from, and it is
+  // not recording a payment. TRAINING_OPERATIONS holds this and neither of the
+  // other two — which is the separation that stops one person discounting
+  // unobserved.
+  assertCan(ctx.principal, 'quote:issue', {});
   const computation = await computeFee(db, input.frameworkId, input.inputs);
 
   // Re-version an existing quote for the same request rather than creating a
@@ -693,8 +705,8 @@ export async function reproduce(db: DB, quoteVersionId: number) {
 
 /** A stored quote version with its lines, for the "why this amount?" screen. */
 export async function explainQuote(db: DB, principal: Principal, quoteVersionId: number) {
-  if (!canAnywhere(principal, 'finance:read')) {
-    throw new FeeError('forbidden', 'Reading a quotation requires finance:read.');
+  if (!canAnywhere(principal, 'quote:read')) {
+    throw new FeeError('forbidden', 'Reading a quotation requires quote:read.');
   }
   const [qv] = await db.select().from(s.quoteVersions)
     .where(eq(s.quoteVersions.id, quoteVersionId)).limit(1);

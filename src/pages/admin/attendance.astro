@@ -9,8 +9,10 @@
 // value that was there before in `corrected_from_present` rather than
 // overwriting it, so the record can still answer "what did the coach actually
 // write down on the day?" — and a register that renders only the current value
-// throws that answer away at the last step. Every corrected mark below is
-// therefore printed as BOTH readings, with who changed it and when.
+// throws that answer away at the last step. A corrected mark is therefore
+// printed as BOTH readings, with who changed it and when — except where the
+// earlier value was never kept, and there the page says that rather than
+// guessing which way the mark went.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // WHAT IS COUNTED AND WHAT IS NOT
@@ -22,6 +24,17 @@
 // over every mark; only the corrections are listed row by row, because a
 // programme of four hundred children across twenty-four sessions is nine
 // thousand marks and no administrator reads those on a screen.
+//
+// There is deliberately NO count of how many participants went unrecorded at a
+// given session, and no attendance rate. Both need a denominator — who was
+// expected in that room on that day — and the federation records no such thing.
+// The nearest available number is the roll as it stands NOW, and subtracting
+// marks from it produces a figure that is wrong in both directions: it counts a
+// child who enrolled after the session as missing from it, and it hides the
+// gap entirely for a cohort that has since shrunk. A wrong number on an
+// administrator's screen is worse than an absent one, so the roll is reported
+// once against the programme, in the present tense, and never arithmetically
+// combined with a past session's marks.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // SCOPE
@@ -94,6 +107,17 @@ if (principal && canAnywhere(principal, 'attendance:read')) {
       const scopes = visibleScopes(principal, 'attendance:read');
       const where: any[] = [];
       let queryable = scopes.kind !== 'none';
+
+      if (scopes.kind === 'none') {
+        // canAnywhere() passed, so the action is held — but no binding carrying
+        // it resolves to a scope (a scoped binding with no scopeId does this).
+        // Saying "no sessions match" here would blame the data for a defect in
+        // the binding, and the person reading needs to know which it is.
+        scopeNote =
+          'You hold attendance:read, but none of the role bindings that carry it resolves to a unit or an ' +
+          'institution, so there is no scope to search inside. No query was run. Whoever granted the role ' +
+          'needs to bind it to a scope before this page can show anything.';
+      }
 
       if (scopes.kind === 'scoped') {
         // The predicate goes on the programme, because that is the row that
@@ -311,8 +335,8 @@ const when = (v: unknown) => {
   }) + ' IST';
 };
 
-/** present / absent / neither — the third case is a gap in the record, not a state. */
-const mark = (v: unknown) => (v === true ? 'present' : v === false ? 'absent' : 'no value kept');
+/** present / absent. `present` is NOT NULL, so only the audit column can be absent. */
+const mark = (v: unknown) => (v === true ? 'present' : 'absent');
 
 const participantOf = (c: any) =>
   c.personName || c.displayName || `Participant #${c.participantId}`;
@@ -340,7 +364,7 @@ const VIEWS: [string, string][] = [
 <AdminShell
   title="Attendance"
   requires="attendance:read"
-  intro="Sessions by programme, and the register taken against each. Where a mark was corrected, both readings are shown — the value the coach recorded and the value it was changed to."
+  intro="Sessions by programme, and the register taken against each. Where a mark was corrected, the value the coach recorded is shown beside the value it was changed to — or, where the earlier value was not kept, that fact instead."
 >
   <nav class="filters" aria-label="Filter sessions">
     {VIEWS.map(([v, text]) => (
@@ -416,8 +440,6 @@ const VIEWS: [string, string][] = [
             {g.sessions.map((s: any) => {
               const t = tallies.get(s.id);
               const corr = correctionsBySession.get(s.id) ?? [];
-              const roll = rolls.get(g.programId);
-              const unmarked = t && roll ? Math.max(0, roll.onRoll - t.recorded) : 0;
               return (
                 <li class={`s-${s.status}`}>
                   <div class="s-row">
@@ -449,9 +471,6 @@ const VIEWS: [string, string][] = [
                         <p class="reg">
                           <strong>{t.present}</strong> present · <strong>{t.absent}</strong> absent
                           <span class="muted"> · {t.recorded} marks</span>
-                          {unmarked > 0 && (
-                            <span class="muted"> · {unmarked} unrecorded</span>
-                          )}
                         </p>
                       ) : s.status === 'delivered' ? (
                         <p class="reg none">Delivered, no register taken.</p>
@@ -475,7 +494,11 @@ const VIEWS: [string, string][] = [
                         {corr.map((c: any) => (
                           <li>
                             <span class="c-who">{participantOf(c)}</span>
-                            <span class="c-was">recorded {mark(c.correctedFrom)}</span>
+                            {c.correctedFrom == null ? (
+                              <span class="c-was-none">earlier value not kept</span>
+                            ) : (
+                              <span class="c-was">recorded {mark(c.correctedFrom)}</span>
+                            )}
                             <span class="c-arrow" aria-hidden="true">→</span>
                             <span class="c-now">changed to {mark(c.present)}</span>
                             <span class="c-by">
@@ -500,10 +523,13 @@ const VIEWS: [string, string][] = [
       <p class="foot">
         A mark is present or absent; there is no third value, so a participant
         with no row for a session is unrecorded and is never counted as absent
-        here. Corrections are kept rather than overwritten, which is why both
-        readings appear above. Per-participant marks are not listed on this page
-        — only the tally and every correction — because a full cohort register
-        runs to thousands of rows.
+        here. That also means no session can say how many people went
+        unrecorded: the register does not record who was expected in the room,
+        and the roll as it stands today is not that number. Corrections are kept
+        rather than overwritten, which is why both readings appear above.
+        Per-participant marks are not listed on this page — only the tally and
+        the corrections — because a full cohort register runs to thousands of
+        rows.
       </p>
     </>
   )}
@@ -587,6 +613,8 @@ const VIEWS: [string, string][] = [
   .corr li:first-child { border-top: 0; }
   .c-who { font-family: var(--font-display); }
   .c-was { color: var(--muted); text-decoration: line-through; }
+  /* Not struck through: there is no superseded value to strike, only its absence. */
+  .c-was-none { color: var(--muted); font-style: italic; }
   .c-arrow { color: var(--muted); }
   .c-now { color: var(--gold-2); }
   .c-by { color: var(--muted); font-size: .8rem; }

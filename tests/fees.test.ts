@@ -28,7 +28,28 @@ const finance: Principal = {
 const athlete: Principal = {
   userId: 2, label: 'athlete', bindings: [{ role: 'ATHLETE', scopeType: 'national', scopeId: null }],
 };
+
+/**
+ * Issuing a quotation is a different authority from authoring the rules it is
+ * computed from.
+ *
+ * These tests used one principal for both, because fees.ts used one action —
+ * 'finance:write' — for both. It no longer does: FINANCE_OFFICER authors and
+ * publishes the framework it reconciles against, and deliberately CANNOT issue
+ * a quotation, which is what stops the same person setting a price and sending
+ * it. TRAINING_OPERATIONS issues.
+ *
+ * Keeping one principal here would have made these tests pass while the
+ * separation they now depend on went unexercised.
+ */
+const ops: Principal = {
+  userId: 3, label: 'ops', bindings: [{ role: 'TRAINING_OPERATIONS', scopeType: 'national', scopeId: null }],
+};
+
+/** Authors and publishes frameworks. */
 const ctx = { principal: finance };
+/** Issues quotations. */
+const opsCtx = { principal: ops };
 
 beforeAll(async () => {
   const client = new PGlite();
@@ -45,6 +66,9 @@ beforeAll(async () => {
   await db.insert(s.users).values([
     { id: 1, email: 'finance@mmakf.in', status: 'active' },
     { id: 2, email: 'athlete@mmakf.in', status: 'active' },
+    // quotes.created_by_user_id is a real foreign key, so the account that
+    // issues one has to exist.
+    { id: 3, email: 'ops@mmakf.in', status: 'active' },
   ]);
 
   const [svc] = await db.insert(s.services).values({
@@ -300,7 +324,7 @@ describe('REPRODUCIBILITY — the property the federation asked for by name', ()
   });
 
   it('a STORED quote recomputes to the figure it was issued at', async () => {
-    const issued = await issueQuote(db, ctx, { frameworkId: FW, inputs });
+    const issued = await issueQuote(db, opsCtx, { frameworkId: FW, inputs });
     const [qv] = await db.select().from(s.quoteVersions).where(eq(s.quoteVersions.quoteId, issued.quoteId));
     const check = await reproduce(db, qv.id);
     expect(check.matches).toBe(true);
@@ -314,7 +338,7 @@ describe('REPRODUCIBILITY — the property the federation asked for by name', ()
       ref: 'MMAKF-REQ-TEST-1', audience: 'school', parameters: {},
     }).returning({ id: s.trainingRequests.id });
 
-    const before = await issueQuote(db, ctx, { requestId: req[0].id, frameworkId: FW, inputs });
+    const before = await issueQuote(db, opsCtx, { requestId: req[0].id, frameworkId: FW, inputs });
     const storedTotal = before.computation.totalMinor;
 
     // A completely different set of fees is published.
@@ -342,11 +366,11 @@ describe('quotes are versioned, never edited', () => {
       ref: 'MMAKF-REQ-TEST-2', audience: 'school', parameters: {},
     }).returning({ id: s.trainingRequests.id });
 
-    const v1 = await issueQuote(db, ctx, {
+    const v1 = await issueQuote(db, opsCtx, {
       requestId: req.id, frameworkId: FW,
       inputs: { audience: 'school', mode: 'on_site', participants: 50 },
     });
-    const v2 = await issueQuote(db, ctx, {
+    const v2 = await issueQuote(db, opsCtx, {
       requestId: req.id, frameworkId: FW,
       inputs: { audience: 'school', mode: 'on_site', participants: 90 },
     });
@@ -366,7 +390,7 @@ describe('quotes are versioned, never edited', () => {
   });
 
   it('a quote needing approval is NOT issued until somebody approves it', async () => {
-    const q = await issueQuote(db, ctx, {
+    const q = await issueQuote(db, opsCtx, {
       frameworkId: FW, inputs: { audience: 'school', mode: 'on_site', participants: 400 },
     });
     const [qv] = await db.select().from(s.quoteVersions).where(eq(s.quoteVersions.quoteId, q.quoteId));
@@ -378,7 +402,7 @@ describe('quotes are versioned, never edited', () => {
     const [req] = await db.insert(s.trainingRequests).values({
       ref: 'MMAKF-REQ-TEST-3', audience: 'school', parameters: { participants: 60 },
     }).returning({ id: s.trainingRequests.id });
-    const q = await issueQuote(db, ctx, {
+    const q = await issueQuote(db, opsCtx, {
       requestId: req.id, frameworkId: FW,
       inputs: { audience: 'school', mode: 'on_site', participants: 60 },
     });
@@ -396,7 +420,7 @@ describe('quotes are versioned, never edited', () => {
 
 describe('the explanation', () => {
   it('reconstructs the arithmetic from the stored rows alone', async () => {
-    const q = await issueQuote(db, ctx, {
+    const q = await issueQuote(db, opsCtx, {
       frameworkId: FW, inputs: { audience: 'school', mode: 'on_site', participants: 80 },
     });
     const [qv] = await db.select().from(s.quoteVersions).where(eq(s.quoteVersions.quoteId, q.quoteId));
@@ -408,10 +432,14 @@ describe('the explanation', () => {
     expect(e.lines.every((l: any) => typeof l.runningTotalMinor === 'number')).toBe(true);
   });
 
-  it('requires finance:read', async () => {
-    const q = await issueQuote(db, ctx, { frameworkId: FW, inputs: { audience: 'school', participants: 10 } });
+  it('requires quote:read, not a payments action', async () => {
+    const q = await issueQuote(db, opsCtx, { frameworkId: FW, inputs: { audience: 'school', participants: 10 } });
     const [qv] = await db.select().from(s.quoteVersions).where(eq(s.quoteVersions.quoteId, q.quoteId));
-    await expect(explainQuote(db, athlete, qv.id)).rejects.toThrow(/finance:read/);
+    // WAS finance:read. A training director holds quote:read and no payments
+    // action at all — under the old gate, the person whose screen this is could
+    // not read it.
+    await expect(explainQuote(db, athlete, qv.id)).rejects.toThrow(/quote:read/);
+    await expect(explainQuote(db, ops, qv.id)).resolves.toBeTruthy();
   });
 });
 

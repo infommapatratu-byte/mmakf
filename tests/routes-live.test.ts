@@ -110,10 +110,27 @@ const OK_ROUTES = [
   '/documents',
 
   // ── Admin ──
+  //
+  // These answer 200 with AdminShell's sign-in prompt when nobody is signed in,
+  // which is the state a test run is in. That is still worth fetching: a null
+  // dereference in the frontmatter is a 500 at request time and a clean
+  // `astro build`, and every one of these pages queries the database in its
+  // frontmatter.
   '/admin/applications',
   '/admin/tasks',
   '/admin/coaches',
   '/admin/support',
+  '/admin/leads',
+  '/admin/fees',
+  '/admin/quotes',
+  '/admin/programs',
+  '/admin/bookings',
+  '/admin/venues',
+  '/admin/attendance',
+  '/admin/workflows',
+
+  // ── The client portal ──
+  '/learn/portal',
 
   // ── Pages whose navigation changed underneath them ──
   '/',

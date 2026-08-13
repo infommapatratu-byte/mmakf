@@ -50,7 +50,21 @@ const principal = identity?.principal ?? null;
 /** The most recent runs, newest first — the usual question is "what just happened". */
 const RUN_LIMIT = 60;
 
-const selectedRunId = Number(Astro.url.searchParams.get('run')) || null;
+/**
+ * The run asked for, if the number could be a run id at all.
+ *
+ * `workflow_runs.id` is a 32-bit integer, so `?run=1.5` or `?run=99999999999`
+ * is not a run that happens not to exist — it is a value the driver refuses,
+ * and an unguarded parse would put a raw database error where the whole page
+ * should be. Anything that is not a plain positive integer inside int4 is
+ * therefore treated as no selection at all.
+ */
+const runParam = Astro.url.searchParams.get('run');
+const parsedRunId = runParam === null || runParam.trim() === '' ? NaN : Number(runParam);
+const selectedRunId =
+  Number.isInteger(parsedRunId) && parsedRunId > 0 && parsedRunId <= 2147483647
+    ? parsedRunId
+    : null;
 
 let definitions: any[] = [];
 let runs: any[] = [];
@@ -233,11 +247,22 @@ const attemptsOf = (definition: unknown) => Number((definition as any)?.maxAttem
 // One block per automation: the highest version, plus the versions it replaced.
 // Superseded rows are kept deliberately — a run that failed under v1 is retried
 // under v1 — so they are listed rather than rendered in full.
-const byCode = new Map<string, { current: any; superseded: number[] }>();
+//
+// The active versions are collected separately because the block shows the
+// HIGHEST version and dispatch() runs the highest ACTIVE one. Those are the
+// same row after installWorkflow(), which deactivates every earlier version of
+// a code before inserting the new one — but they need not be if a row was
+// switched off by hand, and saying "that trigger starts nothing" when an older
+// version is still active would be a false statement about the machinery.
+const byCode = new Map<string, { current: any; superseded: number[]; activeVersions: number[] }>();
 for (const d of definitions) {
   const entry = byCode.get(d.code);
-  if (!entry) byCode.set(d.code, { current: d, superseded: [] });
-  else entry.superseded.push(d.version);
+  if (!entry) {
+    byCode.set(d.code, { current: d, superseded: [], activeVersions: d.active ? [d.version] : [] });
+  } else {
+    entry.superseded.push(d.version);
+    if (d.active) entry.activeVersions.push(d.version);
+  }
 }
 const automations = [...byCode.values()];
 
@@ -270,8 +295,9 @@ const fmtWhen = (v: unknown) => {
 /**
  * What happens next to a run that did not finish.
  *
- * Reads the same three conditions sweepRetries() reads: attempts remaining, and
- * a next-attempt time that is either absent or past.
+ * Reads the same three conditions sweepRetries() reads: a status it retries at
+ * all, attempts remaining, and a next-attempt time that is either absent or
+ * past.
  */
 function retryText(r: any): string {
   if (r.status !== 'failed' && r.status !== 'partially_failed') return '';
@@ -340,7 +366,7 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
               </p>
             )}
 
-            {automations.map(({ current: d, superseded }) => {
+            {automations.map(({ current: d, superseded, activeVersions }) => {
               const steps = stepsOf(d.definition);
               return (
                 <article class={d.active ? 'auto' : 'auto off'}>
@@ -362,14 +388,18 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
                   <p class="a-trigger">
                     Runs when <code>{d.trigger}</code> happens.
                     {!d.active && (
-                      <> This version is not active, so that trigger currently starts nothing.</>
+                      activeVersions.length === 0
+                        ? <> No version of this automation is active, so that trigger currently starts nothing.</>
+                        : <> This version is not active. Version {Math.max(...activeVersions)} is, and that is the one the trigger starts.</>
                     )}
                   </p>
 
                   {steps === null ? (
                     <p class="a-broken" role="alert">
-                      This definition has no steps array. dispatch() records it as
-                      a failed run without performing anything.
+                      This definition has no steps array. dispatch() performs
+                      nothing and reports the trigger as failed — and it writes
+                      no run row at all, so the failure shows here and nowhere in
+                      the runs below.
                     </p>
                   ) : (
                     <ol class="steps">
@@ -383,7 +413,9 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
                           <p class="s-what">
                             {s.registered
                               ? (ACTION_TEXT[s.action] ?? 'Registered in the action registry; no description is recorded on this page for it.')
-                              : 'No handler is registered for this action, so the engine fails the step rather than skipping it. Every step after it is recorded as blocked.'}
+                              : s.optional
+                                ? 'No handler is registered for this action, so the engine fails the step rather than skipping it. Because the step is optional the run carries on and the later steps still run — but nothing this step was written to do ever happens.'
+                                : 'No handler is registered for this action, so the engine fails the step rather than skipping it. Every step after it is recorded as blocked.'}
                           </p>
                           {s.when && <p class="s-when">Only when {s.when}.</p>}
                           {s.optional && (
@@ -545,11 +577,13 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
           </p>
         ) : (
           <>
-            <p class="tbl-hint">
+            <p class="count">
               The {runs.length === RUN_LIMIT ? `${RUN_LIMIT} most recent` : runs.length} run
-              {runs.length === 1 ? '' : 's'}, newest first. Scroll the table
-              sideways to see every column.
+              {runs.length === 1 ? '' : 's'}, newest first.
             </p>
+            {/* No .tbl-hint: global.css only reveals it below 760px, and below
+                900px this table is replaced by the records below. The fade on
+                .tbl-scroll is the scroll affordance in between. */}
             <div class="tbl-scroll">
               <table class="tbl">
                 <caption class="sr-only">Workflow runs</caption>
@@ -612,10 +646,13 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
 
             <p class="foot">
               A retry does not happen at the minute shown. The sweep runs once a
-              day with the rest of the reconciliation, and picks up every failed
-              run whose time has passed and whose attempts are not exhausted. It
-              reads the definition again rather than the shape stored on the run,
-              so an automation corrected after a failure is retried corrected.
+              day with the rest of the reconciliation, takes the runs whose time
+              has passed and whose attempts are not exhausted, oldest first — and
+              at most fifty in one pass, so a long backlog clears over several
+              days rather than at once. It re-reads the definition row for the
+              run's own code and version: a correction made in place is picked
+              up, and a correction installed as a new version is not, because the
+              run is retried in the shape it ran under.
             </p>
           </>
         )}
@@ -635,7 +672,12 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
           </div>
           <div>
             <dt>succeeded</dt>
-            <dd>Every step that was reached either succeeded or was skipped by its own condition.</dd>
+            <dd>
+              No required step failed. A step marked optional may have failed and
+              the run still reads as succeeded — the engine carries on past one —
+              so the steps are worth reading before assuming every effect
+              happened.
+            </dd>
           </div>
           <div class="lg-part">
             <dt>partially failed</dt>
@@ -649,7 +691,11 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
           </div>
           <div>
             <dt>failed</dt>
-            <dd>The first step failed, so nothing the automation intended took effect.</dd>
+            <dd>
+              A required step failed and none had succeeded before it, so nothing
+              the automation intended took effect. It is not always the first
+              step: an earlier one may have been skipped by its own condition.
+            </dd>
           </div>
           <div>
             <dt>skipped</dt>
@@ -666,7 +712,9 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
 </AdminShell>
 
 <style>
-  .block { margin: 0 0 40px; }
+  /* global.css gives every <section> 108px of padding and a top rule, which is
+     the public site's rhythm and wrong inside the admin shell. */
+  .block { margin: 0 0 40px; padding: 0; border-top: 0; }
   .sec-h {
     font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 14px;
     padding-bottom: 8px; border-bottom: 1px solid var(--border);
@@ -694,7 +742,9 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
     margin: 12px 0 0; padding: 10px 14px; border-left: 3px solid var(--red);
     background: var(--card-2); font-size: .88rem; line-height: 1.6;
   }
-  .pill-off { opacity: .8; }
+  /* A switched-off automation must not read as a quieter version of a live one:
+     nothing at all happens when its trigger fires. */
+  .pill-off { color: var(--muted); border-style: dashed; }
 
   .steps { margin: 14px 0 0; padding: 0 0 0 22px; }
   .steps li { margin: 0 0 16px; padding: 0 0 0 6px; }
@@ -756,7 +806,7 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
   }
   .stats .warn { color: var(--red); }
 
-  .tbl-hint { font-size: .8rem; color: var(--muted); margin: 0 0 8px; }
+  .count { font-size: .82rem; color: var(--muted); margin: 0 0 8px; }
   .tbl { width: 100%; border-collapse: collapse; font-size: .88rem; }
   .tbl th, .tbl td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .tbl thead th {
@@ -786,7 +836,7 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
 
   /* ── Phone ─────────────────────────────────────────────────────────────── */
   @media (max-width: 900px) {
-    .tbl-scroll, .tbl-hint { display: none; }
+    .tbl-scroll { display: none; }
     .cards { display: block; }
     .cards li { padding: 14px 0 14px 12px; border-bottom: 1px solid var(--border); border-left: 2px solid transparent; }
     .cards li.part { border-left-color: var(--red); }

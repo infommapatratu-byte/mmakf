@@ -46,17 +46,34 @@ const mayApprove = !!principal && canAnywhere(principal, 'program:approve');
 const mayPublish = !!principal && canAnywhere(principal, 'program:publish');
 
 const TEMPLATE_STATUSES = ['draft', 'under_review', 'approved', 'published', 'archived'] as const;
-const statusFilter = Astro.url.searchParams.get('status') || '';
+
+// Normalised, not merely read. An unrecognised ?status= used to leave the query
+// unfiltered while the page still said the list had been filtered by it — so the
+// screen showed every template under the sentence "no template is at X", with X
+// being whatever the caller typed. An unknown status is now simply no filter.
+const rawStatus = Astro.url.searchParams.get('status') || '';
+const statusFilter = (TEMPLATE_STATUSES as readonly string[]).includes(rawStatus) ? rawStatus : '';
+
+// Both lists are capped. The cap is tracked because a silently truncated list is
+// a list that lies about being the whole of anything.
+const ROW_LIMIT = 200;
 
 let templates: any[] = [];
 let running: any[] = [];
 let participantCounts = new Map<number, number>();
+let statusCounts = new Map<string, number>();
 let audienceMismatch = new Set<number>();
 let unavailable: string | null = null;
+let templatesCapped = false;
+let runningCapped = false;
 
-// True when this account's authority is scoped rather than national. It changes
-// what the empty catalogue MEANS, so it is tracked separately from "no rows".
-let catalogueIsNational = false;
+// True when this account's authority is SCOPED and the catalogue is therefore
+// unreadable to it — the catalogue itself is national either way. It changes
+// what an empty catalogue MEANS, so it is tracked separately from "no rows".
+let catalogueOutOfScope = false;
+// True only for a national reader, whose delivery list is unfiltered. Anything
+// the page wants to say about the register AS A WHOLE may only be said then.
+let deliveryIsUnfiltered = false;
 
 if (principal && canAnywhere(principal, 'program:read')) {
   if (!isConfigured()) {
@@ -75,10 +92,11 @@ if (principal && canAnywhere(principal, 'program:read')) {
       // page says why instead of implying the federation has published nothing.
       const templateScope =
         scopes.kind === 'all' ? sql`true` : sql`false`;
-      catalogueIsNational = scopes.kind !== 'all';
+      catalogueOutOfScope = scopes.kind !== 'all';
+      deliveryIsUnfiltered = scopes.kind === 'all';
 
       const templateWhere: any[] = [templateScope];
-      if (statusFilter && (TEMPLATE_STATUSES as readonly string[]).includes(statusFilter)) {
+      if (statusFilter) {
         templateWhere.push(eq(o.programTemplates.status, statusFilter as any));
       }
 
@@ -111,12 +129,30 @@ if (principal && canAnywhere(principal, 'program:read')) {
       })
         .from(o.programTemplates)
         .leftJoin(e.services, eq(e.services.id, o.programTemplates.serviceId))
+        .where(and(...templateWhere))
         // Ordered by audience then title, not by status. An administrator opens
         // this asking "what can we offer a school?"; grouping by status would
         // scatter the answer across five blocks of the table.
-        .where(and(...templateWhere))
         .orderBy(asc(o.programTemplates.audience), asc(o.programTemplates.title))
-        .limit(200);
+        .limit(ROW_LIMIT);
+      templatesCapped = templates.length === ROW_LIMIT;
+
+      // The lifecycle counts are of the WHOLE catalogue, and they are counted in
+      // SQL rather than off the rows above.
+      //
+      // Counting the fetched array was wrong twice over: with ?status=draft on,
+      // every other stage printed 0 — and "Approved 0" on an administrator's
+      // screen reads as "the federation has approved nothing", which is a
+      // statement about the federation, not about a filter. The row cap did the
+      // same thing more quietly. Only run for a national reader, because that is
+      // the only account these counts are shown to.
+      if (scopes.kind === 'all') {
+        const byStatus = await conn.select({
+          status: o.programTemplates.status,
+          n: sql<number>`count(*)::int`,
+        }).from(o.programTemplates).groupBy(o.programTemplates.status);
+        statusCounts = new Map(byStatus.map((r: any) => [String(r.status), Number(r.n)]));
+      }
 
       // A template names an audience AND a service, and serviceAudiences records
       // which audiences a service is offered to — where a row is absent, the
@@ -148,6 +184,10 @@ if (principal && canAnywhere(principal, 'program:read')) {
         if (scopes.states.length) clauses.push(inArray(e.trainingPrograms.stateUnitId, scopes.states));
         if (scopes.districts.length) clauses.push(inArray(e.trainingPrograms.districtUnitId, scopes.districts));
         if (scopes.institutions.length) clauses.push(inArray(e.trainingPrograms.institutionId, scopes.institutions));
+        // A dojo-scoped binding produces no clause at all — trainingPrograms
+        // carries no dojo column, so there is nothing for it to match. That
+        // falls to `false` rather than to no predicate, which is the difference
+        // between seeing nothing and seeing everything.
         runWhere.push(clauses.length ? or(...clauses) : sql`false`);
       }
 
@@ -177,7 +217,8 @@ if (principal && canAnywhere(principal, 'program:read')) {
           sql`case ${e.trainingPrograms.status} when 'running' then 0 when 'scheduled' then 1 when 'planned' then 2 when 'paused' then 3 else 4 end`,
           desc(e.trainingPrograms.startsOn)
         )
-        .limit(200);
+        .limit(ROW_LIMIT);
+      runningCapped = running.length === ROW_LIMIT;
 
       // Counted from the ids the scoped query already returned, so this cannot
       // widen what the account may see however the counts are joined.
@@ -235,7 +276,6 @@ const holds = (a: Action) =>
   a === 'program:write' ? mayWrite : a === 'program:approve' ? mayApprove : mayPublish;
 
 const label = (s: unknown) => String(s ?? '').replace(/_/g, ' ');
-const countIn = (s: string) => templates.filter((t) => t.status === s).length;
 
 const fmtDate = (v: unknown) => {
   if (!v) return '—';
@@ -300,7 +340,10 @@ const modesOf = (t: any) =>
             <li>
               <p class="cy-h">
                 <span class="cy-l">{s.label}</span>
-                {!catalogueIsNational && <span class="cy-n">{countIn(s.status)}</span>}
+                {/* Counted over the whole catalogue, so this is a fact about the
+                    federation's records rather than about the current filter.
+                    Shown only where that count was actually taken. */}
+                {!catalogueOutOfScope && <span class="cy-n">{statusCounts.get(s.status) ?? 0}</span>}
               </p>
               <p class="cy-m">{s.means}</p>
             </li>
@@ -333,7 +376,7 @@ const modesOf = (t: any) =>
           ))}
         </nav>
 
-        {catalogueIsNational ? (
+        {catalogueOutOfScope ? (
           <p class="note">
             The programme catalogue is national — a template belongs to no state,
             district or institution — so it is only readable from a national
@@ -430,6 +473,14 @@ const modesOf = (t: any) =>
                 </li>
               ))}
             </ul>
+
+            {templatesCapped && (
+              <p class="cap">
+                The first {ROW_LIMIT} templates are listed and there may be more.
+                This screen does not page yet, so the counts above are the
+                catalogue and the table below them is not.
+              </p>
+            )}
           </>
         )}
       </section>
@@ -450,10 +501,15 @@ const modesOf = (t: any) =>
         </p>
 
         {running.length === 0 ? (
+          /* Two different facts, and only one of them is knowable from a scoped
+             account. A national reader's query has no scope predicate on it, so
+             an empty result IS an empty register and saying so is true. A scoped
+             reader's query does, so "nothing has been recorded" would be an
+             assertion about rows this page never looked at. */
           <p class="note">
-            No programme is being delivered in the scope this account can read.
-            The delivery register is empty rather than filtered — nothing has been
-            recorded as started.
+            {deliveryIsUnfiltered
+              ? 'No programme is being delivered. This account reads the register nationally and it is unfiltered, so the register itself holds nothing — no proposal has yet been turned into a delivery record.'
+              : 'No programme is being delivered in the scope this account can read. This list is scope-filtered, so it does not say whether anything is running elsewhere in the federation.'}
           </p>
         ) : (
           <>
@@ -519,6 +575,13 @@ const modesOf = (t: any) =>
                 </li>
               ))}
             </ul>
+
+            {runningCapped && (
+              <p class="cap">
+                The first {ROW_LIMIT} programmes are listed and there may be more.
+                This screen does not page yet.
+              </p>
+            )}
           </>
         )}
       </section>
@@ -592,6 +655,8 @@ const modesOf = (t: any) =>
     font-family: var(--font-body, inherit); white-space: normal;
   }
   .flag-line { margin: 0 0 8px; font-size: .8rem; color: var(--red); }
+
+  .cap { margin: 14px 0 0; font-size: .85rem; color: var(--muted); line-height: 1.6; max-width: 62ch; }
 
   .cards { display: none; list-style: none; margin: 0; padding: 0; }
 

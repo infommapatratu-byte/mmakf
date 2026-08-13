@@ -5,16 +5,18 @@
 // A VENUE IS NOT A DOJO
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// A dojo is a CHARTERED MEMBER of the federation — it holds a charter, it sits
-// in the affiliation hierarchy, and it appears on the register of who belongs.
-// A venue is a ROOM: a school hall, a hired mat space, a corporate gym, a
-// stadium floor. Every dojo has a venue; most venues are not dojos. That is why
-// they are two tables and why this page is not the affiliation register wearing
-// a different title — deleting a venue closes a room, deleting a dojo would
-// remove a member of the federation.
+// A dojo is a MEMBER of the federation — `dojos` carries an affiliation status
+// and affiliation dates, it hangs off a state and a district, and it appears on
+// the register of who belongs. A venue is a ROOM: a school hall, a hired mat
+// space, a corporate gym, a stadium floor. That is why they are two tables and
+// why this page is not the affiliation register wearing a different title —
+// withdrawing a venue closes a room, deleting a dojo would remove a member of
+// the federation.
 //
-// The link between them is `venues.dojoId`, and it is nullable because the
-// common case is a room the federation books and does not own.
+// The link between them is `venues.dojoId`, which the SCHEMA makes nullable: a
+// venue need not be a dojo. What proportion of the federation's rooms are its
+// own dojos is not a fact this page has, and it does not guess at one — the
+// register is empty until somebody enters a room into it.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // ABSENT IS NOT THE SAME AS NONE
@@ -66,9 +68,14 @@ const show = Astro.url.searchParams.get('show') === 'withdrawn' ? 'withdrawn'
 const LIMIT = 300;
 
 let venues: any[] = [];
-let blackoutsByVenue = new Map<number, any[]>();
+const blackoutsByVenue = new Map<number, any[]>();
 let unavailable: string | null = null;
 let noScope = false;
+// Whether this reader's authority is national. It only ever changes the WORDING
+// of the empty state: "the register is empty" and "nothing in the register that
+// you may see" are different claims, and a state administrator whose state has
+// no rooms must not be told the federation has none.
+let nationalReader = false;
 
 if (principal && canAnywhere(principal, 'venue:read')) {
   if (!isConfigured()) {
@@ -80,6 +87,7 @@ if (principal && canAnywhere(principal, 'venue:read')) {
       if (show === 'withdrawn') conds.push(eq(o.venues.active, false));
 
       const scopes = visibleScopes(principal, 'venue:read');
+      nationalReader = scopes.kind === 'all';
       if (scopes.kind === 'none') {
         noScope = true;
       } else {
@@ -228,8 +236,12 @@ const inUse = venues.filter((r) => r.v.active).length;
   ) : venues.length === 0 ? (
     <p class="note">
       {show === 'withdrawn'
-        ? 'No venue has been withdrawn. A room taken out of use is kept in the register rather than deleted, because past sessions point at it.'
-        : 'The venue register is empty. That is not a statement that the federation trains nowhere — it means no room has been entered here yet. A venue is recorded when a programme is scheduled into it, and until then this page has nothing to show and will not fill itself with examples.'}
+        ? (nationalReader
+            ? 'No venue has been withdrawn. A room taken out of use is kept in the register rather than deleted, because past sessions point at it.'
+            : 'No withdrawn venue falls within what this account may read, which is not the same as none having been withdrawn. A room taken out of use is kept in the register rather than deleted, because past sessions point at it.')
+        : (nationalReader
+            ? 'The venue register is empty. That is not a statement that the federation trains nowhere — it means no room has been entered here yet. A venue is recorded when a programme is scheduled into it, and until then this page has nothing to show and will not fill itself with examples.'
+            : "No venue falls within what this account may read. That is not a statement that the register is empty, nor that the federation trains nowhere — this account reads venues in its own state, district, dojo or client institution, and a room with none of those recorded against it is visible only to a national reader.")}
     </p>
   ) : (
     <>
@@ -238,10 +250,14 @@ const inUse = venues.filter((r) => r.v.active).length;
         {show === 'all' && <>, of which {inUse} in use</>}.
       </p>
 
+      {/* Not "holds more than LIMIT": the query stops at the ceiling and never
+          counts the remainder, and the order is rooms-in-use-first THEN
+          alphabetical, which is not the same as alphabetical. */}
       {truncated && (
         <p class="note warn" role="status">
-          The register holds more than {LIMIT} venues and only the first {LIMIT}
-          {' '}are listed, alphabetically. Filter by standing to narrow it.
+          This filter reached the ceiling of {LIMIT} venues, and only that many
+          are listed — rooms in use first, then by name. How many more there are
+          was not counted. Filter by standing to narrow it.
         </p>
       )}
 
@@ -275,7 +291,9 @@ const inUse = venues.filter((r) => r.v.active).length;
                 </p>
                 {(r.v.contactName || r.v.contactPhone) && (
                   <p class="v-rel">
-                    Keyholder: {r.v.contactName ?? 'unnamed'}
+                    {/* `||`, not `??`: a keyholder recorded as an empty string
+                        is an unnamed keyholder, not a person called "". */}
+                    Keyholder: {r.v.contactName || 'unnamed'}
                     {r.v.contactPhone && <> · {r.v.contactPhone}</>}
                   </p>
                 )}

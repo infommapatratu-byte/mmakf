@@ -53,7 +53,7 @@ import { identify } from '@/lib/session';
 import { can, visibleScopes, type Principal } from '@/lib/rbac';
 import { href as surfaceHref, SURFACE_ORIGIN, type Surface } from '@/lib/surface';
 import { formatINR } from '@/db/orders';
-import { institutionTickets } from '@/db/support';
+import { institutionTickets, isSupportError } from '@/db/support';
 
 import { persons } from '@/db/schema';
 import {
@@ -73,11 +73,13 @@ const h = (p: string) => surfaceHref(surface, p);
 // and the learn host would then rewrite /my to /learn/my, which does not exist.
 const wwwHref = (p: string) => (surface === 'learn' ? SURFACE_ORIGIN.public + p : p);
 
-// This route sits under /learn, which src/lib/seo.ts classifies as a PUBLIC
-// section — so nothing upstream marks it noindex. The response says so itself.
-// A header travels with the page and cannot be missed by a crawler that never
-// read robots.txt. See the limitation noted at the end of this comment block in
-// the handover: /learn/portal also belongs in EXCLUSIONS in src/lib/seo.ts.
+// Served from learn.mmakf.in the path is /portal, which is in PRIVATE_PREFIXES,
+// so Base.astro already emits the noindex meta. Served from www.mmakf.in it is
+// /learn/portal, and /learn is a PUBLIC section — nothing upstream marks it. So
+// the response says it itself, on both hosts, in a header that travels with the
+// page and cannot be missed by a crawler that never read robots.txt. The
+// matching entry in EXCLUSIONS in src/lib/seo.ts keeps it out of the sitemap;
+// removing one without the other puts a per-tenant surface into the index.
 Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
 
 type Gate =
@@ -88,7 +90,25 @@ type Gate =
   | 'invited_only'
   | 'no_binding'
   | 'refused'
+  | 'unreadable'
   | 'ok';
+
+/**
+ * What a client may be told about a failure.
+ *
+ * The domain modules write their refusals to be read by the person who hit
+ * them, so those are shown verbatim. Everything else — a driver fault, a
+ * missing relation, a constraint name — is a fact about the server, not about
+ * the institution, and drizzle's `err.message` carries the generated statement
+ * and its bound parameters with it. Putting that on a client's screen is how a
+ * connection string reaches somebody outside the federation. Same rule, and the
+ * same shape, as src/pages/my/index.astro and src/pages/live.astro.
+ */
+function readableError(err: any, context: string): string {
+  if (isSupportError(err)) return String(err.message);
+  console.error(`[learn/portal] ${context}`, err);
+  return `${context} could not be read. The fault has been logged for the federation office; nothing about your institution has been changed.`;
+}
 
 interface Membership {
   institutionId: number;
@@ -425,13 +445,31 @@ if (!configured) {
             // caller's scope and excludes confidential tickets in SQL.
             tickets = await institutionTickets(database, principal, institutionId, 50);
           } catch (err: any) {
-            ticketNote = String(err?.message ?? err);
+            ticketNote = readableError(err, 'The support requests');
           }
         }
       }
     }
   } catch (err: any) {
-    loadError = String(err?.message ?? err);
+    loadError = readableError(err, 'Your institution’s records');
+
+    // A HALF-READ PAGE IS WORSE THAN AN UNREAD ONE, for two separate reasons.
+    //
+    // The first is blankness: the membership query is the first statement in
+    // this block, so a failure there leaves `me` null while `gate` is still its
+    // initial 'ok'. No branch below would match and the page would render an
+    // empty container — the one outcome a client cannot act on, and one that
+    // reads as "the portal decided you have nothing".
+    //
+    // The second is worse. Every section states an ABSENCE in words: "no
+    // agreement is in place", "no coach has been confirmed". Those sentences
+    // are true of an empty database and false of a failed query, and there is
+    // nothing on the page to tell the two apart. So whatever was read before
+    // the fault is discarded rather than captioned.
+    gate = 'unreadable';
+    programmes = []; sessions = []; coaches = []; documents = [];
+    quotations = []; agreements = []; tickets = []; ticketNote = null;
+    sessionCounts.clear(); attendanceCounts.clear(); participantCounts.clear();
   }
 }
 
@@ -495,12 +533,15 @@ const pageTitle = me ? `${me.institutionName} — MMAKF client portal` : 'Client
           <p class="pt-lede">
             This deployment has no database connection configured, so there is
             nothing for the portal to read — not an empty institution, but no
-            institution at all. Nothing you have sent MMAKF has been lost; it is
-            simply not reachable from this address yet.
+            institution at all. This is a fault in the address you are reading,
+            and it says nothing about your institution's standing with MMAKF.
           </p>
+          {/* No promise of a reply. MMAKF has published no response standard,
+              and this page is not the place one gets invented. The address is
+              stated as a fact; what happens after it is the office's to say. */}
           <p class="pt-lede">
-            Write to <a href="mailto:admin@mmakf.in">admin@mmakf.in</a> and the
-            training office will answer directly.
+            The training office is reached at
+            {' '}<a href="mailto:admin@mmakf.in">admin@mmakf.in</a>.
           </p>
           <p class="pt-acts"><a class="btn btn-ghost" href={h('/learn')}>Back to training</a></p>
         </>
@@ -516,11 +557,19 @@ const pageTitle = me ? `${me.institutionName} — MMAKF client portal` : 'Client
             before it can show anything, and it never accepts an institution
             named in a link.
           </p>
+          {/* The application's status link is SHOWN ON SCREEN when the
+              application is started and saved (see /learn/apply, "keep this
+              link"). It is deliberately not described as something MMAKF sent:
+              the federation has no outbound mail provider configured, so a
+              message rendered by src/lib/email-templates.ts sits queued rather
+              than delivered, and telling an applicant to look in their inbox
+              would send them to wait for a letter that has not gone out. */}
           <p class="pt-lede">
             MMAKF has one sign-in for everybody — the same account a member,
             an official or a school's coordinator uses. If your institution has
-            an application in progress and no account yet, the acknowledgement
-            MMAKF sent carries its own status link.
+            an application in progress and no account yet, the private link
+            shown when that application was started is what reports its
+            progress; an application does not open a portal account on its own.
           </p>
           <p class="pt-acts">
             <a class="btn btn-primary" href={wwwHref('/my')}>Sign in</a>
@@ -559,10 +608,11 @@ const pageTitle = me ? `${me.institutionName} — MMAKF client portal` : 'Client
             portal; it is not something an account acquires on its own.
           </p>
           <p class="pt-lede">
-            If your institution has an application with MMAKF, its progress is on
-            the status link sent with the acknowledgement. If you expected access
-            here, write to <a href="mailto:admin@mmakf.in">admin@mmakf.in</a>
-            {' '}naming your institution.
+            If your institution has an application with MMAKF, its progress is
+            reported by the private link shown when that application was
+            started, not here. If you expected access to a portal, write to
+            {' '}<a href="mailto:admin@mmakf.in">admin@mmakf.in</a> naming your
+            institution.
           </p>
           <p class="pt-acts">
             <a class="btn btn-ghost" href={h('/learn')}>Back to training</a>
@@ -627,6 +677,33 @@ const pageTitle = me ? `${me.institutionName} — MMAKF client portal` : 'Client
         </>
       )}
 
+      {gate === 'unreadable' && (
+        <>
+          <p class="eyebrow">MMAKF client portal</p>
+          <h1 class="display-2">Your records could not be read just now.</h1>
+          <p class="pt-alert" role="alert">{loadError}</p>
+          <p class="pt-lede">
+            Nothing is shown rather than part of it: every section of this page
+            states in words whether something exists, and a section left empty by
+            a fault would say your institution has no programme, no coach and no
+            agreement — which is not what has been established. Try again shortly.
+          </p>
+          {me ? (
+            <p class="pt-lede">
+              If it keeps happening, write to
+              {' '}<a href="mailto:admin@mmakf.in">admin@mmakf.in</a> quoting
+              {' '}<code>{me.institutionCode}</code>.
+            </p>
+          ) : (
+            <p class="pt-lede">
+              If it keeps happening, write to
+              {' '}<a href="mailto:admin@mmakf.in">admin@mmakf.in</a> naming your
+              institution.
+            </p>
+          )}
+        </>
+      )}
+
       {gate === 'ok' && me && (
         <>
           <p class="eyebrow">MMAKF client portal</p>
@@ -651,11 +728,10 @@ const pageTitle = me ? `${me.institutionName} — MMAKF client portal` : 'Client
             </nav>
           )}
 
-          {loadError && (
-            <p class="pt-alert" role="alert">
-              Part of this page could not be loaded: {loadError}
-            </p>
-          )}
+          {/* No partial-failure banner here: the catch above discards a
+              half-read page outright, so if this branch is rendering at all,
+              every section below is reporting what the database actually
+              holds. */}
 
           {/* ── Programmes ─────────────────────────────────────────────── */}
           <section class="sec">
@@ -688,8 +764,12 @@ const pageTitle = me ? `${me.institutionName} — MMAKF client portal` : 'Client
                         {p.sessionsPlanned != null && (
                           <div><dt>Sessions planned</dt><dd>{p.sessionsPlanned}</dd></div>
                         )}
+                        {/* "Recorded", not "on roll". program_participants
+                            carries joinedOn and leftOn, and this count is every
+                            row — including anyone who has since left. Calling it
+                            a current roll would state a number nobody measured. */}
                         {parts != null && (
-                          <div><dt>Participants on roll</dt><dd>{parts}</dd></div>
+                          <div><dt>Participants recorded</dt><dd>{parts}</dd></div>
                         )}
                       </dl>
                     </li>
@@ -781,7 +861,12 @@ const pageTitle = me ? `${me.institutionName} — MMAKF client portal` : 'Client
                         <p class="empty tight">No session has been scheduled for this programme yet.</p>
                       ) : (
                         <dl class="rec-dl">
-                          <div><dt>Sessions scheduled</dt><dd>{s.total}</dd></div>
+                          {/* "Recorded", not "scheduled": `scheduled` is one of
+                              the five session statuses, and this total counts
+                              every occurrence whatever its status — including
+                              the rescheduled and the not-attended, which are
+                              named in neither line below. */}
+                          <div><dt>Sessions recorded</dt><dd>{s.total}</dd></div>
                           <div><dt>Delivered</dt><dd>{s.delivered}</dd></div>
                           {s.cancelled > 0 && <div><dt>Cancelled</dt><dd>{s.cancelled}</dd></div>}
                           {/* A rate is shown only where marks exist to compute
@@ -844,10 +929,13 @@ const pageTitle = me ? `${me.institutionName} — MMAKF client portal` : 'Client
                 </ul>
                 {/* No download link is offered, because MMAKF has no route that
                     serves these files yet. A link that 404s is worse than an
-                    instruction that works. */}
+                    instruction that works. The note below asks rather than
+                    promises: how the office answers a request for a copy is not
+                    something this page has been told. */}
                 <p class="sec-note">
-                  Copies are sent by the training office. Quote the reference
-                  when you ask for one.
+                  This list names the documents released to you; it does not
+                  serve the files themselves. Ask the training office for a
+                  copy, quoting the reference.
                 </p>
               </>
             )}
@@ -999,7 +1087,9 @@ const pageTitle = me ? `${me.institutionName} — MMAKF client portal` : 'Client
 
   .pt-lede { color: var(--muted); line-height: 1.75; max-width: 62ch; margin: 16px 0; }
   .pt-sub { margin: 14px 0 0; color: var(--muted); font-size: .92rem; }
-  .pt-dot { margin: 0 8px; color: var(--muted-2); }
+  /* No colour of its own: --muted-2 is decorative and fails contrast as text,
+     and this separator IS text. It inherits --muted from .pt-sub. */
+  .pt-dot { margin: 0 8px; }
   .pt-acts { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
 
   .pt-alert {

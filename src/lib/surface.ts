@@ -313,12 +313,16 @@ export const ADMIN_GROUPS: AdminGroup[] = [
     label: 'Training and engagement',
     modules: [
       { href: '/admin/applications', label: 'Applications', action: 'engagement:read' },
-      // Leads, programmes, quotes, bookings, venues and attendance all have
-      // their data model, their domain module and their tests — and no admin
-      // page yet. They are deliberately ABSENT from this menu rather than
-      // listed and broken: /training listed six pages nobody had built and they
-      // 404ed on production for as long as it was live. See
-      // docs/IMPLEMENTATION-QUEUE.md.
+      { href: '/admin/leads', label: 'Leads and CRM', action: 'engagement:read' },
+      { href: '/admin/programs', label: 'Programmes', action: 'program:read' },
+      // Reading the pricing RULES, which is a different authority from reading
+      // a quotation computed under them — and a different one again from
+      // writing or publishing them. See the three feeframework:* actions.
+      { href: '/admin/fees', label: 'Fee framework', action: 'feeframework:read' },
+      { href: '/admin/quotes', label: 'Quotes and proposals', action: 'quote:read' },
+      { href: '/admin/bookings', label: 'Bookings and calendar', action: 'booking:read' },
+      { href: '/admin/venues', label: 'Venues', action: 'venue:read' },
+      { href: '/admin/attendance', label: 'Attendance', action: 'attendance:read' },
     ],
   },
   {
@@ -342,6 +346,9 @@ export const ADMIN_GROUPS: AdminGroup[] = [
     modules: [
       { href: '/admin/tasks', label: 'Tasks', action: 'task:read' },
       { href: '/admin/support', label: 'Support desk', action: 'support:read' },
+      // How the federation answers "what did the system do on our behalf?"
+      // without reading TypeScript.
+      { href: '/admin/workflows', label: 'Automations', action: 'workflow:read' },
       { href: '/admin/listings', label: 'Marketplace', action: 'marketplace:read' },
     ],
   },

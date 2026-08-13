@@ -150,6 +150,19 @@ const QUANTITY_INPUT: Record<string, string> = {
 
 // ─── Strict input parsing ───────────────────────────────────────────────────
 
+/**
+ * A refusal caused by what somebody typed, as opposed to one caused by the
+ * server.
+ *
+ * A distinct class rather than a message heuristic: the two are shown very
+ * differently — an input problem is quoted back verbatim so it can be
+ * corrected, whereas a driver fault or a constraint name is a fact about the
+ * server that gets logged and summarised. Telling them apart by inspecting an
+ * Error's message would eventually put a Postgres error string in front of an
+ * administrator.
+ */
+class InputError extends Error {}
+
 type Parsed = { ok: true; value: number | null } | { ok: false; message: string };
 
 /**
@@ -289,9 +302,9 @@ if (Astro.request.method === 'POST') {
       if (action === 'create_framework') {
         const title = get('title');
         const versionRaw = get('version');
-        if (!title) throw new Error('Give the framework a title.');
+        if (!title) throw new InputError('Give the framework a title.');
         if (!/^\d+$/.test(versionRaw) || Number(versionRaw) < 1) {
-          throw new Error('A framework version is a positive whole number. Versions are unique, so the next one is the lowest number not already taken.');
+          throw new InputError('A framework version is a positive whole number. Versions are unique, so the next one is the lowest number not already taken.');
         }
         const row = await createFramework(db(), ctx, {
           title,
@@ -304,43 +317,43 @@ if (Astro.request.method === 'POST') {
 
       if (action === 'add_rule') {
         const frameworkId = Number(get('frameworkId'));
-        if (!Number.isInteger(frameworkId) || frameworkId <= 0) throw new Error('Say which draft the rule belongs to.');
+        if (!Number.isInteger(frameworkId) || frameworkId <= 0) throw new InputError('Say which draft the rule belongs to.');
 
         const kind = get('kind');
         const meta = RULE_KINDS.find((k) => k.kind === kind);
-        if (!meta) throw new Error('That is not a rule kind this engine implements.');
+        if (!meta) throw new InputError('That is not a rule kind this engine implements.');
 
         const code = get('code');
         const label = get('label');
-        if (!code) throw new Error('Give the rule a code. It is printed on every quotation line the rule produces, and it is how a figure is traced back four years later.');
-        if (!label) throw new Error('Give the rule a label. It is the wording the recipient of the quotation reads.');
+        if (!code) throw new InputError('Give the rule a code. It is printed on every quotation line the rule produces, and it is how a figure is traced back four years later.');
+        if (!label) throw new InputError('Give the rule a label. It is the wording the recipient of the quotation reads.');
 
         const amount = parsePaise(get('amountMinor'), 'The amount');
-        if (!amount.ok) throw new Error(amount.message);
+        if (!amount.ok) throw new InputError(amount.message);
         const factor = parsePpm(get('factorPpm'), 'The factor');
-        if (!factor.ok) throw new Error(factor.message);
+        if (!factor.ok) throw new InputError(factor.message);
         const minQty = parseCount(get('minQuantity'), 'The minimum quantity');
-        if (!minQty.ok) throw new Error(minQty.message);
+        if (!minQty.ok) throw new InputError(minQty.message);
         const maxQty = parseCount(get('maxQuantity'), 'The maximum quantity');
-        if (!maxQty.ok) throw new Error(maxQty.message);
+        if (!maxQty.ok) throw new InputError(maxQty.message);
         const sortOrder = parseCount(get('sortOrder'), 'The order');
-        if (!sortOrder.ok) throw new Error(sortOrder.message);
+        if (!sortOrder.ok) throw new InputError(sortOrder.message);
 
         // Completeness, checked here because computeFee() checks it at the
         // moment somebody asks for a price — which is the worst possible time
         // to discover a rule was saved without its amount.
         if ((meta.needs === 'amount' || meta.needs === 'unit') && amount.value == null) {
-          throw new Error(`A ${kind} rule needs an amount in paise. Without one, computeFee() refuses the whole framework the first time it is asked for a figure.`);
+          throw new InputError(`A ${kind} rule needs an amount in paise. Without one, computeFee() refuses the whole framework the first time it is asked for a figure.`);
         }
         if (meta.needs === 'factor' && factor.value == null) {
-          throw new Error(`A ${kind} rule needs a factor in parts-per-million. ×1.0 is ${PPM}.`);
+          throw new InputError(`A ${kind} rule needs a factor in parts-per-million. ×1.0 is ${PPM}.`);
         }
         if (meta.needs === 'amount' || meta.needs === 'unit') {
           if (kind === 'discount' && (amount.value ?? 0) > 0) {
-            throw new Error('A discount reduces the total, so its amount is negative paise. A positive number here would add to the bill under the word "discount".');
+            throw new InputError('A discount reduces the total, so its amount is negative paise. A positive number here would add to the bill under the word "discount".');
           }
           if (kind !== 'discount' && (amount.value ?? 0) < 0) {
-            throw new Error('Only a discount carries a negative amount.');
+            throw new InputError('Only a discount carries a negative amount.');
           }
         }
 
@@ -350,10 +363,10 @@ if (Astro.request.method === 'POST') {
           try {
             conditions = JSON.parse(conditionsRaw);
           } catch {
-            throw new Error('The conditions are not valid JSON. Leave the field empty for a rule that applies to every request.');
+            throw new InputError('The conditions are not valid JSON. Leave the field empty for a rule that applies to every request.');
           }
           const problem = conditionProblem(conditions);
-          if (problem) throw new Error(problem);
+          if (problem) throw new InputError(problem);
         }
 
         const serviceRaw = get('serviceId');
@@ -378,18 +391,18 @@ if (Astro.request.method === 'POST') {
 
       if (action === 'publish') {
         const frameworkId = Number(get('frameworkId'));
-        if (!Number.isInteger(frameworkId) || frameworkId <= 0) throw new Error('Say which draft is being published.');
+        if (!Number.isInteger(frameworkId) || frameworkId <= 0) throw new InputError('Say which draft is being published.');
         // The typed confirmation is not decoration. Publishing cannot be undone
         // and it freezes the arithmetic behind every future quotation, so it is
         // deliberately not a single click made in passing.
         if (get('confirm') !== get('expectedCode')) {
-          throw new Error('The framework was not published. To publish it, type its code exactly as shown next to the field — publishing cannot be undone.');
+          throw new InputError('The framework was not published. To publish it, type its code exactly as shown next to the field — publishing cannot be undone.');
         }
         await publishFramework(db(), ctx, frameworkId);
         return Astro.redirect(`${SELF}?framework=${frameworkId}&done=published`, 303);
       }
 
-      throw new Error('Unknown action.');
+      throw new InputError('Unknown action.');
     } catch (err: any) {
       if (err instanceof ForbiddenError) {
         // Named, because the two authorities do not have to stay aligned — see
@@ -397,9 +410,11 @@ if (Astro.request.method === 'POST') {
         Astro.response.status = 403;
         error = `The fee engine refused this: it requires ${err.action}, which this account does not hold. Nothing was changed.`;
       } else if (isFeeError(err)) {
+        // The engine's own refusals are already written for a person — the
+        // immutability message in particular explains what to do instead.
         Astro.response.status = 400;
         error = err.message;
-      } else if (err instanceof Error && !/^[A-Z][a-z]+Error:/.test(err.message)) {
+      } else if (err instanceof InputError) {
         Astro.response.status = 400;
         error = err.message;
       } else {
@@ -449,7 +464,11 @@ if (mayRead && nationalReach && configured) {
       id: s.services.id, code: s.services.code, title: s.services.title,
     }).from(s.services).orderBy(asc(s.services.title));
   } catch (err: any) {
-    readError = String(err?.message ?? err);
+    // The same split the POST handler makes, for the same reason: a relation
+    // name and a bound parameter list are facts about the server, not about
+    // the person reading the register. Logged in full, summarised on the page.
+    console.error('[admin/fees] framework register read failed', err);
+    readError = 'The framework register could not be read. The fault has been logged for the federation office; nothing has been changed.';
   }
 }
 
@@ -457,6 +476,12 @@ const done = Astro.url.searchParams.get('done');
 const doneMessage = done ? DONE_MESSAGES[done] ?? null : null;
 
 const drafts = frameworks.filter((f) => f.status === 'draft');
+// A framework can be published and still not be in force: activeFramework()
+// requires the effective window to be open today, so a version dated forward —
+// or one whose window has closed — leaves inForce null while the federation HAS
+// published rules. Saying "no fee rules have been published" in that case would
+// be a false statement about the federation, so the two are counted separately.
+const published = frameworks.filter((f) => f.status === 'published');
 const selectedIsDraft = selected?.status === 'draft';
 const publishTarget = selectedIsDraft ? selected : null;
 
@@ -513,14 +538,23 @@ const conditionsLabel = (c: unknown) => {
             Every quotation issued from today computes against this version and
             keeps computing against it for as long as the quotation exists.
           </p>
+        ) : published.length === 0 ? (
+          <p class="band-p">
+            No framework is in force, and none has ever been published. The
+            federation has published no fee rules, so <code>computeFee()</code>
+            has nothing to price against and every quotation path in the system
+            — public estimator, training request, institutional enquiry — ends
+            at &ldquo;a quotation will be prepared&rdquo;. That is the true
+            state of this system, not a display fault, and this page is where it
+            is changed.
+          </p>
         ) : (
           <p class="band-p">
-            No framework is in force. The federation has published no fee rules,
-            so <code>computeFee()</code> has nothing to price against and every
-            quotation path in the system — public estimator, training request,
-            institutional enquiry — ends at &ldquo;a quotation will be
-            prepared&rdquo;. That is the true state of this system, not a display
-            fault, and this page is where it is changed.
+            No framework is in force today, though {published.length} {published.length === 1 ? 'version has' : 'versions have'} been
+            published. Every published version's effective window is either
+            closed or has not opened yet, so <code>computeFee()</code> has
+            nothing in force to price against and a quotation issued today would
+            have to name a version explicitly. Check the effective dates below.
           </p>
         )}
       </section>
@@ -541,6 +575,15 @@ const conditionsLabel = (c: unknown) => {
                   <span class="v-code">{f.code}</span>
                   <span class="v-title">{f.title}</span>
                 </a>
+                {/* The effective window, because "published" and "in force
+                    today" are different states and this list is where the
+                    difference is read. A null is stated, not left blank: an
+                    open-ended window is what activeFramework() treats it as. */}
+                <span class="v-when">
+                  {f.effectiveFrom || f.effectiveTo
+                    ? <>{dateLabel(f.effectiveFrom) ?? 'no start'} — {dateLabel(f.effectiveTo) ?? 'no end'}</>
+                    : <span class="muted">no window set</span>}
+                </span>
                 <span class={`pill st-${f.status}`}><span class="pill-dot"></span>{f.status}</span>
               </li>
             ))}
@@ -712,7 +755,16 @@ const conditionsLabel = (c: unknown) => {
                       <label class="input-label" for="r-framework">Draft version</label>
                       <select class="input" id="r-framework" name="frameworkId" required>
                         {drafts.map((f) => (
-                          <option value={f.id} selected={publishTarget ? f.id === publishTarget.id : false}>{f.code} — {f.title}</option>
+                          <option
+                            value={f.id}
+                            selected={
+                              // After a refusal, keep the draft they chose;
+                              // otherwise offer the version being viewed.
+                              focusForm === 'rule'
+                                ? v('frameworkId') === String(f.id)
+                                : Boolean(publishTarget && f.id === publishTarget.id)
+                            }
+                          >{f.code} — {f.title}</option>
                         ))}
                       </select>
                     </p>
@@ -919,9 +971,11 @@ const conditionsLabel = (c: unknown) => {
   .versions a { text-decoration: none; display: flex; gap: 14px; align-items: baseline; flex: 1; min-width: 0; }
   .v-code { font-family: var(--font-accent, monospace); font-size: .86rem; color: var(--gold-2); white-space: nowrap; }
   .v-title { color: var(--muted); font-size: .92rem; overflow: hidden; text-overflow: ellipsis; }
+  .v-when { font-size: .78rem; color: var(--muted); white-space: nowrap; }
   .st-draft { color: var(--muted); }
   .st-published { color: var(--gold-2); border-color: var(--gold-dim); }
 
+  .tbl-scroll { overflow-x: auto; }
   .tbl { width: 100%; border-collapse: collapse; font-size: .9rem; }
   .tbl th, .tbl td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: top; }
   .tbl thead th {

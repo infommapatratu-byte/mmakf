@@ -98,11 +98,23 @@ const kind = KINDS.includes(askedKind) ? askedKind : '';
 // truncated agenda that looks complete.
 const LIMIT = 400;
 
+// ISO dates sort correctly as plain strings, so an inverted window needs no
+// Date to detect. It is caught HERE rather than left to istDayRange(), which
+// throws on it: a thrown domain error would land in the same alert box as "the
+// database is unreachable" and tell an administrator the system is broken when
+// they have simply picked the two dates the wrong way round.
+const rangeInverted = to < from;
+
 let rows: any[] = [];
 let unavailable: string | null = null;
 let noScope = false;
+// Whether this reader's authority is national. Used only to word the empty
+// state: "nothing in this window" and "nothing in this window that you may see"
+// are different statements, and a scoped administrator must not be told the
+// first when only the second was checked.
+let nationalReader = false;
 
-if (principal && canAnywhere(principal, 'booking:read')) {
+if (principal && canAnywhere(principal, 'booking:read') && !rangeInverted) {
   if (!isConfigured()) {
     unavailable = 'The federation database is not reachable from this deployment, so no agenda can be assembled. Bookings are held in the database, not in this page.';
   } else {
@@ -118,6 +130,7 @@ if (principal && canAnywhere(principal, 'booking:read')) {
       if (kind) conds.push(eq(s.bookings.kind, kind as any));
 
       const scopes = visibleScopes(principal, 'booking:read');
+      nationalReader = scopes.kind === 'all';
       if (scopes.kind === 'none') {
         noScope = true;
       } else {
@@ -210,6 +223,16 @@ const venueKey = (b: any): string | null => {
   return t ? `venue:${t}` : null;
 };
 
+// The label a collision is REPORTED under must name what actually matched.
+// venueKey() prefers the dojo reference over the free text, so a booking that
+// carries both has been tied to its neighbour by the dojo id — printing the
+// typed-in room name instead would send the office to look at the wrong thing,
+// and would print only one of the two rows' text when the two differ.
+const venueLabel = (r: any): string =>
+  r.b.dojoId != null
+    ? (r.dojoName ?? `dojo #${r.b.dojoId}`)
+    : String(r.b.venue ?? '').trim();
+
 const blocking = rows.filter((r) => BLOCKING.has(r.b.status));
 const collisions: Array<{ a: any; b: any; shared: string; what: 'coach' | 'venue' }> = [];
 
@@ -235,7 +258,7 @@ for (let i = 0; i < blocking.length; i++) {
       what: sharedCoach ? 'coach' : 'venue',
       shared: sharedCoach
         ? (A.coachName ?? `coach #${A.b.coachPersonId}`)
-        : (A.b.venue ?? A.dojoName ?? 'the same venue'),
+        : venueLabel(A),
     });
   }
 }
@@ -266,7 +289,13 @@ const buffers = (b: any) => {
   return `${before} min before, ${after} min after`;
 };
 
-const whereOf = (r: any) => r.b.venue ?? r.dojoName ?? null;
+// A blank `venue` string is not a venue. `??` would keep it and print an empty
+// cell that reads as "recorded, and it is nothing"; trimming first lets the
+// dojo name, or the honest "not recorded", take its place.
+const whereOf = (r: any) => {
+  const t = typeof r.b.venue === 'string' ? r.b.venue.trim() : '';
+  return t || r.dojoName || null;
+};
 
 const qs = (over: Record<string, string>) => {
   const merged: Record<string, string> = { from, to, status, kind, ...over };
@@ -319,7 +348,13 @@ const qs = (over: Record<string, string>) => {
     ))}
   </nav>
 
-  {unavailable ? (
+  {rangeInverted ? (
+    <p class="note warn" role="status">
+      The window ends before it starts — {dayLabel(to)} is earlier than
+      {' '}{dayLabel(from)} — so nothing was read. Put the earlier date in
+      "From". This is the dates as typed, not a fault in the bookings module.
+    </p>
+  ) : unavailable ? (
     <p class="note" role="alert">{unavailable}</p>
   ) : noScope ? (
     <p class="note">
@@ -365,18 +400,26 @@ const qs = (over: Record<string, string>) => {
       {rows.length === 0 ? (
         <p class="note">
           No booking falls between {dayLabel(from)} and {dayLabel(to)} under this
-          filter. An empty agenda is an empty diary, not a refusal — bookings
-          appear here the moment a slot is taken, because taking the slot is what
-          creates the row.
+          filter{nationalReader ? '' : ', within what this account may see'}. An
+          empty agenda is an empty diary, not a refusal — bookings appear here
+          the moment a slot is taken, because taking the slot is what creates the
+          row.
+          {!nationalReader && (
+            <> This account reads bookings in its own units only, so this is not
+            a statement about the federation's diary as a whole.</>
+          )}
         </p>
       ) : (
         <>
+          {/* "more than LIMIT" would be a count nobody made: the query stops at
+              the ceiling and never learns the total. It reports the ceiling,
+              which is the number it does know. */}
           {truncated && (
             <p class="note warn" role="status">
-              This window holds more than {LIMIT} bookings and only the first
-              {' '}{LIMIT} are shown, earliest first. Narrow the dates to see the
-              rest — and read the collisions above as covering only what is
-              listed.
+              This window reached the ceiling of {LIMIT} bookings, and only that
+              many are shown, earliest first. How many more there are was not
+              counted. Narrow the dates to see the rest — and read the collisions
+              above as covering only what is listed.
             </p>
           )}
 
