@@ -22,6 +22,7 @@ import {
   uniqueIndex, index, jsonb, pgEnum,
 } from 'drizzle-orm/pg-core';
 import { persons, dojos, stateUnits, districtUnits } from './schema';
+import { institutions } from './engagement.schema';
 
 // ─── Enums ──────────────────────────────────────────────────────────────────
 
@@ -394,6 +395,31 @@ export const supportTickets = pgTable('support_tickets', {
   status: ticketStatus('status').notNull().default('open'),
   assignedToUserId: integer('assigned_to_user_id'),
   department: text('department'),
+
+  /**
+   * The client this ticket belongs to, where it came from one.
+   *
+   * Added in 0011 rather than building a second ticket table for institutions.
+   * A school asking why its invoice is wrong and a parent asking about a
+   * grading are the same kind of object, and two tables would mean two queues,
+   * two SLA clocks and two places to look for a complaint.
+   *
+   * NULL for tickets raised by individuals — which is most of them.
+   */
+  institutionId: integer('institution_id').references(() => institutions.id),
+
+  /**
+   * How many times this ticket has been escalated for going unanswered.
+   *
+   * A level rather than a boolean because escalation repeats: unanswered at the
+   * agent, then at the manager, then at the director. A flag can only say that
+   * it happened once.
+   */
+  escalationLevel: integer('escalation_level').notNull().default(0),
+  escalatedAt: timestamp('escalated_at', { withTimezone: true }),
+  reopenedCount: integer('reopened_count').notNull().default(0),
+  /** Drives the "waiting on us" queue and the escalation sweep. */
+  lastActivityAt: timestamp('last_activity_at', { withTimezone: true }),
   // The response deadline, so a service standard is measurable rather than
   // aspirational.
   slaDueAt: timestamp('sla_due_at', { withTimezone: true }),
@@ -405,6 +431,7 @@ export const supportTickets = pgTable('support_tickets', {
 }, (t) => ({
   ticketNoIdx: uniqueIndex('support_tickets_no_uk').on(t.ticketNo),
   statusIdx: index('support_tickets_status_idx').on(t.status, t.slaDueAt),
+  institutionIdx: index('support_tickets_institution_idx').on(t.institutionId, t.status),
 }));
 
 // ─── Partners and sponsors ──────────────────────────────────────────────────
@@ -475,8 +502,43 @@ export const notifications = pgTable('notifications', {
   sentAt: timestamp('sent_at', { withTimezone: true }),
   readAt: timestamp('read_at', { withTimezone: true }),
   failureReason: text('failure_reason'),
+
+  // ── Added in 0011 ──
+
+  /**
+   * Where to send it when the recipient has no account.
+   *
+   * A school principal who filled in the application wizard is not a member,
+   * has no person record and no user row — and is exactly who the
+   * acknowledgement is for. Without this the notification could be created and
+   * never addressed.
+   */
+  recipientEmail: text('recipient_email'),
+  recipientName: text('recipient_name'),
+
+  /** Which template rendered it, so a resend produces the same message. */
+  template: text('template'),
+  /** The values the template was rendered from. */
+  payload: jsonb('payload'),
+
+  /** Subscription topic, for push preferences. */
+  topic: text('topic'),
+  priority: text('priority').notNull().default('normal'),
+  institutionId: integer('institution_id').references(() => institutions.id),
+
+  /**
+   * Sent once, however many times the workflow runs.
+   *
+   * Unique where present. Every automation step can be retried, and a retried
+   * acknowledgement is a second email to the same person about the same thing.
+   * This makes "only once" a database constraint rather than a hope — the same
+   * device workflow_runs.idempotency_key uses one level up.
+   */
+  dedupeKey: text('dedupe_key'),
+
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   recipientIdx: index('notifications_recipient_idx').on(t.personId, t.status),
   queueIdx: index('notifications_queue_idx').on(t.status, t.createdAt),
+  dedupeUk: uniqueIndex('notifications_dedupe_uk').on(t.dedupeKey),
 }));
