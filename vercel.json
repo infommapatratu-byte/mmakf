@@ -46,7 +46,6 @@
   "crons": [
     {
       "path": "/api/cron/reconcile",
-      "_comment": "DAILY, NOT HOURLY, AND THIS IS NOT A PREFERENCE. An hourly '0 * * * *' is rejected outright by Vercel on a Hobby account: 'Hobby accounts are limited to daily cron jobs.' The rejection happens when the DEPLOYMENT IS CREATED, so nothing is built and nothing appears in the Deployments tab — while the Git integration keeps reporting itself connected and healthy. That combination cost this project seventeen hours: every push to main was silently refused, production stayed on a build from the previous morning, and the failure looked exactly like a webhook that was not firing. Raising this above once a day requires the Pro plan; until then, changing it here is what allows ANY deploy to happen at all.",
       "schedule": "0 3 * * *"
     }
   ]
