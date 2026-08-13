@@ -1,0 +1,340 @@
+---
+// Coaches and instructors — what applying involves, and the form.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THIS PAGE WAS A 404 UNTIL NOW
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// /learn/coaches was put in LEARN_NAV and on the learn landing page, and
+// resolved to /learn/[audience] — where `coaches` is not an audience slug, so it
+// returned 404. tests/navigation.test.ts matched it against the dynamic route
+// and passed, which is the limit of a static link check: it proves a route
+// COULD answer, not that it does.
+//
+// The lesson went into the smoke test instead, which fetches the URL.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE PAGE, NOT TWO
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The information and the form are together. A candidate who has read what the
+// stages are should not have to load a second page to start — and splitting
+// them means the person who lands on the form directly never reads the stages
+// at all.
+//
+// Posts to itself, so it works with JavaScript switched off. See
+// api/learn/coach-application.ts for why it cannot post to /api/.
+
+import Base from '@/layouts/Base.astro';
+import { submitCoachApplication, type CoachOutcome } from '@/pages/api/learn/coach-application';
+import { href as surfaceHref, canonicalFor, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+let outcome: CoachOutcome | null = null;
+let submitted: Record<string, unknown> = {};
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+
+  submitted = Object.fromEntries([...form.entries()].map(([k, v]) => [k, String(v)]));
+
+  outcome = await submitCoachApplication(Astro.request, {
+    fullName: get('fullName'),
+    email: get('email'),
+    phone: get('phone'),
+    city: get('city'),
+    danGrade: get('danGrade'),
+    gradeAwardedBy: get('gradeAwardedBy'),
+    teachingYears: get('teachingYears'),
+    competitionExperience: get('competitionExperience'),
+    qualificationsSummary: get('qualificationsSummary'),
+    preferredPrograms: form.getAll('preferredPrograms').map(String),
+    preferredLocations: get('preferredLocations'),
+    availabilityNote: get('availabilityNote'),
+    languages: form.getAll('languages').map(String),
+    refereeName: get('refereeName'),
+    refereeContact: get('refereeContact'),
+    refereeRelationship: get('refereeRelationship'),
+  });
+}
+
+const done = outcome?.kind === 'submitted';
+const errField = outcome?.kind === 'invalid' ? outcome.field : null;
+const val = (k: string) => (done ? '' : String(submitted[k] ?? ''));
+const checked = (k: string, v: string) => !done && String(submitted[k] ?? '').includes(v);
+
+const STAGES = [
+  ['Application', 'You send this form. MMAKF acknowledges it with a reference.'],
+  ['Screening', 'The coach manager reads it — your grade, your experience, your references.'],
+  ['Interview', 'A conversation about how and what you teach.'],
+  ['Technical review', 'Your karate is assessed by the federation’s technical authority.'],
+  ['Document verification', 'Grade certificates, identity, and any coaching or safeguarding qualifications.'],
+  ['Approval and onboarding', 'A coach profile is created, and you appear in the assignment pool.'],
+];
+
+const PROGRAMS = [
+  'Shotokan syllabus', 'Children’s karate', 'School programmes',
+  'Corporate self-defence', 'Women’s safety', 'Competition preparation',
+  'Grading preparation', 'Online instruction',
+];
+const LANGUAGES = ['Hindi', 'English', 'Bengali', 'Urdu', 'Santali', 'Nagpuri'];
+
+const schema = {
+  '@context': 'https://schema.org',
+  '@type': 'WebPage',
+  name: 'Teach for MMAKF',
+  description: 'Apply to teach karate for the Modern Martial Arts Karate-Do Federation of India.',
+  url: canonicalFor(surface, '/learn/coaches'),
+};
+---
+
+<Base
+  title="Teach for MMAKF — apply as a coach or instructor"
+  description="Apply to teach karate for the Modern Martial Arts Karate-Do Federation of India. Screening, interview, technical review and document verification."
+>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+
+  <header class="ch-hero">
+    <div class="container">
+      <p class="eyebrow">Training and engagement</p>
+      <h1 class="display-1">Teach for MMAKF.</h1>
+      <p class="ch-standfirst">
+        The federation assigns instructors to school, corporate and community
+        programmes across its network, and to its own centres. Applications are
+        screened, interviewed and technically reviewed before anybody teaches.
+      </p>
+    </div>
+  </header>
+
+  <div class="container ch-body">
+    <section class="ch-sec">
+      <h2 class="display-2">What the stages are</h2>
+      <p class="ch-p">
+        Each is recorded, and they cannot be skipped — an approval means the
+        screening, the interview and the technical review actually happened.
+        MMAKF has published no timescale for the process, so this page does not
+        state one.
+      </p>
+      <ol class="stages">
+        {STAGES.map(([title, body], i) => (
+          <li>
+            <span class="s-n" aria-hidden="true">{i + 1}</span>
+            <div>
+              <h3 class="s-t">{title}</h3>
+              <p class="s-b">{body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+
+    <section class="ch-sec">
+      <h2 class="display-2">Safeguarding</h2>
+      <p class="ch-p">
+        Much of the federation’s work is with children. A coach whose
+        child-protection clearance is not on the federation’s record, or has
+        lapsed, is <strong>excluded automatically</strong> from any programme
+        involving minors — not warned about, excluded. If you hold a clearance,
+        say so below; if you do not, apply anyway and MMAKF will tell you what is
+        needed.
+      </p>
+    </section>
+
+    <section class="ch-sec" id="apply">
+      <h2 class="display-2">Apply</h2>
+
+      {outcome && (
+        <div
+          class={`ch-banner ${done ? 'ok' : 'err'}`}
+          role={done ? 'status' : 'alert'}
+        >
+          <p><strong>{outcome.message}</strong></p>
+          {done && (
+            <p class="ch-banner-sub">
+              Keep the reference. MMAKF will be in touch about screening.
+            </p>
+          )}
+        </div>
+      )}
+
+      {!done && (
+        <form method="POST" class="ch-form" novalidate>
+          <fieldset>
+            <legend>You</legend>
+            <div class="f2">
+              <div class={`fld ${errField === 'fullName' ? 'bad' : ''}`}>
+                <label class="input-label" for="fullName">Full name <span class="req">*</span></label>
+                <input class="input" id="fullName" name="fullName" value={val('fullName')} autocomplete="name" required />
+              </div>
+              <div class="fld">
+                <label class="input-label" for="city">City or town</label>
+                <input class="input" id="city" name="city" value={val('city')} autocomplete="address-level2" />
+              </div>
+              <div class={`fld ${errField === 'email' ? 'bad' : ''}`}>
+                <label class="input-label" for="email">Email</label>
+                <input class="input" id="email" name="email" type="email" value={val('email')} autocomplete="email" />
+              </div>
+              <div class="fld">
+                <label class="input-label" for="phone">Telephone</label>
+                <input class="input" id="phone" name="phone" type="tel" value={val('phone')} autocomplete="tel" inputmode="tel" />
+              </div>
+            </div>
+            <p class="hint">One of email or telephone is needed, so MMAKF can tell you the outcome.</p>
+          </fieldset>
+
+          <fieldset>
+            <legend>Your karate</legend>
+            <div class="f2">
+              <div class="fld">
+                <label class="input-label" for="danGrade">Grade held</label>
+                <input class="input" id="danGrade" name="danGrade" value={val('danGrade')} placeholder="e.g. III Dan" />
+              </div>
+              <div class="fld">
+                <label class="input-label" for="gradeAwardedBy">Awarded by</label>
+                <input class="input" id="gradeAwardedBy" name="gradeAwardedBy" value={val('gradeAwardedBy')} />
+              </div>
+              <div class="fld">
+                <label class="input-label" for="teachingYears">Years teaching</label>
+                <input class="input" id="teachingYears" name="teachingYears" type="number" min="0" inputmode="numeric" value={val('teachingYears')} />
+              </div>
+            </div>
+            <div class="fld">
+              <label class="input-label" for="qualificationsSummary">Coaching, first-aid or safeguarding qualifications</label>
+              <textarea class="input" id="qualificationsSummary" name="qualificationsSummary" rows="3">{val('qualificationsSummary')}</textarea>
+            </div>
+            <div class="fld">
+              <label class="input-label" for="competitionExperience">Competition experience</label>
+              <textarea class="input" id="competitionExperience" name="competitionExperience" rows="3">{val('competitionExperience')}</textarea>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>What you would teach</legend>
+            <div class="checks">
+              {PROGRAMS.map((p) => (
+                <label class="chk">
+                  <input type="checkbox" name="preferredPrograms" value={p} checked={checked('preferredPrograms', p)} />
+                  <span>{p}</span>
+                </label>
+              ))}
+            </div>
+            <div class="fld">
+              <label class="input-label" for="preferredLocations">Where you can teach</label>
+              <input class="input" id="preferredLocations" name="preferredLocations" value={val('preferredLocations')} placeholder="Districts or towns you can reach" />
+            </div>
+            <div class="fld">
+              <label class="input-label" for="availabilityNote">When you are available</label>
+              <textarea class="input" id="availabilityNote" name="availabilityNote" rows="2" placeholder="Weekday mornings, Saturday afternoons, and so on">{val('availabilityNote')}</textarea>
+            </div>
+            <fieldset class="inner">
+              <legend class="input-label">Languages you teach in</legend>
+              <div class="checks">
+                {LANGUAGES.map((l) => (
+                  <label class="chk">
+                    <input type="checkbox" name="languages" value={l.toLowerCase()} checked={checked('languages', l.toLowerCase())} />
+                    <span>{l}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          </fieldset>
+
+          <fieldset>
+            <legend>A reference</legend>
+            <p class="hint">Somebody who can speak to your teaching. Optional, and it shortens screening.</p>
+            <div class="f2">
+              <div class="fld">
+                <label class="input-label" for="refereeName">Name</label>
+                <input class="input" id="refereeName" name="refereeName" value={val('refereeName')} />
+              </div>
+              <div class="fld">
+                <label class="input-label" for="refereeRelationship">How they know you</label>
+                <input class="input" id="refereeRelationship" name="refereeRelationship" value={val('refereeRelationship')} />
+              </div>
+              <div class="fld">
+                <label class="input-label" for="refereeContact">How to reach them</label>
+                <input class="input" id="refereeContact" name="refereeContact" value={val('refereeContact')} />
+              </div>
+            </div>
+          </fieldset>
+
+          <p class="hint">
+            Documents — grade certificates, identity, clearances — are asked for
+            at the verification stage, not now. Nothing is uploaded from this
+            page.
+          </p>
+
+          <button class="btn btn-primary" type="submit">Send application</button>
+        </form>
+      )}
+    </section>
+  </div>
+</Base>
+
+<style>
+  .ch-hero { padding: 96px 0 52px; border-bottom: 1px solid var(--border); }
+  .ch-standfirst {
+    font-family: var(--font-display); font-size: clamp(1.1rem, 2.2vw, 1.45rem);
+    line-height: 1.5; color: var(--muted); max-width: 40ch; margin: 22px 0 0;
+  }
+  .ch-body { padding-bottom: 88px; }
+  .ch-sec { margin-top: 56px; max-width: 62rem; }
+  .ch-p { color: var(--muted); line-height: 1.75; max-width: 62ch; margin: 14px 0; }
+
+  .stages { list-style: none; margin: 28px 0 0; padding: 0; max-width: 62ch; }
+  .stages li {
+    display: grid; grid-template-columns: 46px 1fr; gap: 0 20px;
+    padding: 18px 0; border-top: 1px solid var(--border);
+  }
+  .s-n { font-family: var(--font-display); font-size: 1.35rem; color: var(--gold-2); font-variant-numeric: tabular-nums; }
+  .s-t { margin: 0 0 5px; font-size: 1.02rem; }
+  .s-b { margin: 0; color: var(--muted); line-height: 1.65; }
+
+  .ch-banner {
+    margin: 22px 0; padding: 18px 20px; border-radius: var(--radius);
+    border-left: 3px solid var(--gold); background: var(--card); line-height: 1.6;
+    max-width: 62ch;
+  }
+  .ch-banner.err { border-left-color: var(--red); }
+  .ch-banner p { margin: 0; }
+  .ch-banner-sub { margin-top: 6px !important; color: var(--muted); }
+
+  .ch-form { margin-top: 26px; max-width: 46rem; }
+  .ch-form fieldset { border: 0; padding: 0; margin: 0 0 34px; }
+  .ch-form fieldset.inner { margin: 18px 0 0; }
+  .ch-form legend {
+    font-family: var(--font-display); font-size: 1.05rem; padding: 0;
+    margin-bottom: 14px;
+  }
+  .ch-form legend.input-label { font-size: .84rem; font-family: var(--font-body); }
+  .f2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .fld { margin-bottom: 18px; }
+  .f2 .fld { margin-bottom: 0; }
+  .fld.bad .input { border-color: var(--red); }
+  .req { color: var(--red); }
+  .hint { margin: 10px 0 0; font-size: .84rem; color: var(--muted); line-height: 1.6; max-width: 58ch; }
+
+  .checks { display: flex; flex-wrap: wrap; gap: 9px; margin-bottom: 18px; }
+  .chk {
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 10px 14px; border: 1px solid var(--control-border);
+    border-radius: var(--radius); cursor: pointer; min-height: 44px; line-height: 1.3;
+  }
+  .chk:hover { border-color: var(--gold); }
+  .chk input { width: 17px; height: 17px; accent-color: var(--gold-2); }
+
+  @media (max-width: 700px) {
+    .ch-hero { padding: 76px 0 40px; }
+    .stages li { grid-template-columns: 1fr; gap: 0; }
+    .s-n { font-size: .84rem; letter-spacing: .16em; display: block; margin-bottom: 4px; }
+    .f2 { grid-template-columns: 1fr; gap: 18px; }
+    .f2 .fld { margin-bottom: 0; }
+    .chk { flex: 1 1 100%; }
+    .ch-form .btn { width: 100%; text-align: center; }
+  }
+</style>

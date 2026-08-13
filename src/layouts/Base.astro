@@ -11,6 +11,7 @@ import {
   canonicalFor, href as surfaceHref, isIndexable, SURFACE_ORIGIN,
   type Surface,
 } from '@/lib/surface';
+import { isPrivatePath } from '@/lib/seo';
 
 // Official channels, loaded here so every page footer links to them. The site
 // previously had no outbound links at all, which is why none of the
@@ -69,7 +70,22 @@ const isCurrent = (target: string) =>
 // arrived is two pages competing for the same content.
 const SITE = SURFACE_ORIGIN[surface];
 const canonical = canonicalFor(surface, currentPath);
-const indexable = isIndexable(surface);
+
+/**
+ * Indexability is decided by the HOST *and* the PATH, and it has to be both.
+ *
+ * The first version asked only `isIndexable(surface)`. On admin.mmakf.in that
+ * is correct — and admin.mmakf.in DOES NOT EXIST YET. Every operations page is
+ * reached today at www.mmakf.in/admin/…, where the surface resolves to
+ * 'public', so the whole admin platform was being served with no noindex at
+ * all. tests/routes-live.test.ts caught it by fetching the page rather than
+ * reasoning about it.
+ *
+ * isPrivatePath() is the existing classifier that already keeps /admin, /api,
+ * /my and /portal out of the sitemap. Asking it here means the page and the
+ * sitemap cannot disagree about what is private.
+ */
+const indexable = isIndexable(surface) && !isPrivatePath(currentPath);
 
 // Organization structured data — only facts the federation itself publishes.
 const sameAs = social.map((a: any) => a.url);

@@ -33,3 +33,4 @@ backups/
 *.tmp.mjs
 .tmp-*/
 .astro-test-smoke/
+.astro-test-routes/
