@@ -5,12 +5,33 @@
 // are read. Nothing here appoints anybody: the assignment engine recommends
 // with reasons, and only confirmAssignment() — which takes a principal and
 // writes an audit row — can put a coach on a programme.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ADOPTING THE SHARED SYSTEM
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The heading block, the stage strip, the status pills and the empty and error
+// blocks are now the shared components: AdminShell's `header` (§12), Status
+// (§102), EmptyState and ErrorState. The QUERY IS UNCHANGED — same stage
+// filter, same scope predicate, same sixty-day qualification horizon — and
+// `?status=` still means what it meant.
+//
+// WHAT DID NOT BECOME A TABLE, AND WHY. A candidate row is a name, a reference,
+// a grade, a stage — and the recorded reason a decision went the way it did.
+// That reason is prose and it is the substance of the screen: a stage without
+// the reason behind it is a status nobody can act on. Forced into a cell it
+// truncates. §97 asks for the shared table where a page has a table; this page
+// has a pipeline of people, and it stays a list.
 
 import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
 import { isConfigured, db } from '@/db';
 import { identify } from '@/lib/session';
 import { canAnywhere } from '@/lib/rbac';
 import { coachPipeline, expiringQualifications, COACH_STATUSES, type CoachStatus } from '@/db/coaches';
+import { statusOf } from '@/lib/status';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 
 export const prerender = false;
@@ -21,24 +42,43 @@ const h = (p: string) => surfaceHref(surface, p);
 const identity = await identify(Astro.request.headers.get('cookie'));
 const principal = identity?.principal ?? null;
 
-const filter = Astro.url.searchParams.get('status') || '';
+// Only a stage the enum actually holds reaches the query. `?status=` is a URL
+// people type and share, and an unrecognised value used to travel all the way
+// to a Postgres enum comparison and come back as a failed read — an error
+// screen for a typo, with the raw SQL behind it. An unknown stage is no filter.
+//
+// COACH_STATUSES, not PIPELINE: withdrawn, rejected, suspended and inactive are
+// real recorded stages that this screen does not put in its strip, and a link
+// to one of them should still work.
+const requestedStatus = Astro.url.searchParams.get('status') || '';
+const filter = (COACH_STATUSES as readonly string[]).includes(requestedStatus)
+  ? requestedStatus
+  : '';
 
 let rows: any[] = [];
 let expiring: any[] = [];
-let unavailable: string | null = null;
+
+// A deployment with no database has not failed at anything; a query that threw
+// has. They were one variable and they are two, because only one of them is
+// worth telling somebody to retry.
+const configured = isConfigured();
+let failure: string | null = null;
+// Whether the pipeline was actually read. Nothing derived from `rows` is a
+// figure until this is true — an empty array from a deployment with no database
+// is not a pipeline with nobody in it.
+let queried = false;
 
 if (principal && canAnywhere(principal, 'coach:read')) {
-  if (!isConfigured()) {
-    unavailable = 'The federation database is not reachable from this deployment, so the coach pipeline cannot be listed.';
-  } else {
+  if (configured) {
     try {
       rows = await coachPipeline(db(), principal, {
         status: (filter || undefined) as CoachStatus | undefined,
         limit: 200,
       });
       expiring = await expiringQualifications(db(), principal, 60);
+      queried = true;
     } catch (err: any) {
-      unavailable = String(err?.message ?? err);
+      failure = String(err?.message ?? err);
     }
   }
 }
@@ -52,40 +92,94 @@ const PIPELINE: CoachStatus[] = [
 ];
 
 const countIn = (s: CoachStatus) => rows.filter((r) => r.status === s).length;
-const label = (s: string) => s.replace(/_/g, ' ');
 const fmt = (v: unknown) => {
   if (!v) return '—';
   const d = new Date(v as string);
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 };
+
+/**
+ * When a stage count is a real answer.
+ *
+ * The old strip printed one under every stage unconditionally, and it was wrong
+ * in two ways it never admitted. Under a stage filter the query returns only
+ * that stage, so every OTHER stage read zero — six stages reporting empty when
+ * they were not. And the query is capped at two hundred rows, so past that the
+ * counts describe the first two hundred candidates rather than the pipeline.
+ *
+ * There is no coachCounts() to ask instead, so the honest move is to print the
+ * numbers when they are complete and print none when they are not. A count
+ * nobody could stand behind is worse than no count: the reader cannot tell
+ * which kind they are looking at.
+ *
+ * `queried` is the third condition and the one this screen was caught on: with
+ * no DATABASE_URL — which is what production has — nothing was read, and an
+ * empty array counted stage by stage printed eight confident zeroes for a
+ * pipeline nobody had looked at.
+ */
+const countsAreComplete = queried && !filter && rows.length < 200;
+
+const tabs = [
+  ...PIPELINE.map((s) => ({
+    label: statusOf(s, 'coach').label,
+    href: `${h('/admin/coaches')}?status=${s}`,
+    count: countsAreComplete ? countIn(s) : undefined,
+  })),
+  {
+    label: 'All',
+    href: h('/admin/coaches'),
+    count: countsAreComplete ? rows.length : undefined,
+  },
+];
+
+// §104: an absence names its kind and offers a way out.
+const emptyTitle = filter
+  ? `No candidate is at the ${statusOf(filter, 'coach').label.toLowerCase()} stage.`
+  : 'No coach has applied yet.';
+const emptyAction = filter
+  ? { label: 'See every candidate', href: h('/admin/coaches') }
+  : { label: 'Back to the operations console', href: h('/admin') };
 ---
 
 <AdminShell
   title="Coaches"
   requires="coach:read"
   intro="Candidates and instructors. The stages are recorded in order and cannot be skipped, so an approval always means the screening, the interview and the technical review took place."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Coaches', url: h('/admin/coaches') },
+    ],
+    /* The stage strip, as real links. It was already one — the same hrefs, the
+       same ?status= — and it stays in pipeline order because the order is the
+       claim this screen makes.
+
+       No action bar. Nothing on this page advances a candidate or appoints
+       anybody: advanceCoachApplication() and confirmAssignment() both take a
+       principal and write an audit row, and neither has a screen yet. §13's one
+       dominant action is not a licence to draw a button for a route that does
+       not exist. */
+    tabs,
+  }}
 >
-  {unavailable ? (
-    <p class="note" role="alert">{unavailable}</p>
+  {!configured ? (
+    /* Neither EmptyState nor ErrorState. Nothing failed and nobody has been
+       turned away — this deployment has no database to hold a coach record,
+       which is a fourth kind of absence and is what production renders today. */
+    <p class="unconfigured">
+      The federation database is not reachable from this deployment, so the
+      coach pipeline cannot be listed. That is not an empty pipeline and not a
+      failure: the candidates live in the federation's database, and this
+      deployment has no connection to one.
+    </p>
+  ) : failure ? (
+    <ErrorState
+      title="The coach pipeline could not be read."
+      safe="Nothing has been changed. This was a read, so no candidate was advanced, approved or rejected, and no coach was assigned to anything."
+      detail={failure}
+    />
   ) : (
     <>
-      <ol class="pipe" aria-label="Recruitment pipeline">
-        {PIPELINE.map((s) => (
-          <li class={filter === s ? 'on' : ''}>
-            <a href={`${h('/admin/coaches')}?status=${s}`}>
-              <span class="p-n">{countIn(s)}</span>
-              <span class="p-l">{label(s)}</span>
-            </a>
-          </li>
-        ))}
-        <li class={!filter ? 'on' : ''}>
-          <a href={h('/admin/coaches')}>
-            <span class="p-n">{rows.length}</span>
-            <span class="p-l">all</span>
-          </a>
-        </li>
-      </ol>
-
       {expiring.length > 0 && (
         <section class="expiring" role="status">
           <h2 class="sec-h">Qualifications lapsing within sixty days</h2>
@@ -106,11 +200,11 @@ const fmt = (v: unknown) => {
       )}
 
       {rows.length === 0 ? (
-        <p class="note">
-          No candidates at this stage. Applications arrive through the training
-          platform and create a screening task for the coach manager
-          automatically.
-        </p>
+        <EmptyState
+          title={emptyTitle}
+          body="Applications arrive through the training platform and create a screening task for the coach manager automatically."
+          action={emptyAction}
+        />
       ) : (
         <ul class="cands">
           {rows.map((r) => (
@@ -126,7 +220,10 @@ const fmt = (v: unknown) => {
                 {r.decisionReason && <p class="c-reason">{r.decisionReason}</p>}
               </div>
               <div class="c-side">
-                <span class="pill"><span class="pill-dot"></span>{label(r.status)}</span>
+                {/* `active` means something different for a coach than for a
+                    membership — available for assignment, not paid up — which
+                    is exactly what the domain argument is for. */}
+                <Status value={r.status} domain="coach" />
                 <span class="c-when">{fmt(r.submittedAt)}</span>
               </div>
             </li>
@@ -138,26 +235,21 @@ const fmt = (v: unknown) => {
 </AdminShell>
 
 <style>
-  .note, .expiring {
-    padding: 20px 22px; border-left: 3px solid var(--gold);
+  .expiring {
+    padding: 20px 22px; border-left: 3px solid var(--red);
     background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
+    margin: 0 0 26px;
   }
-  .expiring { border-left-color: var(--red); margin: 0 0 26px; }
   .sec-h { font-family: var(--font-display); font-size: 1rem; margin: 0 0 8px; color: var(--off-white, inherit); }
   .sec-p { margin: 0 0 12px; font-size: .9rem; }
   .expiring ul { margin: 0; padding-left: 18px; }
   .expiring li { margin: 4px 0; font-size: .9rem; }
 
-  .pipe { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 26px; padding: 0; }
-  .pipe li a {
-    display: flex; flex-direction: column; gap: 2px;
-    padding: 11px 16px; border: 1px solid var(--border); border-radius: var(--radius);
-    text-decoration: none; min-width: 92px;
+  .unconfigured {
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 60ch;
   }
-  .pipe li a:hover { border-color: var(--gold); }
-  .pipe li.on a { border-color: var(--gold); background: var(--bg-2); }
-  .p-n { font-family: var(--font-display); font-size: 1.3rem; font-variant-numeric: tabular-nums; }
-  .p-l { font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 
   .cands { list-style: none; margin: 0; padding: 0; }
   .cands li {
@@ -173,8 +265,6 @@ const fmt = (v: unknown) => {
   code { font-family: var(--font-accent, monospace); font-size: .95em; }
 
   @media (max-width: 700px) {
-    .pipe { gap: 6px; }
-    .pipe li a { min-width: 0; flex: 1 1 auto; padding: 9px 12px; }
     .cands li { flex-direction: column; gap: 8px; }
     .c-side { flex-direction: row; align-items: center; gap: 10px; }
   }

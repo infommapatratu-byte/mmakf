@@ -1,0 +1,501 @@
+---
+// The operator's view of notification delivery (§T, §103).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE QUESTION THIS PAGE ANSWERS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// "Did that go out?" — and its harder second half, "if not, is that a fault or
+// is it working as intended?"
+//
+// Before this page the federation had a notifications table, a push delivery
+// table that records suppressions rather than swallowing them, and no way at
+// all to look at either. A delivery record nobody can read is the same liability
+// the audit log was: it exists for the one moment somebody asks, and it could
+// not answer.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// A SUPPRESSION IS NOT A FAILURE, AND THIS PAGE WILL NOT IMPLY THAT IT IS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// suppressed_quiet_hours, suppressed_preference and suppressed_duplicate mean
+// the system honoured something: a quiet hour, a stated preference, or the fact
+// that an identical notice had just gone out. NOTHING WENT WRONG. There is
+// nothing to fix, nothing to retry, and nobody to chase.
+//
+// src/lib/status.ts already tones all three `neutral`. The failure this page
+// guards against is subtler than a colour: it is grouping them under a heading
+// like "Problems" or putting them in the same column as `failed`, which tells
+// an operator to go and "fix" a member's own choice not to be disturbed at
+// eleven at night. So they are in their own group, under their own sentence,
+// and the group is placed BEFORE the one that does need attention — because the
+// common case is that everything here is fine.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// IT NAMES NO RECIPIENT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// No member's name, no address, no message body. `notification:read` is held by
+// institution administrators and coordinators who do not hold person:read_pii,
+// and a delivery report that joined the person table would hand each of them a
+// membership list with a covering story. This is a page about the CHANNEL.
+// Tracing one message to one member is done from that member's record, by
+// somebody with the authority to open it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// deliveryOverview() applies visibleScopes() as a SQL predicate on
+// institution_id. `notifications` carries no state, district or dojo, so an
+// authority scoped to one of those cannot be narrowed and is shown NOTHING
+// rather than everything — see the module for why that is the safe direction.
+// The push table carries no institution at all, so its figures are shown only
+// to an account whose reach is the whole federation.
+
+import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import Table from '@/components/DataTable/Table.astro';
+import type { Column } from '@/components/DataTable/types';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere } from '@/lib/rbac';
+import { transportStatus } from '@/lib/notifications';
+import { pushStatus } from '@/lib/push';
+import {
+  deliveryOverview, pushOutcomes, outcomeGroup,
+  type DeliveryOverview, type OutcomeGroup,
+} from '@/db/notifications-inbox';
+import { humanise } from '@/lib/status';
+
+export const prerender = false;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+const configured = isConfigured();
+
+let overview: DeliveryOverview | null = null;
+let push: Array<{ outcome: string; n: number }> | null = null;
+let failure: string | null = null;
+
+// AdminShell refuses the page without notification:read. This repeats the check
+// before querying, because the shell decides what to RENDER and this decides
+// what to READ — and a query that runs before the refusal is drawn has already
+// happened.
+if (configured && principal && canAnywhere(principal, 'notification:read')) {
+  try {
+    overview = await deliveryOverview(db(), principal);
+    // Only asked for when the account may see the whole federation; the module
+    // returns null otherwise rather than a figure it cannot honestly narrow.
+    push = await pushOutcomes(db(), principal);
+  } catch (err: any) {
+    console.error('[admin/notifications]', err);
+    failure = 'The delivery record could not be read.';
+  }
+}
+
+// ─── Grouping ───────────────────────────────────────────────────────────────
+
+const GROUP_ORDER: OutcomeGroup[] = ['delivered', 'waiting', 'held', 'churn', 'attention'];
+
+/**
+ * The heading and the sentence under each group.
+ *
+ * `held` gets the longest explanation on the page, deliberately: it is the one
+ * an operator is most likely to misread, and the count sitting under it is the
+ * evidence that preferences are being honoured rather than evidence of a fault.
+ */
+const GROUPS: Record<OutcomeGroup, { label: string; note: string }> = {
+  delivered: {
+    label: 'Delivered',
+    note: 'A transport accepted these. An in-app notice has no transport to accept it — the row is the notification — so it is marked here the next time the delivery run passes over it.',
+  },
+  waiting: {
+    // Precision, because the two causes lead an operator to different places
+    // and one of them is not a fault at all. An in-app notice is already
+    // readable by the member while its row still says queued: it is waiting to
+    // be MARKED, not waiting to be delivered.
+    label: 'Waiting',
+    note: 'Queued and not yet marked sent. These are not lost. For email and SMS the usual cause is a channel with no provider configured — see the transports above. An in-app notice counted here is already visible to its recipient and is only waiting for the delivery run to record that.',
+  },
+  held: {
+    label: 'Held, by design',
+    note: 'Not sent because a preference was honoured — a quiet hour, a topic somebody turned off, or an identical notice that had just gone out. Nothing went wrong and there is nothing to fix here. These are recorded rather than dropped so that "we chose not to send it" and "we tried and failed" are never the same fact.',
+  },
+  churn: {
+    label: 'Expired',
+    note: 'A device registration that is no longer valid. Normal churn: people replace phones and clear browser data.',
+  },
+  attention: {
+    label: 'Needs attention',
+    note: 'A transport rejected these, or the outcome is one this surface does not recognise. These are the only figures on the page that ask anybody to do something.',
+  },
+};
+
+interface Bucket {
+  group: OutcomeGroup;
+  rows: Array<{ status: string; channel: string | null; n: number }>;
+  total: number;
+}
+
+function bucketise(rows: Array<{ status: string; channel?: string | null; n: number }>): Bucket[] {
+  const map = new Map<OutcomeGroup, Bucket>();
+  for (const r of rows) {
+    const group = outcomeGroup(r.status);
+    if (!map.has(group)) map.set(group, { group, rows: [], total: 0 });
+    const b = map.get(group)!;
+    b.rows.push({ status: r.status, channel: r.channel ?? null, n: r.n });
+    b.total += r.n;
+  }
+  for (const b of map.values()) {
+    b.rows.sort((a, z) => z.n - a.n || a.status.localeCompare(z.status));
+  }
+  return GROUP_ORDER.filter((g) => map.has(g)).map((g) => map.get(g)!);
+}
+
+const queueBuckets = overview ? bucketise(overview.byStatus) : [];
+const pushBuckets = push ? bucketise(push.map((p) => ({ status: p.outcome, channel: 'push', n: p.n }))) : [];
+
+const totalRecorded = queueBuckets.reduce((sum, b) => sum + b.total, 0);
+
+const transports = [...transportStatus(), pushStatus()];
+const unconfiguredChannels = transports.filter((t) => !t.configured).map((t) => t.channel);
+
+// A channel is a name, not a sentence. humanise() exists to turn a stored
+// status into prose and lowercases everything after the first letter, which
+// renders `sms` as "Sms" and `in_app` as "In app" — wrong for both, and wrong
+// in the one column an operator scans down. Anything not listed still falls
+// back to humanise() rather than being printed raw.
+const CHANNEL_LABEL: Record<string, string> = {
+  in_app: 'In-app',
+  email: 'Email',
+  sms: 'SMS',
+  push: 'Push',
+};
+const channelLabel = (c: string | null | undefined): string => {
+  const v = String(c ?? '').trim();
+  if (!v) return '';
+  return CHANNEL_LABEL[v] ?? humanise(v);
+};
+
+const fmt = (d: Date | string | null) => {
+  if (!d) return null;
+  const x = d instanceof Date ? d : new Date(d);
+  return Number.isNaN(x.getTime())
+    ? null
+    : x.toLocaleString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata',
+      });
+};
+
+const oldest = fmt(overview?.oldestQueued ?? null);
+
+// The failure list. Title and channel only — see the note at the top about why
+// there is no recipient and no body here.
+const failureColumns: Column[] = [
+  { key: 'title', header: 'Message' },
+  { key: 'channel', header: 'Channel', render: (r: any) => channelLabel(r.channel) },
+  { key: 'topic', header: 'Category', render: (r: any) => (r.topic ? humanise(String(r.topic)) : null) },
+  { key: 'failureReason', header: 'Reason the transport gave' },
+  {
+    key: 'createdAt',
+    header: 'Queued',
+    sortable: true,
+    initialDir: 'desc',
+    render: (r: any) => fmt(r.createdAt),
+  },
+];
+---
+
+<AdminShell
+  title="Notification delivery"
+  requires="notification:read"
+  intro="What the federation has sent, what is still waiting, what was held because somebody asked for it to be, and what actually failed."
+>
+  {!configured ? (
+    /* Neither empty nor broken: this deployment has no database holding a
+       delivery record. It is the fourth kind of absence, and it is what
+       production renders today. */
+    <p class="nd-unconfigured">
+      The federation database is not reachable from this deployment, so there is
+      no delivery record to read. That is not an empty queue and not a failure —
+      the notifications live in the federation’s database and this deployment has
+      no connection to one.
+    </p>
+  ) : failure ? (
+    <p class="nd-unconfigured" role="alert">
+      {failure} Nothing has been changed: this page only reads, so no message was
+      sent, resent or cancelled.
+    </p>
+  ) : overview && overview.reach === 'none' ? (
+    /* A refusal with a reason, not an empty page. */
+    <p class="nd-unconfigured">
+      This account holds <code>notification:read</code> in a scope this record
+      cannot be narrowed by. A notification carries the client institution it
+      belongs to and nothing else placing it in the federation — no state, no
+      district, no dojo — so an authority scoped to one of those can be shown
+      either the whole federation’s delivery record or none of it. It is shown
+      none. A national account, or one bound to the institutions concerned, can
+      read this page.
+    </p>
+  ) : (
+    <>
+      <section class="nd-transports" aria-labelledby="nd-transports-h">
+        <h2 id="nd-transports-h">What can actually be delivered</h2>
+        <p class="nd-lede">
+          A channel with no provider configured does not fail — it QUEUES. Read
+          this before reading the figures: a growing "waiting" count almost
+          always means one of these is unset rather than that a provider is
+          rejecting anything.
+        </p>
+        <dl class="nd-tlist">
+          {/* Deliberately NOT a Status chip. Whether an environment variable is
+              set is a fact about this deployment, not a state the federation's
+              records are in, and minting a dictionary entry for it would put a
+              deployment concern into the vocabulary that describes gradings and
+              memberships. The word carries the meaning; the colour only
+              reinforces it. */}
+          {transports.map((t) => (
+            <div class="nd-t">
+              <dt>{humanise(t.channel)}</dt>
+              <dd>
+                <span class:list={['nd-mark', t.configured ? 'nd-on' : 'nd-off']}>
+                  {t.configured ? 'Configured' : 'Not configured'}
+                </span>
+                <span class="nd-treason">{t.reason}</span>
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      {overview && overview.reach === 'institutions' && (
+        <p class="nd-scope">
+          Narrowed to the {overview.institutionIds.length === 1 ? 'one client institution' : `${overview.institutionIds.length} client institutions`} this
+          account is bound to. Notifications belonging to any other institution,
+          and federation-wide notifications belonging to none, are excluded in
+          the query rather than hidden after it.
+        </p>
+      )}
+
+      {totalRecorded === 0 ? (
+        <p class="nd-empty">
+          No notification has been recorded yet. Messages appear here as soon as
+          the federation queues one — the event feed produces them, so the first
+          will arrive with the first grading result, certificate or confirmed
+          entry.
+        </p>
+      ) : (
+        <>
+          <section class="nd-outcomes" aria-labelledby="nd-outcomes-h">
+            <h2 id="nd-outcomes-h">Outcomes</h2>
+            {queueBuckets.map((b) => (
+              <div class="nd-group">
+                <h3>{GROUPS[b.group].label} <span class="nd-total">{b.total.toLocaleString('en-IN')}</span></h3>
+                <p class="nd-note">{GROUPS[b.group].note}</p>
+                {/* domain="notification" is not decoration. Without it the
+                    dictionary hands `failed` its PAYMENT sentence — "No money
+                    moved" — about a rejected SMS, and hands `expired` a
+                    sentence about a missed deadline about a browser
+                    subscription that simply lapsed. Status exposes that
+                    sentence through aria-describedby as well as the tooltip,
+                    so getting it wrong is wrong for every reader, not just the
+                    one with a mouse. */}
+                <ul class="nd-counts">
+                  {b.rows.map((r) => (
+                    <li>
+                      <Status value={r.status} domain="notification" size="sm" />
+                      <span class="nd-channel">{humanise(String(r.channel ?? ''))}</span>
+                      <span class="nd-n">{r.n.toLocaleString('en-IN')}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </section>
+
+          {oldest && (
+            <p class="nd-oldest">
+              The oldest message still waiting was queued on <strong>{oldest}</strong>.
+              {unconfiguredChannels.length > 0 && (
+                <> That is the figure to watch: {unconfiguredChannels.map((c) => humanise(c)).join(', ')} {unconfiguredChannels.length === 1 ? 'has' : 'have'} no
+                provider configured, so anything queued for {unconfiguredChannels.length === 1 ? 'it' : 'them'} waits rather than sending.</>
+              )}
+            </p>
+          )}
+        </>
+      )}
+
+      {pushBuckets.length > 0 && (
+        <section class="nd-outcomes" aria-labelledby="nd-push-h">
+          <h2 id="nd-push-h">Push, device by device</h2>
+          <p class="nd-lede">
+            One row per attempt to reach one device. This is where the
+            suppressions are recorded, and the count under "held" is the
+            federation keeping its word to members who said when they did not
+            want to be disturbed.
+          </p>
+          {pushBuckets.map((b) => (
+            <div class="nd-group">
+              <h3>{GROUPS[b.group].label} <span class="nd-total">{b.total.toLocaleString('en-IN')}</span></h3>
+              <p class="nd-note">{GROUPS[b.group].note}</p>
+              <ul class="nd-counts">
+                {b.rows.map((r) => (
+                  <li>
+                    <Status value={r.status} domain="notification" size="sm" />
+                    <span class="nd-n">{r.n.toLocaleString('en-IN')}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {push === null && overview && overview.reach !== 'all' && (
+        <p class="nd-note nd-standalone">
+          Push outcomes are not shown. That table records a device, a person and
+          a topic, and nothing that places an attempt with a client institution —
+          so it cannot be narrowed to this account’s scope, and showing it
+          unnarrowed would be a disclosure.
+        </p>
+      )}
+
+      {overview && overview.failures.length > 0 && (
+        <section class="nd-failures" aria-labelledby="nd-failures-h">
+          <h2 id="nd-failures-h">Failures the transport reported</h2>
+          <Table
+            id="notification-failures"
+            caption="Notifications a transport rejected"
+            columns={failureColumns}
+            rows={overview.failures as any[]}
+            dataset="complete"
+            note="The most recent twenty-five. The reason is the transport’s own words. No recipient is named here — this page is about the channel, and tracing a message to a member is done from that member’s record."
+            emptyTitle="No notification has failed."
+            emptyBody="Nothing has been rejected by a transport."
+          />
+        </section>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .nd-unconfigured,
+  .nd-empty {
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 66ch;
+  }
+  .nd-unconfigured code {
+    font-family: var(--font-accent, monospace);
+    background: var(--bg-2);
+    padding: 2px 7px;
+    border-radius: var(--radius-sm, 4px);
+  }
+
+  h2 {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    margin: 0 0 var(--space-2);
+    color: var(--white);
+  }
+
+  .nd-lede,
+  .nd-note {
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 72ch;
+    font-size: var(--text-sm);
+  }
+  .nd-lede { margin: 0 0 var(--space-5); }
+  .nd-note { margin: 0 0 var(--space-3); }
+  .nd-standalone { margin: var(--space-6) 0 0; }
+
+  .nd-transports { margin-bottom: var(--space-8); }
+  .nd-tlist { margin: 0; display: grid; gap: var(--space-3); }
+  .nd-t {
+    display: grid;
+    grid-template-columns: 120px minmax(0, 1fr);
+    gap: var(--space-4);
+    align-items: baseline;
+    padding-bottom: var(--space-3);
+    border-bottom: 1px solid var(--border);
+  }
+  .nd-t dt { color: var(--off-white); font-size: var(--text-sm); }
+  .nd-t dd {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+  }
+  .nd-treason { color: var(--muted); font-size: var(--text-sm); line-height: var(--leading-normal); }
+  .nd-mark {
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .nd-on { color: var(--gold-2); }
+  .nd-off { color: var(--red-2); }
+
+  .nd-scope {
+    margin: 0 0 var(--space-6);
+    padding: var(--space-3) 0 var(--space-3) var(--space-4);
+    border-left: 2px solid var(--gold-dim);
+    color: var(--off-white);
+    font-size: var(--text-sm);
+    line-height: var(--leading-relaxed);
+    max-width: 72ch;
+  }
+
+  .nd-outcomes { margin-bottom: var(--space-8); }
+
+  .nd-group {
+    padding: var(--space-5) 0;
+    border-top: 1px solid var(--border);
+  }
+  .nd-group h3 {
+    margin: 0 0 var(--space-2);
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    color: var(--white);
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-3);
+  }
+  .nd-total {
+    font-variant-numeric: tabular-nums;
+    color: var(--gold-2);
+    font-size: var(--text-lg);
+  }
+
+  .nd-counts { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+  .nd-counts li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: var(--text-sm);
+  }
+  .nd-channel { color: var(--muted); }
+  .nd-n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--off-white); }
+
+  .nd-oldest {
+    margin: 0 0 var(--space-8);
+    color: var(--off-white);
+    line-height: var(--leading-relaxed);
+    font-size: var(--text-sm);
+    max-width: 72ch;
+  }
+
+  .nd-failures { margin-top: var(--space-8); }
+
+  @media (max-width: 700px) {
+    .nd-t { grid-template-columns: 1fr; gap: var(--space-1); }
+    .nd-counts li { flex-wrap: wrap; }
+    .nd-n { margin-left: 0; }
+  }
+</style>

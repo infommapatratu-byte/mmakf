@@ -38,8 +38,27 @@
 // venues in their state because the SQL says so. A venue with no state, no
 // district, no dojo and no institution recorded is visible only to a national
 // reader — fail-closed, and worth knowing about if a row seems to be missing.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS IS NOT THE SHARED TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §97's one table is for rows: values of the same shape, in columns a reader
+// scans down. A venue is not a row. It is an address, a keyholder, two
+// measurements, three variable-length lists read out of JSON, an accessibility
+// finding that is usually the ABSENCE of a finding, and a set of blackout
+// periods — and the accessibility paragraph alone is longer than any cell a
+// table can hold. Forcing it into columns would either truncate the one
+// sentence on this page that must not be truncated, or make every row as tall
+// as it.
+//
+// The §12 header, the status dictionary and the state components are adopted;
+// the record list is deliberately kept.
 
 import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
 import { isConfigured, db } from '@/db';
 import { identify } from '@/lib/session';
 import { canAnywhere, visibleScopes } from '@/lib/rbac';
@@ -69,7 +88,14 @@ const LIMIT = 300;
 
 let venues: any[] = [];
 const blackoutsByVenue = new Map<number, any[]>();
-let unavailable: string | null = null;
+// "Not configured" and "could not be read" are different absences and are told
+// apart here (CONTENT-ARCHITECTURE §5.4). One is a deployment with no system of
+// record — nothing failed, and there is nothing to retry. The other is a
+// failure, which is what ErrorState is for.
+let notConfigured = false;
+let readFailed = false;
+/** The driver's own words. Behind the Details disclosure, never the headline. */
+let failureDetail: string | null = null;
 let noScope = false;
 // Whether this reader's authority is national. It only ever changes the WORDING
 // of the empty state: "the register is empty" and "nothing in the register that
@@ -79,7 +105,7 @@ let nationalReader = false;
 
 if (principal && canAnywhere(principal, 'venue:read')) {
   if (!isConfigured()) {
-    unavailable = 'The federation database is not reachable from this deployment, so the venue register cannot be read. Nothing is missing — the register lives in the database, not in this page.';
+    notConfigured = true;
   } else {
     try {
       const conds: any[] = [];
@@ -143,7 +169,8 @@ if (principal && canAnywhere(principal, 'venue:read')) {
         }
       }
     } catch (err: any) {
-      unavailable = String(err?.message ?? err);
+      readFailed = true;
+      failureDetail = String(err?.message ?? err);
     }
   }
 }
@@ -218,15 +245,44 @@ const inUse = venues.filter((r) => r.v.active).length;
   title="Venues"
   requires="venue:read"
   intro="Rooms the federation trains in. A venue is a room, not a member: a dojo holds a charter and appears on the affiliation register, while a school hall hired for a term appears only here."
->
-  <nav class="filters" aria-label="Filter venues">
-    <a href={h('/admin/venues')} class={show === 'in-use' ? 'on' : ''}>In use</a>
-    <a href={`${h('/admin/venues')}?show=withdrawn`} class={show === 'withdrawn' ? 'on' : ''}>Withdrawn</a>
-    <a href={`${h('/admin/venues')}?show=all`} class={show === 'all' ? 'on' : ''}>All</a>
-  </nav>
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Venues', url: h('/admin/venues') },
+    ],
+    /* The three standing views, as real links carrying real querystrings (§79,
+       §80) rather than the hand-rolled chip row this replaced — so a view can
+       be bookmarked, sent to a colleague and reached with JavaScript off, and
+       so the current one is announced with aria-current rather than shown only
+       by a background colour.
 
-  {unavailable ? (
-    <p class="note" role="alert">{unavailable}</p>
+       Query-only hrefs. On admin.mmakf.in this page is served at /venues and
+       the middleware rewrites it to /admin/venues internally, so a link that
+       rebuilt the pathname would be rewritten a second time.
+
+       No counts on the tabs. A number beside "Withdrawn" would have to be
+       counted, and this page counts only the view it loaded. */
+    tabs: [
+      { label: 'In use', href: '?' },
+      { label: 'Withdrawn', href: '?show=withdrawn' },
+      { label: 'All', href: '?show=all' },
+    ],
+  }}
+>
+  {notConfigured ? (
+    /* Not ErrorState: nothing failed. There is no database attached to this
+       deployment, so there is no register to read and nothing to retry. */
+    <p class="note">
+      The federation database is not reachable from this deployment, so the
+      venue register cannot be read. Nothing is missing — the register lives in
+      the database, not in this page.
+    </p>
+  ) : readFailed ? (
+    <ErrorState
+      title="The venue register could not be read."
+      safe="Nothing has been changed. This was a read, so no room was added, edited or withdrawn."
+      detail={failureDetail}
+    />
   ) : noScope ? (
     <p class="note">
       This account holds the right to read the venue register, but in no unit
@@ -234,15 +290,41 @@ const inUse = venues.filter((r) => r.v.active).length;
       or a client institution, and none of this account's bindings covers one.
     </p>
   ) : venues.length === 0 ? (
-    <p class="note">
-      {show === 'withdrawn'
-        ? (nationalReader
-            ? 'No venue has been withdrawn. A room taken out of use is kept in the register rather than deleted, because past sessions point at it.'
-            : 'No withdrawn venue falls within what this account may read, which is not the same as none having been withdrawn. A room taken out of use is kept in the register rather than deleted, because past sessions point at it.')
-        : (nationalReader
-            ? 'The venue register is empty. That is not a statement that the federation trains nowhere — it means no room has been entered here yet. A venue is recorded when a programme is scheduled into it, and until then this page has nothing to show and will not fill itself with examples.'
-            : "No venue falls within what this account may read. That is not a statement that the register is empty, nor that the federation trains nowhere — this account reads venues in its own state, district, dojo or client institution, and a room with none of those recorded against it is visible only to a national reader.")}
-    </p>
+    /* §104: the way out is real and it depends on which emptiness this is. A
+       view filtered to one standing can be widened; the whole register being
+       empty cannot, and that empty state goes back to the module list rather
+       than pretending there is somewhere else to look. */
+    show === 'withdrawn' ? (
+      <EmptyState
+        title={nationalReader
+          ? 'No venue has been withdrawn.'
+          : 'No withdrawn venue falls within what this account may read.'}
+        body={nationalReader
+          ? 'A room taken out of use is kept in the register rather than deleted, because past sessions point at it.'
+          : 'That is not the same as none having been withdrawn. A room taken out of use is kept in the register rather than deleted, because past sessions point at it.'}
+        action={{ label: 'Show every room', href: '?show=all' }}
+      />
+    ) : show === 'in-use' ? (
+      <EmptyState
+        title={nationalReader
+          ? 'No room is currently in use.'
+          : 'No room in use falls within what this account may read.'}
+        body={nationalReader
+          ? 'Either nothing has been entered in the register yet, or every room in it has been withdrawn. The next view answers which.'
+          : 'This account reads venues in its own state, district, dojo or client institution. A room with none of those recorded against it is visible only to a national reader.'}
+        action={{ label: 'Show every room', href: '?show=all' }}
+      />
+    ) : (
+      <EmptyState
+        title={nationalReader
+          ? 'The venue register is empty.'
+          : 'No venue falls within what this account may read.'}
+        body={nationalReader
+          ? 'That is not a statement that the federation trains nowhere — it means no room has been entered here yet. A venue is recorded when a programme is scheduled into it, and until then this page has nothing to show and will not fill itself with examples.'
+          : 'That is not a statement that the register is empty, nor that the federation trains nowhere — this account reads venues in its own state, district, dojo or client institution, and a room with none of those recorded against it is visible only to a national reader.'}
+        action={{ label: 'Back to operations', href: h('/admin') }}
+      />
+    )
   ) : (
     <>
       <p class="count">
@@ -269,12 +351,24 @@ const inUse = venues.filter((r) => r.v.active).length;
           const blackouts = blackoutsByVenue.get(r.v.id) ?? [];
           const place = placeOf(r);
           return (
-            <li class={r.v.active ? '' : 'gone'}>
+            <li>
               <div class="ident">
                 <p class="v-name">{r.v.name}</p>
                 <p class="v-meta">
                   <code>{r.v.code}</code> · {label(r.v.kind)}
-                  {!r.v.active && <span class="tag">withdrawn</span>}
+                </p>
+                {/* The standing of the room, through the one component that
+                    turns a stored value into a word a person reads. `active` is
+                    a boolean here, so it is mapped to the two values the venue
+                    domain defines — and the domain is what stops "withdrawn"
+                    being read with the applications meaning of the word.
+
+                    It is a chip on EVERY room, not a marker on the withdrawn
+                    ones. A page that marks only the exceptions leaves the
+                    reader to infer the rule, and the row that says nothing is
+                    the row they scroll past. */}
+                <p class="v-standing">
+                  <Status value={r.v.active ? 'active' : 'withdrawn'} domain="venue" size="sm" />
                 </p>
                 {r.dojoName && (
                   <p class="v-rel">
@@ -385,14 +479,6 @@ const inUse = venues.filter((r) => r.v.active).length;
 </AdminShell>
 
 <style>
-  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; }
-  .filters a {
-    padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
-    font-size: .8rem; text-decoration: none; color: var(--muted); line-height: 1.5;
-  }
-  .filters a:hover { border-color: var(--gold); }
-  .filters a.on { background: var(--gold); color: #FFFFFF; border-color: var(--gold); }
-
   .note {
     padding: 20px 22px; border-left: 3px solid var(--gold);
     background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
@@ -405,10 +491,16 @@ const inUse = venues.filter((r) => r.v.active).length;
     display: grid; grid-template-columns: minmax(0, 20rem) minmax(0, 1fr);
     gap: 0 36px; padding: 22px 0; border-bottom: 1px solid var(--border);
   }
-  .reg > li.gone { opacity: .68; }
+  /* A withdrawn room used to be dimmed to 68% opacity. Opacity does not dim a
+     marker, it dims a RECORD — the address, the keyholder's telephone number
+     and the accessibility finding all lost contrast together, and those are
+     exactly what somebody looks up about a room that has gone out of use.
+     The standing is now said in words by the status chip, which carries the
+     fact at full strength (WCAG 1.4.3). */
 
   .v-name { margin: 0; font-family: var(--font-display); font-size: 1.12rem; }
   .v-meta { margin: 4px 0 0; font-size: .82rem; color: var(--muted); text-transform: capitalize; }
+  .v-standing { margin: 8px 0 0; }
   .v-rel { margin: 8px 0 0; font-size: .85rem; color: var(--muted); }
   .v-addr { margin: 10px 0 0; font-size: .85rem; color: var(--muted); line-height: 1.6; }
   .v-notes { margin: 14px 0 0; font-size: .85rem; color: var(--muted); line-height: 1.7; max-width: 62ch; }
@@ -442,11 +534,6 @@ const inUse = venues.filter((r) => r.v.active).length;
   .bl-when { font-variant-numeric: tabular-nums; }
   .bl-why { color: var(--muted); }
 
-  .tag {
-    display: inline-block; margin-left: 8px; padding: 1px 8px;
-    border: 1px solid var(--red); border-radius: 999px;
-    font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; color: var(--red);
-  }
   .muted { color: var(--muted); }
   .small { font-size: .84rem; }
   code { font-family: var(--font-accent, monospace); font-size: .95em; text-transform: none; }

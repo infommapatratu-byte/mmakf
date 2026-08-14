@@ -1,6 +1,6 @@
 # Implementation status
 
-**Honest accounting, updated 13 August 2026.**
+**Honest accounting, updated 14 August 2026.**
 
 This file exists because the question was asked directly — *"have you implemented
 this prompt fully or again summarised?"* — and the answer then was "about half",
@@ -14,12 +14,20 @@ HTTP request. Nothing is marked BUILT because a page or a table exists.
 
 ## Numbers
 
+Verified on 14 August 2026 by running the commands, not by reading a previous
+version of this file. The counts move as work lands — this table was found
+stale once already, quoting a figure taken before two test files were added —
+so re-run the commands before citing a number from it.
+
 | | |
 |---|---|
 | Database tables | **144** (117 before this session) |
 | Migrations | 12, all applied through the production runner in CI |
-| Tests | **2,391** across 70 files, all passing |
-| Routes | 115 |
+| Tests | **2,468** across **73** files, all passing (`npx vitest run`) |
+| Route files under `src/pages` | 123 |
+| Admin surfaces | 27 |
+| Statuses in the federation dictionary | **166**, across 8 tones |
+| `npx astro build` | succeeds |
 | Live 404s from links the site publishes | **0** (was 2) |
 
 ---
@@ -46,6 +54,7 @@ HTTP request. Nothing is marked BUILT because a page or a table exists.
 | Individual fee estimator | `pages/training/estimate.astro` | Returns a real figure or says a quotation is needed. Never a placeholder. |
 | Admin: applications, tasks, coaches, support | `pages/admin/*` | Scope-filtered in SQL; menu filtered by RBAC; recomposed for phones. |
 | Supabase Data API lockdown | `0010`, `0012` | RLS on all 144 tables, grants revoked. |
+| Permissioned data export | `lib/export.ts`, `api/export/[kind].ts` | CSV and JSON, seven kinds. Two gates (`export:run` **and** the kind's read action), scope as a SQL predicate, an `audit_events` row per file. Formula injection neutralised; UTF-8 BOM; money as integer paise. **CSV and JSON only.** |
 
 ---
 
@@ -75,10 +84,9 @@ finished:
 
 - **`/admin/leads` is read-only.** No status transition, no owner assignment, no
   note. Those need `engagement:write` and a POST endpoint; neither exists.
-- **`/admin/quotes` cannot approve a version.** `src/db/fees.ts` has no
-  `approveQuoteVersion()`, so a version that used a requires-approval rule sits
-  at `awaiting_approval` indefinitely. The page says so rather than showing a
-  control that would write outside the module that owns quotations.
+- ~~**`/admin/quotes` cannot approve a version.**~~ **Resolved 14 August 2026** —
+  `approveQuoteVersion()`, `rejectQuoteVersion()` and `awaitingApproval()` now
+  exist in `src/db/fees.ts`. See the third wave below.
 - **A draft fee rule cannot be edited or deleted.** Correcting one means
   authoring a new version. `fees.ts` exposes no `updateRule`.
 - **Publishing V2 does not mark V1 superseded.** `activeFramework()` picks the
@@ -90,6 +98,36 @@ finished:
   when the cap is hit. There is no `leadCounts()` aggregate and writing raw SQL
   in a page would move the scope predicate out of the domain module.
 
+## BUILT — the third wave: foundations, and two records nobody could read
+
+Four changes, 14 August 2026. Three of them close a gap where the system already
+held the data and had no way to show it or act on it.
+
+| Work | Where | What it changes |
+|---|---|---|
+| **Design tokens (§99)** | `src/styles/global.css` | A radius scale, a 4px spacing scale, a clamped type scale, four elevations, motion durations and easings, a named z-index ladder, and the shell dimensions. There was previously one radius, one container width, two shadows and no scale at all, so 58 files hard-coded everything else. **Every colour token is byte-identical** — several carry a measured contrast ratio and changing a hex would silently undo an accessibility fix. |
+| **The status dictionary (§102)** | `src/lib/status.ts`, `src/components/Status.astro` | 166 statuses over 8 tones, replacing 28 enums' worth of private opinions about colour and wording. The drift guard reads the enum labels out of the migrations and **found 94 statuses that were rendering as untoned grey chips the first time it ran.** |
+| **Quotation approval** | `src/db/fees.ts`, `/admin/quotes` | A quotation parked at `awaiting_approval` could never move — there was no approve function. `approveQuoteVersion()`, `rejectQuoteVersion()` and `awaitingApproval()` close it. **The approver must not be the issuer, compared on `userId`**: `TRAINING_DIRECTOR` holds both `quote:issue` and `quote:approve`, so checking the action alone would let one person satisfy a two-person control by doing it twice. A principal with no `userId` is refused, because it cannot be *shown* to be somebody else. |
+| **The audit log has a page** | `/admin/audit` | `audit_events` has been written to since migration 0000 — ranks awarded and revoked, results finalised, certificates issued, coaches suspended — and **nothing read it**. A complete record of the federation's own decisions with no way to look at it is a liability, not an asset. The menu's "Audit trail" entry also pointed at `/admin/approvals`, which is the two-person approval queue and a different thing entirely. |
+
+Alongside these, four accessibility regressions the guards caught were fixed,
+and one page that should never have shipped was removed.
+
+### What these deliberately do NOT do
+
+- **The tokens are not applied retrospectively.** Pages predating them still
+  hard-code values. `--radius` keeps its unsuffixed name so all 58 files soften
+  together, but spacing, type and elevation are only used where new work touched.
+- **The status dictionary validates no transitions.** It says what a status
+  means, not whether `draft → approved` is legal. See
+  [domains/status-model.md](domains/status-model.md).
+- **`/admin/audit` is read-only and has no export.** It reads the register; it
+  cannot produce a CSV or a signed extract for an external auditor.
+- **Rejecting a quotation does not notify the institution.** There is no email
+  transport. It records the rejection and its reason, and stops.
+
+---
+
 ## SCAFFOLDED — model and domain logic, still no surface
 
 | Capability | Model | Missing |
@@ -97,6 +135,14 @@ finished:
 | Contracts | `contracts` | The quote → contract transition, and a surface |
 | Client documents | `clientDocuments` | Storage binding |
 | External calendar sync | `calendarConnections`, `calendarEvents`, `calendarSyncLog` | Google/Microsoft OAuth |
+| **In-app notifications** | `notifications`, `src/lib/notifications.ts` | **A surface.** `myNotifications()`, `markRead()` and `queueHealth()` have no caller in `src/pages`. There is no bell and no notification centre, so a member cannot read an in-app notification. |
+| **Event → notification fan-out** | `NOTIFIABLE`, `notifyForEvent()` | **A consumer.** Nothing walks the domain-event feed calling it. The only path that currently writes a notification on a real request is `send_message` inside a workflow. |
+| **Web push** | `src/lib/push.ts` — 1,386 lines, RFC 8291 and RFC 8292, fully tested | **Everything else.** The module is imported by nothing: no subscribe endpoint, no settings page, no `push` handler in `public/sw.js`, no VAPID keys. A complete engine that has never run outside its tests. |
+| Notification delivery | `deliverQueued()` | An email or SMS provider, and a line in `/api/cron/reconcile` to sweep the queue. |
+
+Notifications are the largest gap between "tested" and "usable" in the system,
+and [domains/notifications.md](domains/notifications.md) §7 sets it out in full
+rather than letting the test count imply otherwise.
 
 ---
 
@@ -106,7 +152,14 @@ finished:
 - Institutional analytics surfaces (PART V)
 - HR module (PART X) — `hr:*` actions and `HR_OFFICER` exist; no tables
 - Network visualisation and India map
-- Data export (CSV/XLSX/PDF)
+- **XLSX and PDF export.** CSV and JSON are built (see above). Both of the other
+  two need a library — a zip writer and a spreadsheet XML schema for XLSX, a
+  layout engine for PDF — and this codebase adds no dependencies. Neither is
+  stubbed and neither appears as an accepted `format`, so a caller asking for one
+  is told there is no such format rather than handed a CSV with the wrong
+  extension.
+- **A screen to run an export from.** The endpoint is reachable and audited;
+  nothing in the admin navigation links to it yet.
 - Remaining SEO landing pages beyond the three built
 - Premium design rebuild across the pages predating this session
 
@@ -148,3 +201,31 @@ carries the federation's statement and the archive is left as printed.
 5. **Verify against production, not the repository.** Content lives in Redis;
    editing `seed.ts` does not reach a running page. A deployment can be refused
    before it exists.
+
+---
+
+## Domain documentation
+
+Each of these was written by reading the source, and each ends with what its
+subject does **not** do.
+
+| Document | Covers |
+|---|---|
+| [domains/design-system.md](domains/design-system.md) | §71/§99 — the tokens, and the real API of `PageHeader`, `DataTable`, `Status`, `SidePanel` and the five state components |
+| [domains/status-model.md](domains/status-model.md) | §102 — the eight tones, the distinctions that earn their place, and how the drift guard works |
+| [domains/notifications.md](domains/notifications.md) | §T/§47/§48 — the allow-list, transports, push, and the large gap between built and usable |
+| [domains/seo.md](domains/seo.md) | §P — route classification, the dynamic-route expansion policy, and what is deliberately not expanded |
+| [domains/automation.md](domains/automation.md) | §AF/§R — the workflow engine, idempotency, resumption and retries |
+| [domains/admin-platform.md](domains/admin-platform.md) | The three surfaces over one application |
+| [domains/coaches.md](domains/coaches.md) | The coach lifecycle and the assignment engine |
+| [domains/institutional-training.md](domains/institutional-training.md) | The institutional pipeline |
+
+**The single register of what MMAKF has not supplied is
+[PENDING-FEDERATION-VERIFICATION.md](PENDING-FEDERATION-VERIFICATION.md).** No
+other document keeps its own list; they link to it.
+
+> **One caveat on an older document.** The token tables in
+> [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md) are out of date — it records
+> `--radius: 2px`, and the token is now `10px` within a seven-step scale.
+> `domains/design-system.md` supersedes it on values. Its argument about
+> institutional intent still stands, but its findings were not re-verified.

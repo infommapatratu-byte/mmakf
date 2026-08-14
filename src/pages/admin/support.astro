@@ -7,8 +7,24 @@
 //
 // Confidential tickets are national-desk work: supportDesk() excludes them for
 // any scoped administrator in the WHERE clause, not by filtering afterwards.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ADOPTING THE SHARED SYSTEM
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The heading block, the status pills and the ticket list were written here.
+// The list was a table that had been talked out of being one: nine uniform
+// fields per row, laid out as a two-column flex list that could not be sorted
+// and became a squeeze on a phone. It is now the shared DataTable, which sorts,
+// pages and turns each row into a record below 900px (§97, §54).
+//
+// The QUERY IS UNCHANGED — same filters, same confidential exclusion, same
+// scope predicate, same ceiling — and `?category=`, `?unassigned=1` and
+// `?breached=1` still mean exactly what they meant.
 
 import AdminShell from '@/components/AdminShell.astro';
+import Table from '@/components/DataTable/Table.astro';
+import type { Column, Filter } from '@/components/DataTable/types';
 import { isConfigured, db } from '@/db';
 import { identify } from '@/lib/session';
 import { canAnywhere } from '@/lib/rbac';
@@ -29,12 +45,18 @@ const breachedOnly = Astro.url.searchParams.get('breached') === '1';
 
 let rows: any[] = [];
 let counts = { open: 0, unassigned: 0, escalated: 0, awaitingMember: 0, breached: 0 };
-let unavailable: string | null = null;
+
+// A deployment with no database has not failed at anything; a query that threw
+// has. They were one variable and they are two, because only one of them is
+// worth telling somebody to retry.
+const configured = isConfigured();
+let failure: string | null = null;
+// Whether the figures above were actually counted. A zero nobody counted reads
+// exactly like a zero somebody did, so an uncounted figure is not printed.
+let counted = false;
 
 if (principal && canAnywhere(principal, 'support:read')) {
-  if (!isConfigured()) {
-    unavailable = 'The federation database is not reachable from this deployment, so the desk cannot be listed.';
-  } else {
+  if (configured) {
     try {
       rows = await supportDesk(db(), principal, {
         category: category || undefined,
@@ -43,17 +65,13 @@ if (principal && canAnywhere(principal, 'support:read')) {
         limit: 200,
       });
       counts = await supportCounts(db(), principal);
+      counted = true;
     } catch (err: any) {
-      unavailable = String(err?.message ?? err);
+      failure = String(err?.message ?? err);
     }
   }
 }
 
-const fmt = (v: unknown) => {
-  if (!v) return '—';
-  const d = new Date(v as string);
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-};
 const age = (v: unknown) => {
   if (!v) return '';
   const d = new Date(v as string);
@@ -61,71 +79,152 @@ const age = (v: unknown) => {
   const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
   return days <= 0 ? 'today' : days === 1 ? '1 day' : `${days} days`;
 };
+
+const categoryLabel = (v: unknown) =>
+  SUPPORT_CATEGORIES.find((c) => c.value === v)?.label ?? String(v ?? '').replace(/_/g, ' ');
+
+// The same nine facts the hand-written list carried, in the same order.
+const columns: Column[] = [
+  // First column, so it is what the record is called when a row collapses on a
+  // phone. A record headed by a reference number is a record nobody can scan.
+  { key: 'subject', header: 'Subject' },
+  { key: 'ticketNo', header: 'Reference' },
+  { key: 'category', header: 'Category', render: (r: any) => categoryLabel(r.category) },
+  { key: 'department', header: 'Department' },
+  {
+    key: 'assignedToUserId',
+    header: 'Assigned',
+    // Whether, not who. The row carries a user id and nothing else, and an
+    // internal id printed at an operator is not an answer to "who has this".
+    render: (r: any) => (r.assignedToUserId == null ? 'Unassigned' : 'Assigned'),
+  },
+  { key: 'institutionId', header: 'Institution', render: (r: any) => (r.institutionId ? `#${r.institutionId}` : null) },
+  { key: 'status', header: 'Status', status: { domain: 'ticket' } },
+  {
+    // Sorted on the timestamp and shown as an age: sorting the words would put
+    // "9 days" after "10 days" and quietly reverse the queue.
+    key: 'createdAt',
+    header: 'Age',
+    sortable: true,
+    initialDir: 'asc',
+    render: (r: any) => age(r.createdAt),
+  },
+  {
+    key: 'escalationLevel',
+    header: 'Escalated',
+    numeric: true,
+    sortable: true,
+    initialDir: 'desc',
+    render: (r: any) => ((r.escalationLevel ?? 0) > 0 ? `×${r.escalationLevel}` : null),
+  },
+];
+
+// Fourteen categories is a select, not a tab strip. Same `?category=`, same SQL.
+const filters: Filter[] = [
+  {
+    key: 'category',
+    label: 'Category',
+    type: 'select',
+    anyLabel: 'Any category',
+    options: SUPPORT_CATEGORIES.map((c) => ({ value: c.value, label: c.label })),
+  },
+];
+
+// DataTable knows which of ITS filters emptied a table. It cannot know about
+// this page's two views, so the page says which absence this is (§104).
+const emptyTitle = breachedOnly
+  ? 'No ticket has passed a deadline.'
+  : unassignedOnly
+    ? 'Every ticket on the desk has an owner.'
+    : 'There are no tickets on the desk.';
+const emptyBody = breachedOnly
+  ? 'Only a ticket that has a deadline can appear here, and MMAKF has published no response standard, so most tickets have none.'
+  : undefined;
+const emptyAction = breachedOnly || unassignedOnly
+  ? { label: 'See every ticket', href: h('/admin/support') }
+  : { label: 'Back to the operations console', href: h('/admin') };
 ---
 
 <AdminShell
   title="Support desk"
   requires="support:read"
   intro="Tickets from members, institutions and the public. Ordered by escalation and then by age, because an old ticket nobody answered is usually the more urgent one."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Support desk', url: h('/admin/support') },
+    ],
+    /* The two views that are not a category. Category is a filter, below.
+
+       No action bar: nothing in the admin surface answers, assigns or closes a
+       ticket yet, and §13's one dominant action is not a reason to invent a
+       route. */
+    tabs: [
+      { label: 'All', href: h('/admin/support') },
+      { label: 'Unassigned', href: `${h('/admin/support')}?unassigned=1` },
+      { label: 'Past deadline', href: `${h('/admin/support')}?breached=1` },
+    ],
+  }}
 >
-  <dl class="stats">
-    <div><dt>Open</dt><dd>{counts.open}</dd></div>
-    <div><dt>Unassigned</dt><dd>{counts.unassigned}</dd></div>
-    <div><dt>Escalated</dt><dd class={counts.escalated ? 'warn' : ''}>{counts.escalated}</dd></div>
-    <div><dt>Waiting on member</dt><dd>{counts.awaitingMember}</dd></div>
-    <div>
-      <dt>Past a published deadline</dt>
-      <dd class={counts.breached ? 'warn' : ''}>{counts.breached}</dd>
-    </div>
-  </dl>
+  {/* §12 puts the page's metadata in its header. These are counted figures, so
+      they belong there — and they are omitted entirely rather than shown as
+      zeroes when there was nothing to count. */}
+  {counted && (
+    <dl class="stats" slot="meta">
+      <div><dt>Open</dt><dd>{counts.open}</dd></div>
+      <div><dt>Unassigned</dt><dd>{counts.unassigned}</dd></div>
+      <div><dt>Escalated</dt><dd class={counts.escalated ? 'warn' : ''}>{counts.escalated}</dd></div>
+      <div><dt>Waiting on member</dt><dd>{counts.awaitingMember}</dd></div>
+      <div>
+        <dt>Past a published deadline</dt>
+        <dd class={counts.breached ? 'warn' : ''}>{counts.breached}</dd>
+      </div>
+    </dl>
+  )}
 
-  <p class="sla-note">
-    The last figure counts only tickets that have a deadline. MMAKF has
-    published no response standard, so most tickets have none — and a ticket
-    with no deadline is unmeasured, not met. Counting it as met would put work
-    that never happened into a success rate.
-  </p>
-
-  <nav class="filters" aria-label="Filter tickets">
-    <a href={h('/admin/support')} class={!category && !unassignedOnly && !breachedOnly ? 'on' : ''}>All</a>
-    <a href={`${h('/admin/support')}?unassigned=1`} class={unassignedOnly ? 'on' : ''}>Unassigned</a>
-    <a href={`${h('/admin/support')}?breached=1`} class={breachedOnly ? 'on' : ''}>Past deadline</a>
-    {SUPPORT_CATEGORIES.map((c) => (
-      <a href={`${h('/admin/support')}?category=${c.value}`} class={category === c.value ? 'on' : ''}>{c.label}</a>
-    ))}
-  </nav>
-
-  {unavailable ? (
-    <p class="note" role="alert">{unavailable}</p>
-  ) : rows.length === 0 ? (
-    <p class="note">No tickets match.</p>
+  {!configured ? (
+    /* Neither EmptyState nor ErrorState. Nothing failed and the desk is not
+       empty — this deployment has no database to hold a ticket, which is a
+       fourth kind of absence and is what production renders today. */
+    <p class="unconfigured">
+      The federation database is not reachable from this deployment, so the desk
+      cannot be listed. That is not an empty desk and not a failure: the tickets
+      live in the federation's database, and this deployment has no connection
+      to one.
+    </p>
   ) : (
-    <ul class="tix">
-      {rows.map((t) => (
-        <li class={t.status === 'escalated' ? 'esc' : ''}>
-          <div>
-            <p class="t-sub">{t.subject}</p>
-            <p class="t-meta">
-              <code>{t.ticketNo}</code>
-              · {String(t.category).replace(/_/g, ' ')}
-              {t.department && <> · {t.department}</>}
-              {t.assignedToUserId == null && <> · <span class="muted">unassigned</span></>}
-              {t.institutionId && <> · institution #{t.institutionId}</>}
-            </p>
-          </div>
-          <div class="t-side">
-            <span class="pill"><span class="pill-dot"></span>{String(t.status).replace(/_/g, ' ')}</span>
-            <span class="t-age">{age(t.createdAt)} old</span>
-            {(t.escalationLevel ?? 0) > 0 && <span class="t-esc">escalated ×{t.escalationLevel}</span>}
-          </div>
-        </li>
-      ))}
-    </ul>
+    <>
+      {counted && (
+        <p class="sla-note">
+          The last figure counts only tickets that have a deadline. MMAKF has
+          published no response standard, so most tickets have none — and a
+          ticket with no deadline is unmeasured, not met. Counting it as met
+          would put work that never happened into a success rate.
+        </p>
+      )}
+
+      <Table
+        id="tickets"
+        caption="Support tickets"
+        columns={columns}
+        filters={filters}
+        rows={rows}
+        dataset="complete"
+        state={failure ? 'error' : 'ready'}
+        note="Escalated tickets first, then the oldest, and capped at two hundred tickets. Sorting a column below re-orders those; it does not fetch more."
+        emptyTitle={emptyTitle}
+        emptyBody={emptyBody}
+        emptyAction={emptyAction}
+        errorTitle="The support desk could not be read."
+        errorSafe="Nothing has been changed. This was a read, so no ticket was answered, assigned, escalated or closed."
+        errorDetail={failure}
+      />
+    </>
   )}
 </AdminShell>
 
 <style>
-  .stats { display: flex; flex-wrap: wrap; gap: 0 36px; margin: 0 0 14px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 0 36px; margin: 0; }
   .stats dt { font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); max-width: 14ch; line-height: 1.4; }
   .stats dd {
     margin: 5px 0 0; font-family: var(--font-display); font-size: 1.7rem;
@@ -139,37 +238,14 @@ const age = (v: unknown) => {
     line-height: 1.65; max-width: 66ch;
   }
 
-  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 22px; }
-  .filters a {
-    padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
-    font-size: .78rem; text-decoration: none; color: var(--muted);
+  .unconfigured {
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 60ch;
   }
-  .filters a.on { background: var(--gold); color: #1a1713; border-color: var(--gold); }
-
-  .note {
-    padding: 20px 22px; border-left: 3px solid var(--gold);
-    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 62ch;
-  }
-
-  .tix { list-style: none; margin: 0; padding: 0; }
-  .tix li {
-    display: flex; justify-content: space-between; gap: 20px; align-items: flex-start;
-    padding: 15px 0 15px 14px; border-bottom: 1px solid var(--border);
-    border-left: 2px solid transparent;
-  }
-  .tix li.esc { border-left-color: var(--red); }
-  .t-sub { margin: 0; font-family: var(--font-display); font-size: 1rem; line-height: 1.4; }
-  .t-meta { margin: 4px 0 0; font-size: .8rem; color: var(--muted); }
-  .t-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
-  .t-age { font-size: .78rem; color: var(--muted); }
-  .t-esc { font-size: .72rem; color: var(--red); }
-  .muted { color: var(--muted); }
-  code { font-family: var(--font-accent, monospace); font-size: .95em; }
 
   @media (max-width: 700px) {
     .stats { gap: 0 22px; }
     .stats dd { font-size: 1.3rem; }
-    .tix li { flex-direction: column; gap: 8px; }
-    .t-side { flex-direction: row; align-items: center; gap: 10px; flex-wrap: wrap; }
   }
 </style>

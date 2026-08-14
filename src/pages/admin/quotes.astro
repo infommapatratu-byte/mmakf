@@ -1,6 +1,6 @@
 ---
-// /admin/quotes — the quotations the federation has issued, and how each total
-// was reached.
+// /admin/quotes — the quotations the federation has issued, how each total was
+// reached, and the decision on the ones held back for approval.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // WHAT A QUOTE IS IN THIS SYSTEM
@@ -41,31 +41,53 @@
 // from a scoped reader, because there is no basis on which they could be
 // entitled to it.
 //
-// THE SAME APPLIES ON THE WAY IN, AND IT IS EASIER TO MISS. Three ids arrive
-// from the issue form as plain numbers — institution, training request and
-// person — and each of them names a row somebody may have no scope over.
-// Knowing an id is never sufficient here, and the request id is the sharpest of
-// the three: issueQuote() re-versions the quotation an existing request already
+// THE SAME APPLIES ON THE WAY IN, AND IT IS EASIER TO MISS. Ids arrive from the
+// forms as plain numbers — institution, training request, person, and now a
+// quotation version — and each of them names a row somebody may have no scope
+// over. Knowing an id is never sufficient here. The request id is the sharpest
+// of them: issueQuote() re-versions the quotation an existing request already
 // carries, so an unchecked one would let a scoped issuer supersede a quotation
-// belonging to a tenant they cannot even read. All three are checked against
-// the ISSUING scope before anything is written.
+// belonging to a tenant they cannot even read. Every one is checked against the
+// scope of the ACTION being taken — the issuing scope for issuing, the
+// approving scope for approving — before anything is written.
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// TWO THINGS THIS PAGE WILL NOT INVENT
+// APPROVAL, AND THE ONE RULE THE PAGE MUST NOT FIGHT
 // ─────────────────────────────────────────────────────────────────────────────
 //
-//  1. AN APPROVAL PATH. src/db/fees.ts has issueQuote(), reproduce() and
-//     explainQuote() and NO approve function. quote_versions carries
-//     approvedByUserId and approvedAt, and nothing in this codebase sets them.
-//     So this page offers no approve control: writing one here would put a
-//     second write path to a quotation outside the fee module, which is exactly
-//     what that module exists to prevent. A holder of 'quote:approve' is told
-//     what is missing instead of being handed a button that writes a row nobody
-//     else can account for.
+// issueQuote() parks a version at `awaiting_approval` whenever a rule that
+// fired carries requiresApproval — a large discount, an unusual multiplier.
+// src/db/fees.ts now has approveQuoteVersion(), rejectQuoteVersion() and
+// awaitingApproval(), so those versions can move, and this page is where they
+// move from. Nothing here writes to quote_versions directly: a second write
+// path to a quotation outside the fee module is exactly what that module
+// exists to prevent.
 //
-//  2. A VALIDITY PERIOD. MMAKF has published no standard quotation validity, so
-//     validUntil is whatever whoever issued it typed, and a quotation without
-//     one does not expire. The column says that rather than showing a blank.
+// THE APPROVER MUST NOT BE THE ISSUER, and the module enforces it. This page
+// therefore does not draw a button it knows will be refused — awaitingApproval()
+// returns `approvableByCaller` for precisely this, and a row that cannot be
+// approved from here is still LISTED, with the reason written out. Hiding it
+// would make the queue disagree with the count, and an operator would be left
+// hunting for a quotation that the register says exists.
+//
+// A principal with no userId — a legacy session, a shared credential — cannot
+// be shown to be a different person from the issuer, so the module refuses it
+// as unattributable. That is a refusal this page can predict, so it says so
+// instead of offering a control that always fails.
+//
+// A REFUSAL NEEDS A REASON. rejectQuoteVersion() will not accept one without,
+// so the field is required in the markup as well — a form that could be
+// submitted empty would spend a round trip discovering what the page already
+// knew.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE THING THIS PAGE STILL WILL NOT INVENT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A VALIDITY PERIOD. MMAKF has published no standard quotation validity, so
+// validUntil is whatever whoever issued it typed, and a quotation without one
+// does not expire. The column says that rather than showing a blank, and
+// nothing on this page is ever late.
 //
 // Forms post to this page, not to /api/: the middleware requires
 // application/json on /api/ paths and a form with JavaScript off cannot send
@@ -73,15 +95,23 @@
 // is not same-origin before this runs.
 
 import AdminShell from '@/components/AdminShell.astro';
+import PageHeader from '@/components/PageHeader.astro';
+import Status from '@/components/Status.astro';
+import Table from '@/components/DataTable/Table.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import type { Column, Filter } from '@/components/DataTable/types';
+import { readTableQuery, type TableQuery } from '@/components/DataTable/query';
 import { and, asc, desc, eq, inArray, or } from 'drizzle-orm';
 import { isConfigured, db } from '@/db';
 import * as s from '@/db/schema';
 import { identify, clientIp } from '@/lib/session';
 import { rateLimit } from '@/lib/ratelimit';
 import { canAnywhere, visibleScopes, ForbiddenError } from '@/lib/rbac';
+import { LIFECYCLES } from '@/lib/status';
 import type { AuditContext } from '@/db/federation';
 import {
   activeFramework, issueQuote, explainQuote, reproduce,
+  approveQuoteVersion, rejectQuoteVersion, awaitingApproval,
   formatINR, isFeeError, PPM, type FeeInputs,
 } from '@/db/fees';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
@@ -100,6 +130,11 @@ const mayRead = Boolean(principal) && canAnywhere(principal, 'quote:read');
 const mayIssue = Boolean(principal) && canAnywhere(principal, 'quote:issue');
 const mayApprove = Boolean(principal) && canAnywhere(principal, 'quote:approve');
 
+// approveQuoteVersion() refuses a principal with no userId outright: an
+// approval nobody can attribute is not an approval. Read here so the page can
+// explain rather than offer a control that is certain to be refused.
+const approverIsAttributable = Boolean(principal && principal.userId != null);
+
 // issueQuote() and explainQuote() assert 'finance:write' and 'finance:read'
 // respectively, which are NOT the same actions this page gates on. They travel
 // together for national roles and come apart for the operations roles — a
@@ -111,6 +146,10 @@ const holdsFinanceRead = Boolean(principal) && canAnywhere(principal, 'finance:r
 
 const readScopes = visibleScopes(principal, 'quote:read');
 const issueScopes = visibleScopes(principal, 'quote:issue');
+// A DIFFERENT SCOPE FROM READING. Being entitled to read a state's quotations
+// does not make somebody entitled to decide one, and the two are separate
+// bindings in rbac.ts, so the approval path is checked against its own.
+const approveScopes = visibleScopes(principal, 'quote:approve');
 
 const MAX_ROWS = 200;
 // The institution control is a list, not a search. The cap is stated on the
@@ -213,6 +252,8 @@ const COUNT_INPUTS: Array<{ key: keyof FeeInputs; label: string; help: string }>
 
 const DONE_MESSAGES: Record<string, string> = {
   issued: 'The quotation was recorded. Any earlier issued version of it is now superseded and keeps its own figures.',
+  approved: 'The quotation was approved and is now issued. Any version of it that was already issued is superseded and keeps its own figures. The approval is on the audit trail with your account against it.',
+  rejected: 'The quotation was refused. The version keeps its inputs, its lines and its arithmetic — nothing was deleted — and the reason you gave is on the audit trail.',
 };
 
 // ─── The action ─────────────────────────────────────────────────────────────
@@ -221,31 +262,137 @@ type Posted = Record<string, string>;
 let posted: Posted = {};
 let error: string | null = null;
 
+/**
+ * Where a refusal is shown.
+ *
+ * Two forms on this page can be refused, and a message printed once at the top
+ * would leave the reader of a rejected approval scrolling back to a form they
+ * cannot see. This says which section the message belongs beside.
+ */
+let errorAt: 'issue' | 'approval' | null = null;
+
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
   posted = Object.fromEntries([...form.entries()].map(([k, v]) => [k, String(v)]));
   const get = (k: string) => String(form.get(k) ?? '').trim();
+  const action = get('action');
 
-  const rl = await rateLimit(Astro.request, 'quote-issue', 30, 60);
+  // Separate buckets. Issuing and deciding are different rates of work — an
+  // approver clearing a queue makes many more requests than somebody composing
+  // one quotation — and one bucket would let either starve the other.
+  const rl = await rateLimit(
+    Astro.request,
+    action === 'approve' || action === 'reject' ? 'quote-decide' : 'quote-issue',
+    30,
+    60
+  );
 
   if (!rl.ok) {
     Astro.response.status = 429;
-    error = `Too many attempts in a short time. Nothing was issued. Try again in ${rl.retryAfterSeconds} seconds.`;
+    error = `Too many attempts in a short time. Nothing was issued or decided. Try again in ${rl.retryAfterSeconds} seconds.`;
   } else if (!identity) {
     Astro.response.status = 401;
-    error = 'Your session has ended. Sign in again — nothing was issued.';
+    error = 'Your session has ended. Sign in again — nothing was issued or decided.';
   } else if (!configured) {
     Astro.response.status = 503;
     error = 'The federation database is not configured on this deployment, so there is nowhere to record a quotation.';
-  } else if (get('action') !== 'issue') {
+  } else if (action === 'approve' || action === 'reject') {
+    errorAt = 'approval';
+    if (!mayApprove) {
+      // Re-checked against the session, not against what the page drew. A
+      // hidden control is a courtesy; this is the gate.
+      //
+      // The message goes to the TOP of the page, not beside the approval
+      // section: that section is not rendered for an account without the
+      // action, so a refusal filed against it would never be read.
+      errorAt = null;
+      Astro.response.status = 403;
+      error = 'Deciding a quotation requires quote:approve, which this account does not hold in any scope.';
+    } else {
+      try {
+        const versionId = Number(get('quoteVersionId'));
+        if (!Number.isInteger(versionId) || versionId <= 0) {
+          throw new InputError('That is not a quotation version.');
+        }
+
+        // THE VERSION ID IS A FOREIGN KEY ARRIVING FROM A FORM FIELD.
+        // approveQuoteVersion() checks the action, the state and the separation
+        // of duties — it does not check scope, because scope is not something
+        // the fee module knows about. So the version is checked here against the
+        // APPROVING scope, as a WHERE clause, before it is passed on. Without
+        // this a scoped approver could decide another tenant's quotation by
+        // typing its id.
+        const approveFilter = quoteScopeFilter(approveScopes);
+        if (approveFilter === 'none') {
+          throw new InputError(
+            'This account holds quote:approve at a scope that contains no quotation — a quotation belongs to a client institution, and no institution falls inside this credential. Nothing was changed.'
+          );
+        }
+        const ownClauses: any[] = [eq(s.quoteVersions.id, versionId)];
+        if (approveFilter) ownClauses.push(approveFilter);
+        const within = await db().select({ id: s.quoteVersions.id })
+          .from(s.quoteVersions)
+          .innerJoin(s.quotes, eq(s.quoteVersions.quoteId, s.quotes.id))
+          .where(and(...ownClauses))
+          .limit(1);
+        if (!within.length) {
+          // ONE message for "no such version" and for "outside your scope",
+          // for the same reason the lead register gives one: telling them apart
+          // lets somebody count the federation's quotations by walking ids.
+          throw new InputError('No quotation version of that id is within this account’s approving scope. Nothing was changed.');
+        }
+
+        const ctx: AuditContext = {
+          principal: identity.principal,
+          ip: clientIp(Astro.request),
+          authority: identity.shared ? `shared:${identity.via}` : 'user',
+          reason: get('reason') || get('note') || null,
+        };
+
+        if (action === 'approve') {
+          const result = await approveQuoteVersion(db(), ctx, versionId, {
+            note: get('note') || undefined,
+          });
+          return Astro.redirect(
+            `${SELF}?done=approved&ref=${encodeURIComponent(result.ref)}&v=${result.version}`,
+            303
+          );
+        }
+
+        const result = await rejectQuoteVersion(db(), ctx, versionId, get('reason'));
+        return Astro.redirect(`${SELF}?done=rejected&v=${result.version}`, 303);
+      } catch (err: any) {
+        if (err instanceof ForbiddenError) {
+          Astro.response.status = 403;
+          error = `The fee engine refused this: it requires ${err.action}, which this account does not hold. Nothing was changed.`;
+        } else if (isFeeError(err)) {
+          // The module's own messages are written for this reader — self
+          // approval, an unattributable session, a version somebody else has
+          // already decided — so they are quoted rather than summarised.
+          Astro.response.status = 400;
+          error = err.message;
+        } else if (err instanceof InputError) {
+          Astro.response.status = 400;
+          error = err.message;
+        } else {
+          console.error('[admin/quotes] decision failed', err);
+          Astro.response.status = 500;
+          error = 'Nothing was changed. The write was refused by the database.';
+        }
+      }
+    }
+  } else if (action !== 'issue') {
     Astro.response.status = 400;
     error = 'Unknown action.';
   } else if (!mayIssue) {
-    // Re-checked against the session, not against what the page drew. A hidden
-    // control is a courtesy; this is the gate.
+    // Top of the page for the same reason: the issue form is not drawn for an
+    // account that cannot issue, so a refusal filed against it would be
+    // invisible to exactly the person who needs it.
+    errorAt = null;
     Astro.response.status = 403;
     error = 'Issuing a quotation requires quote:issue, which this account does not hold in any scope.';
   } else {
+    errorAt = 'issue';
     try {
       const frameworkId = Number(get('frameworkId'));
       if (!Number.isInteger(frameworkId) || frameworkId <= 0) {
@@ -448,6 +595,19 @@ let inForce: Row | null = null;
 let readError: string | null = null;
 let scopeRefusal: string | null = null;
 
+/** The versions held for approval that this account may both see and decide. */
+let approvalQueue: Row[] = [];
+let approvalProblem: string | null = null;
+/**
+ * True when quote:approve is held at a scope that can contain no quotation.
+ *
+ * A refusal, not an empty queue, and told as one: an account bound only to a
+ * dojo holds the action over nothing, and printing "nothing is held for
+ * approval" at it would be a claim about the federation's quotations rather
+ * than about this credential.
+ */
+let approvalOutOfScope = false;
+
 // The explanation panel.
 let explained: Awaited<ReturnType<typeof explainQuote>> | null = null;
 let explainRef: string | null = null;
@@ -456,6 +616,13 @@ let reproduction: Awaited<ReturnType<typeof reproduce>> | null = null;
 
 const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const explainId = Number(Astro.url.searchParams.get('explain')) || 0;
+
+// Validated against the declared quote lifecycle rather than passed through, so
+// a hand-typed ?status= cannot empty the register under a header that says no
+// filter is applied.
+const QUOTE_STATUSES = LIFECYCLES.quote;
+const statusParam = Astro.url.searchParams.get('status') ?? '';
+const statusFilter = QUOTE_STATUSES.includes(statusParam) ? statusParam : '';
 
 if (mayRead && configured) {
   const filter = quoteScopeFilter(readScopes);
@@ -513,6 +680,61 @@ if (mayRead && configured) {
         else held.versionCount += 1;
       }
       listed = [...seen.values()];
+
+      // ── The approval queue ─────────────────────────────────────────────
+      //
+      // awaitingApproval() answers a FEDERATION-WIDE question — what is held up
+      // anywhere — and carries no scope predicate, because the fee module knows
+      // nothing about scopes. So the rows this account may actually decide are
+      // determined by WHERE clauses here, and the module's answer is
+      // intersected with them. The restriction is the SQL predicate; the
+      // intersection is only how two queries are joined.
+      //
+      // TWO PREDICATES, NOT ONE, AND THE SECOND IS THE ONE THAT MATTERS.
+      // Reading a state's quotations and deciding one are separate actions with
+      // separate bindings in rbac.ts, so an account can read the register
+      // nationally and hold quote:approve over a single state. Restricted by
+      // the READING predicate alone, this queue would draw an Approve button on
+      // every version held anywhere in the federation and the POST would refuse
+      // every one of them against the approving scope — the control that always
+      // fails which this page says elsewhere it will not offer. The APPROVING
+      // predicate is therefore applied as well, and it is the same one the POST
+      // re-checks the submitted id against.
+      //
+      // What is NOT filtered out is a row the caller may see and may not
+      // approve, because they issued it. That row stays, with the reason
+      // printed beside it — see the section below.
+      if (mayApprove) {
+        try {
+          const approveFilter = quoteScopeFilter(approveScopes);
+          if (approveFilter === 'none') {
+            approvalOutOfScope = true;
+          } else {
+            const queue = await awaitingApproval(db(), principal!);
+            const clauses: any[] = [eq(s.quoteVersions.status, 'awaiting_approval')];
+            if (filter) clauses.push(filter);
+            if (approveFilter) clauses.push(approveFilter);
+            if (clauses.length === 1) {
+              // National at both actions, so there is nothing to intersect
+              // against and a second query would only re-fetch the same set.
+              approvalQueue = queue;
+            } else {
+              const inScope = await db().select({ id: s.quoteVersions.id })
+                .from(s.quoteVersions)
+                .innerJoin(s.quotes, eq(s.quoteVersions.quoteId, s.quotes.id))
+                .where(and(...clauses));
+              const allowed = new Set<number>(inScope.map((r: any) => Number(r.id)));
+              approvalQueue = queue.filter((r: any) => allowed.has(Number(r.quoteVersionId)));
+            }
+          }
+        } catch (err: any) {
+          // A queue that could not be read must not take the register down with
+          // it; the register is the reason most people open this page.
+          approvalProblem = isFeeError(err)
+            ? err.message
+            : 'The approval queue could not be read. Nothing has been changed.';
+        }
+      }
 
       if (mayIssue) {
         publishedFrameworks = await db().select().from(s.feeFrameworks)
@@ -580,7 +802,7 @@ if (mayRead && configured) {
       // prints bound parameters, and neither is a fact about the person
       // reading the register.
       console.error('[admin/quotes] register read failed', err);
-      readError = 'The quotation register could not be read. The fault has been logged for the federation office; nothing has been issued or changed.';
+      readError = 'The quotation register could not be read.';
     }
   }
 }
@@ -591,7 +813,7 @@ const doneRefRaw = Astro.url.searchParams.get('ref') ?? '';
 const doneRef = /^[A-Za-z0-9-]{1,40}$/.test(doneRefRaw) ? doneRefRaw : null;
 const doneVersion = /^\d{1,4}$/.test(Astro.url.searchParams.get('v') ?? '') ? Astro.url.searchParams.get('v') : null;
 
-const awaitingApproval = listed.filter((r) => r.status === 'awaiting_approval').length;
+const awaitingCount = listed.filter((r) => r.status === 'awaiting_approval').length;
 const withoutFigure = listed.filter((r) => r.requiresManualQuote).length;
 
 const v = (k: string, fallback = '') => (posted[k] !== undefined ? posted[k] : fallback);
@@ -602,6 +824,104 @@ const dateLabel = (value: unknown) => {
     ? null
     : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
 };
+
+// ─── The register table ─────────────────────────────────────────────────────
+
+const quoteColumns: Column[] = [
+  { key: 'ref', header: 'Reference', primary: true, sortable: true },
+  {
+    key: 'version', header: 'Version', numeric: true, sortable: true, initialDir: 'desc',
+    render: (r: any) => (r.versionCount > 1 ? `v${r.version} of ${r.versionCount}` : `v${r.version}`),
+  },
+  {
+    key: 'institutionName', header: 'For', primary: true, sortable: true,
+    render: (r: any) => r.institutionName ?? 'no institution recorded',
+  },
+  { key: 'status', header: 'Status', status: true },
+  { key: 'frameworkCode', header: 'Framework' },
+  {
+    key: 'validUntil', header: 'Valid until', sortable: true, initialDir: 'desc',
+    // No federation standard sets this, so an absent date is stated as what it
+    // is. It is never rendered as a blank, which would read as overdue.
+    render: (r: any) => dateLabel(r.validUntil) ?? 'no expiry set',
+  },
+  {
+    key: 'totalMinor', header: 'Total', numeric: true, align: 'end',
+    // NEVER ₹0.00 for a version that carries no figure. Zero reads as free.
+    render: (r: any) => (r.requiresManualQuote ? 'no figure' : formatINR(r.totalMinor)),
+  },
+  {
+    key: 'versionId', header: 'Arithmetic',
+    render: () => 'How this was reached',
+    href: (r: any) => `${SELF}?explain=${r.versionId}`,
+  },
+];
+
+const quoteFilters: Filter[] = [
+  {
+    key: 'status', label: 'Status', type: 'select', anyLabel: 'Any status',
+    options: QUOTE_STATUSES.map((k) => ({ value: k, label: k.replace(/_/g, ' ') })),
+  },
+];
+
+const quoteQuery: TableQuery = {
+  ...readTableQuery(Astro.url, {
+    sortable: ['ref', 'version', 'institutionName', 'validUntil'],
+    filters: ['status'],
+    defaultSort: null,
+  }),
+  filters: statusFilter ? { status: statusFilter } : {},
+};
+
+/**
+ * The tabs over the register.
+ *
+ * ONLY THE STATUSES ACTUALLY PRESENT, each with the number of rows carrying it.
+ * A tab reading "Rejected 0" is an assertion that nothing has been rejected,
+ * which is only true of the rows this page read — and would be false of the
+ * register as soon as the 200-row cap bites.
+ */
+const presentStatuses = QUOTE_STATUSES.filter((k) => listed.some((r) => r.status === k));
+const registerTabs = [
+  { label: 'All', href: SELF, count: listed.length, current: !statusFilter },
+  ...presentStatuses.map((k) => ({
+    label: k.replace(/_/g, ' '),
+    href: `${SELF}?status=${k}`,
+    count: listed.filter((r) => r.status === k).length,
+    current: statusFilter === k,
+  })),
+];
+
+/** Why the primary action cannot be taken, or nothing when it can. */
+const issueRefusal =
+  !mayIssue
+    ? 'Issuing a quotation requires quote:issue, which this account does not hold in any scope.'
+    : publishedFrameworks.length === 0
+      ? 'No fee framework is published, so there is nothing to compute a quotation from. Publishing a framework is what unblocks it.'
+      : null;
+
+// The lines of the explained version. Ordered by the order the rules ran, and
+// no column is sortable: re-ordering the arithmetic would make it unreadable as
+// arithmetic, which is the one thing this table exists to be.
+const lineColumns: Column[] = [
+  { key: 'ruleCode', header: 'Rule', render: (l: any) => l.ruleCode ?? '—' },
+  { key: 'label', header: 'Line', primary: true },
+  { key: 'kind', header: 'Kind', render: (l: any) => String(l.kind).replace(/_/g, ' ') },
+  { key: 'quantity', header: 'Quantity', numeric: true },
+  {
+    key: 'unitAmountMinor', header: 'Unit', numeric: true,
+    // No `?? 0`. A missing unit amount is a dash; a zero rupee figure would say
+    // the line was free.
+    render: (l: any) => (l.unitAmountMinor == null ? '—' : formatINR(l.unitAmountMinor)),
+  },
+  {
+    key: 'factorPpm', header: 'Factor', numeric: true,
+    render: (l: any) => (l.factorPpm == null ? '—' : `×${(l.factorPpm / PPM).toFixed(6)} (${l.factorPpm} ppm)`),
+  },
+  { key: 'amountMinor', header: 'Amount', numeric: true, render: (l: any) => formatINR(l.amountMinor) },
+  { key: 'runningTotalMinor', header: 'Running total', numeric: true, render: (l: any) => formatINR(l.runningTotalMinor) },
+  { key: 'because', header: 'Because', render: (l: any) => l.because ?? 'unconditional' },
+];
 ---
 
 <AdminShell
@@ -609,10 +929,14 @@ const dateLabel = (value: unknown) => {
   requires="quote:read"
   intro="Every quotation the federation has issued, at its current version, with the arithmetic that produced it. A quotation is never edited — it is re-versioned, and each version keeps the framework and the inputs it was computed from."
 >
-  {error && <p class="msg msg-bad" role="alert">{error}</p>}
+  {/* A refusal from a form is not a failed read, so it is a message beside the
+      work rather than an ErrorState card: the reader has something to correct
+      and needs the form still in front of them. */}
+  {error && errorAt === null && <p class="msg msg-bad" role="alert">{error}</p>}
   {doneMessage && (
     <p class="msg msg-ok" role="status">
       {doneRef ? <><strong>{doneRef}</strong>{doneVersion ? <> version {doneVersion}</> : null}. </> : null}
+      {!doneRef && doneVersion ? <>Version {doneVersion}. </> : null}
       {doneMessage}
     </p>
   )}
@@ -626,7 +950,11 @@ const dateLabel = (value: unknown) => {
   ) : scopeRefusal ? (
     <p class="note">{scopeRefusal}</p>
   ) : readError ? (
-    <p class="note" role="alert">{readError}</p>
+    <ErrorState
+      title="The quotation register could not be read."
+      safe="Nothing has been issued, approved, refused or changed. This was a read that failed; every quotation is exactly where it was, and the figures recipients hold are untouched."
+      body="The fault has been logged for the federation office with the detail this page deliberately does not print."
+    />
   ) : (
     <>
       {/* ── What anything issued today would compute against ─────────────── */}
@@ -658,119 +986,234 @@ const dateLabel = (value: unknown) => {
       </section>
 
       {/* ── The register ─────────────────────────────────────────────────── */}
-      <section class="band" aria-labelledby="register-h">
-        <h2 id="register-h" class="band-h">Issued</h2>
-
-        {listed.length === 0 ? (
-          <p class="note">
-            {readScopes.kind === 'all' ? (
-              <>No quotation has been issued. This account reads the register
-              nationally, so an empty list here means the register itself is
-              empty and not that something is being withheld.</>
-            ) : (
-              <>No quotation is listed. This account reads the register at its
-              own scope — the restriction is in the query, not in the display —
-              so this means no quotation belongs to an institution within that
-              scope. It does not mean the federation has issued none.</>
+      <section class="band" aria-label="Issued quotations">
+        {/* AdminShell prints the h1; this header prints an h2, or the page has
+            two competing titles. It does not stick — it heads a section, and a
+            sticky band would sit over the section above it. */}
+        <PageHeader
+          title="Issued"
+          headingLevel="h2"
+          sticky={false}
+          description="MMAKF has published no standard quotation validity, so a quotation with no expiry date does not expire. Nothing here is overdue and nothing escalates on its own."
+          primary={{
+            label: 'Issue a quotation',
+            href: `${SELF}#issue`,
+            unavailable: issueRefusal ?? undefined,
+          }}
+          secondary={[
+            { label: 'Fee framework', href: h('/admin/fees') },
+            { label: 'Leads', href: h('/admin/leads') },
+          ]}
+          tabs={listed.length > 0 ? registerTabs : []}
+        >
+          <Fragment slot="meta">
+            {listed.length > 0 && (
+              <>
+                <span class="meta-chip">{listed.length}{truncated ? '+' : ''} listed</span>
+                {awaitingCount > 0 && (
+                  <span class="meta-chip">{awaitingCount} awaiting approval</span>
+                )}
+                {withoutFigure > 0 && (
+                  <span class="meta-chip">{withoutFigure} carrying no figure</span>
+                )}
+              </>
             )}
-            {publishedCount === 0
-              ? <> With no published fee framework there is nothing to compute a quotation from, which is why the register stays empty.</>
-              : null}
+          </Fragment>
+        </PageHeader>
+
+        {truncated && (
+          <p class="band-p">
+            Only the {MAX_ROWS} most recent versions were read, so the counts
+            above describe what is listed and not the whole register.
           </p>
-        ) : (
-          <>
-            <dl class="stats">
-              <div><dt>Quotations listed</dt><dd>{listed.length}</dd></div>
-              <div><dt>Awaiting approval</dt><dd class={awaitingApproval ? 'warn' : ''}>{awaitingApproval}</dd></div>
-              <div><dt>Carrying no figure</dt><dd>{withoutFigure}</dd></div>
-            </dl>
+        )}
 
-            {truncated && (
-              <p class="band-p">
-                Only the {MAX_ROWS} most recent versions were read, so the
-                counts above describe what is listed and not the whole register.
-              </p>
-            )}
+        {!holdsFinanceRead && listed.length > 0 && (
+          <p class="note">
+            Opening the arithmetic behind a total needs
+            <code>finance:read</code>, which this account does not hold —
+            <code>explainQuote()</code> asks for it, not for
+            <code>quote:read</code>. The links in the table will refuse until
+            that action is granted.
+          </p>
+        )}
 
-            {!holdsFinanceRead && (
-              <p class="note">
-                Opening the arithmetic behind a total needs
-                <code>finance:read</code>, which this account does not hold —
-                <code>explainQuote()</code> asks for it, not for
-                <code>quote:read</code>. The links below will refuse until that
-                action is granted.
-              </p>
-            )}
+        <Table
+          id="quotes"
+          caption="Quotations at their current version"
+          columns={quoteColumns}
+          filters={quoteFilters}
+          rows={listed}
+          query={quoteQuery}
+          note={truncated ? `The ${MAX_ROWS} most recent versions in scope.` : null}
+          emptyTitle={readScopes.kind === 'all'
+            ? 'No quotation has been issued.'
+            : 'No quotation is listed for this account’s scope.'}
+          emptyBody={readScopes.kind === 'all'
+            ? (publishedCount === 0
+                ? 'This account reads the register nationally, so an empty list here means the register itself is empty and not that something is being withheld. With no published fee framework there is nothing to compute a quotation from, which is why it stays empty.'
+                : 'This account reads the register nationally, so an empty list here means the register itself is empty and not that something is being withheld.')
+            : 'This account reads the register at its own scope — the restriction is in the query, not in the display — so this means no quotation belongs to an institution within that scope. It does not mean the federation has issued none.'}
+          emptyAction={publishedCount === 0
+            ? { label: 'Go to the fee framework', href: h('/admin/fees') }
+            : mayIssue
+              ? { label: 'Issue a quotation', href: `${SELF}#issue` }
+              : { label: 'Back to leads', href: h('/admin/leads') }}
+        />
+      </section>
 
-            <p class="tbl-hint">Scroll the table sideways to see every column.</p>
-            <div class="tbl-scroll">
-              <table class="tbl">
-                <caption class="sr-only">Quotations at their current version</caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Reference</th>
-                    <th scope="col">Version</th>
-                    <th scope="col">For</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Framework</th>
-                    <th scope="col">Valid until</th>
-                    <th scope="col">Total</th>
-                    <th scope="col">Arithmetic</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {listed.map((r) => (
-                    <tr>
-                      <td><code>{r.ref}</code></td>
-                      <td class="num">v{r.version}{r.versionCount > 1 ? <span class="minor">of {r.versionCount}</span> : null}</td>
-                      <td class="strong">
-                        {r.institutionName ?? <span class="muted">no institution recorded</span>}
-                        {r.requestRef ? <span class="minor">request {r.requestRef}</span> : null}
-                      </td>
-                      <td><span class="pill"><span class="pill-dot"></span>{String(r.status).replace(/_/g, ' ')}</span></td>
-                      <td><code>{r.frameworkCode}</code></td>
-                      <td>{dateLabel(r.validUntil) ?? <span class="muted">no expiry set</span>}</td>
-                      <td class="num">
-                        {r.requiresManualQuote
-                          ? <span class="muted">no figure</span>
-                          : <span class="figure">{formatINR(r.totalMinor)}</span>}
-                      </td>
-                      <td><a href={`${SELF}?explain=${r.versionId}`}>How this was reached</a></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+      {/* ── Approval ─────────────────────────────────────────────────────── */}
+      {mayApprove && (
+        <section class="band" id="approval" aria-labelledby="approve-h">
+          <h2 id="approve-h" class="band-h">Held for approval</h2>
 
-            {/* Eight columns cannot be read inside a 360px viewport however far
-                they slide, so the same rows are recomposed as records. PART AL. */}
-            <ul class="cards" aria-label="Quotations at their current version">
-              {listed.map((r) => (
-                <li>
-                  <p class="c-top"><code>{r.ref}</code><span class="pill"><span class="pill-dot"></span>{String(r.status).replace(/_/g, ' ')}</span></p>
-                  <p class="c-name">{r.institutionName ?? 'No institution recorded'}</p>
-                  <dl>
-                    <div><dt>Version</dt><dd>v{r.version}{r.versionCount > 1 ? ` of ${r.versionCount}` : ''}</dd></div>
-                    <div><dt>Framework</dt><dd>{r.frameworkCode}</dd></div>
-                    <div><dt>Valid until</dt><dd>{dateLabel(r.validUntil) ?? 'no expiry set'}</dd></div>
+          {error && errorAt === 'approval' && <p class="msg msg-bad" role="alert">{error}</p>}
+
+          <p class="band-p">
+            A version waits here when a rule that priced it required a second
+            pair of eyes. <strong>The approver must not be the issuer</strong> —
+            <code>src/db/fees.ts</code> refuses a self-approval outright, so a
+            version this account issued is listed below without a decision
+            control and with the reason said rather than left to be guessed at.
+            Approving issues the quotation and supersedes any version of it that
+            was already issued. Refusing keeps the version, its inputs and its
+            arithmetic intact and records why.
+          </p>
+
+          {!approverIsAttributable && (
+            <p class="note">
+              This session is not attributable to a named account, so nothing
+              here can be <em>approved</em> from it — an approval nobody can
+              attribute is not an approval, and the fee module refuses one
+              outright. A refusal is still available, because it carries a
+              recorded reason and does not stand in for a second person's
+              judgement.
+            </p>
+          )}
+
+          {approvalOutOfScope ? (
+            <p class="note">
+              This account holds <code>quote:approve</code>, but at a scope that
+              contains no quotation — a quotation belongs to a client
+              institution, and no institution falls inside this credential. That
+              is a refusal rather than an empty queue: nothing is said here
+              about what the federation is holding.
+            </p>
+          ) : approvalProblem ? (
+            <p class="note" role="alert">{approvalProblem}</p>
+          ) : approvalQueue.length === 0 ? (
+            <p class="note">
+              Nothing is held for approval that this account may both read and
+              decide. That is not the same as nothing being held in the
+              federation: this queue is restricted by the predicate the register
+              is read through AND by the separate scope of
+              <code>quote:approve</code>, so a version this account may see but
+              has no authority to decide is neither listed nor counted here.
+            </p>
+          ) : (
+            /* Not a DataTable, deliberately. Each row carries two forms, a note
+               and a required reason; a table cell is the wrong container for a
+               decision, and a bulk action over approvals would be the exact
+               rubber stamp the second pair of eyes exists to prevent. */
+            <ul class="queue">
+              {approvalQueue.map((r) => (
+                <li class="q-item">
+                  <p class="q-top">
+                    <code>{r.ref}</code>
+                    <span class="q-v">version {r.version}</span>
+                    <Status value="awaiting_approval" size="sm" />
+                  </p>
+                  <dl class="q-facts">
                     <div>
                       <dt>Total</dt>
-                      <dd>{r.requiresManualQuote ? 'no figure — prepared by hand' : formatINR(r.totalMinor)}</dd>
+                      <dd>
+                        {r.requiresManualQuote
+                          ? 'no figure — prepared by hand'
+                          : formatINR(r.totalMinor)}
+                      </dd>
                     </div>
+                    <div><dt>Framework</dt><dd><code>{r.frameworkCode}</code></dd></div>
+                    <div><dt>Held since</dt><dd>{dateLabel(r.createdAt) ?? 'not recorded'}</dd></div>
                   </dl>
-                  <p class="c-link"><a href={`${SELF}?explain=${r.versionId}`}>How this was reached</a></p>
+
+                  {/* THE TWO DECISIONS ARE NOT GATED THE SAME WAY, because
+                      the module does not gate them the same way.
+
+                      approveQuoteVersion() refuses an approval from a session
+                      with no userId (unattributable) and an approval by the
+                      issuer (self-approval). rejectQuoteVersion() imposes
+                      neither: withdrawing a quotation you raised yourself is
+                      not the thing the second pair of eyes exists to prevent.
+                      Hiding Refuse alongside Approve would be this page
+                      inventing a rule the fee engine does not hold, and would
+                      strand a held version with nobody able to close it. */}
+                  <div class="q-acts">
+                    {!approverIsAttributable ? (
+                      <p class="q-why">
+                        <strong>Approval is not offered from this session.</strong>{' '}
+                        It is not attributable to a named account, and an
+                        approval nobody can attribute is not an approval — the
+                        fee module refuses one outright. Sign in with a named
+                        account to approve this.
+                      </p>
+                    ) : !r.approvableByCaller ? (
+                      <p class="q-why">
+                        <strong>This account issued this quotation.</strong> A
+                        quotation cannot be approved by the person who issued
+                        it, so there is no approve control here — the whole
+                        point of the check is that a second person looks. Ask a
+                        colleague who holds <code>quote:approve</code>. The row
+                        is listed rather than hidden, so that this queue and the
+                        register agree with each other.
+                      </p>
+                    ) : (
+                      <form method="post" class="q-form">
+                        <input type="hidden" name="action" value="approve" />
+                        <input type="hidden" name="quoteVersionId" value={r.quoteVersionId} />
+                        <p class="field">
+                          <label class="input-label" for={`ap-note-${r.quoteVersionId}`}>
+                            Note, on the audit trail
+                          </label>
+                          <input class="input" id={`ap-note-${r.quoteVersionId}`} name="note" />
+                          <span class="help">Optional. Recorded beside the approval.</span>
+                        </p>
+                        <button class="btn btn-primary" type="submit">
+                          Approve {r.ref} version {r.version}
+                        </button>
+                      </form>
+                    )}
+
+                    <form method="post" class="q-form">
+                      <input type="hidden" name="action" value="reject" />
+                      <input type="hidden" name="quoteVersionId" value={r.quoteVersionId} />
+                      <p class="field">
+                        <label class="input-label" for={`rj-reason-${r.quoteVersionId}`}>
+                          Why it is refused
+                        </label>
+                        <input
+                          class="input"
+                          id={`rj-reason-${r.quoteVersionId}`}
+                          name="reason"
+                          required
+                          minlength="4"
+                        />
+                        <span class="help">
+                          Required. The module refuses a refusal with no reason,
+                          and whoever has to re-quote cannot act on one. The
+                          version keeps its inputs and its arithmetic either way.
+                        </span>
+                      </p>
+                      <button class="btn btn-ghost q-refuse" type="submit">
+                        Refuse {r.ref} version {r.version}
+                      </button>
+                    </form>
+                  </div>
                 </li>
               ))}
             </ul>
-
-            <p class="band-p foot">
-              MMAKF has published no standard quotation validity, so a quotation
-              with no expiry date does not expire. Nothing here is overdue and
-              nothing escalates on its own.
-            </p>
-          </>
-        )}
-      </section>
+          )}
+        </section>
+      )}
 
       {/* ── The explanation ──────────────────────────────────────────────── */}
       {explainId > 0 && (
@@ -817,64 +1260,16 @@ const dateLabel = (value: unknown) => {
                 </p>
               ) : (
                 <>
-                  <p class="tbl-hint">Scroll the table sideways to see every column.</p>
-                  <div class="tbl-scroll">
-                    <table class="tbl">
-                      <caption class="sr-only">Every line of this quotation version, in the order the rules ran</caption>
-                      <thead>
-                        <tr>
-                          <th scope="col">Rule</th>
-                          <th scope="col">Line</th>
-                          <th scope="col">Kind</th>
-                          <th scope="col">Quantity</th>
-                          <th scope="col">Unit</th>
-                          <th scope="col">Factor</th>
-                          <th scope="col">Amount</th>
-                          <th scope="col">Running total</th>
-                          <th scope="col">Because</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {explained.lines.map((l: any) => (
-                          <tr>
-                            <td><code>{l.ruleCode ?? '—'}</code></td>
-                            <td class="strong">{l.label}</td>
-                            <td>{String(l.kind).replace(/_/g, ' ')}</td>
-                            <td class="num">{l.quantity ?? <span class="muted">—</span>}</td>
-                            <td class="num">{l.unitAmountMinor == null ? <span class="muted">—</span> : formatINR(l.unitAmountMinor)}</td>
-                            <td class="num">{l.factorPpm == null ? <span class="muted">—</span> : <>×{(l.factorPpm / PPM).toFixed(6)}<span class="minor">{l.factorPpm} ppm</span></>}</td>
-                            <td class="num">{formatINR(l.amountMinor)}</td>
-                            <td class="num">{formatINR(l.runningTotalMinor)}</td>
-                            <td class="reason">{l.because ?? <span class="muted">unconditional</span>}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <ul class="cards" aria-label="Every line of this quotation version">
-                    {explained.lines.map((l: any) => (
-                      <li>
-                        <p class="c-top"><code>{l.ruleCode ?? '—'}</code><span class="muted">{String(l.kind).replace(/_/g, ' ')}</span></p>
-                        <p class="c-name">{l.label}</p>
-                        <dl>
-                          {/* No ?? 0 below. A missing unit amount prints a dash
-                              in the table above, and printing a zero rupee
-                              figure for it on a phone would say the line was
-                              free. */}
-                          {l.quantity != null && (
-                            <div><dt>Quantity</dt><dd>{l.quantity}{l.unitAmountMinor == null ? null : <> × {formatINR(l.unitAmountMinor)}</>}</dd></div>
-                          )}
-                          {l.factorPpm != null && (
-                            <div><dt>Factor</dt><dd>×{(l.factorPpm / PPM).toFixed(6)} <span class="muted">({l.factorPpm} ppm)</span></dd></div>
-                          )}
-                          <div><dt>Amount</dt><dd>{formatINR(l.amountMinor)}</dd></div>
-                          <div><dt>Running</dt><dd>{formatINR(l.runningTotalMinor)}</dd></div>
-                          {l.because && <div><dt>Because</dt><dd>{l.because}</dd></div>}
-                        </dl>
-                      </li>
-                    ))}
-                  </ul>
+                  <Table
+                    id="quote-lines"
+                    caption="Every line of this quotation version, in the order the rules ran"
+                    columns={lineColumns}
+                    rows={explained.lines as any[]}
+                    paramPrefix="l"
+                    pageSize={false}
+                    savedViews={false}
+                    emptyTitle="This version has no lines."
+                  />
 
                   <h3 class="sub-h">The same arithmetic in words</h3>
                   <ol class="narrative">
@@ -898,8 +1293,10 @@ const dateLabel = (value: unknown) => {
 
       {/* ── Issuing ──────────────────────────────────────────────────────── */}
       {mayIssue && (
-        <section class="band" aria-labelledby="issue-h">
+        <section class="band" id="issue" aria-labelledby="issue-h">
           <h2 id="issue-h" class="band-h">Issue a quotation</h2>
+
+          {error && errorAt === 'issue' && <p class="msg msg-bad" role="alert">{error}</p>}
 
           {!holdsFinanceWrite && (
             <p class="note">
@@ -1043,34 +1440,12 @@ const dateLabel = (value: unknown) => {
         </section>
       )}
 
-      {/* ── Approval ─────────────────────────────────────────────────────── */}
-      {mayApprove && (
-        <section class="band" aria-labelledby="approve-h">
-          <h2 id="approve-h" class="band-h">Approval</h2>
-          <p class="note">
-            This account holds <code>quote:approve</code>, and there is no
-            approval control on this page, because there is nothing behind one:
-            <code>src/db/fees.ts</code> implements issuing, reproduction and
-            explanation, and no approve function.
-            <code>quote_versions.approvedByUserId</code> and
-            <code>approvedAt</code> exist and nothing in this codebase writes
-            them. A version sits at <em>awaiting approval</em> when a rule it
-            used required it, and stays there.
-            {awaitingApproval > 0
-              ? ` Versions listed above in that state: ${awaitingApproval}.`
-              : ' No version listed above is in that state.'}
-            {' '}Writing the update here instead would put a second path to a
-            quotation outside the module that owns them, which is the one thing
-            the fee architecture is built to prevent.
-          </p>
-        </section>
-      )}
-
       {mayIssue && !mayApprove && (
         <p class="band-p foot">
           This account issues quotations and does not approve them. That
           separation is deliberate: a version produced by a rule that requires
-          approval waits for somebody else.
+          approval waits for somebody else, and this screen will not offer a
+          control that the fee module would refuse.
         </p>
       )}
     </>
@@ -1097,30 +1472,18 @@ const dateLabel = (value: unknown) => {
   .band-p.foot { margin-top: 18px; font-size: .88rem; }
   .sub-h { font-family: var(--font-display); font-size: .95rem; margin: 30px 0 12px; }
 
-  .stats { display: flex; flex-wrap: wrap; gap: 0 40px; margin: 0 0 24px; }
-  .stats > div { padding: 0 0 4px; }
-  .stats dt { font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
-  .stats dd {
-    margin: 4px 0 0; font-family: var(--font-display); font-size: 1.8rem;
-    font-variant-numeric: tabular-nums; line-height: 1;
+  /* Counts taken from rows this page read. Deliberately not shaped like a
+     Status chip: one is a number, the other is a state, and a reader who learns
+     to read them as the same thing will misread both. */
+  .meta-chip {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    font-size: var(--text-xs); color: var(--muted);
+    border: 1px solid var(--border); border-radius: var(--radius-pill);
+    padding: 3px 10px; line-height: 1.5;
   }
-  .stats .warn { color: var(--red); }
 
-  .tbl-scroll { overflow-x: auto; }
-  .tbl { width: 100%; border-collapse: collapse; font-size: .9rem; }
-  .tbl th, .tbl td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: top; }
-  .tbl thead th {
-    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase;
-    color: var(--muted); font-weight: 400;
-  }
-  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .tbl .strong { font-family: var(--font-display); white-space: normal; min-width: 16ch; }
-  .tbl .reason { white-space: normal; min-width: 22ch; color: var(--muted); font-size: .85rem; }
-  .figure { display: block; }
-  .minor { display: block; font-size: .72rem; color: var(--muted); }
   .muted { color: var(--muted); }
   code { font-family: var(--font-accent, monospace); font-size: .88em; }
-  .tbl-hint { font-size: .78rem; color: var(--muted); margin: 0 0 8px; }
 
   .narrative { margin: 0 0 22px; padding-left: 20px; max-width: 70ch; }
   .narrative li { color: var(--muted); line-height: 1.8; font-variant-numeric: tabular-nums; }
@@ -1131,6 +1494,33 @@ const dateLabel = (value: unknown) => {
     font-family: var(--font-accent, monospace); line-height: 1.6; margin: 0 0 14px;
   }
 
+  /* ── The approval queue ─────────────────────────────────────────────────
+     A decision, not a row. Each item is a record with its own controls, which
+     is why it is a list and not the shared table. */
+  .queue { list-style: none; margin: 0; padding: 0; max-width: 900px; }
+  .q-item {
+    border: 1px solid var(--border); border-left-width: 3px;
+    border-left-color: var(--gold-dim);
+    padding: 18px 20px; margin: 0 0 16px;
+    background: var(--card);
+  }
+  .q-top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 12px; }
+  .q-v { font-size: .82rem; color: var(--muted); }
+  .q-facts { display: flex; flex-wrap: wrap; gap: 4px 36px; margin: 0 0 16px; }
+  .q-facts dt { font-size: .7rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .q-facts dd { margin: 3px 0 0; font-variant-numeric: tabular-nums; }
+  .q-why {
+    margin: 0; padding: 12px 16px; background: var(--bg-2);
+    border-left: 3px solid var(--border);
+    color: var(--muted); line-height: 1.7; font-size: .88rem; max-width: 64ch;
+  }
+  .q-why code { color: var(--gold-2); }
+  .q-acts { display: flex; flex-wrap: wrap; gap: 20px 32px; }
+  .q-form { flex: 1 1 300px; }
+  /* --red, not --red-3: on a ghost control the border IS the boundary that
+     identifies it, and --red-3 is declared decorative-only in global.css. */
+  .q-refuse { color: var(--red); border-color: var(--red); }
+
   .form { max-width: 900px; }
   .fields { display: flex; flex-wrap: wrap; gap: 18px 20px; margin: 0 0 22px; }
   .field { flex: 1 1 260px; margin: 0; }
@@ -1139,25 +1529,11 @@ const dateLabel = (value: unknown) => {
   .help { display: block; margin-top: 6px; font-size: .78rem; color: var(--muted); line-height: 1.6; }
   textarea.input { resize: vertical; font-family: var(--font-accent, monospace); font-size: .86rem; }
 
-  .cards { display: none; list-style: none; margin: 0; padding: 0; }
-
-  /* ── Phone (PART AL) ─────────────────────────────────────────────────────
-     Eight and nine column tables are unreadable inside a 360px viewport
-     however far they slide, so both are recomposed as records. */
   @media (max-width: 900px) {
-    .tbl-scroll, .tbl-hint { display: none; }
-    .cards { display: block; }
-    .cards li { padding: 16px 0; border-bottom: 1px solid var(--border); }
-    .c-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 6px; }
-    .c-name { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 10px; }
-    .c-link { margin: 10px 0 0; font-size: .88rem; }
-    .cards dl { margin: 0; display: grid; gap: 4px; }
-    .cards dl > div { display: grid; grid-template-columns: 11ch 1fr; gap: 10px; font-size: .87rem; }
-    .cards dt { color: var(--muted); }
-    .cards dd { margin: 0; }
-
-    .stats { gap: 0 28px; }
     .field, .field-sm { flex: 1 1 100%; }
+    .q-facts { gap: 10px 24px; }
+    .q-acts { gap: 22px; }
+    .q-form { flex: 1 1 100%; }
     .btn { width: 100%; }
   }
 </style>

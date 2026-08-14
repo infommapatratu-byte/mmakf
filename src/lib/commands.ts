@@ -487,6 +487,9 @@ const BASE_COMMANDS: Command[] = [
   { id: 'go.my.courses', label: 'My courses', section: 'navigation',
     href: '/my/courses',
     keywords: 'academy learning enrolled study' },
+  { id: 'go.my.notifications', label: 'My notifications', section: 'navigation',
+    href: '/my/notifications',
+    keywords: 'inbox alerts unread messages notices told' },
 
   // ── Navigation: competition ───────────────────────────────────────────────
   { id: 'go.competitions', label: 'Competitions', section: 'navigation',

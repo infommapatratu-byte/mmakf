@@ -424,6 +424,10 @@ const hasRows = isReady && pageRows.length > 0;
 
       {hasTools && (
         <div class="dtx-tools-row">
+          {/* `f.value` is the fallback and never the override: what the URL
+              says always wins, so a reader's own choice cannot be overwritten
+              by a caller's default. See Filter.value in types.ts for why a
+              default is shown here but is not counted as an active filter. */}
           {filters.map((f) => (
             <div class="dtx-field">
               <label class="input-label" for={`${id}-f-${f.key}`}>{f.label}</label>
@@ -431,7 +435,7 @@ const hasRows = isReady && pageRows.length > 0;
                 <select class="input dtx-input" id={`${id}-f-${f.key}`} name={f.key}>
                   <option value="">{f.anyLabel ?? 'Any'}</option>
                   {(f.options ?? []).map((o) => (
-                    <option value={o.value} selected={q.filters[f.key] === o.value}>{o.label}</option>
+                    <option value={o.value} selected={(q.filters[f.key] ?? f.value ?? '') === o.value}>{o.label}</option>
                   ))}
                 </select>
               ) : (
@@ -440,7 +444,7 @@ const hasRows = isReady && pageRows.length > 0;
                   id={`${id}-f-${f.key}`}
                   name={f.key}
                   type={f.type === 'date' ? 'date' : 'search'}
-                  value={q.filters[f.key] ?? ''}
+                  value={q.filters[f.key] ?? f.value ?? ''}
                   placeholder={f.placeholder}
                 />
               )}

@@ -349,6 +349,11 @@ export const ADMIN_GROUPS: AdminGroup[] = [
       // How the federation answers "what did the system do on our behalf?"
       // without reading TypeScript.
       { href: '/admin/workflows', label: 'Automations', action: 'workflow:read' },
+      // Delivery, not composition. There is no screen anywhere that sends a
+      // notification by hand — every message is derived from a domain event
+      // that already happened — so this module reads and never writes, and it
+      // is gated on notification:read rather than notification:send.
+      { href: '/admin/notifications', label: 'Notification delivery', action: 'notification:read' },
       { href: '/admin/listings', label: 'Marketplace', action: 'marketplace:read' },
     ],
   },

@@ -129,6 +129,14 @@ const OK_ROUTES = [
   '/admin/attendance',
   '/admin/workflows',
   '/admin/audit',
+  '/admin/notifications',
+  '/admin/dashboard',
+  '/admin/command',
+
+  // The member's own inbox. Linked from /my and from a push notification's
+  // click target, so it is reachable by two routes that are not a menu.
+  '/my',
+  '/my/notifications',
 
   // ── The client portal ──
   '/learn/portal',

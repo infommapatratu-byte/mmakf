@@ -386,11 +386,41 @@ export async function recordQualification(
  * Expiry with no warning means a coach turns up to a school with an out-of-date
  * clearance and cannot work, which is a wasted journey for them and a cancelled
  * session for the school.
+ *
+ * SCOPED, like coachPipeline above. assertCanAnywhere() answers "may this
+ * principal read coaches at all"; it does not answer "which ones", and this
+ * query used to skip the second question entirely. The effect was that every
+ * holder of coach:read — a district coach manager included — got a NATIONAL
+ * list of names and child-protection clearances on /admin/coaches, for units
+ * they have no standing in. The predicate belongs in the WHERE clause and not
+ * in a filter over the result, so that the rows are never read in the first
+ * place.
  */
 export async function expiringQualifications(db: DB, principal: Principal, withinDays = 60, now = new Date()) {
   assertCanAnywhere(principal, 'coach:read');
+  const scopes = visibleScopes(principal, 'coach:read');
+  if (scopes.kind === 'none') return [];
+
   const horizon = new Date(now.getTime() + withinDays * 86_400_000).toISOString().slice(0, 10);
   const today = now.toISOString().slice(0, 10);
+
+  const where: any[] = [
+    isNotNull(o.coachQualifications.expiresOn),
+    lte(o.coachQualifications.expiresOn, horizon),
+    gte(o.coachQualifications.expiresOn, today),
+  ];
+
+  if (scopes.kind === 'scoped') {
+    // The coach's own unit, on the profile — the same two columns coachPipeline
+    // scopes its candidates by.
+    const clauses: any[] = [];
+    if (scopes.states.length) clauses.push(inArray(o.coachProfiles.stateUnitId, scopes.states));
+    if (scopes.districts.length) clauses.push(inArray(o.coachProfiles.districtUnitId, scopes.districts));
+    // A scoped principal holding no unit sees nobody rather than everybody:
+    // an empty scope list is an empty answer, never an absent filter.
+    if (!clauses.length) return [];
+    where.push(or(...clauses));
+  }
 
   return db.select({
     qualification: o.coachQualifications,
@@ -401,11 +431,7 @@ export async function expiringQualifications(db: DB, principal: Principal, withi
     .from(o.coachQualifications)
     .innerJoin(o.coachProfiles, eq(o.coachProfiles.id, o.coachQualifications.coachProfileId))
     .innerJoin(s.persons, eq(s.persons.id, o.coachProfiles.personId))
-    .where(and(
-      isNotNull(o.coachQualifications.expiresOn),
-      lte(o.coachQualifications.expiresOn, horizon),
-      gte(o.coachQualifications.expiresOn, today)
-    ))
+    .where(and(...where))
     .orderBy(asc(o.coachQualifications.expiresOn))
     .limit(200);
 }

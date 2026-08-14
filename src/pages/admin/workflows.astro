@@ -31,6 +31,11 @@
 // filtered an array afterwards.
 
 import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import Table from '@/components/DataTable/Table.astro';
+import type { Column } from '@/components/DataTable/types';
 import { isConfigured, db } from '@/db';
 import { identify } from '@/lib/session';
 import { canAnywhere, visibleScopes } from '@/lib/rbac';
@@ -71,7 +76,13 @@ let runs: any[] = [];
 let counts: Array<{ status: string; n: number }> = [];
 let selectedRun: any = null;
 let selectedSteps: any[] = [];
-let unavailable: string | null = null;
+// A deployment with no database and a query that threw are different facts and
+// get different components (CONTENT-ARCHITECTURE §5.4). Only the second is a
+// failure; only the second has anything to retry.
+let notConfigured = false;
+let readFailed = false;
+/** The driver's own words. Behind Details, never the headline. */
+let failureDetail: string | null = null;
 let outOfScope = false;
 
 if (principal && canAnywhere(principal, 'workflow:read')) {
@@ -80,8 +91,7 @@ if (principal && canAnywhere(principal, 'workflow:read')) {
   const scopeFilter = scope.kind === 'all' ? sql`true` : sql`false`;
 
   if (!isConfigured()) {
-    unavailable =
-      'The federation database is not reachable from this deployment, so this page cannot say which automations are installed or what they have done. Without a database the engine cannot run at all: nothing is recorded and nothing is queued for retry.';
+    notConfigured = true;
   } else {
     try {
       definitions = await db()
@@ -127,7 +137,8 @@ if (principal && canAnywhere(principal, 'workflow:read')) {
         }
       }
     } catch (err: any) {
-      unavailable = String(err?.message ?? err);
+      readFailed = true;
+      failureDetail = String(err?.message ?? err);
     }
   }
 }
@@ -317,15 +328,104 @@ const STEP_TEXT: Record<string, string> = {
   blocked: 'not attempted, because an earlier step had already failed',
 };
 const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
+
+// ─── The runs, as rows for the one shared table (§97) ───────────────────────
+//
+// A hand-written table and a hand-written copy of the same rows as cards for a
+// phone lived here. DataTable does both from one declaration, which is the
+// whole argument for having it: the two copies could not disagree about a value
+// once there is only one.
+//
+// The row objects are FLAT and hold only what the columns declare. That is not
+// tidiness — a free-text search in this table reads the declared columns, so a
+// row carrying the whole workflow_runs record would put its context payload and
+// its error text inside the reach of a filter box.
+
+const runRows = runs.map((r) => {
+  const startedAt = r.startedAt ?? r.createdAt;
+  const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
+  return {
+    id: r.id,
+    automation: `${r.workflowCode} v${r.workflowVersion}`,
+    trigger: r.trigger,
+    subject: r.subjectKind ? `${label(r.subjectKind)} #${r.subjectId ?? '—'}` : null,
+    status: r.status,
+    attempts: `${r.attempt} of ${r.maxAttempts}`,
+    retry: retryText(r) || null,
+    started: fmtWhen(startedAt),
+    // Sorted on the instant, printed as the words. Sorting the printed form
+    // would order "1 Apr" before "1 Mar" because A comes before M.
+    // Number.isFinite guards a null or unparseable timestamp into a null, which
+    // the table's comparator sinks to the bottom in both directions rather than
+    // floating to the top of a descending sort as if it were the newest run.
+    startedMs: Number.isFinite(startedMs) ? startedMs : null,
+  };
+});
+
+const runColumns: Column[] = [
+  {
+    key: 'id',
+    header: 'Run',
+    render: (r) => `#${r.id}`,
+    href: (r) => `${h('/admin/workflows')}?run=${r.id}`,
+    sortable: true,
+    numeric: true,
+    // numeric for the ordering and the tabular figures, start-aligned because
+    // it is a reference rather than a quantity — nobody adds up run numbers.
+    align: 'start',
+    primary: true,
+  },
+  { key: 'automation', header: 'Automation', sortable: true, primary: true },
+  { key: 'trigger', header: 'Trigger', sortable: true },
+  { key: 'subject', header: 'Subject' },
+  // The one status on this page, and the reason the workflow domain exists in
+  // the dictionary: `pending` and `failed` carry the payment meaning by default.
+  { key: 'status', header: 'Outcome', status: { domain: 'workflow' }, sortable: true, primary: true },
+  { key: 'attempts', header: 'Attempts' },
+  { key: 'retry', header: 'Retry' },
+  {
+    key: 'startedMs',
+    header: 'Started',
+    render: (r) => r.started as string,
+    sortable: true,
+    numeric: true,
+    align: 'start',
+    initialDir: 'desc',
+  },
+];
 ---
 
 <AdminShell
   title="Automations"
   requires="workflow:read"
   intro="What the system does on the federation's behalf. Each automation is a stored definition — a trigger and an ordered list of actions — and every execution is recorded step by step, whether it worked or not."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Automations', url: h('/admin/workflows') },
+    ],
+    /* No tabs: this page has one view, and a strip offering "Definitions" and
+       "Runs" would be navigation invented to fill a slot — both are on screen
+       already, and the reader needs them together to answer why a run did what
+       it did. No action bar either: nothing here installs, re-runs or switches
+       off an automation, and a header is not the place to imply otherwise. */
+  }}
 >
-  {unavailable ? (
-    <p class="note" role="alert">{unavailable}</p>
+  {notConfigured ? (
+    /* Not ErrorState. Nothing failed and nothing is queued: without a database
+       the engine cannot run at all, so there is no failure to retry. */
+    <p class="note">
+      The federation database is not reachable from this deployment, so this
+      page cannot say which automations are installed or what they have done.
+      Without a database the engine cannot run at all: nothing is recorded and
+      nothing is queued for retry.
+    </p>
+  ) : readFailed ? (
+    <ErrorState
+      title="The automation register could not be read."
+      safe="Nothing has been changed, and nothing was run. This page only reads: it does not start an automation, re-run one or clear a retry, so whatever the engine had queued is still queued."
+      detail={failureDetail}
+    />
   ) : outOfScope ? (
     <p class="note">
       Automations belong to the federation as a whole. A definition and its runs
@@ -341,20 +441,20 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
         <h2 class="sec-h" id="defs-h">Installed automations</h2>
 
         {automations.length === 0 ? (
-          <p class="note">
-            No automation is installed in this database. Nothing runs on the
-            federation's behalf: when a school applies, when somebody applies to
-            teach, or when a programme is approved, every acknowledgement, task
-            and notification is created by hand.
+          <EmptyState
+            title="No automation is installed in this database."
+            body="Nothing runs on the federation's behalf: when a school applies, when somebody applies to teach, or when a programme is approved, every acknowledgement, task and notification is created by hand."
+            action={{ label: 'Back to operations', href: h('/admin') }}
+          >
             {notInstalled.length > 0 && (
-              <>
-                {' '}The code defines {notInstalled.length} standard automation
+              <p class="empty-more">
+                The code defines {notInstalled.length} standard automation
                 {notInstalled.length === 1 ? '' : 's'} that no row here matches —
                 {' '}{notInstalled.map((w) => w.code).join(', ')} — and
                 installStandardAutomations() is what puts them in place.
-              </>
+              </p>
             )}
-          </p>
+          </EmptyState>
         ) : (
           <>
             {notInstalled.length > 0 && (
@@ -378,9 +478,14 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
                         {' '}up to {attemptsOf(d.definition)} attempts
                       </p>
                     </div>
-                    <span class={d.active ? 'pill' : 'pill pill-off'}>
-                      <span class="pill-dot"></span>{d.active ? 'active' : 'switched off'}
-                    </span>
+                    {/* `workflow_definitions.active` is a boolean, and the two
+                        sides of it are rendered through the dictionary like any
+                        other state — domain "automation", where `inactive`
+                        reads "Switched off" and says plainly that the trigger
+                        starts nothing. The local pill this replaces used a
+                        dashed border to carry that, which is a difference
+                        nobody can name. */}
+                    <Status value={d.active ? 'active' : 'inactive'} domain="automation" />
                   </header>
 
                   {d.description && <p class="a-desc">{d.description}</p>}
@@ -467,7 +572,7 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
               <div class={`run-card run-${selectedRun.status}`}>
                 <p class="r-top">
                   <code>{selectedRun.workflowCode}</code> v{selectedRun.workflowVersion}
-                  <span class={`st st-${selectedRun.status}`}>{label(selectedRun.status)}</span>
+                  <Status value={selectedRun.status} domain="workflow" />
                 </p>
                 <dl class="r-facts">
                   <div><dt>Trigger</dt><dd><code>{selectedRun.trigger}</code></dd></div>
@@ -567,83 +672,31 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
           </p>
         )}
 
-        {runs.length === 0 ? (
-          <p class="note">
-            No automation has run. Runs are created by events rather than by a
-            clock: an institutional application submitted, a coaching application
-            submitted, a programme approved. Nothing is scheduled, so an empty
-            list means no such event has reached the engine — not that a job is
-            late.
-          </p>
-        ) : (
+        {/* §97's one table. It orders, pages and — below 760px — turns each run
+            into a record, all of it on the server, so every one of those still
+            works with JavaScript switched off. The hand-written table and the
+            hand-written phone cards that used to sit here rendered the same
+            eight values twice and could drift apart; now they cannot.
+
+            `total` is not passed and does not need to be: the dataset is
+            complete, so the table counts what it holds. What it holds is the
+            tail of the register, which is what the note says out loud. */}
+        <Table
+          id="workflow-runs"
+          caption="Workflow runs"
+          columns={runColumns}
+          rows={runRows}
+          defaultSort={{ key: 'startedMs', dir: 'desc' }}
+          note={runs.length > 0
+            ? `The ${runs.length === RUN_LIMIT ? `${RUN_LIMIT} most recent` : String(runs.length)} run${runs.length === 1 ? '' : 's'}. Ordering and paging here move within those; the counts above are over every run the federation has recorded.`
+            : null}
+          emptyTitle="No automation has run."
+          emptyBody="Runs are created by events rather than by a clock: an institutional application submitted, a coaching application submitted, a programme approved. Nothing is scheduled, so an empty list means no such event has reached the engine — not that a job is late."
+          emptyAction={{ label: 'Back to operations', href: h('/admin') }}
+        />
+
+        {runs.length > 0 && (
           <>
-            <p class="count">
-              The {runs.length === RUN_LIMIT ? `${RUN_LIMIT} most recent` : runs.length} run
-              {runs.length === 1 ? '' : 's'}, newest first.
-            </p>
-            {/* No .tbl-hint: global.css only reveals it below 760px, and below
-                900px this table is replaced by the records below. The fade on
-                .tbl-scroll is the scroll affordance in between. */}
-            <div class="tbl-scroll">
-              <table class="tbl">
-                <caption class="sr-only">Workflow runs</caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Run</th>
-                    <th scope="col">Automation</th>
-                    <th scope="col">Trigger</th>
-                    <th scope="col">Subject</th>
-                    <th scope="col">Outcome</th>
-                    <th scope="col">Attempts</th>
-                    <th scope="col">Retry</th>
-                    <th scope="col">Started</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {runs.map((r) => (
-                    <tr class={r.status === 'partially_failed' ? 'part' : ''}>
-                      <td><a href={`${h('/admin/workflows')}?run=${r.id}`}>#{r.id}</a></td>
-                      <td class="strong"><code>{r.workflowCode}</code> v{r.workflowVersion}</td>
-                      <td><code>{r.trigger}</code></td>
-                      <td>
-                        {r.subjectKind
-                          ? <>{label(r.subjectKind)} #{r.subjectId ?? '—'}</>
-                          : <span class="muted">—</span>}
-                      </td>
-                      <td><span class={`st st-${r.status}`}>{label(r.status)}</span></td>
-                      <td class="num">{r.attempt} / {r.maxAttempts}</td>
-                      <td>{retryText(r) || <span class="muted">—</span>}</td>
-                      <td>{fmtWhen(r.startedAt ?? r.createdAt)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Eight columns inside a 360px viewport are unreadable however far
-                they slide, so the same runs are recomposed as records. PART AL. */}
-            <ul class="cards" aria-label="Workflow runs">
-              {runs.map((r) => (
-                <li class={r.status === 'partially_failed' ? 'part' : ''}>
-                  <p class="c-top">
-                    <a href={`${h('/admin/workflows')}?run=${r.id}`}>#{r.id}</a>
-                    <span class={`st st-${r.status}`}>{label(r.status)}</span>
-                  </p>
-                  <p class="c-name"><code>{r.workflowCode}</code> v{r.workflowVersion}</p>
-                  <dl>
-                    <div><dt>Trigger</dt><dd><code>{r.trigger}</code></dd></div>
-                    <div>
-                      <dt>Subject</dt>
-                      <dd>{r.subjectKind ? `${label(r.subjectKind)} #${r.subjectId ?? '—'}` : '—'}</dd>
-                    </div>
-                    <div><dt>Attempts</dt><dd>{r.attempt} of {r.maxAttempts}</dd></div>
-                    <div><dt>Retry</dt><dd>{retryText(r) || '—'}</dd></div>
-                    <div><dt>Started</dt><dd>{fmtWhen(r.startedAt ?? r.createdAt)}</dd></div>
-                  </dl>
-                </li>
-              ))}
-            </ul>
-
             <p class="foot">
               A retry does not happen at the minute shown. The sweep runs once a
               day with the rest of the reconciliation, takes the runs whose time
@@ -742,9 +795,15 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
     margin: 12px 0 0; padding: 10px 14px; border-left: 3px solid var(--red);
     background: var(--card-2); font-size: .88rem; line-height: 1.6;
   }
-  /* A switched-off automation must not read as a quieter version of a live one:
-     nothing at all happens when its trigger fires. */
-  .pill-off { color: var(--muted); border-style: dashed; }
+  /* Extra guidance inside EmptyState, which centres its own content. */
+  .empty-more {
+    margin: var(--space-4) 0 0;
+    font-size: var(--text-sm);
+    color: var(--muted);
+    line-height: var(--leading-normal);
+    max-width: 56ch;
+    text-align: left;
+  }
 
   .steps { margin: 14px 0 0; padding: 0 0 0 22px; }
   .steps li { margin: 0 0 16px; padding: 0 0 0 6px; }
@@ -806,23 +865,6 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
   }
   .stats .warn { color: var(--red); }
 
-  .count { font-size: .82rem; color: var(--muted); margin: 0 0 8px; }
-  .tbl { width: 100%; border-collapse: collapse; font-size: .88rem; }
-  .tbl th, .tbl td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  .tbl thead th {
-    font-size: .7rem; letter-spacing: .1em; text-transform: uppercase;
-    color: var(--muted); font-weight: 400;
-  }
-  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .tbl .strong { font-family: var(--font-display); }
-  .tbl tr.part td:first-child { box-shadow: inset 3px 0 0 var(--red); }
-
-  .st { font-size: .74rem; letter-spacing: .06em; }
-  .st-succeeded { color: var(--gold-2); }
-  .st-partially_failed { color: var(--red); font-weight: 600; }
-  .st-failed { color: var(--red); }
-  .st-running, .st-pending, .st-skipped { color: var(--muted); }
-
   .muted { color: var(--muted); }
   code { font-family: var(--font-accent, monospace); font-size: .9em; }
 
@@ -832,21 +874,11 @@ const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
   .legend dd { margin: 0; color: var(--muted); font-size: .88rem; line-height: 1.7; }
   .legend .lg-part dt { color: var(--red); }
 
-  .cards { display: none; list-style: none; margin: 0; padding: 0; }
-
-  /* ── Phone ─────────────────────────────────────────────────────────────── */
+  /* ── Phone ──────────────────────────────────────────────────────────────
+     The runs no longer need a rule here. DataTable turns each row into a
+     record below 760px on its own (§54, PART AL), which is exactly the copy of
+     this page's phone layout that this file used to maintain by hand. */
   @media (max-width: 900px) {
-    .tbl-scroll { display: none; }
-    .cards { display: block; }
-    .cards li { padding: 14px 0 14px 12px; border-bottom: 1px solid var(--border); border-left: 2px solid transparent; }
-    .cards li.part { border-left-color: var(--red); }
-    .c-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 6px; }
-    .c-name { font-family: var(--font-display); margin: 0 0 10px; }
-    .cards dl { margin: 0; display: grid; gap: 4px; }
-    .cards dl > div { display: grid; grid-template-columns: 10ch 1fr; gap: 10px; font-size: .85rem; }
-    .cards dt { color: var(--muted); }
-    .cards dd { margin: 0; word-break: break-word; }
-
     .a-head { flex-direction: column; gap: 8px; }
     .s-params > div, .r-facts > div, .legend > div { grid-template-columns: 1fr; gap: 0; }
     .s-params dt, .r-facts dt, .legend dt { font-size: .78rem; }

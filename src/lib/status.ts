@@ -359,6 +359,27 @@ const BY_DOMAIN: Record<string, Record<string, Partial<StatusMeaning>>> = {
   },
   venue: {
     active: { label: 'In use', meaning: 'Available to be booked.' },
+    // `venues.active` is a boolean, and the register calls the false side
+    // withdrawn. Without this the reader would be told a room had been "taken
+    // back by whoever submitted it", which is the applications meaning of the
+    // word and describes nothing that happens to a hall. The tone stays
+    // `stopped`: a room goes out of use because somebody decided it should.
+    withdrawn: {
+      label: 'Withdrawn',
+      meaning: 'Taken out of use. Kept in the register rather than deleted, because past sessions point at it.',
+    },
+  },
+  // A workflow definition's `active` flag is also a boolean, and it decides
+  // whether a trigger starts anything at all. "Inactive" is far too mild for
+  // that: an administrator reading it as "quiet at the moment" would wait for
+  // an acknowledgement that is never going to be sent.
+  automation: {
+    active: { meaning: 'This is the version its trigger starts.' },
+    inactive: {
+      label: 'Switched off',
+      tone: 'stopped',
+      meaning: 'Installed and not running. Nothing happens in this version when its trigger fires.',
+    },
   },
   // `referred` means two unrelated things, and the difference is a person's
   // grading result against a committee's paperwork. In grading it means "not
@@ -369,6 +390,49 @@ const BY_DOMAIN: Record<string, Record<string, Partial<StatusMeaning>>> = {
   // A programme is paused by a decision, not by a failure.
   program: {
     paused: { label: 'Paused', tone: 'stopped', meaning: 'Delivery halted by agreement. Not cancelled.' },
+  },
+  // ── Workflow runs ────────────────────────────────────────────────────────
+  //
+  // Four of these words are already in the dictionary WITH THE PAYMENT MEANING,
+  // because payments are where they were first needed. Put on an automation run
+  // they are not merely vague, they are wrong: `pending` would tell an operator
+  // the run is "with the payment provider", and `failed` would assure them that
+  // "no money moved" about a job whose whole question is what it did before it
+  // stopped. The tones are unchanged — only the sentence a reader is given.
+  workflow: {
+    pending: { meaning: 'Created and not yet claimed by a worker.' },
+    running: { meaning: 'Claimed and executing. A second worker cannot pick it up while it is here.' },
+    succeeded: {
+      meaning: 'No required step failed. A step marked optional may have failed and the run still reads as succeeded, so the steps are worth reading before assuming every effect happened.',
+    },
+    failed: {
+      meaning: 'A required step failed and none had succeeded before it, so nothing the automation intended took effect.',
+    },
+    skipped: {
+      meaning: 'Nothing ran, because the same idempotency key had already succeeded, was still in progress, or had used its attempts.',
+    },
+  },
+  // ── Notification and push delivery ───────────────────────────────────────
+  //
+  // The same defect the workflow block above exists for, one table over.
+  // `failed` carries the PAYMENT sentence, so the delivery page would tell an
+  // operator "No money moved" about an SMS a provider rejected — and tell it to
+  // every screen-reader user too, because Status exposes the meaning through
+  // aria-describedby and not only as a mouse tooltip.
+  //
+  // `expired` is the one that had to change. Its dictionary sentence says a
+  // deadline passed without a decision; the federation publishes no deadlines,
+  // and on a push registration the word means the browser's own subscription is
+  // no longer valid. Nobody missed anything and there is nobody to chase.
+  //
+  // Tones are unchanged throughout — only the sentence a reader is given.
+  notification: {
+    queued: { meaning: 'Written and waiting for a transport. Not lost: it goes out once a provider for its channel is configured.' },
+    sent: { meaning: 'A transport accepted it. That is not the same as it having been read.' },
+    failed: { meaning: 'A transport rejected it. The reason the provider gave is recorded against the message.' },
+    expired: {
+      meaning: 'The device registration is no longer valid, so there was nothing to deliver to. Normal churn — people replace phones and clear browser data.',
+    },
   },
 };
 

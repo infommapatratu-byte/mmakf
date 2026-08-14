@@ -84,6 +84,20 @@ export interface Filter<R extends Row = Row> {
   /** The wording of a select's do-not-filter option. */
   anyLabel?: string;
   /**
+   * What the control SHOWS when the URL names no value for it.
+   *
+   * For the case where the caller applied a narrowing the reader did not ask
+   * for — a default date window, say — and the field would otherwise sit blank
+   * above rows it plainly restricted, leaving the reader to guess at it.
+   *
+   * It is a display value and NOTHING ELSE. It is not put into `q.filters`, so
+   * it does not count towards "these filters are why the table is empty", it
+   * does not offer a Clear link that would clear nothing, and it never reaches
+   * `match`. A default the reader cannot clear is not a filter they applied,
+   * and an empty state must not blame them for it.
+   */
+  value?: string;
+  /**
    * How this filter decides, when the table holds the complete set.
    *
    * Without one, a select compares `row[key]` for equality and a search box

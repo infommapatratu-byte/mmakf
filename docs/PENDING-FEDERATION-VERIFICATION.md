@@ -11,7 +11,11 @@ place in the system that is holding a space for it, and what supplying it turns
 on. **Nothing here is guessed, defaulted or filled with a placeholder.** Each is
 NULL or empty in the database and renders as absent.
 
-Updated 13 August 2026.
+Updated 14 August 2026.
+
+**This is the single register.** No other document keeps its own list of what
+MMAKF has not supplied; the domain documents link here instead. If you find a
+second list anywhere, it is a duplicate and should be replaced with a link.
 
 ---
 
@@ -165,8 +169,8 @@ Smaller, and all unblocking real behaviour.
 
 | Needed | Turns on |
 |---|---|
-| An email provider (SMTP or an API key) | Delivery. Messages render and queue correctly today; `src/lib/email-templates.ts` renders and `notifications` stores them with status `queued`. Nothing sends them, and nothing pretends to. |
-| VAPID keys | Web push. `push_devices` and the preference model exist. |
+| An email provider (SMTP or an API key) | Delivery. Messages render and queue correctly today; `src/lib/email-templates.ts` renders and `notifications` stores them with status `queued`. Nothing sends them, and nothing pretends to. `transportStatus()` reports the channel as unconfigured rather than failing silently. |
+| VAPID keys | Web push. `push_devices`, the preference model and the full RFC 8291/8292 implementation exist. **Note:** the keys alone will not turn push on — there is no subscribe endpoint, no settings page and no `push` handler in `public/sw.js`. See [IMPLEMENTATION-QUEUE.md](IMPLEMENTATION-QUEUE.md) item 4. `generateVapidKeys()` exists for an operator to run once. |
 | Google / Microsoft OAuth credentials | External calendar sync. `calendar_connections`, `calendar_events` and `calendar_sync_log` exist. |
 | Routing rules — who handles which enquiries | `routing_rules` is empty, so every application arrives **unassigned** and sits in the national queue. That is deliberate: assigning to an arbitrary administrator would look like routing while producing work nobody agreed to do. |
 | Programme templates | `/admin/programs` and the wizard's "a published programme, if one fits" step. Nothing is advertised as available that is not published. |
@@ -196,3 +200,9 @@ Smaller, and all unblocking real behaviour.
 - [IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md) — what is built
 - [IMPLEMENTATION-QUEUE.md](IMPLEMENTATION-QUEUE.md) — what is next
 - [CLAIMS-AUDIT.md](CLAIMS-AUDIT.md) — claims examined, and what was found
+- [domains/notifications.md](domains/notifications.md) — what §4's email, SMS and
+  VAPID entries would turn on, and what would still be missing afterwards
+- [domains/automation.md](domains/automation.md) — why every task template's
+  `due_in_hours` is NULL, and what §1.2 would set
+- [domains/seo.md](domains/seo.md) — why `activityLocationGraph()` emits nothing
+  while the unit register holds no currently-affiliated entry

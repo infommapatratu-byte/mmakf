@@ -22,6 +22,11 @@
 // needs to know it does not exist.
 
 import AdminShell from '@/components/AdminShell.astro';
+import PageHeader from '@/components/PageHeader.astro';
+import Table from '@/components/DataTable/Table.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import type { Column, Filter } from '@/components/DataTable/types';
+import { readTableQuery, type TableQuery } from '@/components/DataTable/query';
 import { isConfigured, db } from '@/db';
 import { identify } from '@/lib/session';
 import { canAnywhere, visibleScopes, type Action } from '@/lib/rbac';
@@ -63,7 +68,13 @@ let running: any[] = [];
 let participantCounts = new Map<number, number>();
 let statusCounts = new Map<string, number>();
 let audienceMismatch = new Set<number>();
-let unavailable: string | null = null;
+// THREE ABSENCES, NOT ONE (CONTENT-ARCHITECTURE §5.4). "There is no database
+// on this deployment", "the read failed" and "there is nothing recorded" are
+// different facts, told in different words by different components. They shared
+// one string, which reported the unconfigured deployment — the state production
+// is actually in — as a fault somebody would go and chase.
+let notConfigured = false;
+let readError: string | null = null;
 let templatesCapped = false;
 let runningCapped = false;
 
@@ -77,7 +88,7 @@ let deliveryIsUnfiltered = false;
 
 if (principal && canAnywhere(principal, 'program:read')) {
   if (!isConfigured()) {
-    unavailable = 'The federation database is not reachable from this deployment, so neither the programme catalogue nor the running programmes can be listed.';
+    notConfigured = true;
   } else {
     try {
       const conn = db();
@@ -234,7 +245,7 @@ if (principal && canAnywhere(principal, 'program:read')) {
         participantCounts = new Map(counts.map((c: any) => [c.programId, Number(c.n)]));
       }
     } catch (err: any) {
-      unavailable = String(err?.message ?? err);
+      readError = String(err?.message ?? err);
     }
   }
 }
@@ -312,6 +323,113 @@ const includes = (t: any) => {
 
 const modesOf = (t: any) =>
   Array.isArray(t.modes) && t.modes.length ? t.modes.map((m: unknown) => label(m)).join(', ') : null;
+
+// ─── The two registers, through the one shared table ────────────────────────
+//
+// Nine and ten columns respectively, and both used to be written twice — once
+// as a wide table and once as a card list for the phone, with a comment on each
+// asking the next author to keep them in step. DataTable does the collapse, so
+// there is one description of each register and no second copy to drift.
+
+const templateColumns: Column[] = [
+  { key: 'code', header: 'Code', primary: true, sortable: true },
+  {
+    key: 'title', header: 'Programme', primary: true, sortable: true,
+    // The inconsistency is appended to the name rather than given a column of
+    // its own: it is a fact about THIS template, derived from stored rows, and
+    // a column would be nine-tenths empty.
+    render: (t: any) => (audienceMismatch.has(t.id)
+      ? `${t.title} — service not offered to this audience`
+      : t.title),
+  },
+  { key: 'audience', header: 'Audience', sortable: true, render: (t: any) => label(t.audience) },
+  { key: 'serviceTitle', header: 'Service', render: (t: any) => t.serviceTitle ?? 'none linked' },
+  { key: 'shape', header: 'Shape', render: (t: any) => shape(t) ?? 'not specified' },
+  { key: 'group', header: 'Group', render: (t: any) => groupSize(t) ?? 'not specified' },
+  { key: 'includes', header: 'Includes', render: (t: any) => includes(t) ?? 'not specified' },
+  { key: 'modes', header: 'Delivery', render: (t: any) => modesOf(t) ?? 'not specified' },
+  { key: 'status', header: 'Status', status: true },
+  {
+    key: 'next', header: 'Next move',
+    render: (t: any) => {
+      const move = NEXT_MOVE[t.status];
+      if (!move) return 'no forward move';
+      if (!holds(move.action)) return `needs ${move.action}`;
+      return move.note ? `to ${move.to} — ${move.note}` : `to ${move.to}`;
+    },
+  },
+];
+
+const templateFilters: Filter[] = [
+  {
+    key: 'status', label: 'Status', type: 'select', anyLabel: 'Every status',
+    options: TEMPLATE_STATUSES.map((v) => ({ value: v, label: label(v) })),
+  },
+];
+
+// The status the SQL query was actually filtered by, not the raw querystring.
+// The two came apart once already — an unrecognised value left the query
+// unfiltered while the page claimed a filter — and handing the raw value to the
+// table would re-open it from the other end, emptying a table the query had
+// filled.
+const templateQuery: TableQuery = {
+  ...readTableQuery(Astro.url, {
+    sortable: ['code', 'title', 'audience'],
+    filters: ['status'],
+    prefix: 't',
+  }),
+  filters: statusFilter ? { status: statusFilter } : {},
+};
+
+const runningColumns: Column[] = [
+  { key: 'code', header: 'Code', primary: true, sortable: true },
+  { key: 'title', header: 'Programme', primary: true, sortable: true },
+  { key: 'institutionName', header: 'Client', sortable: true, render: (r: any) => r.institutionName ?? 'not linked' },
+  { key: 'serviceTitle', header: 'Service', render: (r: any) => r.serviceTitle ?? 'none linked' },
+  // `paused` on a programme means delivery halted BY AGREEMENT, not a failure —
+  // which is exactly the distinction the status dictionary's `program` domain
+  // exists to hold.
+  { key: 'status', header: 'Status', status: { domain: 'program' } },
+  { key: 'mode', header: 'Delivery', render: (r: any) => (r.mode ? label(r.mode) : 'not specified') },
+  { key: 'startsOn', header: 'Starts', sortable: true, initialDir: 'desc', render: (r: any) => fmtDate(r.startsOn) },
+  { key: 'endsOn', header: 'Ends', render: (r: any) => fmtDate(r.endsOn) },
+  { key: 'sessionsPlanned', header: 'Sessions', numeric: true, render: (r: any) => r.sessionsPlanned ?? '—' },
+  {
+    key: 'participants', header: 'Participants', numeric: true,
+    // Every participant row, including those who have left. A current headcount
+    // is a different number, and calling this one "current" would be a small
+    // invention.
+    render: (r: any) => participantCounts.get(r.id) ?? 0,
+  },
+];
+
+const runningQuery: TableQuery = readTableQuery(Astro.url, {
+  sortable: ['code', 'title', 'institutionName', 'startsOn'],
+  prefix: 'r',
+});
+
+/**
+ * The tabs over the catalogue.
+ *
+ * The count comes from the SQL aggregate over the WHOLE catalogue, and it is
+ * only attached where that aggregate was actually taken — a scoped account
+ * never runs it, and PageHeader prints nothing at all for an omitted count
+ * rather than falling back to a zero nobody counted.
+ */
+const templateTabs = [
+  {
+    label: 'All',
+    href: h('/admin/programs'),
+    count: catalogueOutOfScope ? undefined : [...statusCounts.values()].reduce((a, b) => a + b, 0),
+    current: !statusFilter,
+  },
+  ...TEMPLATE_STATUSES.map((v) => ({
+    label: label(v),
+    href: `${h('/admin/programs')}?status=${v}`,
+    count: catalogueOutOfScope ? undefined : (statusCounts.get(v) ?? 0),
+    current: statusFilter === v,
+  })),
+];
 ---
 
 <AdminShell
@@ -319,21 +437,58 @@ const modesOf = (t: any) =>
   requires="program:read"
   intro="The catalogue of programmes the federation can offer, and the programmes actually being delivered to clients. The first is a menu; the second is what is on the table."
 >
-  {unavailable ? (
-    <p class="note" role="alert">{unavailable}</p>
+  {notConfigured ? (
+    <p class="note">
+      The federation database is not reachable from this deployment, so neither
+      the programme catalogue nor the running programmes can be listed. Nothing
+      has been lost and nothing is waiting here: there is no system of record on
+      this deployment to read one from.
+    </p>
+  ) : readError ? (
+    <ErrorState
+      title="The programme register could not be read."
+      safe="Nothing has been changed. No template and no delivery record was altered — this was a read that failed, and every programme is still being delivered exactly as it was."
+      detail={readError}
+    />
   ) : (
     <>
       {/* ── The catalogue ─────────────────────────────────────────────────── */}
-      <section class="block" aria-labelledby="tpl-h">
-        <h2 id="tpl-h">Templates</h2>
-        <p class="lede">
-          A configurable shape the federation can offer — an audience, a service,
-          a length, a group size and what it includes. A template
-          <strong> carries no price</strong>, and there is no column for one:
-          money comes from the fee framework when a configuration is quoted, so a
-          figure stored here would be a second, competing answer to the same
-          question.
-        </p>
+      <section class="block" aria-label="Programme catalogue">
+        {/* AdminShell prints the h1, so this prints an h2 — a page with two h1s
+            gives a screen-reader user two competing titles. It does not stick:
+            it heads a section, and there are two sections on this page.
+
+            THE PRIMARY ACTION IS A REFUSAL, and that is the point. §70: there is
+            no route that moves a template's status, and a button that silently
+            does nothing is worse than no button. PageHeader renders an
+            unavailable action as a focusable control carrying its reason rather
+            than removing it — which is the honest rendering of "this cannot be
+            done here yet", where a missing button teaches nobody why. */}
+        <PageHeader
+          title="Templates"
+          headingLevel="h2"
+          sticky={false}
+          description="A configurable shape the federation can offer — an audience, a service, a length, a group size and what it includes. A template carries no price, and there is no column for one: money comes from the fee framework when a configuration is quoted, so a figure stored here would be a second, competing answer to the same question."
+          primary={{
+            label: 'Move a template on',
+            href: h('/admin/programs'),
+            unavailable: 'Moves are not made from this screen. The lifecycle below is the record model and the authorities are real, but no route in this system changes a template’s status, so a template is moved by whoever runs the database.',
+          }}
+          secondary={[
+            { label: 'Fee framework', href: h('/admin/fees') },
+            { label: 'Quotations', href: h('/admin/quotes') },
+          ]}
+          tabs={templateTabs}
+        >
+          <Fragment slot="meta">
+            {templatesCapped && (
+              <span class="meta-chip">first {ROW_LIMIT} shown</span>
+            )}
+            {catalogueOutOfScope && (
+              <span class="meta-chip">not readable at this account’s scope</span>
+            )}
+          </Fragment>
+        </PageHeader>
 
         <ol class="cycle" aria-label="Template lifecycle">
           {LIFECYCLE.map((s) => (
@@ -359,23 +514,6 @@ const modesOf = (t: any) =>
           is why it is a separate authority from approval.
         </p>
 
-        {/* §70. There is no endpoint behind these transitions yet, and a button
-            that silently does nothing is worse than no button. The authorities
-            are stated because they are what an administrator has to ask for; the
-            controls arrive with the endpoint. */}
-        <p class="note note-tight">
-          Moves are not yet made from this screen. The lifecycle above is the
-          record model and the authorities are real, but no route changes a
-          template's status, so a template is moved by whoever runs the database.
-        </p>
-
-        <nav class="filters" aria-label="Filter templates by status">
-          <a href={h('/admin/programs')} class={!statusFilter ? 'on' : ''}>All</a>
-          {TEMPLATE_STATUSES.map((s) => (
-            <a href={`${h('/admin/programs')}?status=${s}`} class={statusFilter === s ? 'on' : ''}>{label(s)}</a>
-          ))}
-        </nav>
-
         {catalogueOutOfScope ? (
           <p class="note">
             The programme catalogue is national — a template belongs to no state,
@@ -384,104 +522,26 @@ const modesOf = (t: any) =>
             catalogue; it is one you are not the reader of. Deliveries in your own
             scope are listed below as normal.
           </p>
-        ) : templates.length === 0 ? (
-          <p class="note">
-            {statusFilter
-              ? `No template is at "${label(statusFilter)}".`
-              : 'No programme template has been recorded. Until one exists here, every institutional enquiry is designed by hand from the service list, and nothing on the public site is generated from this catalogue.'}
-          </p>
         ) : (
-          <>
-            <p class="tbl-hint">Scroll the table sideways to see every column.</p>
-            <div class="tbl-scroll">
-              <table class="tbl">
-                <caption class="sr-only">Programme templates</caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Code</th>
-                    <th scope="col">Programme</th>
-                    <th scope="col">Audience</th>
-                    <th scope="col">Service</th>
-                    <th scope="col">Shape</th>
-                    <th scope="col">Group</th>
-                    <th scope="col">Includes</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Next move</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {templates.map((t) => (
-                    <tr>
-                      <td><code>{t.code}</code></td>
-                      <td class="strong">
-                        {t.title}
-                        {audienceMismatch.has(t.id) && (
-                          <span class="flag" title="serviceAudiences has no row for this audience">service not offered to this audience</span>
-                        )}
-                      </td>
-                      <td>{label(t.audience)}</td>
-                      <td>{t.serviceTitle ?? <span class="muted">none linked</span>}</td>
-                      <td>{shape(t) ?? <span class="muted">not specified</span>}</td>
-                      <td>{groupSize(t) ?? <span class="muted">not specified</span>}</td>
-                      <td class="wrap">{includes(t) ?? <span class="muted">not specified</span>}</td>
-                      <td><span class={`pill${t.status === 'published' ? ' live' : ''}`}><span class="pill-dot"></span>{label(t.status)}</span></td>
-                      <td>
-                        {NEXT_MOVE[t.status]
-                          ? holds(NEXT_MOVE[t.status]!.action)
-                            ? <>to {NEXT_MOVE[t.status]!.to}{NEXT_MOVE[t.status]!.note && <span class="muted"> — {NEXT_MOVE[t.status]!.note}</span>}</>
-                            : <span class="muted">needs <code>{NEXT_MOVE[t.status]!.action}</code></span>
-                          : <span class="muted">no forward move</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Nine columns inside a 360px viewport is unreadable however far it
-                slides, so the same rows are recomposed as records. PART AL. */}
-            <ul class="cards" aria-label="Programme templates">
-              {templates.map((t) => (
-                <li>
-                  <p class="c-top">
-                    <code>{t.code}</code>
-                    <span class={`pill${t.status === 'published' ? ' live' : ''}`}><span class="pill-dot"></span>{label(t.status)}</span>
-                  </p>
-                  <p class="c-name">{t.title}</p>
-                  {audienceMismatch.has(t.id) && <p class="flag-line">Service not offered to this audience.</p>}
-                  <dl>
-                    <div><dt>Audience</dt><dd>{label(t.audience)}</dd></div>
-                    <div><dt>Service</dt><dd>{t.serviceTitle ?? 'none linked'}</dd></div>
-                    <div><dt>Shape</dt><dd>{shape(t) ?? 'not specified'}</dd></div>
-                    <div><dt>Group</dt><dd>{groupSize(t) ?? 'not specified'}</dd></div>
-                    <div><dt>Delivery</dt><dd>{modesOf(t) ?? 'not specified'}</dd></div>
-                    <div><dt>Includes</dt><dd>{includes(t) ?? 'not specified'}</dd></div>
-                    <div><dt>Instructors</dt><dd>{t.instructorsRequired ?? 'not specified'}</dd></div>
-                    <div><dt>Approved</dt><dd>{fmtDate(t.approvedAt)}</dd></div>
-                    <div><dt>Published</dt><dd>{fmtDate(t.publishedAt)}</dd></div>
-                    <div>
-                      <dt>Next move</dt>
-                      <dd>
-                        {NEXT_MOVE[t.status]
-                          ? holds(NEXT_MOVE[t.status]!.action)
-                            ? `to ${NEXT_MOVE[t.status]!.to}`
-                            : `needs ${NEXT_MOVE[t.status]!.action}`
-                          : 'no forward move'}
-                      </dd>
-                    </div>
-                  </dl>
-                </li>
-              ))}
-            </ul>
-
-            {templatesCapped && (
-              <p class="cap">
-                The first {ROW_LIMIT} templates are listed and there may be more.
-                This screen does not page yet, so the counts above are the
-                catalogue and the table below them is not.
-              </p>
-            )}
-          </>
+          /* The empty action's label names where the link actually goes. There
+             is no services screen in this system, so an action promising one
+             would send an administrator looking for a page that does not
+             exist; quotations is where an empty catalogue is felt. */
+          <Table
+            id="templates"
+            caption="Programme templates"
+            columns={templateColumns}
+            filters={templateFilters}
+            rows={templates}
+            query={templateQuery}
+            paramPrefix="t"
+            note={templatesCapped
+              ? `The first ${ROW_LIMIT} templates by audience and title. The lifecycle counts above are of the whole catalogue; this table is not.`
+              : null}
+            emptyTitle="No programme template has been recorded."
+            emptyBody="Until one exists here, every institutional enquiry is designed by hand from the service list, and nothing on the public site is generated from this catalogue."
+            emptyAction={{ label: "See what this blocks — quotations", href: h("/admin/quotes") }}
+          />
         )}
       </section>
 
@@ -500,90 +560,30 @@ const modesOf = (t: any) =>
           nothing below is inferred from anything above.
         </p>
 
-        {running.length === 0 ? (
-          /* Two different facts, and only one of them is knowable from a scoped
-             account. A national reader's query has no scope predicate on it, so
-             an empty result IS an empty register and saying so is true. A scoped
-             reader's query does, so "nothing has been recorded" would be an
-             assertion about rows this page never looked at. */
-          <p class="note">
-            {deliveryIsUnfiltered
-              ? 'No programme is being delivered. This account reads the register nationally and it is unfiltered, so the register itself holds nothing — no proposal has yet been turned into a delivery record.'
-              : 'No programme is being delivered in the scope this account can read. This list is scope-filtered, so it does not say whether anything is running elsewhere in the federation.'}
-          </p>
-        ) : (
-          <>
-            <p class="tbl-hint">Scroll the table sideways to see every column.</p>
-            <div class="tbl-scroll">
-              <table class="tbl">
-                <caption class="sr-only">Programmes being delivered</caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Code</th>
-                    <th scope="col">Programme</th>
-                    <th scope="col">Client</th>
-                    <th scope="col">Service</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Delivery</th>
-                    <th scope="col">Starts</th>
-                    <th scope="col">Ends</th>
-                    <th scope="col">Sessions</th>
-                    <th scope="col">Participants</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {running.map((r) => (
-                    <tr>
-                      <td><code>{r.code}</code></td>
-                      <td class="strong">{r.title}</td>
-                      <td>{r.institutionName ?? <span class="muted">not linked</span>}</td>
-                      <td>{r.serviceTitle ?? <span class="muted">none linked</span>}</td>
-                      <td><span class={`pill${r.status === 'running' ? ' live' : ''}`}><span class="pill-dot"></span>{label(r.status)}</span></td>
-                      <td>{r.mode ? label(r.mode) : <span class="muted">not specified</span>}</td>
-                      <td>{fmtDate(r.startsOn)}</td>
-                      <td>{fmtDate(r.endsOn)}</td>
-                      <td class="num">{r.sessionsPlanned ?? '—'}</td>
-                      {/* Every participant row, including those who have left.
-                          A current headcount is a different number, and calling
-                          this one "current" would be a small invention. */}
-                      <td class="num">{participantCounts.get(r.id) ?? 0}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <ul class="cards" aria-label="Programmes being delivered">
-              {running.map((r) => (
-                <li>
-                  <p class="c-top">
-                    <code>{r.code}</code>
-                    <span class={`pill${r.status === 'running' ? ' live' : ''}`}><span class="pill-dot"></span>{label(r.status)}</span>
-                  </p>
-                  <p class="c-name">{r.title}</p>
-                  <dl>
-                    <div><dt>Client</dt><dd>{r.institutionName ?? 'not linked'}</dd></div>
-                    <div><dt>Kind</dt><dd>{r.institutionKind ? label(r.institutionKind) : 'not recorded'}</dd></div>
-                    <div><dt>Service</dt><dd>{r.serviceTitle ?? 'none linked'}</dd></div>
-                    <div><dt>Delivery</dt><dd>{r.mode ? label(r.mode) : 'not specified'}</dd></div>
-                    <div><dt>Where</dt><dd>{r.venue ?? 'not recorded'}</dd></div>
-                    <div><dt>Starts</dt><dd>{fmtDate(r.startsOn)}</dd></div>
-                    <div><dt>Ends</dt><dd>{fmtDate(r.endsOn)}</dd></div>
-                    <div><dt>Sessions</dt><dd>{r.sessionsPlanned ?? 'not specified'}</dd></div>
-                    <div><dt>Participants</dt><dd>{participantCounts.get(r.id) ?? 0} on record</dd></div>
-                  </dl>
-                </li>
-              ))}
-            </ul>
-
-            {runningCapped && (
-              <p class="cap">
-                The first {ROW_LIMIT} programmes are listed and there may be more.
-                This screen does not page yet.
-              </p>
-            )}
-          </>
-        )}
+        {/* Two different facts about an empty list, and only one of them is
+           knowable from a scoped account. A national reader's query carries no
+           scope predicate, so an empty result IS an empty register and saying
+           so is true. A scoped reader's query does carry one, so "nothing has
+           been recorded" would be an assertion about rows this page never
+           looked at — which is why the two sentences are separate. */}
+        <Table
+          id="running"
+          caption="Programmes being delivered"
+          columns={runningColumns}
+          rows={running}
+          query={runningQuery}
+          paramPrefix="r"
+          note={runningCapped
+            ? `The first ${ROW_LIMIT} programmes, delivery first and history last.`
+            : null}
+          emptyTitle={deliveryIsUnfiltered
+            ? "No programme is being delivered."
+            : "No programme is being delivered in the scope this account can read."}
+          emptyBody={deliveryIsUnfiltered
+            ? "This account reads the register nationally and it is unfiltered, so the register itself holds nothing — no proposal has yet been turned into a delivery record."
+            : "This list is scope-filtered in the query, so it does not say whether anything is running elsewhere in the federation."}
+          emptyAction={{ label: "Back to the catalogue", href: h("/admin/programs") }}
+        />
       </section>
     </>
   )}
@@ -627,48 +627,23 @@ const modesOf = (t: any) =>
     padding: 20px 22px; border-left: 3px solid var(--gold);
     background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
   }
-  .note-tight { padding: 14px 18px; font-size: .9rem; margin: 0 0 22px; }
 
-  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 22px; }
-  .filters a {
-    padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
-    font-size: .8rem; text-decoration: none; color: var(--muted);
-    text-transform: capitalize; line-height: 1.5;
+  /* Counts and qualifications taken from rows this page read. Deliberately
+     not shaped like a Status chip: one is a number, the other is a state. */
+  .meta-chip {
+    font-size: var(--text-xs); color: var(--muted);
+    border: 1px solid var(--border); border-radius: var(--radius-pill);
+    padding: 3px 10px; line-height: 1.5;
   }
-  .filters a:hover { border-color: var(--gold); }
-  .filters a.on { background: var(--gold); color: #1a1713; border-color: var(--gold); }
 
-  .tbl { width: 100%; border-collapse: collapse; font-size: .9rem; }
-  .tbl th, .tbl td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  .tbl thead th {
-    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase;
-    color: var(--muted); font-weight: 400;
-  }
-  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .tbl .strong { font-family: var(--font-display); white-space: normal; min-width: 18ch; }
-  .tbl .wrap { white-space: normal; min-width: 16ch; }
   .muted { color: var(--muted); }
   code { font-family: var(--font-accent, monospace); font-size: .88em; }
 
-  .flag {
-    display: block; margin-top: 3px; font-size: .72rem; color: var(--red);
-    font-family: var(--font-body, inherit); white-space: normal;
-  }
-  .flag-line { margin: 0 0 8px; font-size: .8rem; color: var(--red); }
-
-  .cap { margin: 14px 0 0; font-size: .85rem; color: var(--muted); line-height: 1.6; max-width: 62ch; }
-
-  .cards { display: none; list-style: none; margin: 0; padding: 0; }
-
+  /* ── Phone (PART AL) ─────────────────────────────────────────────────────
+     Both registers become records below 900px, and DataTable owns that for
+     every register in the federation. This file no longer keeps a second copy
+     of either table in step with the first. */
   @media (max-width: 900px) {
-    .tbl-scroll, .tbl-hint { display: none; }
-    .cards { display: block; }
-    .cards li { padding: 16px 0; border-bottom: 1px solid var(--border); }
-    .c-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 6px; }
-    .c-name { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 10px; }
-    .cards dl { margin: 0; display: grid; gap: 4px; }
-    .cards dl > div { display: grid; grid-template-columns: 12ch 1fr; gap: 10px; font-size: .87rem; }
-    .cards dt { color: var(--muted); }
-    .cards dd { margin: 0; }
+    .cycle { margin-top: 18px; }
   }
 </style>

@@ -5,8 +5,27 @@
 // are scope-filtered in SQL by taskQueue(), so a role-holder sees the work
 // addressed to their role and an institution's coordinator sees only their own
 // institution's.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ADOPTING THE SHARED SYSTEM
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The heading block, the filter pills and the empty and error blocks are now
+// the shared components: AdminShell's `header` (§12), EmptyState and ErrorState.
+// The QUERY IS UNCHANGED — same statuses per view, same overdue predicate, same
+// scope predicate — and `?view=` still means what it meant.
+//
+// WHAT DID NOT BECOME A TABLE, AND WHY. A task is a title, an optional
+// paragraph of detail, a priority and a deadline. The detail is prose: in a
+// table it is either a column that dwarfs the other eight or a column that
+// truncates the one sentence explaining what the task is. §97 asks for one
+// shared table where a page has a table, and this page has a work list. It
+// stays a list.
 
 import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
 import { isConfigured, db } from '@/db';
 import { identify } from '@/lib/session';
 import { canAnywhere } from '@/lib/rbac';
@@ -25,12 +44,18 @@ const view = Astro.url.searchParams.get('view') || 'open';
 
 let rows: any[] = [];
 let counts = { open: 0, overdue: 0, escalated: 0, unassigned: 0 };
-let unavailable: string | null = null;
+
+// One variable used to carry two unrelated facts. A deployment with no
+// DATABASE_URL has not failed at anything, and telling an administrator to
+// retry a query that was never attempted wastes their afternoon.
+const configured = isConfigured();
+let failure: string | null = null;
+// Whether the figures were actually counted. An uncounted zero reads exactly
+// like a counted one, so it is not printed at all.
+let counted = false;
 
 if (principal && canAnywhere(principal, 'task:read')) {
-  if (!isConfigured()) {
-    unavailable = 'The federation database is not reachable from this deployment, so no tasks can be listed.';
-  } else {
+  if (configured) {
     try {
       const status: TaskStatus[] =
         view === 'done' ? ['done'] :
@@ -42,8 +67,9 @@ if (principal && canAnywhere(principal, 'task:read')) {
         limit: 200,
       });
       counts = await taskCounts(db(), principal);
+      counted = true;
     } catch (err: any) {
-      unavailable = String(err?.message ?? err);
+      failure = String(err?.message ?? err);
     }
   }
 }
@@ -62,35 +88,85 @@ const isOverdue = (v: unknown) => {
   const d = fmt(v);
   return !!d && d.getTime() <= now;
 };
+
+const VIEWS: Array<[string, string]> = [
+  ['open', 'Open'],
+  ['overdue', 'Past deadline'],
+  ['done', 'Done'],
+  ['cancelled', 'Cancelled'],
+];
+
+// `current` is passed rather than derived. The bare /admin/tasks IS the open
+// view — `view` defaults to it — and a header left to match the URL would find
+// no `?view=` on that address and mark no tab at all.
+const tabs = VIEWS.map(([value, label]) => ({
+  label,
+  href: `${h('/admin/tasks')}?view=${value}`,
+  current: view === value,
+}));
+
+// The absence is named by which view produced it (§104, CONTENT-ARCHITECTURE
+// §5.4), and every one of them offers a way out.
+const emptyTitle =
+  view === 'overdue' ? 'Nothing has passed a deadline.' :
+  view === 'done' ? 'No task in view has been completed.' :
+  view === 'cancelled' ? 'No task in view has been cancelled.' :
+  'There is no open work in this view.';
+const emptyBody =
+  view === 'done' || view === 'cancelled'
+    ? undefined
+    : 'A task with no deadline is not overdue and never escalates — MMAKF has published no service standard, so most tasks carry no deadline at all. That is deliberate: a deadline nobody agreed to is one the system would then report people as missing.';
+const emptyAction =
+  view === 'open'
+    ? { label: 'Back to the operations console', href: h('/admin') }
+    : { label: 'Open work', href: `${h('/admin/tasks')}?view=open` };
 ---
 
 <AdminShell
   title="Tasks"
   requires="task:read"
   intro="Work the federation owes somebody. Most of it is created automatically — an application to review, a candidate to screen, a coach to confirm."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Tasks', url: h('/admin/tasks') },
+    ],
+    /* No action bar. Nothing in the admin surface claims, completes or
+       reassigns a task — the automation engine writes them and the work is done
+       on the record each one points at. §13 asks for one dominant action where
+       there is one; it does not ask for a button that goes nowhere. */
+    tabs,
+  }}
 >
-  <dl class="stats">
-    <div><dt>Open</dt><dd>{counts.open}</dd></div>
-    <div><dt>Past a deadline</dt><dd class={counts.overdue ? 'warn' : ''}>{counts.overdue}</dd></div>
-    <div><dt>Escalated</dt><dd class={counts.escalated ? 'warn' : ''}>{counts.escalated}</dd></div>
-    <div><dt>Unclaimed</dt><dd>{counts.unassigned}</dd></div>
-  </dl>
+  {/* §12: the page's metadata belongs in its header. Omitted entirely rather
+      than shown as zeroes when there was nothing to count. */}
+  {counted && (
+    <dl class="stats" slot="meta">
+      <div><dt>Open</dt><dd>{counts.open}</dd></div>
+      <div><dt>Past a deadline</dt><dd class={counts.overdue ? 'warn' : ''}>{counts.overdue}</dd></div>
+      <div><dt>Escalated</dt><dd class={counts.escalated ? 'warn' : ''}>{counts.escalated}</dd></div>
+      <div><dt>Unclaimed</dt><dd>{counts.unassigned}</dd></div>
+    </dl>
+  )}
 
-  <nav class="filters" aria-label="Filter tasks">
-    {[['open', 'Open'], ['overdue', 'Past deadline'], ['done', 'Done'], ['cancelled', 'Cancelled']].map(([v, label]) => (
-      <a href={`${h('/admin/tasks')}?view=${v}`} class={view === v ? 'on' : ''}>{label}</a>
-    ))}
-  </nav>
-
-  {unavailable ? (
-    <p class="note" role="alert">{unavailable}</p>
-  ) : rows.length === 0 ? (
-    <p class="note">
-      Nothing here. Note that a task with no deadline is not overdue and never
-      escalates — MMAKF has published no service standard, so most tasks carry
-      no deadline at all. That is deliberate: a deadline nobody agreed to is one
-      the system would then report people as missing.
+  {!configured ? (
+    /* Neither EmptyState nor ErrorState. Nothing failed and the queue is not
+       empty — this deployment has no database to hold a task, which is a fourth
+       kind of absence and is what production renders today. */
+    <p class="unconfigured">
+      The federation database is not reachable from this deployment, so no tasks
+      can be listed. That is not an empty queue and not a failure: the work
+      queue lives in the federation's database, and this deployment has no
+      connection to one.
     </p>
+  ) : failure ? (
+    <ErrorState
+      title="The work queue could not be read."
+      safe="Nothing has been changed. This was a read, so no task was claimed, completed, reassigned or escalated."
+      detail={failure}
+    />
+  ) : rows.length === 0 ? (
+    <EmptyState title={emptyTitle} body={emptyBody} action={emptyAction} />
   ) : (
     <ul class="tasks">
       {rows.map((t) => (
@@ -106,6 +182,11 @@ const isOverdue = (v: unknown) => {
             {t.detail && <p class="t-detail">{t.detail}</p>}
           </div>
           <div class="t-side">
+            {/* The open view holds three statuses — open, in progress and
+                blocked — and told them apart nowhere. A task somebody is
+                already working is not a task waiting to be picked up, and the
+                dictionary is the only thing that draws either. */}
+            <Status value={t.status} domain="task" size="sm" />
             <span class={`pri pri-${t.priority}`}>{t.priority}</span>
             {t.dueAt
               ? <span class={isOverdue(t.dueAt) ? 'due late-txt' : 'due'}>due {dateLabel(t.dueAt)}</span>
@@ -121,7 +202,7 @@ const isOverdue = (v: unknown) => {
 </AdminShell>
 
 <style>
-  .stats { display: flex; flex-wrap: wrap; gap: 0 40px; margin: 0 0 26px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 0 40px; margin: 0; }
   .stats > div { padding: 0 0 4px; }
   .stats dt { font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
   .stats dd {
@@ -130,16 +211,10 @@ const isOverdue = (v: unknown) => {
   }
   .stats .warn { color: var(--red); }
 
-  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 22px; }
-  .filters a {
-    padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
-    font-size: .8rem; text-decoration: none; color: var(--muted);
-  }
-  .filters a.on { background: var(--gold); color: #1a1713; border-color: var(--gold); }
-
-  .note {
-    padding: 20px 22px; border-left: 3px solid var(--gold);
-    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 62ch;
+  .unconfigured {
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 60ch;
   }
 
   .tasks { list-style: none; margin: 0; padding: 0; }

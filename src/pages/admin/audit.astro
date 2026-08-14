@@ -32,6 +32,21 @@
 // is a status.
 //
 // ─────────────────────────────────────────────────────────────────────────────
+// AND THAT IS WHY IT IS NOT THE SHARED TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §97 says one table, and DataTable is it — for anything that is a table. This
+// is not one. An audit entry is a SENTENCE with a supporting diff of variable
+// length: one row changes a status, the next rewrites a 200-character reason,
+// and columns make every row in the register as tall as the longest value in
+// it. The timeline below is kept deliberately.
+//
+// What this page DOES take from the system is everything that is not the list:
+// the §12 header, and the states — a failure is ErrorState, an empty register
+// is EmptyState with a way out, and "no database configured" is neither of
+// those and is said in its own words.
+//
+// ─────────────────────────────────────────────────────────────────────────────
 // SCOPE
 // ─────────────────────────────────────────────────────────────────────────────
 //
@@ -44,12 +59,17 @@
 
 import AdminShell from '@/components/AdminShell.astro';
 import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
 import { isConfigured, db } from '@/db';
 import * as s from '@/db/schema';
 import { desc, eq, and, gte, lte, sql, type SQL } from 'drizzle-orm';
-import { statusOf } from '@/lib/status';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
 
 export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
 
 const q = Astro.url.searchParams;
 const f = {
@@ -66,13 +86,24 @@ const LIMIT = 200;
 
 let rows: any[] = [];
 let total: number | null = null;
-let unavailable: string | null = null;
 let entityTypes: string[] = [];
 let actions: string[] = [];
 
+// ── Two absences, and they are not the same absence ─────────────────────────
+//
+// CONTENT-ARCHITECTURE §5.4 separates "not configured" from "could not be
+// read", and this page used to render both through one string in one box. They
+// need different words and different components: a deployment with no
+// DATABASE_URL has no system of record to read — nothing failed and retrying
+// changes nothing — while a query that threw is a FAILURE, which is what
+// ErrorState is for and what a Retry link belongs on.
+let notConfigured = false;
+let readFailed = false;
+/** The driver's own words, kept for the Details disclosure and never the headline. */
+let failureDetail: string | null = null;
+
 if (!isConfigured()) {
-  unavailable =
-    'The federation’s database is not reachable from this deployment, so the audit log cannot be read.';
+  notConfigured = true;
 } else {
   try {
     const d = db();
@@ -104,7 +135,8 @@ if (!isConfigured()) {
     const ac = await d.selectDistinct({ v: s.auditEvents.action }).from(s.auditEvents);
     actions = ac.map((r: any) => r.v).filter(Boolean).sort();
   } catch (err: any) {
-    unavailable = 'The audit log could not be read.';
+    readFailed = true;
+    failureDetail = String(err?.message ?? err);
   }
 }
 
@@ -193,9 +225,32 @@ const filtered = Boolean(f.entityType || f.action || f.actor || f.entityId || f.
   title="Audit log"
   requires="audit:read"
   intro="Every consequential change the federation has made, with who made it, what it was before, and why."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Audit log', url: h('/admin/audit') },
+    ],
+    /* No tabs. Every other view of this page is a COMBINATION of six filters,
+       and a tab strip that offered two of them would imply the others were
+       secondary. There is also no action bar: nothing on this page writes
+       anything, and §13's one dominant action does not exist here to invent. */
+  }}
 >
-  {unavailable ? (
-    <p class="au-unavailable">{unavailable}</p>
+  {notConfigured ? (
+    /* Deliberately not ErrorState. Nothing failed: this deployment has no
+       database to hold an audit log, so there is nothing to retry and no
+       reassurance to give about what survived. */
+    <p class="au-unconfigured">
+      This deployment has no database configured, so there is no audit log to
+      read here. That is not an empty record and not a failure — the log lives in
+      the federation's database, and this deployment has no connection to one.
+    </p>
+  ) : readFailed ? (
+    <ErrorState
+      title="The audit log could not be read."
+      safe="Nothing has been changed. Reading the log writes nothing to it, and no account can alter a row that is already there."
+      detail={failureDetail}
+    />
   ) : (
     <>
       <section class="au-note" aria-label="About this record">
@@ -248,7 +303,11 @@ const filtered = Boolean(f.entityType || f.action || f.actor || f.entityId || f.
         </div>
         <div class="au-f au-f-actions">
           <button class="btn btn-primary" type="submit">Filter</button>
-          {filtered && <a class="btn btn-ghost" href="/admin/audit">Clear</a>}
+          {/* Query-only, never a rebuilt path. On admin.mmakf.in this page is
+              served at /audit and the middleware rewrites it to /admin/audit
+              internally, so a link written as "/admin/audit" would be rewritten
+              a second time and land on nothing. */}
+          {filtered && <a class="btn btn-ghost" href="?">Clear</a>}
         </div>
       </form>
 
@@ -261,14 +320,22 @@ const filtered = Boolean(f.entityType || f.action || f.actor || f.entityId || f.
       </p>
 
       {rows.length === 0 ? (
-        <div class="au-empty">
-          <p>
-            {filtered
-              ? 'Nothing matches. Try widening the dates or clearing a filter.'
-              : 'The federation has not recorded a change yet. Entries appear here as soon as anybody awards a rank, finalises a result, issues a certificate or approves a quotation.'}
-          </p>
-          {filtered && <a class="btn btn-ghost" href="/admin/audit">Clear filters</a>}
-        </div>
+        /* §104: an empty state carries its own way out. Which way out depends
+           on WHICH emptiness this is — a filter that matched nothing is undone
+           by clearing it, and a log with nothing in it yet cannot be. */
+        filtered ? (
+          <EmptyState
+            title="No recorded change matches these filters."
+            body="The log itself is not empty — these six filters are all applied together, and one of them is excluding the rest."
+            action={{ label: 'Clear filters', href: '?' }}
+          />
+        ) : (
+          <EmptyState
+            title="The federation has not recorded a change yet."
+            body="Entries appear here as soon as anybody awards a rank, finalises a result, issues a certificate or approves a quotation. Nothing has to be switched on for that to happen."
+            action={{ label: 'Back to operations', href: h('/admin') }}
+          />
+        )
       ) : (
         <ol class="au-list">
           {rows.map((r) => {
@@ -331,7 +398,7 @@ const filtered = Boolean(f.entityType || f.action || f.actor || f.entityId || f.
 </AdminShell>
 
 <style>
-  .au-unavailable { color: var(--muted); line-height: var(--leading-relaxed); max-width: 60ch; }
+  .au-unconfigured { color: var(--muted); line-height: var(--leading-relaxed); max-width: 60ch; }
 
   .au-note {
     border-left: 2px solid var(--gold-dim);
@@ -354,14 +421,6 @@ const filtered = Boolean(f.entityType || f.action || f.actor || f.entityId || f.
   .au-f-actions { display: flex; gap: var(--space-2); }
 
   .au-count { color: var(--muted); font-size: var(--text-sm); margin-bottom: var(--space-6); }
-
-  .au-empty {
-    padding: var(--space-12) 0;
-    color: var(--muted);
-    line-height: var(--leading-relaxed);
-    max-width: 60ch;
-  }
-  .au-empty p { margin: 0 0 var(--space-4); }
 
   .au-list { list-style: none; margin: 0; padding: 0; }
 

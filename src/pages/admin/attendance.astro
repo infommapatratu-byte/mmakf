@@ -37,6 +37,25 @@
 // combined with a past session's marks.
 //
 // ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS IS NOT THE SHARED TABLE, AND WHY A MARK IS NOT A STATUS CHIP
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §97's one table is adopted everywhere there is a table. This is not one. A
+// session carries a correction trail — one line per corrected mark, each
+// naming a participant, both readings, who changed it and when — and that trail
+// is the reason this screen exists. A table can hold a session; it cannot hold
+// a session AND the variable-length trail beneath it without either dropping
+// the trail or making every row as tall as the longest one. The trail stays.
+//
+// The session's own status goes through <Status> like every other status in the
+// federation. The MARKS do not, and deliberately: present/absent is a NOT NULL
+// boolean on program_attendance, not a status enum, and the dictionary has
+// `absent` from the grading vocabulary — where it means a candidate did not sit
+// an examination and is terminal and red. Rendering a child's attendance mark
+// in that word's clothing would import a meaning nobody wrote. Marks are
+// printed as the words they are.
+//
+// ─────────────────────────────────────────────────────────────────────────────
 // SCOPE
 // ─────────────────────────────────────────────────────────────────────────────
 //
@@ -55,6 +74,9 @@
 // where the query is built, and this is that place.
 
 import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
 import { isConfigured, db } from '@/db';
 import { identify } from '@/lib/session';
 import { canAnywhere, visibleScopes } from '@/lib/rbac';
@@ -95,13 +117,18 @@ const rolls = new Map<number, { onRoll: number; departed: number }>();
 let sessionsTruncated = false;
 let correctionsTruncated = false;
 let scopeNote: string | null = null;
-let unavailable: string | null = null;
+// Three different absences, told apart (CONTENT-ARCHITECTURE §5.4): a
+// deployment with no system of record, a query that failed, and a register with
+// nothing in it. They were one string in one box; only the middle one is an
+// error, and only the last one is empty.
+let notConfigured = false;
+let readFailed = false;
+/** The driver's own words. Behind Details, never the headline. */
+let failureDetail: string | null = null;
 
 if (principal && canAnywhere(principal, 'attendance:read')) {
   if (!isConfigured()) {
-    unavailable =
-      'The federation database is not reachable from this deployment, so no sessions and no attendance can be listed. ' +
-      'Nothing has been lost — this deployment simply has no DATABASE_URL, and the register lives in the database.';
+    notConfigured = true;
   } else {
     try {
       const scopes = visibleScopes(principal, 'attendance:read');
@@ -271,7 +298,8 @@ if (principal && canAnywhere(principal, 'attendance:read')) {
         }
       }
     } catch (err: any) {
-      unavailable = String(err?.message ?? err);
+      readFailed = true;
+      failureDetail = String(err?.message ?? err);
     }
   }
 }
@@ -365,31 +393,62 @@ const VIEWS: [string, string][] = [
   title="Attendance"
   requires="attendance:read"
   intro="Sessions by programme, and the register taken against each. Where a mark was corrected, the value the coach recorded is shown beside the value it was changed to — or, where the earlier value was not kept, that fact instead."
->
-  <nav class="filters" aria-label="Filter sessions">
-    {VIEWS.map(([v, text]) => (
-      <a
-        href={v ? `${h('/admin/attendance')}?view=${v}` : h('/admin/attendance')}
-        class={view === v ? 'on' : ''}
-        aria-current={view === v ? 'page' : undefined}
-      >{text}</a>
-    ))}
-  </nav>
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Attendance', url: h('/admin/attendance') },
+    ],
+    /* The seven views, as the shared tab strip. They were already real links
+       carrying aria-current, which is why this is the smallest change on the
+       page — what it gains is the strip's own sideways scroll on a phone (the
+       chips used to wrap into four rows above the register), a 44px target on
+       each, and one place that decides which view is current instead of a
+       comparison written out seven times.
 
-  {unavailable ? (
-    <p class="note" role="alert">{unavailable}</p>
+       Query-only hrefs: on admin.mmakf.in this page is served at /attendance
+       and rewritten to /admin/attendance internally, so a rebuilt pathname
+       would be rewritten twice.
+
+       No counts. Six of the seven would have to be counted with six more
+       queries, and a count nobody made is not put on a tab. */
+    tabs: VIEWS.map(([v, text]) => ({ label: text, href: v ? `?view=${v}` : '?' })),
+  }}
+>
+  {notConfigured ? (
+    /* Not ErrorState: nothing failed, and there is nothing to retry. */
+    <p class="note">
+      The federation database is not reachable from this deployment, so no
+      sessions and no attendance can be listed. Nothing has been lost — this
+      deployment simply has no DATABASE_URL, and the register lives in the
+      database.
+    </p>
+  ) : readFailed ? (
+    <ErrorState
+      title="The attendance register could not be read."
+      safe="Nothing has been changed. This was a read, so no mark was recorded, corrected or removed — including the corrections listed on this page, which are appended and never overwritten."
+      detail={failureDetail}
+    />
   ) : scopeNote ? (
     <p class="note">{scopeNote}</p>
   ) : sessions.length === 0 ? (
-    <p class="note">
-      No sessions match. Sessions appear here when a programme is scheduled, and
-      a mark appears against one as soon as a coach or an institution
-      coordinator records it. Two things worth knowing while this is empty: a
-      participant with no mark is unrecorded rather than absent, because the
-      register stores no third value; and the federation has published no
-      standard for when a register must be taken, so a delivered session without
-      one is not late — it is simply untaken, and somebody has to ask for it.
-    </p>
+    <EmptyState
+      title={statusFilter || correctedOnly ? 'No session matches this view.' : 'No session has been recorded yet.'}
+      body="Sessions appear here when a programme is scheduled, and a mark appears against one as soon as a coach or an institution coordinator records it."
+      action={statusFilter || correctedOnly
+        ? { label: 'Show all sessions', href: '?' }
+        : { label: 'Back to operations', href: h('/admin') }}
+    >
+      {/* EmptyState's slot, for the qualification a reader needs before drawing
+          a conclusion from the absence. Two things this page must never let an
+          empty screen imply. */}
+      <p class="empty-more">
+        Two things worth knowing while this is empty. A participant with no mark
+        is unrecorded rather than absent, because the register stores no third
+        value. And the federation has published no standard for when a register
+        must be taken, so a delivered session without one is not late — it is
+        simply untaken, and somebody has to ask for it.
+      </p>
+    </EmptyState>
   ) : (
     <>
       <dl class="stats">
@@ -423,7 +482,9 @@ const VIEWS: [string, string][] = [
             <p class="prog-meta">
               <code>{g.code}</code>
               {g.institution && <> · {g.institution}</>}
-              {g.status && <> · {label(g.status)}</>}
+              {/* domain="program", which is what makes `paused` read as a
+                  decision to halt delivery rather than as a fault. */}
+              {g.status && <> · <Status value={g.status} domain="program" size="sm" bare /></>}
               {g.mode && <> · {label(g.mode)}</>}
               {rolls.has(g.programId) && (
                 <>
@@ -466,7 +527,11 @@ const VIEWS: [string, string][] = [
                     </div>
 
                     <div class="s-side">
-                      <span class={`pill st-${s.status}`}><span class="pill-dot"></span>{label(s.status)}</span>
+                      {/* The one way a status is rendered anywhere in this
+                          codebase. It replaces a local pill that painted
+                          cancelled and no_show the same red — the dictionary
+                          keeps them apart, and says what each one means. */}
+                      <Status value={s.status} domain="session" />
                       {t ? (
                         <p class="reg">
                           <strong>{t.present}</strong> present · <strong>{t.absent}</strong> absent
@@ -536,17 +601,18 @@ const VIEWS: [string, string][] = [
 </AdminShell>
 
 <style>
-  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 22px; }
-  .filters a {
-    padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
-    font-size: .8rem; text-decoration: none; color: var(--muted); line-height: 1.5;
-  }
-  .filters a:hover { border-color: var(--gold); }
-  .filters a.on { background: var(--gold); color: #1a1713; border-color: var(--gold); }
-
   .note {
     padding: 20px 22px; border-left: 3px solid var(--gold);
     background: var(--card); color: var(--muted); line-height: 1.7; max-width: 62ch;
+  }
+  /* Inside EmptyState, which centres its own content to a reading measure. */
+  .empty-more {
+    margin: var(--space-4) 0 0;
+    font-size: var(--text-sm);
+    color: var(--muted);
+    line-height: var(--leading-normal);
+    max-width: 56ch;
+    text-align: left;
   }
   .trunc {
     margin: 0 0 18px; font-size: .84rem; color: var(--muted);
@@ -587,8 +653,6 @@ const VIEWS: [string, string][] = [
   .s-why { margin: 6px 0 0; font-size: .84rem; color: var(--muted); line-height: 1.6; max-width: 62ch; }
 
   .s-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
-  .pill.st-cancelled, .pill.st-no_show { color: var(--red); border-color: var(--red); }
-  .pill.st-delivered { color: var(--gold-2); border-color: var(--gold-dim); }
   .reg { margin: 0; font-size: .84rem; text-align: right; font-variant-numeric: tabular-nums; }
   .reg strong { font-weight: 600; }
   .reg.none { color: var(--gold-2); }

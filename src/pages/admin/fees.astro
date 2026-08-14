@@ -70,6 +70,12 @@
 // request that is not same-origin before this code runs.
 
 import AdminShell from '@/components/AdminShell.astro';
+import PageHeader from '@/components/PageHeader.astro';
+import Status from '@/components/Status.astro';
+import Table from '@/components/DataTable/Table.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import type { Column } from '@/components/DataTable/types';
 import { asc, desc, eq } from 'drizzle-orm';
 import { isConfigured, db } from '@/db';
 import * as s from '@/db/schema';
@@ -468,7 +474,7 @@ if (mayRead && nationalReach && configured) {
     // name and a bound parameter list are facts about the server, not about
     // the person reading the register. Logged in full, summarised on the page.
     console.error('[admin/fees] framework register read failed', err);
-    readError = 'The framework register could not be read. The fault has been logged for the federation office; nothing has been changed.';
+    readError = 'The framework register could not be read.';
   }
 }
 
@@ -497,6 +503,62 @@ const conditionsLabel = (c: unknown) => {
   if (!c || typeof c !== 'object' || !Object.keys(c as object).length) return null;
   return JSON.stringify(c);
 };
+
+// ─── Publishing, and why the control may not be offered ─────────────────────
+//
+// One sentence, computed once, and used in three places: as the reason on the
+// refused header action, in the publish section itself, and nowhere else is
+// allowed to invent a fourth wording. PageHeader renders a refused action as a
+// focusable button carrying its reason rather than removing it, which is the
+// behaviour wanted here — an administrator who cannot publish needs to be told
+// what is missing, not shown a screen with no publish control on it at all.
+const publishRefusal: string | null =
+  !mayPublish
+    ? 'Publishing needs feeframework:publish, which this account does not hold. A draft can be prepared here and somebody who holds that action publishes it.'
+    : !selected
+      ? 'There is no version selected, so there is nothing to publish.'
+      : !selectedIsDraft
+        ? `${selected.code} is ${selected.status} and frozen. A published framework can never be edited or re-published — correcting one means authoring a new version.`
+        : rules.length === 0
+          ? `${selected.code} has no rules. Publishing it would price nothing while appearing on this screen to be configured, so the fee module refuses it.`
+          : null;
+
+/** Why a rule cannot be added, or nothing when one can. */
+const addRuleRefusal: string | null =
+  !mayWrite
+    ? 'Adding a rule needs feeframework:write, which this account does not hold.'
+    : drafts.length === 0
+      ? 'There is no draft to add a rule to. A published version cannot be edited, so changing the rules means authoring a new version.'
+      : null;
+
+// The rules of the selected version. Nine columns, which is why they go through
+// the shared table rather than a hand-written one with a duplicate card list
+// beneath it — DataTable is what turns them into records below 900px.
+//
+// NO COLUMN IS SORTABLE except the order itself. Rules run from the lowest
+// order upwards and multipliers are not commutative, so the sequence IS part of
+// the answer: a reader who re-sorted this table by amount would be looking at
+// an arithmetic that never happens.
+const ruleColumns: Column[] = [
+  { key: 'sortOrder', header: 'Order', numeric: true, sortable: true },
+  { key: 'code', header: 'Code', primary: true },
+  { key: 'label', header: 'Label', primary: true },
+  { key: 'kind', header: 'Kind', render: (r: any) => String(r.kind).replace(/_/g, ' ') },
+  {
+    key: 'amountMinor', header: 'Amount', numeric: true,
+    // The stored integer is shown beside every figure. This screen is where
+    // paise are authored, so the unit is never left to be inferred from a
+    // formatted rupee amount.
+    render: (r: any) => (r.amountMinor == null ? '—' : `${formatINR(r.amountMinor)} (${r.amountMinor} paise)`),
+  },
+  {
+    key: 'factorPpm', header: 'Factor', numeric: true,
+    render: (r: any) => (r.factorPpm == null ? '—' : `×${(r.factorPpm / PPM).toFixed(6)} (${r.factorPpm} ppm)`),
+  },
+  { key: 'audience', header: 'Audience', render: (r: any) => r.audience ?? 'all' },
+  { key: 'conditions', header: 'Conditions', render: (r: any) => conditionsLabel(r.conditions) ?? 'unconditional' },
+  { key: 'requiresApproval', header: 'Approval', render: (r: any) => (r.requiresApproval ? 'required' : 'no') },
+];
 ---
 
 <AdminShell
@@ -523,7 +585,11 @@ const conditionsLabel = (c: unknown) => {
       &ldquo;request a quotation&rdquo;.
     </p>
   ) : readError ? (
-    <p class="note" role="alert">{readError}</p>
+    <ErrorState
+      title="The framework register could not be read."
+      safe="Nothing has been changed. No framework was created, altered or published — this was a read that failed, and every quotation already issued still computes to the figure it was issued at."
+      body="The fault has been logged for the federation office with the detail this page deliberately does not print: a relation name and a bound parameter list are facts about the server, not about the person reading the register."
+    />
   ) : (
     <>
       {/* ── What is in force ────────────────────────────────────────────── */}
@@ -563,10 +629,13 @@ const conditionsLabel = (c: unknown) => {
       <section class="band" aria-labelledby="versions-h">
         <h2 id="versions-h" class="band-h">Versions</h2>
         {frameworks.length === 0 ? (
-          <p class="note">
-            No framework has ever been authored. Not an empty list — nothing
-            exists yet. Create a draft below, give it rules, and publish it.
-          </p>
+          <EmptyState
+            title="No framework has ever been authored."
+            body="Not an empty list — nothing exists yet. Until a version is created here, given rules and published, computeFee() has nothing to price against and every quotation path in the federation ends at “a quotation will be prepared”."
+            action={mayWrite
+              ? { label: 'Author the first version', href: '#new-version' }
+              : { label: 'See what this blocks', href: h('/admin/quotes') }}
+          />
         ) : (
           <ul class="versions">
             {frameworks.map((f) => (
@@ -584,7 +653,11 @@ const conditionsLabel = (c: unknown) => {
                     ? <>{dateLabel(f.effectiveFrom) ?? 'no start'} — {dateLabel(f.effectiveTo) ?? 'no end'}</>
                     : <span class="muted">no window set</span>}
                 </span>
-                <span class={`pill st-${f.status}`}><span class="pill-dot"></span>{f.status}</span>
+                {/* The one way a status is drawn anywhere in this codebase.
+                    The local `.pill st-draft / st-published` this replaced was
+                    a third private opinion about what those two words look
+                    like, and it painted `draft` and `archived` identically. */}
+                <Status value={f.status} />
               </li>
             ))}
           </ul>
@@ -593,98 +666,69 @@ const conditionsLabel = (c: unknown) => {
 
       {/* ── The rules of the selected version ───────────────────────────── */}
       {selected && (
-        <section class="band" aria-labelledby="rules-h">
-          <h2 id="rules-h" class="band-h">{selected.code} — rules</h2>
+        <section class="band" aria-label="Rules of the selected version">
+          {/* AdminShell prints the h1, so this prints an h2 — a page with two
+              h1s gives a screen-reader user two competing titles. It does not
+              stick: it heads a section, and a sticky band here would cover the
+              version list a reader scrolls back to.
 
-          <p class="band-p">
-            {selected.status === 'draft' ? (
-              <>This version is a draft. It prices nothing: <code>computeFee()</code> refuses
-              any framework that is not published, because quoting from a draft would produce
-              a figure the federation has not approved.</>
-            ) : (
-              <>This version is {selected.status} and frozen. Its rules can no longer be changed —
-              every quotation issued under it must keep computing to the figure it was issued at.
-              A change means a new version.</>
-            )}
-            {selected.notes ? <> {selected.notes}</> : null}
-          </p>
+              THE PUBLISH CONTROL LIVES HERE as the one dominant action, and it
+              is marked `danger` and labelled irreversible IN WORDS as well as
+              in colour. When it cannot be taken it is rendered as a refused
+              button carrying the reason rather than removed, because an
+              administrator who cannot publish needs to be told what is missing
+              — not handed a screen with no publish control on it at all. */}
+          <PageHeader
+            title={selected.code}
+            headingLevel="h2"
+            sticky={false}
+            description={selected.status === 'draft'
+              ? `${selected.title}. This version is a draft: it prices nothing, because computeFee() refuses any framework that is not published — quoting from a draft would produce a figure the federation has not approved. Publishing it cannot be undone.`
+              : `${selected.title}. This version is ${selected.status} and frozen. Its rules can no longer be changed: every quotation issued under it must keep computing to the figure it was issued at, so a change means a new version.`}
+            primary={{
+              label: 'Publish — irreversible',
+              href: '#publish',
+              danger: true,
+              unavailable: publishRefusal ?? undefined,
+            }}
+            secondary={[
+              {
+                label: 'Add a rule',
+                href: '#new-rule',
+                unavailable: addRuleRefusal ?? undefined,
+              },
+              { label: 'Author a new version', href: '#new-version' },
+            ]}
+          >
+            <Fragment slot="meta">
+              <Status value={selected.status} />
+              <span class="meta-chip">
+                {rules.length} {rules.length === 1 ? 'rule' : 'rules'}
+              </span>
+              <span class="meta-chip">
+                {selected.effectiveFrom || selected.effectiveTo
+                  ? `${dateLabel(selected.effectiveFrom) ?? 'no start'} — ${dateLabel(selected.effectiveTo) ?? 'no end'}`
+                  : 'no effective window set'}
+              </span>
+            </Fragment>
+          </PageHeader>
 
-          {rules.length === 0 ? (
-            <p class="note">
-              This version has no rules, so it prices nothing. Publishing it in
-              this state is refused outright: an empty published framework would
-              send every request to &ldquo;requires a quotation&rdquo; while
-              appearing on this screen to be configured.
-            </p>
-          ) : (
-            <>
-              <p class="tbl-hint">Scroll the table sideways to see every column.</p>
-              <div class="tbl-scroll">
-                <table class="tbl">
-                  <caption class="sr-only">Rules in {selected.code}, in the order they are applied</caption>
-                  <thead>
-                    <tr>
-                      <th scope="col">Order</th>
-                      <th scope="col">Code</th>
-                      <th scope="col">Label</th>
-                      <th scope="col">Kind</th>
-                      <th scope="col">Amount</th>
-                      <th scope="col">Factor</th>
-                      <th scope="col">Audience</th>
-                      <th scope="col">Conditions</th>
-                      <th scope="col">Approval</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rules.map((r) => (
-                      <tr>
-                        <td class="num">{r.sortOrder}</td>
-                        <td><code>{r.code}</code></td>
-                        <td class="strong">{r.label}</td>
-                        <td>{String(r.kind).replace(/_/g, ' ')}</td>
-                        <td class="num">
-                          {r.amountMinor == null
-                            ? <span class="muted">—</span>
-                            : <><span class="figure">{formatINR(r.amountMinor)}</span><span class="minor">{r.amountMinor} paise</span></>}
-                        </td>
-                        <td class="num">
-                          {r.factorPpm == null
-                            ? <span class="muted">—</span>
-                            : <><span class="figure">×{(r.factorPpm / PPM).toFixed(6)}</span><span class="minor">{r.factorPpm} ppm</span></>}
-                        </td>
-                        <td>{r.audience ?? <span class="muted">all</span>}</td>
-                        <td>{conditionsLabel(r.conditions) ? <code>{conditionsLabel(r.conditions)}</code> : <span class="muted">unconditional</span>}</td>
-                        <td>{r.requiresApproval ? 'required' : <span class="muted">no</span>}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+          {selected.notes && <p class="band-p">{selected.notes}</p>}
 
-              {/* On a phone nine columns are unreadable however far they slide,
-                  so the same rules are recomposed as records. PART AL. */}
-              <ul class="cards" aria-label={`Rules in ${selected.code}`}>
-                {rules.map((r) => (
-                  <li>
-                    <p class="c-top"><code>{r.code}</code><span class="muted">order {r.sortOrder}</span></p>
-                    <p class="c-name">{r.label}</p>
-                    <dl>
-                      <div><dt>Kind</dt><dd>{String(r.kind).replace(/_/g, ' ')}</dd></div>
-                      {r.amountMinor != null && (
-                        <div><dt>Amount</dt><dd>{formatINR(r.amountMinor)} <span class="muted">({r.amountMinor} paise)</span></dd></div>
-                      )}
-                      {r.factorPpm != null && (
-                        <div><dt>Factor</dt><dd>×{(r.factorPpm / PPM).toFixed(6)} <span class="muted">({r.factorPpm} ppm)</span></dd></div>
-                      )}
-                      <div><dt>Audience</dt><dd>{r.audience ?? 'all'}</dd></div>
-                      <div><dt>Conditions</dt><dd>{conditionsLabel(r.conditions) ?? 'unconditional'}</dd></div>
-                      <div><dt>Approval</dt><dd>{r.requiresApproval ? 'required' : 'no'}</dd></div>
-                    </dl>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
+          <Table
+            id="fee-rules"
+            caption={`Rules in ${selected.code}, in the order they are applied`}
+            columns={ruleColumns}
+            rows={rules}
+            paramPrefix="r"
+            defaultSort={{ key: 'sortOrder', dir: 'asc' }}
+            note="Rules run from the lowest order upwards, and multipliers are not commutative — the sequence is part of the answer."
+            emptyTitle="This version has no rules, so it prices nothing."
+            emptyBody="Publishing it in this state is refused outright: an empty published framework would send every request to “requires a quotation” while appearing on this screen to be configured."
+            emptyAction={addRuleRefusal
+              ? { label: 'Author a new version', href: '#new-version' }
+              : { label: 'Add the first rule', href: '#new-rule' }}
+          />
         </section>
       )}
 
@@ -698,7 +742,7 @@ const conditionsLabel = (c: unknown) => {
         </p>
       ) : (
         <>
-          <section class="band" aria-labelledby="new-fw-h">
+          <section class="band" id="new-version" aria-labelledby="new-fw-h">
             <h2 id="new-fw-h" class="band-h">Author a new version</h2>
             <p class="band-p">
               A new version starts as a draft and prices nothing until it is
@@ -731,7 +775,7 @@ const conditionsLabel = (c: unknown) => {
             </form>
           </section>
 
-          <section class="band" aria-labelledby="new-rule-h">
+          <section class="band" id="new-rule" aria-labelledby="new-rule-h">
             <h2 id="new-rule-h" class="band-h">Add a rule to a draft</h2>
 
             {drafts.length === 0 ? (
@@ -869,7 +913,7 @@ const conditionsLabel = (c: unknown) => {
           </section>
 
           {/* ── Publishing ────────────────────────────────────────────────── */}
-          <section class="band band-danger" aria-labelledby="publish-h">
+          <section class="band band-danger" id="publish" aria-labelledby="publish-h">
             <h2 id="publish-h" class="band-h">Publish</h2>
 
             <div class="warn">
@@ -890,26 +934,13 @@ const conditionsLabel = (c: unknown) => {
               </p>
             </div>
 
-            {!mayPublish ? (
-              <p class="note">
-                Publishing needs <code>feeframework:publish</code>, which this
-                account does not hold. A draft can be prepared here and somebody
-                who holds it publishes.
-              </p>
-            ) : !publishTarget ? (
-              <p class="note">
-                {selected
-                  ? <>{selected.code} is {selected.status}, so there is nothing to publish. Select a draft version above.</>
-                  : <>There is no draft to publish.</>}
-              </p>
-            ) : rules.length === 0 ? (
-              <p class="note">
-                {publishTarget.code} has no rules. Publishing is refused while
-                that is true: the framework would price nothing and every request
-                would fall through to a manual quotation, while this screen
-                showed a published framework.
-              </p>
-            ) : (
+            {/* ONE WORDING, computed once above and used both here and as the
+                reason on the refused header action. Two hand-written versions
+                of the same refusal drift, and a reader who sees them disagree
+                cannot tell which is the rule. */}
+            {publishRefusal ? (
+              <p class="note">{publishRefusal}</p>
+            ) : publishTarget && (
               <form method="post" class="form">
                 <input type="hidden" name="action" value="publish" />
                 <input type="hidden" name="frameworkId" value={publishTarget.id} />
@@ -918,7 +949,12 @@ const conditionsLabel = (c: unknown) => {
                   <p class="field">
                     <label class="input-label" for="p-confirm">Type <code>{publishTarget.code}</code> to publish it</label>
                     <input class="input" id="p-confirm" name="confirm" autocomplete="off" required />
-                    <span class="help">{rules.length} rule{rules.length === 1 ? '' : 's'} will be frozen.</span>
+                    <span class="help">
+                      {rules.length} rule{rules.length === 1 ? '' : 's'} will be
+                      frozen, permanently. There is no unpublish, no edit and no
+                      undo — the only correction available afterwards is a new
+                      version.
+                    </span>
                   </p>
                   <p class="field field-wide">
                     <label class="input-label" for="p-reason">On whose authority</label>
@@ -972,26 +1008,17 @@ const conditionsLabel = (c: unknown) => {
   .v-code { font-family: var(--font-accent, monospace); font-size: .86rem; color: var(--gold-2); white-space: nowrap; }
   .v-title { color: var(--muted); font-size: .92rem; overflow: hidden; text-overflow: ellipsis; }
   .v-when { font-size: .78rem; color: var(--muted); white-space: nowrap; }
-  .st-draft { color: var(--muted); }
-  .st-published { color: var(--gold-2); border-color: var(--gold-dim); }
-
-  .tbl-scroll { overflow-x: auto; }
-  .tbl { width: 100%; border-collapse: collapse; font-size: .9rem; }
-  .tbl th, .tbl td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: top; }
-  .tbl thead th {
-    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase;
-    color: var(--muted); font-weight: 400;
+  /* Counts and windows taken from rows this page read. Deliberately not
+     shaped like a Status chip: one is a number, the other is a state, and a
+     reader who learns to read them as the same thing will misread both. */
+  .meta-chip {
+    font-size: var(--text-xs); color: var(--muted);
+    border: 1px solid var(--border); border-radius: var(--radius-pill);
+    padding: 3px 10px; line-height: 1.5;
   }
-  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .tbl .strong { font-family: var(--font-display); white-space: normal; min-width: 16ch; }
-  .figure { display: block; }
-  /* The stored integer is shown under every figure. This screen is where paise
-     are authored, so the unit is never left to be inferred from a formatted
-     rupee amount. */
-  .minor { display: block; font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
   .muted { color: var(--muted); }
   code { font-family: var(--font-accent, monospace); font-size: .88em; }
-  .tbl-hint { font-size: .78rem; color: var(--muted); margin: 0 0 8px; }
 
   .units {
     margin: 0 0 22px; padding: 16px 20px; background: var(--bg-2);
@@ -1023,23 +1050,11 @@ const conditionsLabel = (c: unknown) => {
   .warn p:first-child { color: var(--red); }
   .warn p:last-child { margin-bottom: 0; }
 
-  .cards { display: none; list-style: none; margin: 0; padding: 0; }
-
-  /* ── Phone (PART AL) ──────────────────────────────────────────────────────
-     Nine columns cannot be read inside a 360px viewport however far they
-     slide, so the rules are recomposed as records. */
+  /* ── Phone (PART AL) ─────────────────────────────────────────
+     The nine rule columns become records below 900px, and DataTable owns that
+     behaviour for every register in the federation. This file no longer keeps
+     a second copy of the rules in step with the first. */
   @media (max-width: 900px) {
-    .tbl-scroll, .tbl-hint { display: none; }
-    .cards { display: block; }
-    .cards li { padding: 16px 0; border-bottom: 1px solid var(--border); }
-    .c-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 6px; }
-    .c-name { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 10px; }
-    .cards dl { margin: 0; display: grid; gap: 4px; }
-    .cards dl > div { display: grid; grid-template-columns: 11ch 1fr; gap: 10px; font-size: .87rem; }
-    .cards dt { color: var(--muted); }
-    .cards dd { margin: 0; }
-
-    .versions li { flex-wrap: wrap; gap: 6px 12px; }
     .field, .field-sm { flex: 1 1 100%; }
     .k-name { display: block; min-width: 0; margin-bottom: 2px; }
     .btn { width: 100%; }

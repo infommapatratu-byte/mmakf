@@ -18,14 +18,39 @@
 // "Forbidden" sends an administrator to ask somebody who also does not know.
 // The refusal here names the action, which is the thing whoever grants roles
 // actually needs to hear.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHO PRINTS THE <h1>
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// This component always has. That was right while the shell was the only thing
+// that knew a page had a title, and it is wrong now that §12 asks every
+// authenticated page to open with a breadcrumb, a title, a description, its
+// metadata, its one primary action and its tabs — none of which the shell can
+// supply, because only the page knows them.
+//
+// So `header` hands that whole block to PageHeader, and THE SHELL THEN PRINTS
+// NO TITLE OF ITS OWN. It is one prop rather than a boolean for a reason: a
+// boolean would let a page switch the shell's heading off and then forget to
+// render a header, leaving a surface with no h1 at all and no test able to see
+// it. Here the two cannot come apart — either this component prints the h1 or
+// the component it renders in its place does, and there is no third path.
+//
+// The twenty-six pages that predate PageHeader pass nothing and are unchanged.
 
 import Base from '@/layouts/Base.astro';
+import PageHeader from '@/components/PageHeader.astro';
+import type { Props as PageHeaderProps } from '@/components/PageHeader.astro';
 import { identify } from '@/lib/session';
 import { canAnywhere, type Action, type Principal } from '@/lib/rbac';
 import { adminNavFor, href as surfaceHref, type Surface } from '@/lib/surface';
 import OperationsBar from '@/components/OperationsBar.astro';
 
 export interface Props {
+  /**
+   * The module. Always the document title; also the visible heading unless
+   * `header` supplies its own.
+   */
   title: string;
   /** The action this module needs. The page is refused without it. */
   requires: Action;
@@ -38,9 +63,19 @@ export interface Props {
    * that passes nothing gets the global palette, which is what it had before.
    */
   entity?: any;
+  /**
+   * §12's page header, rendered in place of the shell's own title block.
+   *
+   * `headingLevel` is not offered: this is the page's h1 and nothing else is.
+   * `title` defaults to the module title and `description` to `intro`, so a
+   * page adopting the header does not restate what it has already said.
+   *
+   * Counts and status chips go in the `meta` slot, which is forwarded through.
+   */
+  header?: Omit<PageHeaderProps, 'title' | 'headingLevel'> & { title?: string };
 }
 
-const { title, requires, intro, entity = null } = Astro.props;
+const { title, requires, intro, entity = null, header } = Astro.props;
 
 const identity = await identify(Astro.request.headers.get('cookie'));
 const principal: Principal | null = identity?.principal ?? null;
@@ -117,10 +152,34 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
           </section>
         ) : (
           <>
-            <header class="ad-head">
-              <h1 class="display-2">{title}</h1>
-              {intro && <p class="ad-lede">{intro}</p>}
-            </header>
+            {header ? (
+              /* The meta slot is forwarded only when the page filled it.
+                 Forwarding unconditionally would make Astro.slots.has('meta')
+                 true inside PageHeader on every page, and it would draw an
+                 empty metadata row under every title. */
+              Astro.slots.has('meta') ? (
+                <PageHeader
+                  {...header}
+                  title={header.title ?? title}
+                  description={header.description ?? intro}
+                  headingLevel="h1"
+                >
+                  <slot name="meta" slot="meta" />
+                </PageHeader>
+              ) : (
+                <PageHeader
+                  {...header}
+                  title={header.title ?? title}
+                  description={header.description ?? intro}
+                  headingLevel="h1"
+                />
+              )
+            ) : (
+              <header class="ad-head">
+                <h1 class="display-2">{title}</h1>
+                {intro && <p class="ad-lede">{intro}</p>}
+              </header>
+            )}
             <slot />
           </>
         )}
@@ -163,6 +222,23 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
   }
 
   .ad-head { margin-bottom: 26px; }
+
+  /* Where a page supplies its own PageHeader, the shell owns two things the
+     header cannot know from inside itself.
+
+     The first is where "stuck" is. PageHeader defaults to the 96px band
+     global.css reserves with scroll-padding-top; this shell parks its sidebar
+     at 92px because that is where its own chrome ends, and a header that stopped
+     four pixels lower than the column beside it would read as a misalignment
+     rather than as a decision.
+
+     The second is the gap beneath it. A header that reserved its own bottom
+     margin would reserve it wherever it was used, including where it is not the
+     top of a column — so the space belongs to whatever places it, which here is
+     this shell. :global() because the element is rendered by PageHeader and
+     carries PageHeader's scope, not this file's. */
+  .ad-main { --ph-sticky-top: 92px; }
+  .ad-main > :global(header[data-page-header]) { margin-bottom: var(--space-6); }
   .ad-lede { color: var(--muted); line-height: 1.7; max-width: 62ch; margin: 12px 0 0; }
   .ad-refuse { padding: 40px 0; }
   .ad-refuse code {
