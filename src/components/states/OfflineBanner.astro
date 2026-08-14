@@ -45,6 +45,15 @@
 // from first render. A live region inserted or unhidden at the moment of the
 // change is not reliably announced, which is exactly the moment that matters.
 //
+// ─────────────────────────────────────────────────────────────────────────────
+// FOCUS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// This is not an overlay: it never takes focus, so there is no trap, no Escape
+// binding — Escape belongs to whatever real dialog may be open — and no trigger
+// to restore focus to. But it does have one focusable control, and hiding a
+// card while that control holds focus is itself a focus change. See `hide()`.
+//
 //   <OfflineBanner />
 //   <OfflineBanner stillWorks={['The draw sheet you already opened.']} />
 
@@ -125,47 +134,82 @@ const {
 </div>
 
 <script>
-  // One script for however many banners a page renders — Astro bundles this
-  // block once, so it must not assume a single instance.
+  // Astro bundles this block once per page, so it must cope with however many
+  // banners the page happens to contain.
   const roots = Array.from(
     document.querySelectorAll<HTMLElement>('[data-offline-banner]')
   );
 
-  if (roots.length > 0) {
+  // Two banners on one page — a layout that renders one and a page that renders
+  // another — would stack two identical fixed cards in exactly the same place
+  // and announce the same sentence through two live regions at once. That is
+  // the live-region equivalent of a duplicate id, and it is loudest for the
+  // reader least able to work out what happened. Only the first is driven; the
+  // rest are silenced and left closed. They are not removed from the document,
+  // because deleting another author's markup is not this component's business.
+  const root = roots[0];
+  for (const spare of roots.slice(1)) {
+    const card = spare.querySelector<HTMLElement>('[data-ob-card]');
+    if (card) card.hidden = true;
+    const live = spare.querySelector<HTMLElement>('[data-ob-live]');
+    if (live) { live.removeAttribute('role'); live.removeAttribute('aria-live'); }
+  }
+
+  if (root) {
+    const card = root.querySelector<HTMLElement>('[data-ob-card]');
+    const off = root.querySelector<HTMLElement>('[data-ob-offline]');
+    const on = root.querySelector<HTMLElement>('[data-ob-online]');
+    const live = root.querySelector<HTMLElement>('[data-ob-live]');
+
     // Whether the reader has actually been offline this session. Without it,
     // the `online` event that some browsers fire on load would open a "Back
     // online" card at somebody who never lost anything.
     let wasOffline = false;
-    let hideTimer: ReturnType<typeof setTimeout> | undefined;
+    let hideTimer: ReturnType<typeof window.setTimeout> | undefined;
 
     const show = (mode: 'offline' | 'restored') => {
-      for (const root of roots) {
-        const card = root.querySelector<HTMLElement>('[data-ob-card]');
-        const off = root.querySelector<HTMLElement>('[data-ob-offline]');
-        const on = root.querySelector<HTMLElement>('[data-ob-online]');
-        const live = root.querySelector<HTMLElement>('[data-ob-live]');
-        if (!card || !off || !on) continue;
+      if (!card || !off || !on) return;
 
-        const active = mode === 'offline' ? off : on;
-        off.hidden = mode !== 'offline';
-        on.hidden = mode !== 'restored';
-        card.hidden = false;
+      const active = mode === 'offline' ? off : on;
+      off.hidden = mode !== 'offline';
+      on.hidden = mode !== 'restored';
+      card.hidden = false;
 
-        // Setting the same string twice would not be re-announced, and the two
-        // states never share one, so no cache-busting hack is needed.
-        if (live) live.textContent = active.getAttribute('data-announce') ?? '';
-      }
+      // Setting the same string twice would not be re-announced, and the two
+      // states never share one, so no cache-busting hack is needed.
+      if (live) live.textContent = active.getAttribute('data-announce') ?? '';
     };
 
     const hide = () => {
-      for (const root of roots) {
-        const card = root.querySelector<HTMLElement>('[data-ob-card]');
-        const live = root.querySelector<HTMLElement>('[data-ob-live]');
-        if (card) card.hidden = true;
-        // Cleared so a later announcement of the same words is treated as a
-        // change rather than as no change at all.
-        if (live) live.textContent = '';
+      if (!card) return;
+
+      // Hiding the card while Dismiss inside it holds focus drops focus onto
+      // <body>, and the reader's next Tab restarts at the top of the document —
+      // which for a keyboard or switch user is the whole page again. It happens
+      // two ways: pressing Dismiss, and the restored card timing out while the
+      // reader has tabbed to it.
+      //
+      // There is no trigger to restore focus to; nobody opened this. Focus goes
+      // instead to the banner's own wrapper, which stays in the document at the
+      // same point in the tab order, so the next Tab carries on from where the
+      // reader was. preventScroll matters: the wrapper sits at the end of the
+      // body, and focusing it normally would yank the viewport to the bottom of
+      // the page. The tabindex is dropped again on blur so the wrapper never
+      // becomes a tab stop of its own.
+      if (document.activeElement && card.contains(document.activeElement)) {
+        root.setAttribute('tabindex', '-1');
+        root.focus({ preventScroll: true });
+        root.addEventListener(
+          'blur',
+          () => root.removeAttribute('tabindex'),
+          { once: true }
+        );
       }
+
+      card.hidden = true;
+      // Cleared so a later announcement of the same words is treated as a
+      // change rather than as no change at all.
+      if (live) live.textContent = '';
     };
 
     const goOffline = () => {
@@ -180,21 +224,19 @@ const {
       show('restored');
       // The restored card is a confirmation, not a state. It removes itself,
       // because a notice that outlives the condition it reports is noise.
-      hideTimer = setTimeout(hide, 6000);
+      hideTimer = window.setTimeout(hide, 6000);
     };
 
     window.addEventListener('offline', goOffline);
     window.addEventListener('online', goOnline);
 
-    for (const root of roots) {
-      root.querySelector<HTMLButtonElement>('[data-ob-dismiss]')
-        ?.addEventListener('click', () => {
-          if (hideTimer) clearTimeout(hideTimer);
-          hide();
-          // Dismissal ends this notice only. Losing the connection again is a
-          // new fact and says so again.
-        });
-    }
+    root.querySelector<HTMLButtonElement>('[data-ob-dismiss]')
+      ?.addEventListener('click', () => {
+        if (hideTimer) clearTimeout(hideTimer);
+        hide();
+        // Dismissal ends this notice only. Losing the connection again is a
+        // new fact and says so again.
+      });
 
     // The page may well have been served from the cache while already offline.
     if (navigator.onLine === false) goOffline();
@@ -202,6 +244,25 @@ const {
 </script>
 
 <style>
+  /* A focus waypoint, not a control. Focus only ever lands here at the instant
+     the card closes underneath it, and this wrapper is a zero-height block, so
+     a ring would draw a full-width line across the page instead of pointing at
+     anything. The signal that something happened is the card disappearing; the
+     next Tab lands on a real control with the site's own visible ring. */
+  .ob:focus { outline: none; }
+
+  /* The ring belongs on the thing a person can see.
+     The wrapper above genuinely should not draw one — it is a zero-height
+     block and a ring on it is a full-width line pointing at nothing. But
+     "no ring on the wrapper" is not the same as "no ring", and the card IS
+     focusable: it holds the retry control and a keyboard user reaches it.
+     WCAG 2.4.7 is satisfied here, on the element with dimensions, rather
+     than abandoned because the wrapper was the wrong place for it. */
+  .ob-card:focus-visible {
+    outline: 2px solid var(--gold-2);
+    outline-offset: 2px;
+  }
+
   .ob-card {
     position: fixed;
     left: 50%;

@@ -107,17 +107,25 @@ const retry = retryHref === null
 const hasTechnical = Boolean(errorId || detail);
 ---
 
-<div
-  class:list={['er', className]}
-  role={alert ? 'alert' : undefined}
->
-  <p class="er-title">{title}</p>
+<div class:list={['er', className]}>
+  {/* role="alert" is on the PROSE, not on the card.
+      An alert carries an implicit aria-live="assertive" and aria-atomic="true":
+      any change anywhere inside it makes assistive technology interrupt the
+      reader and re-read the whole region. When the card itself was the alert,
+      three ordinary interactions did exactly that — opening Details, pressing
+      Copy, and the Copy label resetting itself four seconds later, which
+      re-read the entire failure at somebody who had already moved on. Scoping
+      the role to the sentences that are worth interrupting for leaves the
+      controls, the disclosure and the copy confirmation outside it. */}
+  <div class="er-say" role={alert ? 'alert' : undefined}>
+    <p class="er-title">{title}</p>
 
-  {/* The reassurance sits directly under the headline, above everything else,
-      because it answers the question the reader already has. */}
-  <p class="er-safe">{safe}</p>
+    {/* The reassurance sits directly under the headline, above everything else,
+        because it answers the question the reader already has. */}
+    <p class="er-safe">{safe}</p>
 
-  {body && <p class="er-body">{body}</p>}
+    {body && <p class="er-body">{body}</p>}
+  </div>
 
   {/* The offline route, a caveat, whatever the page needs to add. */}
   <slot />
@@ -139,8 +147,20 @@ const hasTechnical = Boolean(errorId || detail);
             <code class="er-ref-value">{errorId}</code>
             {/* JS-only accelerator, and correctly so: the reference is
                 selectable text without it. Hidden until a script has proved the
-                clipboard exists, so a dead button never renders. */}
-            <button type="button" class="er-copy" data-err-copy={errorId} hidden>Copy</button>
+                clipboard exists, so a dead button never renders.
+
+                The label the eye reads changes (Copy → Copied → Copy); the name
+                assistive technology reads does not. Keeping the accessible name
+                fixed means the outcome is reported once, by the live region
+                below, rather than twice — and means the four-second reset is
+                not a second announcement of a button nobody asked about. */}
+            <button
+              type="button"
+              class="er-copy"
+              data-err-copy={errorId}
+              aria-label="Copy the reference"
+              hidden
+            ><span data-err-copy-label aria-hidden="true">Copy</span></button>
           </p>
         )}
         {detail && <pre class="er-detail">{detail}</pre>}
@@ -164,20 +184,28 @@ const hasTechnical = Boolean(errorId || detail);
   if (buttons.length > 0 && navigator.clipboard) {
     for (const btn of buttons) {
       btn.hidden = false;
+      // Only the visible span is rewritten — never btn.textContent, which would
+      // destroy the span and with it the fixed accessible name.
+      const face = btn.querySelector<HTMLElement>('[data-err-copy-label]') ?? btn;
+      // One timer per button, cleared on each press, so a second press does not
+      // inherit the first press's pending reset.
+      let reset: ReturnType<typeof window.setTimeout> | undefined;
+
       btn.addEventListener('click', async () => {
         const value = btn.getAttribute('data-err-copy') ?? '';
         const live = btn.closest('.er')?.querySelector<HTMLElement>('[data-err-copied]');
         try {
           await navigator.clipboard.writeText(value);
-          btn.textContent = 'Copied';
+          face.textContent = 'Copied';
           if (live) live.textContent = 'Reference copied to the clipboard.';
         } catch {
           // A refused clipboard is not a second failure to shout about. Say
           // plainly that it did not happen; the reference is still on screen.
-          btn.textContent = 'Copy failed';
+          face.textContent = 'Copy failed';
           if (live) live.textContent = 'The reference could not be copied. Select it to copy it by hand.';
         }
-        window.setTimeout(() => { btn.textContent = 'Copy'; }, 4000);
+        if (reset) clearTimeout(reset);
+        reset = window.setTimeout(() => { face.textContent = 'Copy'; }, 4000);
       });
     }
   }

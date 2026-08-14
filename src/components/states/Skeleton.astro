@@ -39,10 +39,24 @@
 // A table skeleton of six rows by five columns is thirty-six empty elements. A
 // screen reader walking them announces nothing useful thirty-six times, which is
 // materially worse than silence. So every shimmering box is inside one
-// aria-hidden subtree, and the operation is announced ONCE through a single
-// visually-hidden live region. `aria-busy` on the wrapper tells assistive
-// technology the region is not finished, which is the honest machine-readable
-// version of what the shimmer says to the eye.
+// aria-hidden subtree, and the operation is carried ONCE by a single
+// visually-hidden region. `aria-busy` tells assistive technology the region is
+// not finished, which is the honest machine-readable version of what the
+// shimmer says to the eye.
+//
+// The live region sits OUTSIDE the aria-busy wrapper, and that is not tidiness.
+// aria-busy="true" instructs assistive technology to withhold updates from the
+// subtree until it goes false — and this wrapper never goes false, because the
+// skeleton is replaced wholesale rather than filled in. A live region nested
+// inside it is therefore muted for the entire time it exists.
+//
+// Be honest about what the region can and cannot do. A live region is announced
+// when its contents CHANGE; content already present when the page loads is not.
+// This component is server-rendered, so on a first paint the sentence is read
+// when the reader navigates to it, not spoken at them. The region earns its
+// place for the other case — a skeleton swapped in client-side — and for the
+// rest it is simply the only text in the component that assistive technology is
+// allowed to reach.
 //
 //   <Skeleton label="Loading the register" variant="table" rows={6} columns={5} />
 //   <Skeleton label="Processing registration" variant="form" rows={4} />
@@ -73,7 +87,9 @@ export interface Props {
   visibleLabel?: boolean;
   /**
    * Emit the live region. Turn OFF when an ancestor already announces this wait
-   * — two live regions for one operation talk over each other.
+   * — two live regions for one operation talk over each other. With it off the
+   * visible label stops being aria-hidden, so the operation is still reachable
+   * as ordinary text rather than the component going completely silent.
    */
   announce?: boolean;
   class?: string;
@@ -107,11 +123,13 @@ const itemList = Array.from({ length: Math.max(1, count) }, (_, i) => i);
 const waiting = `${label.replace(/[.…\s]+$/, '')}…`;
 ---
 
-<div class:list={['sk', className]} aria-busy="true" data-skeleton>
+<div class:list={['sk', className]} data-skeleton>
   {announce && <p class="sr-only" role="status">{waiting}</p>}
-  {visibleLabel && <p class="sk-label" aria-hidden="true">{waiting}</p>}
 
-  <div class="sk-shape" aria-hidden="true">
+  <div class="sk-busy" aria-busy="true">
+    {visibleLabel && <p class="sk-label" aria-hidden={announce ? 'true' : undefined}>{waiting}</p>}
+
+    <div class="sk-shape" aria-hidden="true">
     {variant === 'text' && rowList.map((i) => (
       <span
         class="sk-b sk-line"
@@ -204,10 +222,14 @@ const waiting = `${label.replace(/[.…\s]+$/, '')}…`;
       </div>
     )}
   </div>
+  </div>
 </div>
 
 <style>
   .sk { min-width: 0; }
+  /* Carries aria-busy so the live region above can sit outside it. Layout is
+     unchanged: both are plain blocks. */
+  .sk-busy { min-width: 0; }
 
   .sk-label {
     font-family: var(--font-display);

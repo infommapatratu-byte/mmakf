@@ -715,6 +715,18 @@ const chordRows = chords.map((c) => {
       if (event.key === 'Tab') trap(event, [helpClose, helpBody]);
     });
 
+    // Opened from somewhere that is not the keyboard — the header's Ctrl+K
+    // button, or any future control that wants to offer it.
+    //
+    // An event rather than a shared reference, because the header and the
+    // palette are separate components that must not import each other: the
+    // header is rendered on surfaces where the palette may not be mounted, and
+    // there nothing listens and nothing happens, which is correct rather than
+    // an error.
+    document.addEventListener('mmakf:command-palette:open', () => {
+      if (!isOpen()) openPalette();
+    });
+
     document.addEventListener('keydown', (event) => {
       // Taken deliberately. Ctrl+K and Cmd+K are the palette everywhere, and
       // the browser binding they displace (Firefox's search bar) has an address

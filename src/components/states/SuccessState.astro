@@ -78,25 +78,46 @@ const {
 } = Astro.props;
 ---
 
-<div
-  class:list={['ok', className]}
-  role={announce ? 'status' : undefined}
-  aria-live={announce ? 'polite' : undefined}
->
-  <p class="ok-title">{title}</p>
-  {body && <p class="ok-body">{body}</p>}
+<div class:list={['ok', className]}>
+  {/* The live region is the confirmation and its reference — the two things
+      worth reading out when this replaces the form. It is NOT the whole card.
+      role="status" carries an implicit aria-atomic="true", so any change
+      anywhere inside re-reads the entire region: with the card as the region,
+      pressing Copy announced the whole confirmation again, then the copy
+      outcome, then the whole confirmation a third time when the button label
+      reset four seconds later. The controls and the copy confirmation
+      therefore sit outside it. */}
+  <div
+    class="ok-say"
+    role={announce ? 'status' : undefined}
+    aria-live={announce ? 'polite' : undefined}
+  >
+    <p class="ok-title">{title}</p>
+    {body && <p class="ok-body">{body}</p>}
 
-  {reference && (
-    <div class="ok-ref">
-      <span class="ok-ref-label">{reference.label}</span>
-      <div class="ok-ref-row">
-        <code class="ok-ref-value">{reference.value}</code>
-        {/* JS-only, and legitimately so — the value is selectable text without
-            it. Hidden until a script confirms a clipboard exists. */}
-        <button type="button" class="ok-copy" data-ok-copy={reference.value} hidden>Copy</button>
+    {reference && (
+      <div class="ok-ref">
+        <span class="ok-ref-label">{reference.label}</span>
+        <div class="ok-ref-row">
+          <code class="ok-ref-value">{reference.value}</code>
+          {/* JS-only, and legitimately so — the value is selectable text without
+              it. Hidden until a script confirms a clipboard exists.
+
+              The button sits inside the announced region because that is where
+              it belongs on screen, so its accessible name is fixed and only the
+              aria-hidden face changes. A mutating label here would re-read the
+              reference every four seconds. */}
+          <button
+            type="button"
+            class="ok-copy"
+            data-ok-copy={reference.value}
+            aria-label="Copy the reference"
+            hidden
+          ><span data-ok-copy-label aria-hidden="true">Copy</span></button>
+        </div>
       </div>
-    </div>
-  )}
+    )}
+  </div>
 
   {/* What to keep, where a receipt goes, the offline route. */}
   <slot />
@@ -117,18 +138,24 @@ const {
   if (buttons.length > 0 && navigator.clipboard) {
     for (const btn of buttons) {
       btn.hidden = false;
+      // Rewrite the face, never btn.textContent: that would delete the span and
+      // leave the button with a changing accessible name inside a live region.
+      const face = btn.querySelector<HTMLElement>('[data-ok-copy-label]') ?? btn;
+      let reset: ReturnType<typeof window.setTimeout> | undefined;
+
       btn.addEventListener('click', async () => {
         const value = btn.getAttribute('data-ok-copy') ?? '';
         const live = btn.closest('.ok')?.querySelector<HTMLElement>('[data-ok-copied]');
         try {
           await navigator.clipboard.writeText(value);
-          btn.textContent = 'Copied';
+          face.textContent = 'Copied';
           if (live) live.textContent = 'Reference copied to the clipboard.';
         } catch {
-          btn.textContent = 'Copy failed';
+          face.textContent = 'Copy failed';
           if (live) live.textContent = 'The reference could not be copied. Select it to copy it by hand.';
         }
-        window.setTimeout(() => { btn.textContent = 'Copy'; }, 4000);
+        if (reset) clearTimeout(reset);
+        reset = window.setTimeout(() => { face.textContent = 'Copy'; }, 4000);
       });
     }
   }

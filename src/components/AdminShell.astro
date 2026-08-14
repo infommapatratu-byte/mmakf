@@ -23,15 +23,24 @@ import Base from '@/layouts/Base.astro';
 import { identify } from '@/lib/session';
 import { canAnywhere, type Action, type Principal } from '@/lib/rbac';
 import { adminNavFor, href as surfaceHref, type Surface } from '@/lib/surface';
+import OperationsBar from '@/components/OperationsBar.astro';
 
 export interface Props {
   title: string;
   /** The action this module needs. The page is refused without it. */
   requires: Action;
   intro?: string;
+  /**
+   * What this page is looking at, for the command palette contextual section.
+   *
+   * OPTIONAL WITH NO DEFAULT BEHAVIOUR CHANGE. Twenty-six pages render through
+   * this component and none of them was edited when the header arrived; a page
+   * that passes nothing gets the global palette, which is what it had before.
+   */
+  entity?: any;
 }
 
-const { title, requires, intro } = Astro.props;
+const { title, requires, intro, entity = null } = Astro.props;
 
 const identity = await identify(Astro.request.headers.get('cookie'));
 const principal: Principal | null = identity?.principal ?? null;
@@ -44,6 +53,18 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
 ---
 
 <Base title={`${title} — MMAKF operations`} description="MMAKF federation operations.">
+  {/* §5. Rendered only to a signed-in caller: a search field and a product
+      switcher above a "sign in" panel would offer tools that cannot work, and
+      the palette would be an accelerator for an account that does not exist. */}
+  {identity && (
+    <OperationsBar
+      principal={principal}
+      surface={surface}
+      product="Operations"
+      entity={entity}
+      accountLabel={identity.label ?? null}
+    />
+  )}
   <div class="ad">
     <div class="container ad-grid">
 

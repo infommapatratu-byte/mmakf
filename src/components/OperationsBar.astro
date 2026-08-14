@@ -1,0 +1,355 @@
+---
+// The operations header (§5, §6, §7).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY IT IS ITS OWN COMPONENT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// AdminShell renders it, and so will the client portal and any future athlete
+// or coach portal. §98 is explicit that the shell must be reusable and must not
+// hardcode product-specific UI — so this takes its products and organisations
+// as data and knows nothing about which surface it is on.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IT REFUSES TO SHOW
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Two refusals, both of them the same lesson learned twice on this project.
+//
+//   · A PRODUCT WITH NO ROUTE IS NOT LISTED. /learn/coaches and /learn/request
+//     both shipped as 404s from a menu entry added before the page existed. The
+//     product list here is filtered against what is actually built, and a
+//     product the federation has not built yet simply is not offered.
+//   · AN ORGANISATION SWITCHER WITH ONE ENTRY IS NOT RENDERED. A control that
+//     cannot change anything is furniture, and furniture in a header is
+//     something every user has to read past for ever.
+
+import CommandPalette from '@/components/CommandPalette.astro';
+import GlobalSearch from '@/components/GlobalSearch.astro';
+import Crest from '@/components/Crest.astro';
+import { canAnywhere, type Action, type Principal } from '@/lib/rbac';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export interface Props {
+  principal: Principal | null;
+  surface: Surface;
+  /** The label of the product this page belongs to, e.g. "Operations". */
+  product?: string;
+  /** Passed through to the command palette so its contextual section fires. */
+  entity?: any;
+  /** The signed-in account's display name, where one is known. */
+  accountLabel?: string | null;
+}
+
+const {
+  principal,
+  surface,
+  product = 'Operations',
+  entity = null,
+  accountLabel = null,
+} = Astro.props;
+
+const h = (p: string) => surfaceHref(surface, p);
+const can = (a: Action) => !!principal && canAnywhere(principal, a);
+
+/**
+ * The products this federation actually has surfaces for.
+ *
+ * §6 lists eleven. Most do not exist yet, and listing them would be the
+ * navigation mistake this project has already made twice. Each entry names the
+ * route that must exist for it to appear; when one is built, it is added here
+ * and tests/routes-live.test.ts fetches it.
+ */
+const PRODUCTS: Array<{ label: string; href: string; action: Action | null; note?: string }> = [
+  { label: 'Federation operations', href: '/admin', action: 'content:read' },
+  { label: 'Training and engagement', href: '/admin/applications', action: 'engagement:read' },
+  { label: 'Competitions', href: '/admin/competition', action: 'competition:read' },
+  { label: 'Grading and certification', href: '/admin/grading', action: 'grading:read' },
+  { label: 'Coaches and officials', href: '/admin/coaches', action: 'coach:read' },
+  { label: 'Governance', href: '/admin/governance', action: 'content:read' },
+  { label: 'Support desk', href: '/admin/support', action: 'support:read' },
+  { label: 'Client portal', href: '/learn/portal', action: null },
+];
+
+const products = PRODUCTS.filter((p) => p.action === null || can(p.action));
+
+/**
+ * The organisations this account belongs to, from their own role bindings.
+ *
+ * Derived, never asked for. A switcher populated from a query parameter would
+ * be an authorisation bypass with a dropdown on it.
+ */
+const orgs = (principal?.bindings ?? [])
+  .filter((b) => (b.status ?? 'active') === 'active')
+  .map((b) => {
+    if (b.scopeType === 'national') return { key: 'national', label: 'MMAKF Federation' };
+    if (b.scopeType === 'state') return { key: `state:${b.scopeId}`, label: `State unit ${b.scopeId}` };
+    if (b.scopeType === 'district') return { key: `district:${b.scopeId}`, label: `District unit ${b.scopeId}` };
+    if (b.scopeType === 'dojo') return { key: `dojo:${b.scopeId}`, label: `Dojo ${b.scopeId}` };
+    if (b.scopeType === 'institution') return { key: `inst:${b.scopeId}`, label: `Institution ${b.scopeId}` };
+    return null;
+  })
+  .filter(Boolean) as Array<{ key: string; label: string }>;
+
+// De-duplicate: several roles at the same scope is one organisation, not three.
+const orgList = [...new Map(orgs.map((o) => [o.key, o])).values()];
+
+/**
+ * The current organisation, for display.
+ *
+ * NOT a stored preference and NOT switchable state — switching genuinely means
+ * different data, and until every query respects a chosen organisation, a
+ * switcher that only changed a label would be a lie. It renders as a
+ * disclosure of what this account can reach, which is true today.
+ */
+const currentOrg = orgList[0] ?? null;
+---
+
+<header class="ob" role="banner">
+  <div class="ob-inner">
+
+    <a class="ob-brand" href={h('/')} aria-label="MMAKF home">
+      <Crest size={26} />
+      <span class="ob-brand-txt">
+        <span class="ob-brand-name">MMAKF</span>
+        <span class="ob-brand-product">{product}</span>
+      </span>
+    </a>
+
+    {orgList.length > 1 ? (
+      <details class="ob-org">
+        <summary aria-label={`Organisation: ${currentOrg?.label ?? 'none'}. Show all`}>
+          <span>{currentOrg?.label}</span>
+          <span class="ob-caret" aria-hidden="true">▾</span>
+        </summary>
+        <div class="ob-pop" role="group" aria-label="Organisations you belong to">
+          <p class="ob-pop-h">This account reaches</p>
+          <ul>
+            {orgList.map((o) => <li>{o.label}</li>)}
+          </ul>
+          <p class="ob-pop-note">
+            Records from all of these are already included wherever you have the
+            authority to see them. There is nothing to switch between.
+          </p>
+        </div>
+      </details>
+    ) : currentOrg ? (
+      <span class="ob-org-static">{currentOrg.label}</span>
+    ) : null}
+
+    <div class="ob-search">
+      <GlobalSearch
+        label="Search the federation"
+        placeholder="Search people, dojos, competitions, certificates…"
+      />
+    </div>
+
+    <nav class="ob-right" aria-label="Account and tools">
+      {products.length > 1 && (
+        <details class="ob-menu ob-products">
+          <summary aria-label="Switch product">
+            <span class="ob-menu-lbl">Products</span>
+            <span class="ob-caret" aria-hidden="true">▾</span>
+          </summary>
+          <div class="ob-pop ob-pop-right" role="group" aria-label="Products">
+            <ul class="ob-plist">
+              {products.map((p) => (
+                <li><a href={h(p.href)}>{p.label}</a></li>
+              ))}
+            </ul>
+          </div>
+        </details>
+      )}
+
+      {/* The palette is the accelerator; this is how somebody discovers it
+          exists. Hidden from assistive technology because the shortcut is
+          already announced on the palette's own trigger. */}
+      <button type="button" class="ob-k" data-command-open aria-label="Open the command palette">
+        <kbd aria-hidden="true">Ctrl</kbd><kbd aria-hidden="true">K</kbd>
+      </button>
+
+      <a class="ob-help" href={h('/faq')}>Help</a>
+
+      <details class="ob-menu ob-account">
+        <summary aria-label="Account">
+          <span class="ob-avatar" aria-hidden="true">
+            {(accountLabel ?? principal?.label ?? '?').trim().charAt(0).toUpperCase()}
+          </span>
+        </summary>
+        <div class="ob-pop ob-pop-right" role="group" aria-label="Account">
+          <p class="ob-pop-h">{accountLabel ?? principal?.label ?? 'Signed in'}</p>
+          <ul class="ob-plist">
+            <li><a href={h('/my')}>My record</a></li>
+            <li><a href={h('/admin')}>Operations home</a></li>
+            <li><a href={h('/api/auth/logout')} data-signout>Sign out</a></li>
+          </ul>
+        </div>
+      </details>
+    </nav>
+  </div>
+</header>
+
+<CommandPalette entity={entity} principal={principal} />
+
+<style>
+  .ob {
+    position: sticky;
+    top: 0;
+    z-index: var(--z-header);
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
+    min-height: var(--shell-header-h);
+  }
+  .ob-inner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--gutter);
+    max-width: var(--max-w-wide);
+    margin: 0 auto;
+    min-height: var(--shell-header-h);
+  }
+
+  .ob-brand { display: flex; align-items: center; gap: var(--space-3); text-decoration: none; flex: none; }
+  .ob-brand-txt { display: flex; flex-direction: column; line-height: 1.15; }
+  .ob-brand-name {
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    letter-spacing: 0.06em;
+    color: var(--white);
+  }
+  .ob-brand-product { font-size: var(--text-xs); color: var(--muted); }
+
+  .ob-org-static, .ob-org > summary {
+    font-size: var(--text-sm);
+    color: var(--off-white);
+    padding: var(--space-1) var(--space-3);
+    border-left: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .ob-org > summary {
+    display: flex; align-items: center; gap: var(--space-2);
+    cursor: pointer; list-style: none; border-radius: var(--radius-sm);
+  }
+  .ob-org > summary::-webkit-details-marker { display: none; }
+
+  .ob-search { flex: 1 1 auto; min-width: 0; max-width: 460px; margin: 0 auto; }
+
+  .ob-right { display: flex; align-items: center; gap: var(--space-2); flex: none; }
+
+  .ob-menu { position: relative; }
+  .ob-menu > summary {
+    display: flex; align-items: center; gap: var(--space-1);
+    cursor: pointer; list-style: none;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    color: var(--off-white);
+  }
+  .ob-menu > summary::-webkit-details-marker { display: none; }
+  .ob-menu > summary:hover { background: var(--bg); color: var(--gold-2); }
+  .ob-caret { color: var(--muted); font-size: 0.7rem; }
+
+  .ob-pop {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    min-width: 240px;
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    padding: var(--space-3);
+    z-index: var(--z-dropdown);
+  }
+  .ob-pop-right { left: auto; right: 0; }
+  .ob-pop-h {
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .ob-pop ul { list-style: none; margin: 0; padding: 0; }
+  .ob-pop li { font-size: var(--text-sm); color: var(--off-white); padding: 2px 0; }
+  .ob-plist a {
+    display: block;
+    padding: var(--space-2);
+    border-radius: var(--radius-xs);
+    color: var(--off-white);
+    text-decoration: none;
+  }
+  .ob-plist a:hover { background: var(--bg); color: var(--gold-2); }
+  .ob-pop-note {
+    margin: var(--space-3) 0 0;
+    font-size: var(--text-xs);
+    color: var(--muted);
+    line-height: var(--leading-normal);
+  }
+
+  .ob-k {
+    display: inline-flex; align-items: center; gap: 2px;
+    background: transparent;
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+  }
+  .ob-k:hover { border-color: var(--gold-dim); }
+  .ob-k kbd {
+    font-family: var(--font-body);
+    font-size: 0.66rem;
+    color: var(--muted);
+    background: transparent;
+  }
+
+  .ob-help { font-size: var(--text-sm); color: var(--off-white); padding: var(--space-2); text-decoration: none; }
+  .ob-help:hover { color: var(--gold-2); }
+
+  .ob-avatar {
+    display: grid; place-items: center;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: var(--card-2);
+    border: 1px solid var(--border-2);
+    font-size: var(--text-xs);
+    color: var(--off-white);
+  }
+
+  /* PART AL / §53. Below this the search takes the whole width on its own row
+     and the secondary controls fold away — a 360px header cannot hold a brand,
+     an organisation, a search field and four controls, and squeezing them makes
+     every one of them unusable rather than one of them absent. */
+  @media (max-width: 900px) {
+    .ob-inner { flex-wrap: wrap; padding: var(--space-2) var(--gutter-sm); }
+    .ob-org, .ob-org-static, .ob-help, .ob-k { display: none; }
+    .ob-search { order: 3; flex-basis: 100%; max-width: none; margin: var(--space-2) 0 0; }
+  }
+</style>
+
+<script>
+  // The header's ⌘K button and the palette are separate components, so they
+  // agree through an event rather than a shared reference. The palette listens
+  // for this; if it is not mounted, nothing happens, which is the correct
+  // behaviour rather than an error.
+  document.addEventListener('click', (e) => {
+    const t = (e.target as HTMLElement | null)?.closest('[data-command-open]');
+    if (!t) return;
+    e.preventDefault();
+    document.dispatchEvent(new CustomEvent('mmakf:command-palette:open'));
+  });
+
+  // A <details> menu left open when focus leaves it is a menu that covers the
+  // page until the next click lands somewhere unrelated.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    document.querySelectorAll<HTMLDetailsElement>('.ob-menu[open], .ob-org[open]')
+      .forEach((d) => { d.open = false; });
+  });
+  document.addEventListener('focusout', (e) => {
+    const from = e.target as HTMLElement | null;
+    const to = (e as FocusEvent).relatedTarget as HTMLElement | null;
+    const menu = from?.closest('.ob-menu, .ob-org') as HTMLDetailsElement | null;
+    if (menu && menu.open && (!to || !menu.contains(to))) menu.open = false;
+  });
+</script>
