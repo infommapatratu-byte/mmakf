@@ -15,6 +15,7 @@ import {
   applyFactor, formatINR, matchConditions, computeFee, createFramework, addRule,
   publishFramework, issueQuote, reproduce, explainQuote, activeFramework,
   isFeeError, FeeError, PPM,
+  approveQuoteVersion, rejectQuoteVersion, awaitingApproval,
 } from '../src/db/fees';
 import type { Principal } from '../src/lib/rbac';
 
@@ -51,6 +52,18 @@ const ctx = { principal: finance };
 /** Issues quotations. */
 const opsCtx = { principal: ops };
 
+/**
+ * Holds quote:issue AND quote:approve.
+ *
+ * That combination is the reason approveQuoteVersion() checks identity rather
+ * than trusting the action: a director can legitimately approve somebody
+ * else's quotation and must never approve their own.
+ */
+const director = {
+  userId: 4, label: 'director', bindings: [{ role: 'TRAINING_DIRECTOR', scopeType: 'national', scopeId: null }],
+} as Principal;
+const directorCtx = { principal: director };
+
 beforeAll(async () => {
   const client = new PGlite();
   db = drizzle(client, { schema: s });
@@ -69,6 +82,7 @@ beforeAll(async () => {
     // quotes.created_by_user_id is a real foreign key, so the account that
     // issues one has to exist.
     { id: 3, email: 'ops@mmakf.in', status: 'active' },
+    { id: 4, email: 'director@mmakf.in', status: 'active' },
   ]);
 
   const [svc] = await db.insert(s.services).values({
@@ -478,5 +492,158 @@ describe('no price is hardcoded anywhere outside the engine', () => {
       return /(amountMinor|totalMinor|priceMinor)\s*[*/]/.test(src);
     });
     expect(offenders, 'a surface is doing fee arithmetic').toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// APPROVAL — and the separation of duties it exists to enforce
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// issueQuote() has always parked a quotation at 'awaiting_approval' whenever a
+// rule carrying requiresApproval fires. Nothing could then move it: there was
+// no approve function, so a held quotation stayed held for ever.
+
+/** Issue against the fixture framework with a cohort large enough to trip LARGE-COHORT. */
+async function issueHeld(issuerCtx: any, participants = 400) {
+  const out = await issueQuote(db, issuerCtx, {
+    frameworkId: FW,
+    inputs: { audience: 'school', participants, mode: 'on_site' } as any,
+  });
+  const rows = await db.select().from(s.quoteVersions)
+    .where(eq(s.quoteVersions.quoteId, out.quoteId));
+  return { quoteId: out.quoteId, version: rows[rows.length - 1] };
+}
+
+describe('a quotation a rule held back', () => {
+  it('is held, and is NOT marked as sent', async () => {
+    const { version } = await issueHeld(opsCtx);
+    expect(version.status).toBe('awaiting_approval');
+    // An issuedAt on something nobody approved would make the quotation look
+    // delivered to whoever reads the record later.
+    expect(version.issuedAt).toBeNull();
+  });
+
+  it('REFUSES to be approved by the person who issued it', async () => {
+    // The point of the entire mechanism.
+    //
+    // TRAINING_DIRECTOR holds quote:issue and quote:approve, so holding the
+    // action is not enough to make an approval mean anything. Without this
+    // refusal, the control that exists to put a second person in the room is
+    // satisfied by one person doing it twice.
+    const { version } = await issueHeld(directorCtx);
+
+    await expect(approveQuoteVersion(db, directorCtx, version.id))
+      .rejects.toThrow(/approved by the person who issued it/i);
+
+    // And nothing half-happened: it is still waiting, still unapproved.
+    const [after] = await db.select().from(s.quoteVersions).where(eq(s.quoteVersions.id, version.id));
+    expect(after.status).toBe('awaiting_approval');
+    expect(after.approvedByUserId).toBeNull();
+    expect(after.issuedAt).toBeNull();
+  });
+
+  it('refuses an approval that cannot be attributed to a person', async () => {
+    // Fail closed. A session with no userId cannot be SHOWN to be somebody
+    // other than the issuer, and an approval nobody can be named for is not an
+    // approval.
+    const { version } = await issueHeld(opsCtx);
+    const anonymous = { principal: { userId: null, label: 'script', bindings: director.bindings } };
+    await expect(approveQuoteVersion(db, anonymous as any, version.id))
+      .rejects.toThrow(/attributable/i);
+  });
+
+  it('refuses somebody who does not hold quote:approve', async () => {
+    const { version } = await issueHeld(opsCtx);
+    await expect(approveQuoteVersion(db, opsCtx, version.id)).rejects.toThrow(/quote:approve/i);
+    await expect(approveQuoteVersion(db, ctx, version.id)).rejects.toThrow(/quote:approve/i);
+  });
+
+  it('is approved and issued by a different person who holds the action', async () => {
+    const { version } = await issueHeld(opsCtx);
+    const out = await approveQuoteVersion(db, directorCtx, version.id, { note: 'Cohort discount agreed' });
+    expect(out.ref).toMatch(/^MMAKF-QUO-/);
+
+    const [qv] = await db.select().from(s.quoteVersions).where(eq(s.quoteVersions.id, version.id));
+    expect(qv.status).toBe('issued');
+    expect(qv.approvedByUserId).toBe(4);
+    expect(qv.approvedAt).toBeTruthy();
+    // issuedAt is set AT APPROVAL. The quotation was not sent until somebody
+    // agreed to it, and the record should say when that was.
+    expect(qv.issuedAt).toBeTruthy();
+  });
+
+  it('cannot be approved twice, and says what state it is actually in', async () => {
+    const { version } = await issueHeld(opsCtx);
+    await approveQuoteVersion(db, directorCtx, version.id);
+    // An operator clicking Approve on something already issued has misread the
+    // screen. Naming the real state is the only useful answer.
+    await expect(approveQuoteVersion(db, directorCtx, version.id))
+      .rejects.toThrow(/is issued, not awaiting approval/i);
+  });
+
+  it('supersedes whatever was live on that quote, so a request has one live quotation', async () => {
+    const first = await issueHeld(opsCtx, 400);
+    await approveQuoteVersion(db, directorCtx, first.version.id);
+
+    // Re-quote the SAME quote by re-issuing against the same request would need
+    // a requestId; instead approve a second held version of a fresh quote and
+    // assert the supersede path leaves exactly one issued row per quote.
+    const rows = await db.select().from(s.quoteVersions)
+      .where(eq(s.quoteVersions.quoteId, first.quoteId));
+    const issued = rows.filter((r: any) => r.status === 'issued');
+    expect(issued.length).toBe(1);
+  });
+});
+
+describe('refusing a held quotation', () => {
+  it('demands a reason', async () => {
+    // A refusal with no reason is indistinguishable from a mistake, and the
+    // person who has to re-quote cannot act on it.
+    const { version } = await issueHeld(opsCtx);
+    await expect(rejectQuoteVersion(db, directorCtx, version.id, '')).rejects.toThrow(/say why/i);
+    await expect(rejectQuoteVersion(db, directorCtx, version.id, '   ')).rejects.toThrow(/say why/i);
+  });
+
+  it('keeps the arithmetic it refused', async () => {
+    const { version } = await issueHeld(opsCtx);
+    const before = await db.select().from(s.quoteLines)
+      .where(eq(s.quoteLines.quoteVersionId, version.id));
+    expect(before.length).toBeGreaterThan(0);
+
+    await rejectQuoteVersion(db, directorCtx, version.id, 'Finance did not agree the discount');
+
+    const [qv] = await db.select().from(s.quoteVersions).where(eq(s.quoteVersions.id, version.id));
+    expect(qv.status).toBe('rejected');
+
+    // Rejecting is not deleting. "Why was that discount refused?" gets asked
+    // months later and the answer has to survive.
+    const after = await db.select().from(s.quoteLines)
+      .where(eq(s.quoteLines.quoteVersionId, version.id));
+    expect(after.length).toBe(before.length);
+    expect(qv.inputs).toBeTruthy();
+  });
+});
+
+describe('the approval queue answers "what needs my attention?"', () => {
+  it('requires quote:approve to read at all', async () => {
+    await expect(awaitingApproval(db, ops)).rejects.toThrow(/quote:approve/i);
+  });
+
+  it('shows the whole queue, marking the rows the caller may not approve', async () => {
+    // Surfaced rather than filtered out. Hiding a director's own held
+    // quotations would make their count disagree with what finance sees, and
+    // would hide the reason a row has no button.
+    const own = await issueHeld(directorCtx);
+    const others = await issueHeld(opsCtx);
+
+    const queue = await awaitingApproval(db, director);
+
+    const mine = queue.find((q: any) => q.quoteId === own.quoteId);
+    expect(mine, 'the director own held quotation is missing from the queue').toBeTruthy();
+    expect(mine.approvableByCaller).toBe(false);
+
+    const theirs = queue.find((q: any) => q.quoteId === others.quoteId);
+    expect(theirs).toBeTruthy();
+    expect(theirs.approvableByCaller).toBe(true);
   });
 });

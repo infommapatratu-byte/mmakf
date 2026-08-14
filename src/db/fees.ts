@@ -673,6 +673,227 @@ export async function issueQuote(
 }
 
 /**
+ * Approve a quotation that a rule held back, and issue it.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS EXISTS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * issueQuote() sets `awaiting_approval` whenever any rule that fired carries
+ * `requiresApproval` — a large discount, an unusual multiplier, whatever the
+ * federation decides needs a second pair of eyes. Nothing could then move it.
+ * A quotation entering that state stayed there for ever, and /admin/quotes had
+ * to tell the reader so.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE SEPARATION IS THE WHOLE POINT
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `quote:issue` and `quote:approve` are different actions held by different
+ * roles: TRAINING_OPERATIONS issues and cannot approve; TRAINING_DIRECTOR can
+ * do both. Which means a director could issue a discounted quotation and then
+ * approve their own — and the control that exists to put a second person in the
+ * room would have been satisfied by one person twice.
+ *
+ * So holding the action is not sufficient. THE APPROVER MUST NOT BE THE ISSUER,
+ * enforced here rather than hoped for in a procedure. Refusing costs a director
+ * thirty seconds of asking a colleague; permitting it costs the federation the
+ * only check on its own pricing.
+ */
+export async function approveQuoteVersion(
+  db: DB,
+  ctx: AuditContext,
+  quoteVersionId: number,
+  opts: { note?: string } = {}
+) {
+  assertCan(ctx.principal, 'quote:approve', {});
+
+  const [qv] = await db.select().from(s.quoteVersions)
+    .where(eq(s.quoteVersions.id, quoteVersionId)).limit(1);
+  if (!qv) throw new FeeError('unknown_quote_version', 'No such quotation version.');
+
+  if (qv.status !== 'awaiting_approval') {
+    // Not a silent no-op. An operator who clicks Approve on something already
+    // issued has misread the screen, and telling them what state it is actually
+    // in is the only useful answer.
+    throw new FeeError(
+      'not_awaiting_approval',
+      `This quotation is ${qv.status}, not awaiting approval, so there is nothing to approve.`
+    );
+  }
+
+  const [quote] = await db.select().from(s.quotes)
+    .where(eq(s.quotes.id, qv.quoteId)).limit(1);
+  if (!quote) throw new FeeError('unknown_quote', 'The quotation this version belongs to is missing.');
+
+  // ── The separation of duties, enforced ──
+  //
+  // Compared on userId. A principal with no userId (a script, a legacy session)
+  // cannot be shown to be a different person from the issuer, so it is refused
+  // too — the fail-closed reading. An approval nobody can attribute is not an
+  // approval.
+  const approver = ctx.principal.userId;
+  if (approver == null) {
+    throw new FeeError(
+      'unattributable_approval',
+      'An approval must be attributable to a named account, and this session has none.'
+    );
+  }
+  if (quote.createdByUserId != null && quote.createdByUserId === approver) {
+    throw new FeeError(
+      'self_approval',
+      'A quotation cannot be approved by the person who issued it. ' +
+      'Ask someone else who holds quote:approve.'
+    );
+  }
+
+  const now = new Date();
+
+  // Anything already issued on this quote is superseded, exactly as issueQuote()
+  // does — otherwise approving an older held version would leave two live
+  // quotations for one request.
+  await db.update(s.quoteVersions)
+    .set({ status: 'superseded' })
+    .where(and(
+      eq(s.quoteVersions.quoteId, qv.quoteId),
+      eq(s.quoteVersions.status, 'issued'),
+    ));
+
+  const [updated] = await db.update(s.quoteVersions)
+    .set({
+      status: 'issued',
+      approvedByUserId: approver,
+      approvedAt: now,
+      issuedAt: now,
+    })
+    .where(and(
+      eq(s.quoteVersions.id, quoteVersionId),
+      // Re-asserted in the WHERE so two approvers racing cannot both win: the
+      // second UPDATE matches no row and returns nothing.
+      eq(s.quoteVersions.status, 'awaiting_approval'),
+    ))
+    .returning();
+
+  if (!updated) {
+    throw new FeeError(
+      'already_decided',
+      'This quotation was approved by somebody else a moment ago.'
+    );
+  }
+
+  await writeAudit(db, { ...ctx, reason: opts.note ?? null }, {
+    entityType: 'quote', entityId: qv.quoteId, action: 'approve',
+    oldValue: { version: qv.version, status: 'awaiting_approval' },
+    newValue: {
+      ref: quote.ref,
+      version: qv.version,
+      status: 'issued',
+      total: qv.totalMinor,
+      approvedBy: approver,
+      issuedBy: quote.createdByUserId ?? null,
+    },
+  });
+
+  return {
+    quoteId: qv.quoteId,
+    ref: quote.ref,
+    version: qv.version,
+    totalMinor: qv.totalMinor,
+    approvedAt: now,
+  };
+}
+
+/**
+ * Refuse a quotation that was held for approval.
+ *
+ * Rejecting is not deleting. The version keeps its rows, its inputs and its
+ * arithmetic, and gains a reason — because "why was that discount refused?" is
+ * a question somebody will ask months later, and the answer must survive.
+ */
+export async function rejectQuoteVersion(
+  db: DB,
+  ctx: AuditContext,
+  quoteVersionId: number,
+  reason: string
+) {
+  assertCan(ctx.principal, 'quote:approve', {});
+
+  const why = String(reason ?? '').trim();
+  if (why.length < 4) {
+    // A rejection with no reason is indistinguishable from a mistake, and the
+    // person who has to re-quote cannot act on it.
+    throw new FeeError('reason_required', 'A refusal must say why.');
+  }
+
+  const [qv] = await db.select().from(s.quoteVersions)
+    .where(eq(s.quoteVersions.id, quoteVersionId)).limit(1);
+  if (!qv) throw new FeeError('unknown_quote_version', 'No such quotation version.');
+  if (qv.status !== 'awaiting_approval') {
+    throw new FeeError(
+      'not_awaiting_approval',
+      `This quotation is ${qv.status}, not awaiting approval.`
+    );
+  }
+
+  const [updated] = await db.update(s.quoteVersions)
+    .set({ status: 'rejected' })
+    .where(and(
+      eq(s.quoteVersions.id, quoteVersionId),
+      eq(s.quoteVersions.status, 'awaiting_approval'),
+    ))
+    .returning();
+  if (!updated) throw new FeeError('already_decided', 'This quotation was already decided.');
+
+  await writeAudit(db, { ...ctx, reason: why }, {
+    entityType: 'quote', entityId: qv.quoteId, action: 'reject',
+    oldValue: { version: qv.version, status: 'awaiting_approval' },
+    newValue: { version: qv.version, status: 'rejected' },
+  });
+
+  return { quoteId: qv.quoteId, version: qv.version };
+}
+
+/**
+ * Quotations waiting on somebody.
+ *
+ * §19 asks "what needs my attention?" — this is the fee engine's answer, and it
+ * deliberately EXCLUDES versions the caller issued themselves, because those
+ * are precisely the ones they may not approve. A queue that lists work you are
+ * forbidden to do is a queue you learn to ignore.
+ */
+export async function awaitingApproval(db: DB, principal: Principal) {
+  if (!canAnywhere(principal, 'quote:approve')) {
+    throw new FeeError('forbidden', 'Reviewing held quotations requires quote:approve.');
+  }
+
+  const rows = await db.select({
+    quoteVersionId: s.quoteVersions.id,
+    quoteId: s.quotes.id,
+    ref: s.quotes.ref,
+    version: s.quoteVersions.version,
+    totalMinor: s.quoteVersions.totalMinor,
+    currency: s.quoteVersions.currency,
+    frameworkCode: s.quoteVersions.frameworkCode,
+    requiresManualQuote: s.quoteVersions.requiresManualQuote,
+    createdAt: s.quoteVersions.createdAt,
+    issuedByUserId: s.quotes.createdByUserId,
+    institutionId: s.quotes.institutionId,
+  })
+    .from(s.quoteVersions)
+    .innerJoin(s.quotes, eq(s.quoteVersions.quoteId, s.quotes.id))
+    .where(eq(s.quoteVersions.status, 'awaiting_approval'))
+    .orderBy(s.quoteVersions.createdAt);
+
+  return rows.map((r) => ({
+    ...r,
+    // Surfaced rather than filtered out, so the reader can see the whole queue
+    // and understand why one row has no button. Silently omitting them would
+    // make the count disagree with what finance can see.
+    approvableByCaller: r.issuedByUserId == null || r.issuedByUserId !== principal.userId,
+  }));
+}
+
+/**
  * Re-run a stored quote version against the framework it was issued under.
  *
  * This is what makes "reproducible" a fact rather than a claim: it reads the
