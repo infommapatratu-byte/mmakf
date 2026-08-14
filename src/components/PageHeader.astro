@@ -109,6 +109,18 @@
 
 import type { Crumb } from '@/lib/seo';
 
+/**
+ * How many times this component has rendered in this process. Feeds the
+ * per-instance id below; see the comment there for why a title hash was not
+ * enough.
+ *
+ * It has to be EXPORTED. Astro's compiler hoists a top-level export out of the
+ * component function and into module scope, and leaves an ordinary `let` inside
+ * it — an ordinary `let` would therefore be reset to zero on every single
+ * render and count nothing. Nothing outside this file should read it.
+ */
+export let phInstances = 0;
+
 export interface PageAction {
   label: string;
   href: string;
@@ -215,9 +227,21 @@ if (currentTab < 0) {
   if (best < 0) currentTab = -1;
 }
 
-// A stable, collision-free id per instance for the aria-describedby wiring on
-// refused actions. Derived from the title so it survives a re-render.
-const uid = 'ph-' + Math.abs(
+// A collision-free id per INSTANCE for the aria-describedby wiring on refused
+// actions.
+//
+// It was a hash of the title alone. A hash of the title is not an instance id:
+// two headers on one page with the same title — a record page and a section
+// below it, the same screen rendered twice in a comparison — produce the same
+// hash, and then two elements share one id. aria-describedby resolves to the
+// first match in the document, so the second header's refusal would announce
+// the first header's reason. Wrong text on a refusal is worse than no text.
+//
+// The counter is module-scope, so it increments across every render this server
+// process performs. That makes the id unstable between page loads, which costs
+// nothing: nothing links to it and no client framework rehydrates against it.
+// Uniqueness within one document is the only property required.
+const uid = 'ph-' + (phInstances++).toString(36) + '-' + Math.abs(
   String(title).split('').reduce((a, c) => ((a * 31 + c.charCodeAt(0)) | 0), 7)
 ).toString(36);
 ---
@@ -492,26 +516,42 @@ const uid = 'ph-' + Math.abs(
                 border-color var(--dur-fast) var(--ease-out),
                 color var(--dur-fast) var(--ease-out);
   }
-  .ph-btn-primary { background: var(--red); color: #FDF9F3; }
-  .ph-btn-primary:hover { background: var(--red-2); color: #fff; }
+  /* --bg-2 rather than a literal white: the palette is fixed, and a hex here is
+     a colour nobody can find again from the token scale. */
+  .ph-btn-primary { background: var(--red); color: var(--bg-2); }
+  .ph-btn-primary:hover { background: var(--red-2); color: var(--bg-2); }
   /* --control-border, not --border-2: a bordered control's edge IS the thing
      that identifies it, so it has to clear 3:1 (WCAG 1.4.11). */
   .ph-btn-ghost { background: transparent; color: var(--off-white); border-color: var(--control-border); }
   .ph-btn-ghost:hover { border-color: var(--gold); color: var(--gold-3); }
-  .ph-btn-danger { color: var(--red); border-color: var(--red-3); }
-  .ph-btn-danger:hover { color: #fff; background: var(--red); border-color: var(--red); }
-  .ph-btn-danger-solid { background: var(--red); color: #FDF9F3; }
+  /* The rule two lines above applies to THIS button too, and it did not.
+     --red-3 is declared in global.css as a hairline for rules and pill edges
+     and measures 1.49:1 on white; on a transparent ghost button the border is
+     the only boundary there is, so a destructive action was the one control in
+     this header whose edge a low-vision reader could not find. --red is 9.3:1
+     on the header ground and reads as the danger outline it already meant. */
+  .ph-btn-danger { color: var(--red); border-color: var(--red); }
+  .ph-btn-danger:hover { color: var(--bg-2); background: var(--red); border-color: var(--red); }
+  .ph-btn-danger-solid { background: var(--red); color: var(--bg-2); }
 
-  /* Refused, not removed. Colour alone never carries this (1.4.1) — the reason
-     is real text, wired up with aria-describedby. */
+  /* Refused, not removed. Hue alone never carries this (1.4.1): the fill and
+     the ink weight both change, and the reason is real text on aria-describedby
+     — visible text in the menu and on the primary, screen-reader-only on the
+     inline copy, where the bar has no room for a sentence.
+
+     NO opacity. This carries aria-disabled rather than `disabled` precisely so
+     it stays focusable and its reason stays readable; 0.6 opacity took --muted
+     on --card-2 from 4.63:1 down to roughly 2.5:1, which made the label of the
+     one control that needs explaining the hardest thing in the header to read.
+     The refusal is shown by the filled ground and the muted ink instead, both
+     of which survive at full strength. */
   .ph-btn-off {
-    opacity: 0.6;
     cursor: not-allowed;
     background: var(--card-2);
     color: var(--muted);
-    border-color: var(--border-2);
+    border-color: var(--control-border);
   }
-  .ph-btn-off:hover { background: var(--card-2); color: var(--muted); border-color: var(--border-2); }
+  .ph-btn-off:hover { background: var(--card-2); color: var(--muted); border-color: var(--control-border); }
 
   .ph-primary-off { display: flex; flex-direction: column; gap: var(--space-1); align-items: flex-end; }
   .ph-why {
@@ -550,7 +590,7 @@ const uid = 'ph-' + Math.abs(
   .ph-more-item {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
     width: 100%;
     padding: var(--space-2) var(--space-3);
     border: 0;
@@ -566,8 +606,8 @@ const uid = 'ph-' + Math.abs(
   .ph-more-item:hover { background: var(--card-2); color: var(--white); }
   .ph-item-danger { color: var(--red); }
   .ph-item-danger:hover { color: var(--red-2); background: var(--card-2); }
-  .ph-more-item.ph-btn-off { background: transparent; opacity: 1; color: var(--muted); }
-  .ph-more-off { display: flex; flex-direction: column; gap: 2px; }
+  .ph-more-item.ph-btn-off { background: transparent; color: var(--muted); }
+  .ph-more-off { display: flex; flex-direction: column; gap: var(--space-1); }
   .ph-more-off .ph-why {
     text-align: left;
     max-width: none;
@@ -578,10 +618,18 @@ const uid = 'ph-' + Math.abs(
   /* ── tabs ──
      Links, not a tablist. See the note at the top of this file. */
   .ph-tabs {
-    margin-top: var(--space-1);
     overflow-x: auto;
     /* The strip carries its own sideways scroll so the page body never does —
-       the failure that makes an operations screen unusable on a phone. */
+       the failure that makes an operations screen unusable on a phone.
+       overflow-x: auto forces overflow-y to compute to auto as well, so the
+       strip clips VERTICALLY too — and the global focus ring is a 2px outline
+       at a 2px offset, which meant the top and bottom of the ring on a focused
+       tab were being cut off by the scroller (2.4.7, 2.4.11). The padding gives
+       the ring room inside the scrolling box; the negative bottom margin pulls
+       the current tab's underline back onto the header's own bottom edge, so
+       nothing moves. */
+    padding: var(--space-1) 0;
+    margin-bottom: calc(var(--space-1) * -1);
     scrollbar-width: thin;
   }
   .ph-tabs ul {
@@ -615,7 +663,7 @@ const uid = 'ph-' + Math.abs(
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 20px;
+    min-width: var(--space-5);
     padding: 0 var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--card-2);
@@ -667,12 +715,24 @@ const uid = 'ph-' + Math.abs(
   // ── the More disclosure ────────────────────────────────────────────────────
   document.querySelectorAll<HTMLDetailsElement>('details[data-ph-more]').forEach((d) => {
     const summary = d.querySelector('summary');
+    // What the arrow keys may land on: every menu item that is actually on the
+    // screen at this width.
+    //
+    // This used to read `li:not(.ph-dupe)`, which is the exact inverse of what
+    // is wanted below 900px. `.ph-dupe` marks the menu copies of the actions
+    // that sit inline in the bar on a wide screen — and below 900px the inline
+    // bar is gone and those copies are the ONLY place those actions exist. The
+    // selector was therefore skipping precisely the items a phone user can see,
+    // so Home went to the wrong item, the wrap-around was wrong, and when every
+    // secondary fitted inline (nothing in the overflow at all) the list came
+    // back empty and the arrow keys did nothing whatsoever.
+    //
+    // offsetParent alone is the correct test and was already here: it is null
+    // for anything under display:none, which is whichever copy the media query
+    // has removed at the current width, at either width.
     const items = () =>
       Array.from(
-        d.querySelectorAll<HTMLElement>('.ph-more-list li:not(.ph-dupe) > a, .ph-more-list li:not(.ph-dupe) > button')
-      // A hidden duplicate is not a destination. offsetParent is null for
-      // anything display:none, which is exactly the copy the media query
-      // removed at this width.
+        d.querySelectorAll<HTMLElement>('.ph-more-list li > a, .ph-more-list li > button')
       ).filter((el) => el.offsetParent !== null);
 
     const close = (restoreFocus: boolean) => {
@@ -687,6 +747,12 @@ const uid = 'ph-' + Math.abs(
     d.addEventListener('keydown', (e) => {
       const key = (e as KeyboardEvent).key;
       if (key === 'Escape') {
+        // Only swallow Escape when there is a menu open for it to close.
+        // stopPropagation used to run first, unconditionally: with the menu
+        // shut and focus resting on the summary, this header ate the Escape
+        // that a surrounding dialog was waiting for, and the dialog stayed
+        // open with no indication why.
+        if (!d.open) return;
         e.stopPropagation();
         close(true);
         return;

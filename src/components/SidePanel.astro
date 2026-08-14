@@ -55,16 +55,22 @@
 //   <td>
 //     <a href={quickViewHref(Astro.url, ref)} data-sp-open={token(ref)}>{row.name}</a>
 //   </td>
-//   <SidePanel entities={quickViews} />
+//   <SidePanel entities={quickViews} can={(a) => can(principal, a)} />
 //
 // `data-sp-open` is what the script binds to. A row without it still works —
 // it navigates, and the server renders the panel open.
+//
+// `can` is the page's own authority predicate and it is what lets the footer
+// offer the module the record is administered in. Omit it and that link is
+// simply not drawn: most modules are /admin routes, and a quick view on a
+// public register must not name one.
 
 import Icon from '@/components/Icon.astro';
 import Status from '@/components/Status.astro';
 import { initials } from '@/lib/people';
+import type { Action } from '@/lib/rbac';
 import {
-  ENTITIES, PANEL_PARAM, closeHref, detailHref, token,
+  ENTITIES, PANEL_PARAM, actionsFor, closeHref, detailHref, token,
   type EntityKind,
 } from '@/lib/entities';
 
@@ -110,13 +116,27 @@ export interface PanelEntity {
 interface Props {
   /** The quick view of every row on this page. Nothing renders when empty. */
   entities: PanelEntity[];
+  /**
+   * The reader's authority, for the links that leave this panel.
+   *
+   * REQUIRED FOR THE MODULE LINK TO APPEAR AT ALL, and the default is no link.
+   * The footer's second control goes to the module the kind is administered in,
+   * and for most kinds that is an /admin route. A person's quick view on the
+   * PUBLIC register would otherwise advertise /admin/membership to a visitor
+   * who has no business knowing the surface exists. Being able to read a row is
+   * not authority to reach the register it came out of, so the panel does not
+   * infer one from the other: pass `can` from the page's own principal — the
+   * same predicate the page used to draw the rows — and the link appears where
+   * it is earned.
+   */
+  can?: (action: Action) => boolean;
   /** Querystring parameter carrying the open record. One name federation-wide. */
   param?: string;
   /** Distinguishes two panels on one page. */
   id?: string;
 }
 
-const { entities, param = PANEL_PARAM, id = 'sidepanel' } = Astro.props;
+const { entities, can, param = PANEL_PARAM, id = 'sidepanel' } = Astro.props;
 
 // The URL is the state. Read it here rather than making every list page parse
 // its own querystring and agree with this component about the spelling.
@@ -152,16 +172,49 @@ function factsOf(e: PanelEntity): PanelFact[] {
 }
 
 function whenText(w: string | Date): string {
-  return w instanceof Date ? w.toISOString().slice(0, 10) : String(w);
+  // Local date parts, not toISOString(). India is UTC+5:30, so an event
+  // recorded at half past seven on a Tuesday evening has a UTC date of Tuesday
+  // — but one recorded at six in the morning does not, and toISOString() would
+  // print it as Monday. A quick view exists to answer "is this the one"; a date
+  // that is off by a day on some rows and not others answers it wrongly.
+  if (!(w instanceof Date)) return String(w);
+  if (Number.isNaN(w.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${w.getFullYear()}-${pad(w.getMonth() + 1)}-${pad(w.getDate())}`;
 }
 
 function profileHref(e: PanelEntity): string | null {
   if (e.fullProfileHref !== undefined) return e.fullProfileHref;
-  return detailHref({ kind: e.kind, id: e.id, identifier: e.identifier });
+  // The status travels with the ref: several §16 detail rules lead to a page
+  // that answers only for a current record, and the model applies that rule so
+  // that no caller has to remember it.
+  return detailHref({ kind: e.kind, id: e.id, identifier: e.identifier, status: e.status });
+}
+
+/**
+ * The module link, where the reader may actually go there.
+ *
+ * Built through actionsFor() rather than reading listPath directly, because the
+ * action a module link needs is not always the action the kind needs — reading
+ * a contract is `contract:read`, but the module it is administered in is Quotes
+ * and proposals, which is `quote:read`. The quick-view action is dropped: it is
+ * the address of the panel the reader is already looking at.
+ */
+function moduleLinksFor(e: PanelEntity) {
+  if (!can) return [];
+  return actionsFor(
+    { kind: e.kind, id: e.id, identifier: e.identifier, status: e.status },
+    can
+  ).filter((a) => a.id === 'module');
 }
 ---
 
-{entities.length > 0 && (
+{/* Rendered when there is something to show OR when the address names a record
+    this page cannot show. The second case is the whole reason the refusal below
+    exists — a link shared into a list that has since been filtered down to
+    nothing arrives here, and gating the component on `entities.length` alone
+    would meet it with a blank page and an address still claiming a record. */}
+{(entities.length > 0 || openIsUnknown) && (
   <div
     class:list={['sp-root', isOpen && 'is-open']}
     id={id}
@@ -200,6 +253,7 @@ function profileHref(e: PanelEntity): string | null {
           const facts = factsOf(e);
           const activity = e.activity ?? [];
           const full = profileHref(e);
+          const modules = moduleLinksFor(e);
           return (
             <div
               class="sp-pane"
@@ -273,20 +327,31 @@ function profileHref(e: PanelEntity): string | null {
                 )}
               </section>
 
-              <footer class="sp-foot">
-                {/* Rendered ONLY where a route exists. Most federation records
-                    are administered from a list and have no page of their own
-                    yet; a button that leads to a 404 — or a disabled one
-                    apologising for it — is worse than no button. */}
-                {full && <a class="btn btn-primary sp-open" href={full}>Open full profile</a>}
-                <a class="btn btn-ghost" href={d.listPath}>{d.plural}</a>
-              </footer>
+              {/* The footer is not drawn at all when it would be empty. Most
+                  federation records have no page of their own yet, and a reader
+                  without authority over the module has nowhere else to go from
+                  here; an empty rule and a band of padding announce a row of
+                  controls that was withheld. */}
+              {(full || modules.length > 0) && (
+                <footer class="sp-foot">
+                  {/* Rendered ONLY where a route exists AND answers for this
+                      record. A button that leads to a 404 — or to a page that
+                      renders "not found" for the reader holding it — is worse
+                      than no button, and a disabled one apologising for it is
+                      worse still. "Record" and not "profile": most of the
+                      twenty-four kinds are not people. */}
+                  {full && <a class="btn btn-primary sp-open" href={full}>Open full record</a>}
+                  {modules.map((m) => (
+                    <a class="btn btn-ghost" href={m.href}>{d.plural}</a>
+                  ))}
+                </footer>
+              )}
             </div>
           );
         })}
 
         {openIsUnknown && (
-          <div class="sp-pane" data-sp-missing hidden={false}>
+          <div class="sp-pane" data-sp-missing data-sp-label={`${id}-t-unknown`} hidden={false}>
             <header class="sp-head">
               <h2 class="sp-title" id={`${id}-t-unknown`}>Not on this page</h2>
             </header>
@@ -310,13 +375,26 @@ function profileHref(e: PanelEntity): string | null {
     position: fixed;
     inset: 0;
     z-index: var(--z-modal);
+    /* The root covers the viewport and stays in the document while the panel
+       animates out, so between the class coming off and `hidden` going on it is
+       an invisible sheet over the whole page. An opacity of zero does not stop
+       a click landing on it: without this the reader's first click after
+       dismissing the panel is swallowed by a scrim they cannot see — and under
+       prefers-reduced-motion, where global.css collapses the transition to
+       nothing, it is swallowed with no animation to explain the pause. */
+    pointer-events: none;
   }
+  .sp-root.is-open { pointer-events: auto; }
   .sp-root[hidden] { display: none; }
 
   .sp-scrim {
     position: absolute;
     inset: 0;
-    background: rgba(26, 23, 19, 0.38);
+    /* No token exists for a scrim. This is the same ink CommandPalette.astro
+       dims the page with, and the same ink the --shadow-* tokens are built from
+       (rgba(26, 23, 19, …)) — one overlay colour for the system rather than a
+       second black introduced a component at a time. */
+    background: rgba(26, 23, 19, 0.44);
     opacity: 0;
     transition: opacity var(--dur-base) var(--ease-out);
   }
@@ -575,13 +653,44 @@ function profileHref(e: PanelEntity): string | null {
     dialog: HTMLElement;
     param: string;
     closeTo: string;
+    /** The record panes, keyed by token. What a row link can open. */
     panes: HTMLElement[];
+    /**
+     * Every pane, INCLUDING the refusal.
+     *
+     * Showing one pane means hiding the others, and "the others" has to include
+     * the "not on this page" refusal or a reader who arrived on a stale link and
+     * then clicked a row would be shown the refusal and the record at once.
+     */
+    allPanes: HTMLElement[];
+    /** The refusal pane, where the server rendered one. */
+    missing: HTMLElement | null;
+    /**
+     * Open right now.
+     *
+     * Tracked rather than read off the DOM because neither DOM signal answers
+     * synchronously: `is-open` is added two frames after opening, and `hidden`
+     * is set a third of a second after closing. Both leave a window in which a
+     * second click would take the wrong branch of the history decision below.
+     */
+    isOpen: boolean;
     /** The element to hand focus back to. */
     trigger: HTMLElement | null;
     /** Did WE add the history entry that opened this? */
     pushed: boolean;
     hideTimer: number | null;
   }
+
+  /**
+   * How long the root stays in the document after the panel is dismissed.
+   *
+   * It only has to outlast the transition on `.sp` (--dur-base), and while it
+   * runs down the root is pointer-events:none, so overshooting costs nothing and
+   * undershooting cuts the animation off. It is not read from the token because
+   * a reader with prefers-reduced-motion has no transition at all and this is
+   * then simply a delay before a hidden element becomes a hidden element.
+   */
+  const HIDE_AFTER_MS = 320;
 
   const FOCUSABLE = [
     'a[href]', 'button:not([disabled])', 'input:not([disabled])',
@@ -594,12 +703,20 @@ function profileHref(e: PanelEntity): string | null {
     const scrim = root.querySelector<HTMLElement>('[data-sp-scrim]');
     if (!dialog) return;
 
+    const missing = root.querySelector<HTMLElement>('[data-sp-missing]');
+    const panes = Array.from(root.querySelectorAll<HTMLElement>('[data-sp-pane]'));
+
     const st: PanelState = {
       root,
       dialog,
       param: root.dataset.param || 'view',
       closeTo: root.dataset.close || location.pathname,
-      panes: Array.from(root.querySelectorAll<HTMLElement>('[data-sp-pane]')),
+      panes,
+      allPanes: missing ? [...panes, missing] : panes,
+      missing,
+      // The server has already decided this: the root is rendered `hidden` only
+      // when the address names nothing.
+      isOpen: !root.hidden,
       trigger: null,
       pushed: false,
       hideTimer: null,
@@ -608,19 +725,18 @@ function profileHref(e: PanelEntity): string | null {
     const paneFor = (tok: string) =>
       st.panes.find((p) => p.dataset.spPane === tok) ?? null;
 
-    function open(tok: string, trigger: HTMLElement | null) {
-      const pane = paneFor(tok);
-      if (!pane) return false;
-
+    /** Show exactly one pane, and label the dialog with that pane's heading. */
+    function show(pane: HTMLElement, trigger: HTMLElement | null) {
       if (st.hideTimer !== null) { window.clearTimeout(st.hideTimer); st.hideTimer = null; }
       // Only remember a trigger when there is one. A deep link has no row to go
       // back to, and overwriting a real trigger with null would strand focus.
       if (trigger) st.trigger = trigger;
 
-      for (const p of st.panes) p.hidden = p !== pane;
+      for (const p of st.allPanes) p.hidden = p !== pane;
       const label = pane.dataset.spLabel;
       if (label) st.dialog.setAttribute('aria-labelledby', label);
 
+      st.isOpen = true;
       st.root.hidden = false;
       // The claim becomes true here and not before: from this line the trap,
       // the scroll lock and Escape are all in force.
@@ -633,11 +749,18 @@ function profileHref(e: PanelEntity): string | null {
       requestAnimationFrame(() => requestAnimationFrame(() => st.root.classList.add('is-open')));
 
       st.dialog.focus();
+    }
+
+    function open(tok: string, trigger: HTMLElement | null) {
+      const pane = paneFor(tok);
+      if (!pane) return false;
+      show(pane, trigger);
       return true;
     }
 
     function close() {
-      if (st.root.hidden) return;
+      if (!st.isOpen) return;
+      st.isOpen = false;
       st.root.classList.remove('is-open');
       st.dialog.removeAttribute('aria-modal');
       document.documentElement.classList.remove('sp-locked');
@@ -652,7 +775,7 @@ function profileHref(e: PanelEntity): string | null {
       st.hideTimer = window.setTimeout(() => {
         st.root.hidden = true;
         st.hideTimer = null;
-      }, 320);
+      }, HIDE_AFTER_MS);
     }
 
     /**
@@ -695,8 +818,21 @@ function profileHref(e: PanelEntity): string | null {
       const href = link.getAttribute('href');
       ev.preventDefault();
       if (href) {
-        history.pushState({ sp: tok }, '', href);
-        st.pushed = true;
+        // Opening from the closed list ADDS a history entry, so Back closes the
+        // panel and returns to the list (§79).
+        //
+        // Moving from one open record to another REPLACES it. Pushing again
+        // would make the reader's next press of Close — which is history.back()
+        // — reopen the record they had just moved on from, having asked to be
+        // rid of the panel entirely. Reading eight rows in turn would bury the
+        // list under eight entries. Switching records is the same act as
+        // opening one, not a step into it.
+        if (st.isOpen) {
+          history.replaceState({ sp: tok }, '', href);
+        } else {
+          history.pushState({ sp: tok }, '', href);
+          st.pushed = true;
+        }
       }
       open(tok, link);
     });
@@ -711,7 +847,15 @@ function profileHref(e: PanelEntity): string | null {
     });
     scrim?.addEventListener('click', () => dismiss());
 
-    st.dialog.addEventListener('keydown', (ev: KeyboardEvent) => {
+    // Bound to the document rather than to the dialog, because a listener on
+    // the dialog only ever hears a key pressed while focus is INSIDE it. Focus
+    // can legitimately be elsewhere: a click on the scrim, or on a stretch of
+    // plain text in the panel, can leave the document element focused in some
+    // browsers, and Escape would then do nothing on a panel that is plainly
+    // open. Escape must close what the reader can see, wherever their focus sat.
+    document.addEventListener('keydown', (ev: KeyboardEvent) => {
+      if (!st.isOpen) return;
+
       if (ev.key === 'Escape') {
         ev.preventDefault();
         dismiss();
@@ -732,6 +876,16 @@ function profileHref(e: PanelEntity): string | null {
       const last = items[items.length - 1];
       const active = document.activeElement;
 
+      // Focus is not in the panel at all — it was dropped on <body>, or a page
+      // script moved it. Tabbing from there walks the list BEHIND the panel,
+      // which is the one thing a trap exists to prevent, so it is pulled back in
+      // rather than merely left alone.
+      if (!(active instanceof Node) || !st.dialog.contains(active)) {
+        ev.preventDefault();
+        (ev.shiftKey ? last : first).focus();
+        return;
+      }
+
       if (ev.shiftKey && (active === first || active === st.dialog)) {
         ev.preventDefault();
         last.focus();
@@ -747,7 +901,14 @@ function profileHref(e: PanelEntity): string | null {
       // Whatever brought us here, it was not us, so there is no pushed entry of
       // ours to go back to. Dismissal from this state rewrites the address.
       st.pushed = false;
-      if (tok && paneFor(tok)) open(tok, null);
+      if (tok && open(tok, null)) return;
+      // The address names a record and it is not one of ours. Say so, exactly as
+      // the server would have on a fresh load of the same URL — closing silently
+      // would leave the address claiming something the page is ignoring, which
+      // is the state this panel refuses to be in. The refusal is only in the
+      // document when the page was ENTERED on an unknown token; where it is not,
+      // closing is the only answer available.
+      if (tok && st.missing) show(st.missing, null);
       else close();
     });
 

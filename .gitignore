@@ -47,3 +47,7 @@ backups/
 # creates the next one. tests/layout-guards.test.ts additionally fails if any
 # survive, so a harness cannot ship even from a working tree that has one.
 src/pages/zz-*
+src/pages/*probe*
+src/pages/*harness*
+src/pages/*scratch*
+src/pages/*sandbox*

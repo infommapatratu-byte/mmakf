@@ -315,23 +315,40 @@ const uid = `gs-${Math.random().toString(36).slice(2, 9)}`;
       open();
     }
 
+    // Stop whatever is in flight from painting. Aborting alone is not enough:
+    // a response already parsed and waiting on the microtask queue would still
+    // pass its own sequence check, so the sequence moves on too.
+    function cancelInFlight() {
+      if (controller) {
+        controller.abort();
+        controller = null;
+      }
+      seq += 1;
+    }
+
     async function run(q: string) {
       const trimmed = q.trim();
 
+      // BOTH SHORT-CIRCUITS CANCEL FIRST. They paint without asking the server,
+      // so a request for the text that was just deleted would otherwise land on
+      // top and show results for a query no longer in the box — the very
+      // out-of-order failure the sequence guard below exists to stop.
       if (trimmed.length === 0 && suggestions) {
+        cancelInFlight();
         render(suggestions);
         return;
       }
       if (trimmed.length > 0 && trimmed.length < min) {
+        cancelInFlight();
         render({ state: 'too_short', query: trimmed });
         return;
       }
 
       // Only the newest request may paint. Debouncing alone lets a slow response
       // for a shorter query land after a fast one for a longer query.
-      if (controller) controller.abort();
+      cancelInFlight();
       controller = new AbortController();
-      const mine = ++seq;
+      const mine = seq;
 
       const url = new URL(endpoint, window.location.origin);
       url.searchParams.set('q', trimmed);
@@ -410,19 +427,28 @@ const uid = `gs-${Math.random().toString(36).slice(2, 9)}`;
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         if (panel!.hidden) return;
-        setActive(activeIndex - 1);
+        // From no selection this must reach the LAST option. `activeIndex - 1`
+        // is -2, which wraps to the second-from-last and reads as a keystroke
+        // the box swallowed.
+        setActive(activeIndex < 0 ? options.length - 1 : activeIndex - 1);
         return;
       }
 
-      if (e.key === 'Home' && !panel!.hidden && options.length) {
+      // HOME AND END BELONG TO THE TEXT CURSOR. In an editable combobox the
+      // APG gives these keys to the input, and taking them would leave a
+      // keyboard user no way to reach the start of what they typed — a worse
+      // loss than the shortcut is a gain, since ArrowUp already reaches the end
+      // of the list in one press. They move the active option only when the box
+      // is EMPTY, which is the suggestion case, where the caret has nowhere to
+      // go and nothing is taken away.
+      if (
+        (e.key === 'Home' || e.key === 'End') &&
+        !panel!.hidden &&
+        options.length &&
+        input!.value.length === 0
+      ) {
         e.preventDefault();
-        setActive(0);
-        return;
-      }
-
-      if (e.key === 'End' && !panel!.hidden && options.length) {
-        e.preventDefault();
-        setActive(options.length - 1);
+        setActive(e.key === 'Home' ? 0 : options.length - 1);
         return;
       }
 
@@ -534,7 +560,7 @@ const uid = `gs-${Math.random().toString(36).slice(2, 9)}`;
   .gs-group-title {
     font-family: var(--font-display);
     font-size: var(--text-xs);
-    letter-spacing: 0.18em;
+    letter-spacing: var(--tracking-caps);
     text-transform: uppercase;
     color: var(--gold);
     padding: var(--space-2) var(--space-5);
@@ -548,7 +574,10 @@ const uid = `gs-${Math.random().toString(36).slice(2, 9)}`;
   .gs-option.is-linked {
     cursor: pointer;
   }
-  .gs-option:hover,
+  /* Hover lifts only the rows that GO somewhere. A record with no page yet is
+     listed and says so; giving it a pointer response would promise a click that
+     does nothing. */
+  .gs-option.is-linked:hover,
   .gs-option[aria-selected='true'] {
     background: var(--card-2);
     border-inline-start-color: var(--gold);
@@ -568,7 +597,7 @@ const uid = `gs-${Math.random().toString(36).slice(2, 9)}`;
     font-size: var(--text-sm);
     color: var(--muted);
     margin-top: var(--space-1);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
   }
 
   .gs-meta {
@@ -583,7 +612,7 @@ const uid = `gs-${Math.random().toString(36).slice(2, 9)}`;
   .gs-note {
     font-family: var(--font-display);
     font-size: var(--text-xs);
-    letter-spacing: 0.12em;
+    letter-spacing: var(--tracking-wide);
     text-transform: uppercase;
     color: var(--muted);
   }
@@ -596,6 +625,6 @@ const uid = `gs-${Math.random().toString(36).slice(2, 9)}`;
     padding: var(--space-4) var(--space-5);
     font-size: var(--text-base);
     color: var(--muted);
-    line-height: 1.6;
+    line-height: var(--leading-normal);
   }
 </style>

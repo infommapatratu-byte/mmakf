@@ -65,10 +65,11 @@
 // no kind for it here either, so a hit is not representable. See
 // NEVER_SEARCHABLE in search.ts.
 
-import { and, asc, desc, eq, isNotNull, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNotNull, isNull, or, type SQL } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import * as o from '@/db/operations.schema';
 import { writeAudit, type AuditContext } from '@/db/federation';
+import { todayIso } from '@/db/membership';
 import { canAnywhere, visibleScopes, type Principal } from '@/lib/rbac';
 import {
   search,
@@ -457,6 +458,25 @@ async function searchCoaches(c: ExtraContext): Promise<ExtraResult> {
 //
 // official_quals carries no unit columns, so the scope predicate is applied
 // through the holder's placement, exactly as search.ts does for certificates.
+//
+// THE PUBLISHED DIRECTORY IS THE DEFAULT, NOT THE WHOLE REGISTER.
+//
+// `person:read` is a MEMBER-level action — every signed-in member and athlete
+// holds it. What /officials publishes to the world is narrower than the table:
+// publicOfficialsDirectory() serves only credentials that are active, held by
+// an active person, and not past their expiry. Searching official_quals with no
+// visibility clause would hand any member the rest of it — that a named
+// person's referee licence is REVOKED, SUSPENDED or LAPSED — which is the same
+// disclosure search.ts refuses when it keeps a suspended dojo affiliation out
+// of the public directory. A withdrawn credential is the federation's news to
+// break, not a search box's.
+//
+// So the directory clause stands on its own for a member, and is UNIONed with
+// the caller's own reach for the office: `user:read` is what gates the staff
+// view of these registries elsewhere (expiringLicences() in src/db/officials.ts
+// asserts exactly that), so it is what widens this one. National `user:read`
+// makes every clause redundant and the filter drops away entirely rather than
+// being written as a tautology.
 
 async function searchOfficials(c: ExtraContext): Promise<ExtraResult> {
   if (!canAnywhere(c.principal, 'person:read')) return { skip: 'not_authorised' };
@@ -474,6 +494,25 @@ async function searchOfficials(c: ExtraContext): Promise<ExtraResult> {
   ];
   const conds = baseConds(c, fields);
   if (scope.reach === 'scoped') conds.push(scope.predicate);
+
+  // Expiry is compared against today's date rather than left to the row's
+  // status column: a licence whose expiry has passed has lapsed whether or not
+  // anyone has run the job that flips its status.
+  const office = scopeFilter(c.principal, 'user:read', {
+    state: s.persons.stateUnitId,
+    district: s.persons.districtUnitId,
+    dojo: s.persons.dojoId,
+  });
+  if (office.reach !== 'all') {
+    const directory = and(
+      eq(s.officialQuals.status, 'active'),
+      eq(s.persons.status, 'active'),
+      or(isNull(s.officialQuals.expiresOn), gte(s.officialQuals.expiresOn, todayIso()))
+    ) as SQL;
+    conds.push(
+      office.reach === 'scoped' ? (or(directory, office.predicate) as SQL) : directory
+    );
+  }
 
   const rows = await c.db
     .select({
@@ -657,8 +696,8 @@ async function searchRegistrations(c: ExtraContext): Promise<ExtraResult> {
 // athlete profile makes when it shows final results and withholds provisional
 // ones.
 //
-// The period label ("2026 Q1 Kumite") is not a match field: matching it would
-// return the whole table, which is a leaderboard export rather than a search.
+// The period label is not a match field: matching it would return the whole
+// table, which is a leaderboard export rather than a search.
 //
 // ranking_entries has no createdAt, so it cannot answer "recent" and says so in
 // suggestion mode rather than being silently absent.
@@ -1056,6 +1095,19 @@ export async function globalSearch(
 
   const note = (kind: GlobalKind, reason: GlobalSkipReason) =>
     skipped.push({ kind, label: GROUP_LABEL[kind], reason, detail: SKIP_TEXT[reason] });
+
+  // A TYPE THE CALLER NARROWED AWAY IS REPORTED, NOT SILENTLY ABSENT. Without
+  // this, a request for one type comes back with `groups: []` and an EMPTY
+  // `skipped` whenever that type matched nothing, and a surface reading those
+  // two fields says "nothing matched" about nineteen types it never looked at —
+  // the exact confusion between a withheld answer and an empty one that the
+  // rest of this module exists to prevent. search.ts records `not_requested`
+  // for the same reason.
+  if (opts.kinds !== undefined) {
+    for (const kind of GROUP_ORDER) {
+      if (!requested.includes(kind)) note(kind, 'not_requested');
+    }
+  }
 
   if (query.length > 0 && query.length < MIN_QUERY_LENGTH) {
     // A one-character query matches most of the register and answers nothing.

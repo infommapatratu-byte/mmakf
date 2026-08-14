@@ -51,9 +51,91 @@
 // per-person session alone, and a fuzzy match away from an accidental sign-out
 // is not a trade worth making for two saved clicks.
 
-import type { Action, Principal } from './rbac';
-import { canAnywhere } from './rbac';
+import type { Action, Principal, Role } from './rbac';
+import { canAnywhere, actionsForRole } from './rbac';
 import { ADMIN_GROUPS, SURFACE_PREFIX, href as surfaceHref, type Surface } from './surface';
+
+// ─── Who the operations modules are for ─────────────────────────────────────
+//
+// A MODULE'S OWN ACTION IS NOT ENOUGH TO DECIDE WHO IS OFFERED IT, and the
+// palette is the first surface where that matters.
+//
+// ADMIN_GROUPS gates /admin/command, /admin/queue and /admin/governance on
+// 'content:read'. Every MEMBER holds 'content:read'. In the sidebar that has
+// never shown, because AdminShell only renders once somebody is already on
+// /admin and every page repeats its own check — the weak gate is masked by
+// where the menu lives. The palette has no such shelter: it opens on the public
+// federation, for a member reading the kata library, and generating its
+// operations entries from ADMIN_GROUPS alone offered exactly those three
+// modules to every member and athlete on the site.
+//
+// It is not only 'content:read'. The read half of operations is shared widely
+// by design: a PARENT holds 'attendance:read', 'grading:read' and
+// 'support:read'; an ATHLETE holds 'competition:read'; an INSTITUTION_ADMIN
+// holds 'program:read', 'booking:read', 'quote:read', 'task:read' and
+// 'report:read'. Gating on the module's action alone would offer a parent the
+// attendance module and a client's administrator half the operations menu.
+//
+// So an operations module needs TWO things: the module's action, and a caller
+// who is operations staff at all. The second is decided here, and it is derived
+// from rbac.ts rather than restated: a principal is operations staff when they
+// hold at least one action that lies outside everything a member, a family and
+// a client's own staff hold between them. That set is computed from the five
+// roles below through actionsForRole(), so a grant changed in rbac.ts changes
+// this test too, and nobody has to remember this file.
+//
+// It fails closed in the useful direction. An EDUCATION_OFFICER holds
+// 'content:write', a MEDIA_OFFICER holds 'seo:write', an INSTRUCTOR holds
+// 'dojo:read', a FINANCE_OFFICER holds 'finance:read' — all outside the set, so
+// all keep their modules. An INSTITUTION_ADMIN's authority is, by construction,
+// entirely inside it.
+const CLIENT_AND_MEMBER_ROLES: Role[] = [
+  'MEMBER',
+  'ATHLETE',
+  'PARENT',
+  'INSTITUTION_ADMIN',
+  'INSTITUTION_COORDINATOR',
+];
+
+// Built on first use rather than at module load. The set is the only thing in
+// this file that calls into rbac.ts at the top level, and doing so pulled the
+// whole grant table — all 32 roles — into the palette's browser bundle, which
+// grew it from 26 kB to 35 kB for a function no browser ever calls. Behind a
+// function it is reachable only from isOperations(), which the client does not
+// use, so the bundler drops rbac.ts again.
+let clientAndMemberActions: ReadonlySet<Action> | null = null;
+
+function clientAndMemberFloor(): ReadonlySet<Action> {
+  if (!clientAndMemberActions) {
+    clientAndMemberActions = new Set<Action>(
+      CLIENT_AND_MEMBER_ROLES.flatMap((role) => actionsForRole(role))
+    );
+  }
+  return clientAndMemberActions;
+}
+
+/**
+ * Is this caller federation operations staff?
+ *
+ * Asked of the principal's WHOLE grant set, not of the actions the palette
+ * happens to gate on: what distinguishes an education officer from a client's
+ * administrator is 'content:write', and the palette gates nothing on it.
+ */
+export function isOperations(principal: Principal | null | undefined): boolean {
+  if (!principal || !Array.isArray(principal.bindings)) return false;
+  const floor = clientAndMemberFloor();
+  for (const b of principal.bindings) {
+    for (const action of actionsForRole(b.role)) {
+      if (floor.has(action)) continue;
+      // Back through canAnywhere() rather than trusting the binding we are
+      // standing on: it is what knows about expiry, revocation and roles that
+      // no longer exist. A withdrawn binding must not confer operations
+      // standing any more than it confers its actions.
+      if (canAnywhere(principal, action)) return true;
+    }
+  }
+  return false;
+}
 
 // ─── Shape ──────────────────────────────────────────────────────────────────
 
@@ -115,6 +197,15 @@ export interface Command {
   requires?: Action;
   /** Contextual commands only: the entity kinds this verb applies to. */
   context?: readonly EntityKind[];
+  /**
+   * Override the section's default heading.
+   *
+   * Used for the operations modules, which are navigation but must not sit in
+   * the same list as the public site: the federation has a Competitions page
+   * and a Competitions module, and two adjacent rows reading "Competitions"
+   * make the reader guess. Under separate headings they are two obvious things.
+   */
+  group?: string;
 }
 
 /** The heading a contextual section gets when the page supplied no label. */
@@ -154,9 +245,10 @@ const ENTITY_HEADING: Record<EntityKind, string> = {
  *
  * CommandPalette.astro's browser script imports rankCommands() from this
  * module, which drags the module in with it. Rollup drops what it can — rbac.ts
- * goes entirely, and none of the 32 roles or their grants appear in the client
- * chunk — but it retains these top-level literals, so the palette's client
- * chunk carries the registry's own text: about 26 kB raw, 7.6 kB gzipped.
+ * goes entirely, so none of the 32 roles or their grants reach the browser,
+ * which is why clientAndMemberFloor() above is a function and not a constant —
+ * but it retains these top-level literals, so the palette's client chunk
+ * carries the registry's own text: about 26 kB raw, 7.6 kB gzipped.
  * Annotating the derivation as pure does not change it, and nor does hoisting
  * the derivation into buildRegistry(); the project does not declare
  * `sideEffects: false`, which is the setting that would let a bundler drop an
@@ -557,6 +649,7 @@ function buildRegistry(): Command[] {
         id: `go${m.href.replace(/\//g, '.')}`,
         label: m.label,
         section: 'navigation',
+        group: 'Operations',
         keywords: `${group.label} operations admin module`,
         href: m.href,
         requires: m.action as Action,
@@ -636,6 +729,14 @@ export interface BuildOptions {
   /** What the caller may do. See actionsFor(). */
   actions: readonly Action[];
   surface: Surface;
+  /**
+   * Is the caller federation operations staff? See isOperations().
+   *
+   * DEFAULTS TO FALSE, which is the fail-safe direction: a caller who forgets
+   * to pass it gets a palette with no operations entries, rather than a member
+   * being offered the approval queue.
+   */
+  operations?: boolean;
   /** What the page is looking at, if anything. */
   entity?: EntityContext | null;
 }
@@ -658,6 +759,7 @@ function fillId(path: string, id: string | number | null | undefined): string | 
  */
 export function buildCommands(o: BuildOptions): ResolvedCommand[] {
   const held = new Set<Action>(o.actions);
+  const operations = o.operations === true;
   const entity = o.entity ?? null;
   const out: ResolvedCommand[] = [];
 
@@ -676,6 +778,13 @@ export function buildCommands(o: BuildOptions): ResolvedCommand[] {
 
     if (c.requires && !held.has(c.requires)) continue;
 
+    // The operations floor. Every /admin destination needs both the module's
+    // own action AND a caller who is operations staff — see isOperations() and
+    // the reasoning above it. Keyed off the path rather than a flag per command
+    // so a destination added under /admin cannot be given the weaker gate by
+    // forgetting a field.
+    if (!operations && c.href && c.href.startsWith('/admin')) continue;
+
     let href: string | null = null;
     if (c.href) {
       const filled = fillId(c.href, entity?.id);
@@ -688,9 +797,9 @@ export function buildCommands(o: BuildOptions): ResolvedCommand[] {
       id: c.id,
       label: c.label,
       section: c.section,
-      group: c.section === 'contextual' ? contextHeading
+      group: c.group ?? (c.section === 'contextual' ? contextHeading
         : c.section === 'action' ? 'Actions'
-        : 'Navigation',
+        : 'Navigation'),
       keywords: c.keywords ?? '',
       href,
       verb: c.verb ?? null,
@@ -819,7 +928,17 @@ export function matchText(query: string, text: string): Match | null {
   };
 
   if (t === q) return { score: 1000, indices: all(0) };
-  if (t.startsWith(q)) return { score: 900 - Math.min(t.length, 60), indices: all(0) };
+  if (t.startsWith(q)) {
+    // Penalised by what is left of the FIRST WORD, not by the length of the
+    // whole string. Penalising the whole string is wrong for keywords, which
+    // are a bag of words rather than a phrase: typing "new" put "Media and
+    // press" (keywords "news journalist release crest") above "Affiliate a
+    // dojo" (keywords "new club charter apply start create") purely because the
+    // first bag is eight characters shorter. What should decide it is that one
+    // word IS "new" and the other is "news".
+    const firstWord = t.split(WORD_BREAK)[0] ?? t;
+    return { score: 900 - Math.min(Math.max(firstWord.length - q.length, 0), 60), indices: all(0) };
+  }
 
   // A prefix of any word: "desk" in "Support desk".
   let cursor = 0;

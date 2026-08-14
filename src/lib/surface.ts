@@ -356,7 +356,13 @@ export const ADMIN_GROUPS: AdminGroup[] = [
     label: 'Assurance',
     modules: [
       { href: '/admin/cases', label: 'Cases', action: 'safeguarding:read' },
-      { href: '/admin/approvals', label: 'Audit trail', action: 'audit:read' },
+      // RELABELLED. This entry said "Audit trail" and pointed at the two-person
+      // approval queue, which reads no audit event at all — so anybody looking
+      // for the federation's record of its own decisions was sent to a list of
+      // pending requests and found nothing. Two different screens with two
+      // different jobs.
+      { href: '/admin/approvals', label: 'Approvals', action: 'audit:read' },
+      { href: '/admin/audit', label: 'Audit log', action: 'audit:read' },
     ],
   },
 ];

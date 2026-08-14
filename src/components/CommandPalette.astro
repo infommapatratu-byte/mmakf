@@ -46,7 +46,7 @@
 
 import { identify } from '@/lib/session';
 import {
-  buildCommands, actionsFor, resolveChords,
+  buildCommands, actionsFor, isOperations, resolveChords,
   type EntityContext, type ResolvedCommand,
 } from '@/lib/commands';
 import type { Principal } from '@/lib/rbac';
@@ -71,6 +71,10 @@ const principal: Principal | null =
 
 const commands: ResolvedCommand[] = buildCommands({
   actions: actionsFor(principal),
+  // Asked separately from the actions because it is a different question: the
+  // actions say what the caller may do, this says whether the operations
+  // modules are addressed to them at all. See isOperations().
+  operations: isOperations(principal),
   surface,
   entity,
 });
@@ -154,7 +158,15 @@ const chordRows = chords.map((c) => {
       </button>
     </div>
 
-    <div class="cp-help-body">
+    <!-- WCAG 2.1.1. This region scrolls — on an 800px viewport the three
+         sections are taller than the panel — and its only focusable control,
+         the close button, sits OUTSIDE it in the header. Without a tab stop of
+         its own there is no key that reaches the overflow, so a keyboard-only
+         reader cannot see the chords at the bottom. tabindex makes it
+         scrollable by arrow key; the group role carries the panel's heading as
+         its name so the stop is not announced as an anonymous box. -->
+    <div class="cp-help-body" id="cp-help-body" tabindex="0"
+         role="group" aria-labelledby="cp-help-title">
       <section>
         <h3>Anywhere</h3>
         <ul class="cp-keys">
@@ -210,6 +222,35 @@ const chordRows = chords.map((c) => {
   const dataEl = document.getElementById('cp-payload');
 
   if (root && help && dataEl) {
+    // ── Where the dialogs live ──────────────────────────────────────────────
+    //
+    // ONE PALETTE PER PAGE. The dialog owns fixed ids, and a second copy would
+    // leave two #cp-list and two #cp-o-0 in the document — aria-controls and
+    // aria-activedescendant both resolve by id, so assistive technology would
+    // be pointed at markup nobody is driving. getElementById already picked the
+    // first of each; the rest are removed rather than left as duplicate ids.
+    document.querySelectorAll('#cp-root').forEach((el) => { if (el !== root) el.remove(); });
+    document.querySelectorAll('#cp-help').forEach((el) => { if (el !== help) el.remove(); });
+    document.querySelectorAll('#cp-payload').forEach((el) => { if (el !== dataEl) el.remove(); });
+
+    // THEN MOVED TO <body>, AND THIS IS NOT TIDYING.
+    //
+    // setBackgroundInert() below marks every direct child of <body> inert while
+    // a dialog is open, skipping the two dialogs themselves. Base.astro renders
+    // a page's content inside <main>, so a palette dropped on a page — the
+    // documented usage — is a DESCENDANT of one of the elements it is about to
+    // disable. It disabled itself: the field could not take focus, the options
+    // could not be clicked, and the dialog was dead the moment it opened.
+    //
+    // Moving it also frees position:fixed from any ancestor carrying a
+    // transform, filter or contain, each of which makes a fixed child position
+    // against that ancestor instead of the viewport — which would pin a
+    // full-screen overlay inside whatever card the page happened to mount it
+    // in. Both problems have the same one-line fix, and neither is visible
+    // until somebody opens the palette in a browser.
+    if (root.parentElement !== document.body) document.body.appendChild(root);
+    if (help.parentElement !== document.body) document.body.appendChild(help);
+
     // ── State ───────────────────────────────────────────────────────────────
 
     const RECENT_KEY = 'mmakf.palette.recent';
@@ -237,6 +278,7 @@ const chordRows = chords.map((c) => {
     const backdrop = document.getElementById('cp-backdrop');
     const helpBackdrop = document.getElementById('cp-help-backdrop');
     const helpClose = help.querySelector('.cp-help-close');
+    const helpBody = document.getElementById('cp-help-body');
 
     let rows = [];              // { cmd, el } in visible order
     let active = -1;
@@ -475,7 +517,13 @@ const chordRows = chords.map((c) => {
 
     function say(message) {
       window.clearTimeout(announceTimer);
-      liveEl.textContent = message;
+      // Cleared and then set, rather than assigned straight over the top. A
+      // live region only announces when its contents CHANGE, and copying a
+      // link twice writes the same six characters twice — which is silence,
+      // in exactly the case where the reader has repeated the action because
+      // they were not sure it worked the first time.
+      liveEl.textContent = '';
+      announceTimer = window.setTimeout(() => { liveEl.textContent = message; }, 60);
     }
 
     function copyLink() {
@@ -494,9 +542,13 @@ const chordRows = chords.map((c) => {
       remember(cmd.id);
 
       if (cmd.verb === 'shortcuts') {
-        const back = paletteReturn;
+        // The help panel is opened BEFORE the palette closes, so that
+        // closePalette() sees a dialog still open and leaves the scroll lock
+        // and the background inert exactly as they are. Closing first released
+        // both for one frame: the scrollbar returned and the page jumped
+        // sideways underneath a reader who had only asked for a key list.
+        openHelp(paletteReturn);
         closePalette(false);
-        openHelp(back);
         return;
       }
       if (cmd.verb === 'copy-link') { copyLink(); return; }
@@ -540,7 +592,19 @@ const chordRows = chords.map((c) => {
       });
     }
 
-    function openPalette(seed) {
+    /**
+     * `returnTo` names the element focus goes back to, for callers that know it
+     * better than the document does.
+     *
+     * A keyboard open can trust document.activeElement. A POINTER open cannot:
+     * Safari does not focus a button when it is clicked, so by the time this
+     * runs the active element is <body> and the reader is returned to the top
+     * of the page instead of the control they pressed. The click handler passes
+     * the trigger itself. (A trigger that is not focusable — a bare <div> with
+     * the attribute — gets nothing back, which is one more reason the affordance
+     * should be a button.)
+     */
+    function openPalette(seed, returnTo) {
       if (isHelpOpen()) closeHelp();
       if (isOpen()) {
         if (typeof seed === 'string') { input.value = seed; render(); }
@@ -548,7 +612,7 @@ const chordRows = chords.map((c) => {
         input.select();
         return;
       }
-      paletteReturn = document.activeElement;
+      paletteReturn = returnTo || document.activeElement;
       root.hidden = false;
       document.documentElement.classList.add('cp-locked');
       setBackgroundInert(true);
@@ -648,7 +712,7 @@ const chordRows = chords.map((c) => {
         closeHelp();
         return;
       }
-      if (event.key === 'Tab') trap(event, [helpClose]);
+      if (event.key === 'Tab') trap(event, [helpClose, helpBody]);
     });
 
     document.addEventListener('keydown', (event) => {
@@ -719,7 +783,7 @@ const chordRows = chords.map((c) => {
       const trigger = target && target.closest ? target.closest('[data-command-palette]') : null;
       if (!trigger) return;
       event.preventDefault();
-      openPalette(trigger.getAttribute('data-command-palette') || '');
+      openPalette(trigger.getAttribute('data-command-palette') || '', trigger);
     });
   }
 </script>
@@ -862,7 +926,7 @@ const chordRows = chords.map((c) => {
     justify-content: space-between;
     gap: var(--space-4);
     padding: var(--space-2) var(--space-4);
-    min-height: 40px;
+    min-height: var(--space-10);
     cursor: pointer;
     color: var(--off-white);
     font-size: var(--text-base);
@@ -894,7 +958,7 @@ const chordRows = chords.map((c) => {
     padding: var(--space-6) var(--space-4);
     color: var(--muted);
     font-size: var(--text-base);
-    line-height: 1.6;
+    line-height: var(--leading-normal);
   }
 
   /* ── Footer ─────────────────────────────────────────────────────────────── */
@@ -936,6 +1000,13 @@ const chordRows = chords.map((c) => {
     overflow-y: auto;
     padding: var(--space-2) var(--space-4) var(--space-6);
   }
+  /* The scroll region is a tab stop (see the markup), so it has to say so when
+     it takes focus. Inset, because an outline outside it would be drawn over
+     by the panel edge it sits against. */
+  .cp .cp-help-body:focus-visible {
+    outline: 2px solid var(--gold-2);
+    outline-offset: calc(var(--space-1) * -1);
+  }
   .cp .cp-help-body section { padding-top: var(--space-4); }
   .cp .cp-help-body h3 {
     font-family: var(--font-display);
@@ -969,7 +1040,7 @@ const chordRows = chords.map((c) => {
     margin: var(--space-2) 0 0;
     font-size: var(--text-xs);
     color: var(--muted);
-    line-height: 1.6;
+    line-height: var(--leading-normal);
     max-width: 56ch;
   }
 

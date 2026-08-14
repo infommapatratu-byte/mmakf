@@ -94,6 +94,17 @@ export interface EntityRef {
   kind: EntityKind;
   id: string | number;
   identifier?: string | null;
+  /**
+   * The record's raw status, where the caller holds it.
+   *
+   * A handful of the `detailPath` rules below lead to a page that answers for
+   * some statuses and not others — the public register entry is the case that
+   * forced this field. Leaving the rule to the caller ("do not offer this link
+   * for a lapsed member") is how twenty-five surfaces come to disagree, which
+   * is the failure this file exists to end. Absent means NOT STATED, and a rule
+   * that needs a status withholds the link rather than assuming a good one.
+   */
+  status?: string | null;
 }
 
 /**
@@ -230,11 +241,16 @@ export const ENTITIES: Record<EntityKind, EntityDescriptor> = {
     requires: 'person:read',
     listPath: '/admin/membership',
     // The public register entry. It is keyed by federation id, not by the
-    // primary key, and athletes.ts answers it only for a person whose status is
-    // `active` — so a caller holding a lapsed or pending record must not offer
-    // this link. The null return covers the other half: a person recorded
-    // without a federation id has no public address at all.
-    detailPath: (ref) => (ref.identifier ? `/athlete/${encodeURIComponent(ref.identifier)}` : null),
+    // primary key, and publicAthleteProfile() in src/db/athletes.ts returns null
+    // for anybody whose status is not `active` — the page then renders "not
+    // found". So the STATUS IS PART OF WHETHER THIS ADDRESS EXISTS, and the rule
+    // is enforced here rather than asked of every caller. Both null returns are
+    // the same answer: a person recorded without a federation id, and a person
+    // whose standing is not current, have no public address to offer.
+    detailPath: (ref) =>
+      ref.identifier && ref.status === 'active'
+        ? `/athlete/${encodeURIComponent(ref.identifier)}`
+        : null,
     actions: [
       quickViewAction('person:read', '/admin/membership'),
       moduleAction('Go to Members', 'membership:read', '/admin/membership'),
@@ -515,11 +531,11 @@ export const ENTITIES: Record<EntityKind, EntityDescriptor> = {
     plural: 'Support tickets',
     icon: 'first-aid',
     table: 'support_tickets',
-    // Tickets carry no reference column. The primary key is what the desk
-    // quotes, and naming it "Ticket" rather than "ID" is the difference between
-    // a number a person can repeat and one they assume is internal.
-    identifierField: 'id',
-    identifierLabel: 'Ticket',
+    // `ticketNo`, not the primary key. The desk quotes the number the ticket was
+    // given; the primary key is an implementation detail nobody outside this
+    // codebase has ever been read down a telephone.
+    identifierField: 'ticketNo',
+    identifierLabel: 'Ticket number',
     lifecycle: 'ticket',
     requires: 'support:read',
     listPath: '/admin/support',
@@ -571,10 +587,17 @@ export const ENTITIES: Record<EntityKind, EntityDescriptor> = {
     identifierLabel: 'Reference',
     requires: 'marketplace:read',
     listPath: '/admin/listings',
-    // The seller's own page for the item. It names WHICH item, never WHOSE:
-    // ownership is resolved from the session inside the query, so this link
-    // leaks nothing when it is followed by somebody else.
-    detailPath: (ref) => `/portal/listings/${encodeURIComponent(String(ref.id))}`,
+    // NO detailPath, and the omission is the point. /portal/listings/:id is the
+    // SELLER'S own page: it picks the row out of myListings(), which resolves
+    // the shop from the session inside its own SQL, so a listing belonging to
+    // anybody else was never in the set and the page renders "not found". That
+    // construction is right — it is why the id names which item and never whose
+    // — but it means the address is NOT this record's page for the reader of
+    // /admin/listings, who is the only reader this kind is modelled for. Rule 1
+    // is about dead ends, not only about routes that 404: an "Open full record"
+    // button that reliably lands a reviewer on "not found" is a dead end with a
+    // route behind it. A seller-facing surface knows the page answers for its
+    // own reader and can pass the address itself.
     actions: [
       quickViewAction('marketplace:read', '/admin/listings'),
       moduleAction('Go to the marketplace', 'marketplace:read', '/admin/listings'),
@@ -620,8 +643,10 @@ export const ENTITIES: Record<EntityKind, EntityDescriptor> = {
     plural: 'Documents',
     icon: 'book',
     table: 'official_documents',
-    identifierField: 'id',
-    identifierLabel: 'Document',
+    // The code is printed beside every document on /documents and is what a
+    // circular is cited by. The primary key is not.
+    identifierField: 'code',
+    identifierLabel: 'Document code',
     requires: 'document:read',
     listPath: '/documents',
     actions: [

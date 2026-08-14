@@ -128,6 +128,7 @@ const OK_ROUTES = [
   '/admin/venues',
   '/admin/attendance',
   '/admin/workflows',
+  '/admin/audit',
 
   // ── The client portal ──
   '/learn/portal',

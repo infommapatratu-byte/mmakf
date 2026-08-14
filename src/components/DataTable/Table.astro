@@ -390,7 +390,7 @@ const emptyHeadline = outOfRange
     ? 'No records match these filters.'
     : (emptyTitle ?? `There are no ${caption.toLowerCase()} to show.`);
 const emptyBodyText = outOfRange
-  ? `There ${total === 1 ? 'is' : 'are'} ${NUM.format(total ?? 0)} matching the current filters, but none of them fall on this page.`
+  ? `The current filters match ${NUM.format(total ?? 0)} ${total === 1 ? nounOne : nounPlural}, none of which fall on this page.`
   : activeFilters > 0
     ? undefined
     : emptyBody;

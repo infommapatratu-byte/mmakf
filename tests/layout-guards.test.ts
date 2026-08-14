@@ -53,7 +53,10 @@ describe('no scratch page can ship', () => {
     // This is the second lock: it fails on a working tree that still has one,
     // so the harness cannot be built into a deployment either.
     const strays = readdirSync('src/pages').filter(
-      (f) => /^zz[-_]/i.test(f) || /\.(scratch|tmp|harness|probe)\./i.test(f)
+      // Matched ANYWHERE in the name, not only as a prefix or a dotted segment.
+      // The first version of this guard looked for a leading zz-, and the very
+      // next harness to appear was called cp-probe.astro — which is neither.
+      (f) => /^zz[-_]/i.test(f) || /(probe|harness|scratch|sandbox|mock|dummy)/i.test(f)
     );
     expect(
       strays,
