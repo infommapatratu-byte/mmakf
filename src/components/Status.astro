@@ -1,0 +1,103 @@
+---
+// One status chip, for the whole federation.
+//
+// Before this, twenty-eight database enums were rendered by whichever page
+// happened to show them, each choosing its own wording and colour. `failed` was
+// amber on one screen and red on another; `active` appeared as ACTIVE, Active
+// and active on three surfaces of the same product.
+//
+// This component is the only place a status becomes something a person reads.
+// It takes the raw database value and asks src/lib/status.ts what it means —
+// so changing how `partially_failed` reads changes it everywhere at once.
+//
+//   <Status value={run.status} domain="workflow" />
+//   <Status value={lead.status} domain="lead" withMeaning />
+//
+// `domain` is optional and only matters for the few words that genuinely differ
+// between contexts — `active` on a coach is not `active` on a membership.
+
+import { statusOf, toneVars, type Tone } from '@/lib/status';
+
+export interface Props {
+  value: string | null | undefined;
+  /** Disambiguates shared words. See BY_DOMAIN in src/lib/status.ts. */
+  domain?: string;
+  /** Show the operational explanation as a title tooltip. */
+  withMeaning?: boolean;
+  size?: 'sm' | 'md';
+  /** Render the tone as a bare dot plus text, with no chip outline. */
+  bare?: boolean;
+}
+
+const { value, domain, withMeaning = true, size = 'md', bare = false } = Astro.props;
+
+const st = statusOf(value, domain);
+const vars = toneVars(st.tone as Tone);
+
+// The tooltip is a convenience for a mouse and reaches nobody else, so the
+// meaning is ALSO exposed to assistive technology through aria-describedby when
+// it is present. A status a screen-reader user cannot interpret is the same
+// problem this component exists to fix, one input device over.
+const describedId = st.meaning && withMeaning
+  ? `st-${Math.abs(String(value).split('').reduce((a, c) => a * 31 + c.charCodeAt(0) | 0, 7))}`
+  : null;
+---
+
+<span
+  class:list={['st', `st-${size}`, bare && 'st-bare', st.tone === 'live' && 'st-live']}
+  style={vars}
+  title={withMeaning && st.meaning ? st.meaning : undefined}
+  aria-describedby={describedId ?? undefined}
+>
+  <span class="st-dot" aria-hidden="true"></span>
+  <span class="st-label">{st.label}</span>
+</span>
+{describedId && <span id={describedId} class="sr-only">{st.meaning}</span>}
+
+<style>
+  .st {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 3px 10px 3px 8px;
+    border: 1px solid var(--st-bd);
+    background: var(--st-bg);
+    color: var(--st-fg);
+    border-radius: var(--radius-pill);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    line-height: 1.5;
+    white-space: nowrap;
+    /* Numerals in a status rarely matter, but a status sitting in a table row
+       beside figures should not shift the baseline. */
+    vertical-align: middle;
+  }
+  .st-sm { font-size: 0.7rem; padding: 2px 8px 2px 6px; gap: 5px; }
+
+  .st-bare {
+    border-color: transparent;
+    background: transparent;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .st-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+  }
+
+  /* LIVE is the only tone that moves.
+     §73: motion must communicate state, not decorate. A live match is the one
+     status a reader must notice without reading, and it is rare enough on any
+     given screen that a pulse does not become wallpaper.
+
+     The global prefers-reduced-motion rule in global.css already reduces this
+     to a stopped frame, so it is not repeated here. */
+  .st-live .st-dot { animation: st-pulse 2s var(--ease-in-out) infinite; }
+  @keyframes st-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.45; transform: scale(0.82); }
+  }
+</style>
