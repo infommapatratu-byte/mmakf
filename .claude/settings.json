@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -f src/pages/zz-dt-harness.astro)",
+      "Bash(rm -rf .astro-dtcheck)",
+      "Bash(pkill -f \"astro dev --port 4399\")"
+    ]
+  }
+}

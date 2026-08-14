@@ -1,0 +1,739 @@
+---
+// ═══════════════════════════════════════════════════════════════════════════
+// PageHeader — the top of every major authenticated page (§12, §13, §15, §104)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// PURPOSE
+//
+// §12 says every major authenticated page opens the same way: breadcrumb,
+// title, description, status and metadata, one primary action, the secondary
+// actions, tabs. Written by hand that ordering survives about four pages. The
+// twenty-five admin screens already share a shell; this is the part of the page
+// the shell cannot supply, because only the page knows its own title and its
+// own actions.
+//
+// WHY THE PROPS ARE SHAPED THE WAY THEY ARE
+//
+// §13 — one dominant action per screen — is the rule this component exists to
+// make unbreakable. It is not enforced by a comment or a code review, because
+// neither survives a deadline. It is enforced by the TYPE: `primary` is a
+// single object, not an array, so a page that wants six primary actions cannot
+// express it. Everything else goes in `secondary`, and past `collapseAfter`
+// (two, by default) the remainder collapses into a "More" disclosure. A
+// component that permits the mistake will eventually be given it.
+//
+// PROPS
+//
+//   breadcrumbs   Crumb[] from src/lib/seo.ts — the SAME type the sitemap and
+//                 the BreadcrumbList structured data already use, so a page
+//                 declares its trail once. The last entry is the current page
+//                 (the convention every page in src/pages already follows);
+//                 every entry before it is a link (§15). Fewer than two entries
+//                 renders NOTHING, matching breadcrumbGraph(): a trail of one
+//                 is not a hierarchy, it is decoration.
+//   title         The page. Rendered as the h1 unless `headingLevel` says
+//                 otherwise.
+//   headingLevel  'h1' (default) or 'h2'. A shell that already prints an h1
+//                 must be given 'h2', or the page has two.
+//   description   One sentence on what this page is for. Optional, and absent
+//                 is better than padded.
+//   primary       ONE action. See above.
+//   secondary     The rest. Order matters: the first `collapseAfter` stay in
+//                 the bar, the remainder go behind "More".
+//   collapseAfter Default 2.
+//   tabs          Real links with real hrefs (§79, §80). Never JS state.
+//   sticky        Default true. Turn it off on a short page where a sticky bar
+//                 is just a bar.
+//   id            Anchor for skip links and deep links.
+//
+//   slot "meta"   Counts, chips and statuses. A status goes in here as
+//                 <Status …/> and in no other way — that component is the only
+//                 place a database enum becomes a word a person reads.
+//
+// STATES
+//
+//   no breadcrumbs / one crumb    the trail is not rendered at all.
+//   no description                the row is absent, not an empty paragraph.
+//   no primary                    the action bar renders only what exists; a
+//                                 page with nothing to do has no bar.
+//   an unavailable action         rendered as an aria-disabled button carrying
+//                                 the REASON, not hidden and not a dead link.
+//                                 An action that vanishes teaches nobody why.
+//   no tabs                       no tab strip, and no border where one would
+//                                 have been.
+//   stuck to the top              a shadow appears, and nothing else changes.
+//
+// ACCESSIBILITY (§52, WCAG 2.2 AA)
+//
+//   · The trail is a <nav aria-label="Breadcrumb"> with an ordered list; the
+//     current page is aria-current="page" and is NOT a link, because a link to
+//     where you already are is a keyboard stop that does nothing.
+//   · Tabs are a <nav> of links, not role="tablist". The ARIA tab pattern
+//     promises panels swapped by script under one URL; these are separate URLs
+//     that survive a refresh and can be pasted to a colleague. Announcing them
+//     as tabs would describe behaviour this component deliberately does not
+//     have. The current one carries aria-current="page".
+//   · "More" is a native <details>/<summary> disclosure. It therefore works
+//     with JavaScript off, announces its own expanded state, and is operable
+//     with Enter and Space without a line of script. Script only ADDS Escape,
+//     click-outside, focus restored to the summary, and arrow-key movement.
+//   · There is NO focus trap in the More menu, on purpose. §52 asks for a trap
+//     in overlays; a disclosure is not an overlay — it does not cover the page
+//     and Tab must be able to leave it. Trapping here would strand the keyboard
+//     in a three-item list. Focus leaving the menu closes it instead.
+//   · An unavailable action uses aria-disabled, never the `disabled` attribute:
+//     a disabled button cannot be focused, so the reason it is disabled can
+//     never be read by the person most likely to need it.
+//   · Focus is never obscured (2.4.11): the sticky offset defaults to the same
+//     96px band global.css already reserves with scroll-padding-top.
+//
+// RESPONSIVE
+//
+//   Below 900px the title and the primary action stay — they are the page and
+//   the thing to do on it. The inline secondary actions collapse into "More",
+//   which then holds all of them. Each action exists twice in the markup, but
+//   exactly one copy is display:none at any width, so nothing is announced
+//   twice and nothing is a hidden tab stop. The tab strip scrolls sideways
+//   inside itself; the page body never scrolls sideways.
+//
+// DO
+//   · Give it one primary action and let the rest be secondary.
+//   · Put counts in the meta slot only when you have counted something.
+//   · Point tabs at querystrings — ?status=open — so the view is shareable.
+// DON'T
+//   · Don't render a status any way but <Status>.
+//   · Don't invent a count, a total or a deadline to fill the meta slot. If the
+//     number would have to be made up, the slot stays empty.
+//   · Don't pass a title here when the surrounding shell already prints one.
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type { Crumb } from '@/lib/seo';
+
+export interface PageAction {
+  label: string;
+  href: string;
+  /** Why this cannot be done right now. Present = rendered as refused, with
+   *  the reason attached, rather than quietly removed from the bar. */
+  unavailable?: string;
+  /** Irreversible, or hard to undo. Marked in words as well as colour. */
+  danger?: boolean;
+  /** Serves a file rather than a page. */
+  download?: boolean | string;
+}
+
+export interface PageTab {
+  label: string;
+  href: string;
+  /** A real count from a real query. Omit it rather than guess — a zero nobody
+   *  counted reads exactly like a zero somebody did. */
+  count?: number;
+  /** Force the current tab. Left alone, the current URL decides. */
+  current?: boolean;
+}
+
+export interface Props {
+  breadcrumbs?: Crumb[];
+  title: string;
+  headingLevel?: 'h1' | 'h2';
+  description?: string;
+  primary?: PageAction;
+  secondary?: PageAction[];
+  collapseAfter?: number;
+  tabs?: PageTab[];
+  sticky?: boolean;
+  id?: string;
+}
+
+const {
+  breadcrumbs = [],
+  title,
+  headingLevel = 'h1',
+  description,
+  primary,
+  secondary = [],
+  collapseAfter = 2,
+  tabs = [],
+  sticky = true,
+  id,
+} = Astro.props;
+
+const Heading = headingLevel;
+
+// A crumb without both halves is not a crumb. Filtering before the length test
+// means a half-filled trail degrades to nothing rather than to a broken link.
+const trail: Crumb[] = (breadcrumbs ?? []).filter((c) => c && c.name && c.url);
+const showTrail = trail.length >= 2;
+
+const acts: PageAction[] = (secondary ?? []).filter((a) => a && a.label && a.href);
+// Never fewer than zero kept, and a page that asks for everything inline still
+// gets a working bar — the mobile rules below fold it away regardless.
+const keep = Math.max(0, collapseAfter);
+const inline = acts.slice(0, keep);
+const overflow = acts.slice(keep);
+// The disclosure holds EVERY secondary action, because below 900px it is the
+// only place any of them live. Above 900px the duplicates of the inline ones
+// are display:none, which removes them from the accessibility tree too.
+const menu = acts;
+const hasMenu = menu.length > 0;
+
+// ── which tab is current ────────────────────────────────────────────────────
+// Derived from the URL rather than declared, so a page cannot ship with two
+// tabs marked current or with none. `current` on the tab still wins, for the
+// pages where the mapping is not mechanical.
+//
+// A tab href may differ from the current URL only by querystring — ?status=open
+// — so a path comparison alone would mark every tab current. A tab matches when
+// its path matches AND every parameter it names is satisfied; the tab that
+// names the most parameters is the most specific, and wins.
+const here = Astro.url;
+const strip = (p: string) => p.replace(/\/+$/, '') || '/';
+
+function specificity(t: PageTab): number {
+  let u: URL;
+  try {
+    u = new URL(t.href, here);
+  } catch {
+    return -1;
+  }
+  if (strip(u.pathname) !== strip(here.pathname)) return -1;
+  const params = [...u.searchParams];
+  for (const [k, v] of params) if (here.searchParams.get(k) !== v) return -1;
+  return params.length;
+}
+
+const tabList: PageTab[] = (tabs ?? []).filter((t) => t && t.label && t.href);
+let currentTab = tabList.findIndex((t) => t.current === true);
+if (currentTab < 0) {
+  let best = -1;
+  tabList.forEach((t, i) => {
+    const s = specificity(t);
+    if (s > best) {
+      best = s;
+      currentTab = i;
+    }
+  });
+  if (best < 0) currentTab = -1;
+}
+
+// A stable, collision-free id per instance for the aria-describedby wiring on
+// refused actions. Derived from the title so it survives a re-render.
+const uid = 'ph-' + Math.abs(
+  String(title).split('').reduce((a, c) => ((a * 31 + c.charCodeAt(0)) | 0), 7)
+).toString(36);
+---
+
+<header
+  class:list={['ph', sticky && 'ph-sticky']}
+  id={id}
+  data-page-header
+>
+  <div class="ph-inner">
+
+    {showTrail && (
+      <nav class="ph-crumbs" aria-label="Breadcrumb">
+        <ol>
+          {trail.map((c, i) =>
+            i === trail.length - 1 ? (
+              <li><span aria-current="page">{c.name}</span></li>
+            ) : (
+              <li><a href={c.url}>{c.name}</a></li>
+            )
+          )}
+        </ol>
+      </nav>
+    )}
+
+    <div class="ph-bar">
+      <div class="ph-id">
+        <Heading class="ph-title">{title}</Heading>
+        {Astro.slots.has('meta') && (
+          <div class="ph-meta"><slot name="meta" /></div>
+        )}
+      </div>
+
+      {(primary || acts.length > 0) && (
+        <div class="ph-actions">
+          {inline.map((a, i) =>
+            a.unavailable ? (
+              // The button and the sentence explaining it share ONE wrapper, so
+              // the width rule that folds the bar away takes the reason with it.
+              // Left as a bare sibling, the .sr-only reason would still be read
+              // out on a phone where its button no longer exists.
+              <span class="ph-inline-act ph-inline-off">
+                <button
+                  type="button"
+                  class="ph-btn ph-btn-ghost ph-btn-off"
+                  aria-disabled="true"
+                  aria-describedby={`${uid}-off-${i}`}
+                >{a.label}</button>
+                <span id={`${uid}-off-${i}`} class="sr-only">{a.unavailable}</span>
+              </span>
+            ) : (
+              <a
+                class:list={['ph-btn', 'ph-btn-ghost', 'ph-inline-act', a.danger && 'ph-btn-danger']}
+                href={a.href}
+                download={a.download === true ? '' : (a.download || undefined)}
+              >{a.label}</a>
+            )
+          )}
+
+          {hasMenu && (
+            <details class:list={['ph-more', overflow.length === 0 && 'ph-more-narrow']} data-ph-more>
+              <summary class="ph-btn ph-btn-ghost ph-more-btn">
+                <span>More</span>
+                <span class="sr-only"> actions</span>
+                <svg class="ph-chev" width="10" height="6" viewBox="0 0 10 6" aria-hidden="true" focusable="false">
+                  <path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </summary>
+              <ul class="ph-more-list">
+                {menu.map((a, i) => (
+                  <li class:list={[i < keep && 'ph-dupe', a.unavailable && 'ph-more-off']}>
+                    {a.unavailable ? (
+                      // The reason sits OUTSIDE the button on purpose. Inside,
+                      // it would become part of the button's accessible name
+                      // and then be announced a second time by describedby —
+                      // the label read twice with the explanation buried in it.
+                      <>
+                        <button
+                          type="button"
+                          class="ph-more-item ph-btn-off"
+                          aria-disabled="true"
+                          aria-describedby={`${uid}-moff-${i}`}
+                        >{a.label}</button>
+                        <span class="ph-why" id={`${uid}-moff-${i}`}>{a.unavailable}</span>
+                      </>
+                    ) : (
+                      <a
+                        class:list={['ph-more-item', a.danger && 'ph-item-danger']}
+                        href={a.href}
+                        download={a.download === true ? '' : (a.download || undefined)}
+                      >{a.label}</a>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+
+          {primary && (
+            primary.unavailable ? (
+              <div class="ph-primary-off">
+                <button
+                  type="button"
+                  class="ph-btn ph-btn-primary ph-btn-off"
+                  aria-disabled="true"
+                  aria-describedby={`${uid}-primary-off`}
+                >{primary.label}</button>
+                <p class="ph-why" id={`${uid}-primary-off`}>{primary.unavailable}</p>
+              </div>
+            ) : (
+              <a
+                class:list={['ph-btn', 'ph-btn-primary', primary.danger && 'ph-btn-danger-solid']}
+                href={primary.href}
+                download={primary.download === true ? '' : (primary.download || undefined)}
+              >{primary.label}</a>
+            )
+          )}
+        </div>
+      )}
+    </div>
+
+    {description && <p class="ph-desc">{description}</p>}
+
+    {tabList.length > 0 && (
+      <nav class="ph-tabs" aria-label="Views of this page">
+        <ul>
+          {tabList.map((t, i) => (
+            <li>
+              <a
+                href={t.href}
+                class={i === currentTab ? 'is-current' : undefined}
+                aria-current={i === currentTab ? 'page' : undefined}
+              >
+                <span>{t.label}</span>
+                {/* Only a number that was actually counted. `count` left
+                    undefined prints nothing — it never falls back to 0. */}
+                {typeof t.count === 'number' && <span class="ph-count">{t.count}</span>}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </nav>
+    )}
+  </div>
+</header>
+
+<style>
+  .ph {
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* The offset is the SAME 96px band global.css already reserves with
+     scroll-padding-top for WCAG 2.4.11, so a focused element scrolled into view
+     lands below this header rather than behind it. A shell that does not sit
+     under the fixed site nav overrides --ph-sticky-top rather than editing
+     this rule. */
+  .ph-sticky {
+    position: sticky;
+    top: var(--ph-sticky-top, var(--space-24));
+    z-index: var(--z-sticky);
+  }
+
+  /* Stuck state changes the SHADOW and nothing else. Shrinking a sticky header
+     on scroll changes its height in normal flow, which moves everything below
+     it, which can move the header back out of its stuck range — a header that
+     flickers between two sizes for the whole length of a long list. A shadow
+     costs no layout. */
+  .ph-sticky.is-stuck { box-shadow: var(--shadow-md); }
+
+  .ph-inner {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-5) 0 0;
+  }
+
+  /* ── breadcrumb ── */
+  .ph-crumbs ol {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    list-style: none;
+    font-size: var(--text-xs);
+    color: var(--muted);
+  }
+  .ph-crumbs li { display: flex; align-items: center; gap: var(--space-2); }
+  .ph-crumbs li + li::before {
+    content: '/';
+    /* Matches the breadcrumb separator in Base.astro, which uses --gold-dim.
+       --muted-2 is 1.87:1 and is decorative-only by declaration in global.css. */
+    color: var(--gold-dim);
+  }
+  .ph-crumbs a {
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: color var(--dur-fast) var(--ease-out),
+                border-color var(--dur-fast) var(--ease-out);
+  }
+  .ph-crumbs a:hover { color: var(--gold-2); border-bottom-color: var(--gold-dim); }
+  .ph-crumbs [aria-current='page'] { color: var(--off-white); }
+
+  /* ── title row ── */
+  .ph-bar {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+  }
+  .ph-id {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+  .ph-title {
+    font-family: var(--font-display);
+    font-size: var(--text-2xl);
+    font-weight: 600;
+    line-height: var(--leading-tight);
+    letter-spacing: var(--tracking-tight);
+    color: var(--white);
+    /* A long register name must wrap rather than push the primary action off
+       the right edge of a narrow screen. */
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .ph-meta { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+
+  .ph-desc {
+    font-size: var(--text-sm);
+    color: var(--muted);
+    max-width: var(--max-w-prose);
+    line-height: var(--leading-normal);
+  }
+
+  /* ── actions ── */
+  .ph-actions {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    /* The dominant action sits last in the DOM so it is the last thing a
+       keyboard reaches before the content, and last in the visual row on the
+       right — but row-reverse would fight the source order, so the order is
+       simply authored as it reads. */
+  }
+
+  /* Local sizing rather than the site .btn, which is a 30px-padded call to
+     action built for a marketing page. An operations header needs a control. */
+  .ph-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    text-decoration: none;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background var(--dur-fast) var(--ease-out),
+                border-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out);
+  }
+  .ph-btn-primary { background: var(--red); color: #FDF9F3; }
+  .ph-btn-primary:hover { background: var(--red-2); color: #fff; }
+  /* --control-border, not --border-2: a bordered control's edge IS the thing
+     that identifies it, so it has to clear 3:1 (WCAG 1.4.11). */
+  .ph-btn-ghost { background: transparent; color: var(--off-white); border-color: var(--control-border); }
+  .ph-btn-ghost:hover { border-color: var(--gold); color: var(--gold-3); }
+  .ph-btn-danger { color: var(--red); border-color: var(--red-3); }
+  .ph-btn-danger:hover { color: #fff; background: var(--red); border-color: var(--red); }
+  .ph-btn-danger-solid { background: var(--red); color: #FDF9F3; }
+
+  /* Refused, not removed. Colour alone never carries this (1.4.1) — the reason
+     is real text, wired up with aria-describedby. */
+  .ph-btn-off {
+    opacity: 0.6;
+    cursor: not-allowed;
+    background: var(--card-2);
+    color: var(--muted);
+    border-color: var(--border-2);
+  }
+  .ph-btn-off:hover { background: var(--card-2); color: var(--muted); border-color: var(--border-2); }
+
+  .ph-primary-off { display: flex; flex-direction: column; gap: var(--space-1); align-items: flex-end; }
+  .ph-why {
+    font-size: var(--text-xs);
+    color: var(--muted);
+    max-width: 34ch;
+    text-align: right;
+    line-height: var(--leading-snug);
+    text-transform: none;
+    letter-spacing: var(--tracking-normal);
+    font-family: var(--font-body);
+  }
+
+  /* ── the More disclosure ── */
+  .ph-more { position: relative; }
+  .ph-more-btn { list-style: none; }
+  /* Safari draws its own triangle on a summary and ignores list-style. */
+  .ph-more-btn::-webkit-details-marker { display: none; }
+  .ph-more[open] .ph-chev { transform: rotate(180deg); }
+  .ph-chev { transition: transform var(--dur-fast) var(--ease-out); }
+
+  .ph-more-list {
+    position: absolute;
+    right: 0;
+    top: calc(100% + var(--space-2));
+    z-index: var(--z-dropdown);
+    min-width: 220px;
+    max-width: min(320px, calc(100vw - var(--space-8)));
+    list-style: none;
+    padding: var(--space-2);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+  }
+  .ph-more-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: 0;
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: var(--off-white);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    text-align: left;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .ph-more-item:hover { background: var(--card-2); color: var(--white); }
+  .ph-item-danger { color: var(--red); }
+  .ph-item-danger:hover { color: var(--red-2); background: var(--card-2); }
+  .ph-more-item.ph-btn-off { background: transparent; opacity: 1; color: var(--muted); }
+  .ph-more-off { display: flex; flex-direction: column; gap: 2px; }
+  .ph-more-off .ph-why {
+    text-align: left;
+    max-width: none;
+    padding: 0 var(--space-3) var(--space-2);
+  }
+  .ph-inline-off { display: inline-flex; }
+
+  /* ── tabs ──
+     Links, not a tablist. See the note at the top of this file. */
+  .ph-tabs {
+    margin-top: var(--space-1);
+    overflow-x: auto;
+    /* The strip carries its own sideways scroll so the page body never does —
+       the failure that makes an operations screen unusable on a phone. */
+    scrollbar-width: thin;
+  }
+  .ph-tabs ul {
+    display: flex;
+    align-items: stretch;
+    gap: var(--space-5);
+    list-style: none;
+    min-width: max-content;
+  }
+  .ph-tabs a {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) 0;
+    font-size: var(--text-sm);
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    /* The underline must not be the only signal, so the current tab also
+       changes weight and colour. */
+    transition: color var(--dur-fast) var(--ease-out),
+                border-color var(--dur-fast) var(--ease-out);
+  }
+  .ph-tabs a:hover { color: var(--off-white); border-bottom-color: var(--border-2); }
+  .ph-tabs a.is-current {
+    color: var(--red);
+    font-weight: 600;
+    border-bottom-color: var(--red);
+  }
+  .ph-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-pill);
+    background: var(--card-2);
+    color: var(--muted);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .ph-tabs a.is-current .ph-count { background: var(--red-3); color: var(--red); }
+
+  /* ── responsive ──
+     Above 900px: the first `collapseAfter` secondaries are buttons in the bar
+     and their copies inside More are removed. Below 900px the reverse. Exactly
+     one copy of each action is in the accessibility tree at any width, because
+     display:none removes an element from it entirely. */
+  .ph-dupe { display: none; }
+  .ph-more-narrow { display: none; }
+
+  @media (max-width: 900px) {
+    .ph-inner { padding-top: var(--space-4); gap: var(--space-2); }
+    .ph-title { font-size: var(--text-xl); }
+    .ph-inline-act { display: none; }
+    .ph-dupe { display: block; }
+    .ph-more-narrow { display: block; }
+    /* Title and primary action keep the row; everything else has folded away. */
+    .ph-bar { flex-wrap: nowrap; align-items: center; }
+    .ph-actions { flex-wrap: nowrap; }
+    .ph-primary-off { align-items: flex-start; }
+    .ph-why { text-align: left; }
+  }
+
+  /* Touch targets (2.5.8). global.css already lifts .btn to 44px on small
+     screens; these are local controls and need the same floor. */
+  @media (max-width: 640px) {
+    .ph-btn { min-height: 44px; }
+    .ph-more-item { min-height: 44px; justify-content: center; }
+    .ph-tabs a { min-height: 44px; }
+  }
+</style>
+
+<script>
+  // Progressive enhancement only.
+  //
+  // Everything below is an accelerator on top of markup that already works:
+  // <details>/<summary> opens, closes, announces its state and responds to
+  // Enter and Space with no script at all, and the sticky header is a CSS
+  // property. With JavaScript off the page loses a drop shadow and the habit of
+  // closing a menu on Escape. It loses no action and no information.
+
+  // ── the More disclosure ────────────────────────────────────────────────────
+  document.querySelectorAll<HTMLDetailsElement>('details[data-ph-more]').forEach((d) => {
+    const summary = d.querySelector('summary');
+    const items = () =>
+      Array.from(
+        d.querySelectorAll<HTMLElement>('.ph-more-list li:not(.ph-dupe) > a, .ph-more-list li:not(.ph-dupe) > button')
+      // A hidden duplicate is not a destination. offsetParent is null for
+      // anything display:none, which is exactly the copy the media query
+      // removed at this width.
+      ).filter((el) => el.offsetParent !== null);
+
+    const close = (restoreFocus: boolean) => {
+      if (!d.open) return;
+      d.open = false;
+      // Focus goes back to the control that opened the menu (§52). Without
+      // this, dismissing a menu drops the keyboard at the top of the document
+      // and the reader has to tab back through the whole header.
+      if (restoreFocus && summary instanceof HTMLElement) summary.focus();
+    };
+
+    d.addEventListener('keydown', (e) => {
+      const key = (e as KeyboardEvent).key;
+      if (key === 'Escape') {
+        e.stopPropagation();
+        close(true);
+        return;
+      }
+      if (!d.open) return;
+      const list = items();
+      if (list.length === 0) return;
+      const at = list.indexOf(document.activeElement as HTMLElement);
+      if (key === 'ArrowDown' || key === 'ArrowUp') {
+        e.preventDefault();
+        const step = key === 'ArrowDown' ? 1 : -1;
+        // From the summary, ArrowDown enters at the top and ArrowUp at the end.
+        const next = at < 0 ? (step === 1 ? 0 : list.length - 1) : (at + step + list.length) % list.length;
+        list[next].focus();
+      } else if (key === 'Home') {
+        e.preventDefault();
+        list[0].focus();
+      } else if (key === 'End') {
+        e.preventDefault();
+        list[list.length - 1].focus();
+      }
+    });
+
+    // NOT a focus trap. This is a disclosure, not a modal: Tab must be able to
+    // leave, and leaving is what closes it.
+    d.addEventListener('focusout', () => {
+      window.setTimeout(() => {
+        if (!d.contains(document.activeElement)) close(false);
+      }, 0);
+    });
+
+    document.addEventListener('click', (e) => {
+      if (d.open && !d.contains(e.target as Node)) close(false);
+    });
+  });
+
+  // ── stuck shadow ───────────────────────────────────────────────────────────
+  // A scroll listener would run on every frame of every scroll on a long
+  // register. The observer fires twice: once on the way down, once on the way
+  // back up.
+  document.querySelectorAll<HTMLElement>('[data-page-header].ph-sticky').forEach((el) => {
+    if (!('IntersectionObserver' in window)) return;
+    const top = parseFloat(getComputedStyle(el).top) || 0;
+    const io = new IntersectionObserver(
+      ([entry]) => el.classList.toggle('is-stuck', entry.intersectionRatio < 1),
+      { threshold: [1], rootMargin: `-${top + 1}px 0px 0px 0px` }
+    );
+    io.observe(el);
+  });
+</script>

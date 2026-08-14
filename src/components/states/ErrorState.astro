@@ -1,0 +1,318 @@
+---
+// A failure, told operationally (§57, §101).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THIS COMPONENT REFUSES TO DO
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §101: "We couldn't load your ranking." Never "An error has occurred during
+// the processing of your request." The second sentence is longer, says less,
+// and was written for the person who caused the fault rather than the person
+// standing in front of it. Every string this component renders comes from the
+// caller precisely so the caller has to write the operational sentence.
+//
+// §57 gives the anatomy, and each part earns its place:
+//
+//   the headline    names what failed, in the reader's terms. NOT the error id.
+//                   A reference number in a headline tells the reader the
+//                   software is more interested in itself than in them.
+//   what is safe    the question every reader actually has, and the one a bare
+//                   "Something went wrong" leaves them to guess at. Did my
+//                   registration go through twice? Was my payment taken? Is my
+//                   profile still there? `safe` is REQUIRED for that reason: an
+//                   author who cannot say what survived the failure has not
+//                   finished thinking about the failure.
+//   Retry           a plain link to the same address, so it works with
+//                   JavaScript off. A retry that needs a script is not a retry
+//                   on the connection that just failed.
+//   Details         the technical reference, folded away. It has to be on the
+//                   page — it is what the reader quotes when they ring the
+//                   federation — and it must not be the first thing they read.
+//
+// This component is for a FAILURE. CONTENT-ARCHITECTURE §5.4: "could not be
+// read" is not "no records", not "not yours to see" and not "not configured".
+// Do not reach for it to explain a permission boundary.
+//
+//   <ErrorState
+//     title="We couldn’t load your ranking."
+//     safe="Your results and your profile are unchanged. Nothing was recalculated."
+//     errorId={ref}
+//   />
+
+export interface ErrorAction {
+  label: string;
+  href: string;
+}
+
+export interface Props {
+  /**
+   * What failed, in the reader's terms and in plain British English.
+   * "We couldn’t load your ranking." Never a code, never an exception class.
+   */
+  title: string;
+  /**
+   * §57: what is safe. REQUIRED — see above. Be specific about consequences
+   * (CONTENT-ARCHITECTURE §5.9): "Nothing you entered has been charged or
+   * recorded" beats "Don't worry".
+   */
+  safe: string;
+  /** Anything further the reader needs before deciding what to do. */
+  body?: string;
+  /**
+   * Where Retry goes. Defaults to this page's own address, which is what retry
+   * means nine times in ten. Pass `null` when retrying cannot help — a rejected
+   * credential does not improve on a second request — and give a `secondary`
+   * route instead.
+   */
+  retryHref?: string | null;
+  retryLabel?: string;
+  /** A second route, for when retrying is not the answer. */
+  secondary?: ErrorAction | null;
+  /**
+   * The technical reference, shown behind Details. This is the string the
+   * reader quotes to the federation, so it must be the same one the logs hold.
+   */
+  errorId?: string | null;
+  /** Further technical detail, also behind Details. Never user-facing prose. */
+  detail?: string | null;
+  /**
+   * Announce immediately. On by default: a failure that replaces content the
+   * reader asked for is exactly what role="alert" is for. Turn it off when
+   * several of these render at once, so they do not shout over each other.
+   */
+  alert?: boolean;
+  class?: string;
+}
+
+const {
+  title,
+  safe,
+  body,
+  retryHref,
+  retryLabel = 'Try again',
+  secondary = null,
+  errorId = null,
+  detail = null,
+  alert = true,
+  class: className = '',
+} = Astro.props;
+
+// Retry means "ask for this page again". Resolved here rather than at every
+// call site so the querystring — the filters and the page number the reader had
+// set — survives the retry instead of dumping them back at an unfiltered view.
+const retry = retryHref === null
+  ? null
+  : (retryHref ?? `${Astro.url.pathname}${Astro.url.search}`);
+
+const hasTechnical = Boolean(errorId || detail);
+---
+
+<div
+  class:list={['er', className]}
+  role={alert ? 'alert' : undefined}
+>
+  <p class="er-title">{title}</p>
+
+  {/* The reassurance sits directly under the headline, above everything else,
+      because it answers the question the reader already has. */}
+  <p class="er-safe">{safe}</p>
+
+  {body && <p class="er-body">{body}</p>}
+
+  {/* The offline route, a caveat, whatever the page needs to add. */}
+  <slot />
+
+  {(retry || secondary) && (
+    <div class="er-actions">
+      {retry && <a class="btn btn-primary er-btn" href={retry}>{retryLabel}</a>}
+      {secondary && <a class="btn btn-ghost er-btn" href={secondary.href}>{secondary.label}</a>}
+    </div>
+  )}
+
+  {hasTechnical && (
+    <details class="er-details">
+      <summary>Details</summary>
+      <div class="er-tech">
+        {errorId && (
+          <p class="er-ref">
+            <span class="er-ref-label">Reference</span>
+            <code class="er-ref-value">{errorId}</code>
+            {/* JS-only accelerator, and correctly so: the reference is
+                selectable text without it. Hidden until a script has proved the
+                clipboard exists, so a dead button never renders. */}
+            <button type="button" class="er-copy" data-err-copy={errorId} hidden>Copy</button>
+          </p>
+        )}
+        {detail && <pre class="er-detail">{detail}</pre>}
+        <p class="er-quote">Quote this reference if you report the fault.</p>
+      </div>
+    </details>
+  )}
+
+  {/* Announces the copy confirmation. Present from the start, because a live
+      region inserted at the moment of the change is not reliably announced. */}
+  {errorId && <span class="sr-only" role="status" data-err-copied></span>}
+</div>
+
+<script>
+  // Reveal the copy control only where it can work, and report the outcome to
+  // everybody rather than only to the eye.
+  const buttons = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('[data-err-copy]')
+  );
+
+  if (buttons.length > 0 && navigator.clipboard) {
+    for (const btn of buttons) {
+      btn.hidden = false;
+      btn.addEventListener('click', async () => {
+        const value = btn.getAttribute('data-err-copy') ?? '';
+        const live = btn.closest('.er')?.querySelector<HTMLElement>('[data-err-copied]');
+        try {
+          await navigator.clipboard.writeText(value);
+          btn.textContent = 'Copied';
+          if (live) live.textContent = 'Reference copied to the clipboard.';
+        } catch {
+          // A refused clipboard is not a second failure to shout about. Say
+          // plainly that it did not happen; the reference is still on screen.
+          btn.textContent = 'Copy failed';
+          if (live) live.textContent = 'The reference could not be copied. Select it to copy it by hand.';
+        }
+        window.setTimeout(() => { btn.textContent = 'Copy'; }, 4000);
+      });
+    }
+  }
+</script>
+
+<style>
+  .er {
+    border: 1px solid var(--red-3);
+    border-left: 3px solid var(--red);
+    border-radius: var(--radius);
+    /* The same wash DataTable's error row already uses, to the value: two
+       failure surfaces on one dashboard must not be two different reds. */
+    background: rgba(142, 18, 18, 0.05);
+    padding: var(--space-6);
+  }
+
+  .er-title {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    font-weight: 500;
+    line-height: var(--leading-snug);
+    color: var(--white);
+    max-width: 52ch;
+  }
+
+  /* Given its own weight. It is the sentence that stops somebody submitting a
+     form a second time and paying twice. */
+  .er-safe {
+    margin-top: var(--space-3);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+    color: var(--off-white);
+    max-width: 62ch;
+  }
+
+  .er-body {
+    margin-top: var(--space-3);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    color: var(--muted);
+    max-width: 62ch;
+  }
+
+  .er-actions {
+    margin-top: var(--space-6);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+  .er-btn { min-height: 44px; }
+
+  .er-details { margin-top: var(--space-5); }
+  .er-details summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .er-details summary:hover { color: var(--gold-2); }
+
+  .er-tech {
+    border-top: 1px solid var(--red-3);
+    padding-top: var(--space-3);
+  }
+
+  .er-ref {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .er-ref-label {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .er-ref-value {
+    font-family: ui-monospace, 'SFMono-Regular', 'Consolas', monospace;
+    font-size: var(--text-sm);
+    color: var(--white);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: var(--space-1) var(--space-2);
+    overflow-wrap: anywhere;
+  }
+
+  .er-copy {
+    background: transparent;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-xs);
+    color: var(--off-white);
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    padding: var(--space-1) var(--space-3);
+    min-height: var(--space-8);
+    transition: border-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out);
+  }
+  .er-copy:hover { border-color: var(--gold-dim); color: var(--gold-2); }
+
+  .er-detail {
+    margin-top: var(--space-3);
+    font-family: ui-monospace, 'SFMono-Regular', 'Consolas', monospace;
+    font-size: var(--text-xs);
+    line-height: var(--leading-snug);
+    color: var(--off-white);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: var(--space-3);
+    overflow-x: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .er-quote {
+    margin-top: var(--space-3);
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
+    color: var(--muted);
+  }
+
+  @media (max-width: 640px) {
+    .er { padding: var(--space-5) var(--space-4); }
+    .er-actions { flex-direction: column; }
+    .er-btn { width: 100%; }
+  }
+</style>

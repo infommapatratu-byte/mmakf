@@ -884,7 +884,7 @@ export async function awaitingApproval(db: DB, principal: Principal) {
     .where(eq(s.quoteVersions.status, 'awaiting_approval'))
     .orderBy(s.quoteVersions.createdAt);
 
-  return rows.map((r) => ({
+  return rows.map((r: (typeof rows)[number]) => ({
     ...r,
     // Surfaced rather than filtered out, so the reader can see the whole queue
     // and understand why one row has no button. Silently omitting them would

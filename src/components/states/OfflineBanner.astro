@@ -1,0 +1,313 @@
+---
+// Connection lost, and what still works (§59).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS SAYS WHAT STILL WORKS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §59: use the real online/offline events, and say what still works. The second
+// half is the part usually left out. "You are offline" is a fact the reader
+// already suspects; what they do not know is whether to keep tapping, whether
+// the form they half filled in is lost, or whether the page in front of them is
+// stale. A banner that only announces the disconnection makes them close the
+// tab.
+//
+// The defaults below are not aspirational — they describe what public/sw.js
+// actually does. It caches GET navigations network-first and falls back to the
+// cache, and it deliberately never touches /api/ or /admin. So a page already
+// visited will open; an admin screen and anything that has to reach the
+// federation will not. If that service worker changes, this copy is wrong and
+// must change with it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT navigator.onLine ACTUALLY MEANS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// It reports whether the device has a network link, NOT whether the federation
+// is reachable. A phone attached to a hotel wifi that wants a login will report
+// itself online. This component therefore never claims the connection is good —
+// it only reports the browser losing and regaining the link, which is the one
+// thing the events are reliable about. It does not poll the network to find
+// out more: a probe on a dying connection is a request that hangs, and the
+// reader gets nothing for it but a warmer handset.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// PROGRESSIVE ENHANCEMENT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §4 permits this to be JavaScript-only. Detecting a dropped connection is not
+// something a server render can do — there is no server to render it — so there
+// is nothing to degrade to and no <noscript> that would be honest. Nothing
+// essential lives here: the banner adds an explanation, it is not the route to
+// anything.
+//
+// The card is announced through a visually-hidden live region that is present
+// from first render. A live region inserted or unhidden at the moment of the
+// change is not reliably announced, which is exactly the moment that matters.
+//
+//   <OfflineBanner />
+//   <OfflineBanner stillWorks={['The draw sheet you already opened.']} />
+
+export interface Props {
+  /** What the reader can still do. Named, not implied. */
+  stillWorks?: string[];
+  /** What will not work until the connection returns. */
+  unavailable?: string[];
+  /** Bottom by default — the top of the viewport belongs to the fixed nav. */
+  position?: 'bottom' | 'top';
+  class?: string;
+}
+
+const {
+  stillWorks = [
+    'Pages you have already opened on this device will still open.',
+    'Whatever you have typed stays in the form until you send it.',
+  ],
+  unavailable = [
+    'Sending a form, making a payment, or checking a record against the register.',
+    'Administration screens, which are never cached and are always fetched fresh.',
+  ],
+  position = 'bottom',
+  class: className = '',
+} = Astro.props;
+---
+
+<div class:list={['ob', className]} data-offline-banner>
+  {/* Present from first render so the announcement lands when the state
+      changes. Written to by the script; empty until then. */}
+  <span class="sr-only" role="status" aria-live="polite" data-ob-live></span>
+
+  <div class:list={['ob-card', `ob-${position}`]} data-ob-card hidden>
+    <div
+      class="ob-msg ob-off"
+      data-ob-offline
+      data-announce="You are offline. Pages you have already opened will still open; anything that has to reach the federation will wait."
+    >
+      <p class="ob-title">You’re offline.</p>
+
+      {stillWorks.length > 0 && (
+        <div class="ob-block">
+          <p class="ob-heading">What still works</p>
+          <ul class="ob-list">
+            {stillWorks.map((s) => <li>{s}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {unavailable.length > 0 && (
+        <div class="ob-block">
+          <p class="ob-heading">What has to wait</p>
+          <ul class="ob-list">
+            {unavailable.map((s) => <li>{s}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {/* Deliberately not "check your connection". The reader knows. */}
+      <p class="ob-note">This clears itself when the connection returns.</p>
+    </div>
+
+    <div
+      class="ob-msg ob-on"
+      data-ob-online
+      data-announce="Back online."
+      hidden
+    >
+      <p class="ob-title">Back online.</p>
+      <p class="ob-note">Anything you were part-way through can be sent now.</p>
+    </div>
+
+    <button type="button" class="ob-dismiss" data-ob-dismiss>
+      <span aria-hidden="true">×</span>
+      <span class="sr-only">Dismiss the connection notice</span>
+    </button>
+  </div>
+</div>
+
+<script>
+  // One script for however many banners a page renders — Astro bundles this
+  // block once, so it must not assume a single instance.
+  const roots = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-offline-banner]')
+  );
+
+  if (roots.length > 0) {
+    // Whether the reader has actually been offline this session. Without it,
+    // the `online` event that some browsers fire on load would open a "Back
+    // online" card at somebody who never lost anything.
+    let wasOffline = false;
+    let hideTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const show = (mode: 'offline' | 'restored') => {
+      for (const root of roots) {
+        const card = root.querySelector<HTMLElement>('[data-ob-card]');
+        const off = root.querySelector<HTMLElement>('[data-ob-offline]');
+        const on = root.querySelector<HTMLElement>('[data-ob-online]');
+        const live = root.querySelector<HTMLElement>('[data-ob-live]');
+        if (!card || !off || !on) continue;
+
+        const active = mode === 'offline' ? off : on;
+        off.hidden = mode !== 'offline';
+        on.hidden = mode !== 'restored';
+        card.hidden = false;
+
+        // Setting the same string twice would not be re-announced, and the two
+        // states never share one, so no cache-busting hack is needed.
+        if (live) live.textContent = active.getAttribute('data-announce') ?? '';
+      }
+    };
+
+    const hide = () => {
+      for (const root of roots) {
+        const card = root.querySelector<HTMLElement>('[data-ob-card]');
+        const live = root.querySelector<HTMLElement>('[data-ob-live]');
+        if (card) card.hidden = true;
+        // Cleared so a later announcement of the same words is treated as a
+        // change rather than as no change at all.
+        if (live) live.textContent = '';
+      }
+    };
+
+    const goOffline = () => {
+      wasOffline = true;
+      if (hideTimer) clearTimeout(hideTimer);
+      show('offline');
+    };
+
+    const goOnline = () => {
+      if (!wasOffline) { hide(); return; }
+      wasOffline = false;
+      show('restored');
+      // The restored card is a confirmation, not a state. It removes itself,
+      // because a notice that outlives the condition it reports is noise.
+      hideTimer = setTimeout(hide, 6000);
+    };
+
+    window.addEventListener('offline', goOffline);
+    window.addEventListener('online', goOnline);
+
+    for (const root of roots) {
+      root.querySelector<HTMLButtonElement>('[data-ob-dismiss]')
+        ?.addEventListener('click', () => {
+          if (hideTimer) clearTimeout(hideTimer);
+          hide();
+          // Dismissal ends this notice only. Losing the connection again is a
+          // new fact and says so again.
+        });
+    }
+
+    // The page may well have been served from the cache while already offline.
+    if (navigator.onLine === false) goOffline();
+  }
+</script>
+
+<style>
+  .ob-card {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: var(--z-toast);
+    /* --max-w-prose rather than a picked pixel width: the card is two short
+       lists and a sentence, so it is bound by the reading measure like any
+       other prose on the site. */
+    width: min(var(--max-w-prose), calc(100% - var(--space-8)));
+
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-left: 3px solid var(--numeral);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    padding: var(--space-5) var(--space-6) var(--space-5) var(--space-5);
+
+    animation: ob-in var(--dur-base) var(--ease-out);
+  }
+  .ob-bottom { bottom: var(--space-6); }
+  /* Clear of the fixed public nav, which is 72–88px tall. */
+  .ob-top { top: calc(var(--space-24) + var(--space-1)); }
+
+  @keyframes ob-in {
+    from { opacity: 0; transform: translate(-50%, var(--space-3)); }
+    to   { opacity: 1; transform: translate(-50%, 0); }
+  }
+
+  /* Restored is the good tone, and looks different at a glance — the reader
+     should not have to read the card to know which of the two it is. */
+  .ob-card:has([data-ob-online]:not([hidden])) { border-left-color: var(--gold); }
+
+  .ob-title {
+    font-family: var(--font-display);
+    font-size: var(--text-md);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--white);
+  }
+
+  .ob-block { margin-top: var(--space-4); }
+
+  .ob-heading {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: var(--space-2);
+  }
+
+  .ob-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    line-height: var(--leading-snug);
+    color: var(--off-white);
+  }
+  .ob-list li {
+    padding-left: var(--space-4);
+    position: relative;
+  }
+  .ob-list li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.55em;
+    width: var(--space-2);
+    height: 1px;
+    background: var(--border-2);
+  }
+
+  .ob-note {
+    margin-top: var(--space-4);
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
+    color: var(--muted);
+  }
+  .ob-on .ob-note { margin-top: var(--space-2); }
+
+  .ob-dismiss {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-xs);
+    color: var(--muted);
+    font-size: var(--text-lg);
+    line-height: 1;
+    transition: color var(--dur-fast) var(--ease-out);
+  }
+  .ob-dismiss:hover { color: var(--white); }
+
+  @media (max-width: 640px) {
+    .ob-card {
+      width: calc(100% - var(--space-6));
+      padding: var(--space-4);
+    }
+    .ob-bottom { bottom: var(--space-4); }
+  }
+</style>

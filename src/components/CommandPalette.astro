@@ -1,0 +1,991 @@
+---
+// The global command palette (§8, §9, §64, §81).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS ONE MAY BE JAVASCRIPT-ONLY, AND A DATA TABLE MAY NOT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §4 draws the line at NECESSITY. A table's filters are the only way to reach
+// its rows, so they are querystring-driven and script only makes them nicer. A
+// palette is an ACCELERATOR: every destination in it is a link that already
+// exists in the navigation, the sidebar or the footer, and nothing here is the
+// only route to anything. With script off the reader loses a keystroke, not a
+// page — so the markup below stays `hidden` and the palette simply is not there.
+//
+// That is also why the trigger is not a button in the masthead. Pages that want
+// a pointer affordance put `data-command-palette` on any element they already
+// render, and it opens the dialog with focus returning to it on close.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE LIST IS FILTERED BEFORE IT IS SERIALISED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// buildCommands() drops everything the caller cannot do, and only the survivors
+// are written into the page. Rendering the whole registry and hiding rows with
+// CSS would put a filter one devtools panel away from being no filter at all.
+//
+// Note what this does NOT claim. The registry's own text does reach the browser
+// inside the bundled script — see the measurement in commands.ts — so the SHAPE
+// of the system is visible to anybody who looks, exactly as the public
+// navigation and the admin sidebar already make it. What is not visible is
+// which of those commands THIS reader may run, and that is the fact worth
+// keeping. None of it is the control either way: every page repeats its own
+// check, because markup is not an authorisation system.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// USAGE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//   <CommandPalette />
+//   <CommandPalette entity={{ kind: 'competition', id: comp.id, label: comp.name }} />
+//   <CommandPalette principal={principal} entity={{ kind: 'coach' }} />
+//
+// `principal` is optional and worth passing on any page that has already called
+// identify() — otherwise this component calls it again, which is a database
+// round trip to draw a menu. One instance per page: the dialog owns fixed ids.
+
+import { identify } from '@/lib/session';
+import {
+  buildCommands, actionsFor, resolveChords,
+  type EntityContext, type ResolvedCommand,
+} from '@/lib/commands';
+import type { Principal } from '@/lib/rbac';
+import type { Surface } from '@/lib/surface';
+
+export interface Props {
+  /** What this page is looking at. Drives the contextual section. */
+  entity?: EntityContext | null;
+  /** The already-resolved caller, to avoid a second identify(). */
+  principal?: Principal | null;
+}
+
+const { entity = null } = Astro.props;
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+
+// "Passed as null" and "not passed" are different: a page that resolved the
+// caller and got nobody must not cause a second lookup.
+const principal: Principal | null =
+  'principal' in Astro.props
+    ? (Astro.props.principal ?? null)
+    : ((await identify(Astro.request.headers.get('cookie')))?.principal ?? null);
+
+const commands: ResolvedCommand[] = buildCommands({
+  actions: actionsFor(principal),
+  surface,
+  entity,
+});
+const chords = resolveChords(commands);
+
+// Serialised into the document rather than fetched: the list is small, it is
+// already scoped to this caller, and a palette that waits for a network round
+// trip before its first keystroke is not an accelerator.
+//
+// `<` is escaped because a payload containing `</script` would end the block
+// early. Nothing in the registry does today; a label added later might.
+const payload = JSON.stringify({ commands, chords }).replace(/</g, '\\u003c');
+
+const chordRows = chords.map((c) => {
+  const parts = c.keys.split(' ');
+  return { first: (parts[0] ?? '').toUpperCase(), second: (parts[1] ?? '').toUpperCase(), label: c.label };
+});
+---
+
+<script type="application/json" id="cp-payload" is:inline set:html={payload}></script>
+
+<div class="cp" id="cp-root" hidden>
+  <!-- Not a button: a decorative dismissal surface. Escape and the close
+       control are the routes out that assistive technology is told about. -->
+  <div class="cp-backdrop" id="cp-backdrop"></div>
+
+  <div class="cp-panel" role="dialog" aria-modal="true" aria-labelledby="cp-title">
+    <h2 class="sr-only" id="cp-title">Command palette</h2>
+
+    <div class="cp-field">
+      <svg class="cp-icon" width="17" height="17" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path>
+      </svg>
+      <input
+        id="cp-input"
+        class="cp-input"
+        type="text"
+        role="combobox"
+        aria-expanded="false"
+        aria-controls="cp-list"
+        aria-autocomplete="list"
+        aria-label="Type a command or the name of a page"
+        placeholder="Type a command, or a page to go to"
+        autocomplete="off"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+      />
+      <button type="button" class="cp-close" aria-label="Close the command palette">
+        <kbd aria-hidden="true">Esc</kbd>
+      </button>
+    </div>
+
+    <div class="cp-results">
+      <div id="cp-list" role="listbox" aria-label="Commands"></div>
+      <p class="cp-empty" id="cp-empty" hidden></p>
+    </div>
+
+    <div class="cp-foot">
+      <span class="cp-legend">
+        <kbd>&uarr;</kbd><kbd>&darr;</kbd> move
+        <kbd>&crarr;</kbd> run
+        <kbd>?</kbd> shortcuts
+      </span>
+      <!-- One live region, and it is visible. The result count is useful to
+           everybody, so it is not tucked away for assistive technology alone;
+           the clipboard result lands here too. -->
+      <span class="cp-live" id="cp-live" role="status" aria-live="polite"></span>
+    </div>
+  </div>
+</div>
+
+<div class="cp cp-help" id="cp-help" hidden>
+  <div class="cp-backdrop" id="cp-help-backdrop"></div>
+  <div class="cp-panel cp-help-panel" role="dialog" aria-modal="true" aria-labelledby="cp-help-title">
+    <div class="cp-help-head">
+      <h2 id="cp-help-title">Keyboard shortcuts</h2>
+      <button type="button" class="cp-close cp-help-close" aria-label="Close the shortcuts panel">
+        <kbd aria-hidden="true">Esc</kbd>
+      </button>
+    </div>
+
+    <div class="cp-help-body">
+      <section>
+        <h3>Anywhere</h3>
+        <ul class="cp-keys">
+          <li><span class="cp-keys-k"><kbd>Ctrl</kbd><kbd>K</kbd></span><span>Open the palette</span></li>
+          <li><span class="cp-keys-k"><kbd>&#8984;</kbd><kbd>K</kbd></span><span>Open the palette</span></li>
+          <li><span class="cp-keys-k"><kbd>/</kbd></span><span>Open the palette</span></li>
+          <li><span class="cp-keys-k"><kbd>N</kbd></span><span>Start something new</span></li>
+          <li><span class="cp-keys-k"><kbd>?</kbd></span><span>This panel</span></li>
+        </ul>
+        <p class="cp-note">
+          The single-letter shortcuts are ignored while you are typing in a
+          field.
+        </p>
+      </section>
+
+      {chordRows.length > 0 && (
+        <section>
+          <h3>Go to</h3>
+          <ul class="cp-keys">
+            {chordRows.map((row) => (
+              <li>
+                <span class="cp-keys-k"><kbd>{row.first}</kbd><span class="cp-then">then</span><kbd>{row.second}</kbd></span>
+                <span>{row.label}</span>
+              </li>
+            ))}
+          </ul>
+          <p class="cp-note">
+            Only the destinations this account can reach are bound, which is why
+            this list is as long as it is and no longer.
+          </p>
+        </section>
+      )}
+
+      <section>
+        <h3>In the palette</h3>
+        <ul class="cp-keys">
+          <li><span class="cp-keys-k"><kbd>&uarr;</kbd><kbd>&darr;</kbd></span><span>Move through the results</span></li>
+          <li><span class="cp-keys-k"><kbd>Home</kbd><kbd>End</kbd></span><span>First and last result</span></li>
+          <li><span class="cp-keys-k"><kbd>&crarr;</kbd></span><span>Run the highlighted command</span></li>
+          <li><span class="cp-keys-k"><kbd>Ctrl</kbd><kbd>&crarr;</kbd></span><span>Open it in a new tab</span></li>
+          <li><span class="cp-keys-k"><kbd>Esc</kbd></span><span>Close and go back to where you were</span></li>
+        </ul>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+  import { rankCommands } from '@/lib/commands';
+
+  const root = document.getElementById('cp-root');
+  const help = document.getElementById('cp-help');
+  const dataEl = document.getElementById('cp-payload');
+
+  if (root && help && dataEl) {
+    // ── State ───────────────────────────────────────────────────────────────
+
+    const RECENT_KEY = 'mmakf.palette.recent';
+    const RECENT_MAX = 6;
+    const CHORD_WINDOW = 1400;      // long enough to think, short enough that a
+                                    // stray G does not swallow the next
+                                    // deliberate keystroke
+
+    let COMMANDS = [];
+    let CHORDS = [];
+    try {
+      const parsed = JSON.parse(dataEl.textContent || '{}');
+      COMMANDS = Array.isArray(parsed.commands) ? parsed.commands : [];
+      CHORDS = Array.isArray(parsed.chords) ? parsed.chords : [];
+    } catch (err) {
+      COMMANDS = [];
+      CHORDS = [];
+    }
+
+    const input = document.getElementById('cp-input');
+    const listEl = document.getElementById('cp-list');
+    const emptyEl = document.getElementById('cp-empty');
+    const liveEl = document.getElementById('cp-live');
+    const closeBtn = root.querySelector('.cp-close');
+    const backdrop = document.getElementById('cp-backdrop');
+    const helpBackdrop = document.getElementById('cp-help-backdrop');
+    const helpClose = help.querySelector('.cp-help-close');
+
+    let rows = [];              // { cmd, el } in visible order
+    let active = -1;
+    let paletteReturn = null;
+    let helpReturn = null;
+    let chord = '';
+    let chordTimer = 0;
+    let announceTimer = 0;
+
+    const isOpen = () => !root.hidden;
+    const isHelpOpen = () => !help.hidden;
+
+    // ── Recent ──────────────────────────────────────────────────────────────
+    //
+    // localStorage, capped, and NOT SYNCED ANYWHERE. What an administrator
+    // reaches for is a record of what they were working on; it belongs to the
+    // browser they were sitting at and to nothing else. Every access is wrapped,
+    // because private browsing and a full quota both throw — and a palette that
+    // dies on a storage error is worse than one with no history.
+
+    function readRecent() {
+      try {
+        const raw = window.localStorage.getItem(RECENT_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed.filter((v) => typeof v === 'string') : [];
+      } catch (err) {
+        return [];
+      }
+    }
+
+    function remember(id) {
+      try {
+        const next = [id].concat(readRecent().filter((v) => v !== id)).slice(0, RECENT_MAX);
+        window.localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+      } catch (err) {
+        /* no history this session; everything else still works */
+      }
+    }
+
+    // ── Rendering ───────────────────────────────────────────────────────────
+
+    /** Emphasise the characters that matched, without going through innerHTML. */
+    function paintLabel(el, label, indices) {
+      el.textContent = '';
+      const set = new Set(indices || []);
+      let buffer = '';
+      let bold = false;
+      const flush = () => {
+        if (!buffer) return;
+        if (bold) {
+          const b = document.createElement('b');
+          b.textContent = buffer;
+          el.appendChild(b);
+        } else {
+          el.appendChild(document.createTextNode(buffer));
+        }
+        buffer = '';
+      };
+      for (let i = 0; i < label.length; i++) {
+        const isBold = set.has(i);
+        if (isBold !== bold) { flush(); bold = isBold; }
+        buffer += label[i];
+      }
+      flush();
+    }
+
+    function groupsFor(query) {
+      const groups = [];
+
+      if (!query) {
+        // The resting state is the federation's own ordering. Contextual first:
+        // the reader opened the palette while looking at the thing, so its verbs
+        // outrank what they did yesterday.
+        const contextual = COMMANDS.filter((c) => c.section === 'contextual');
+        if (contextual.length) {
+          groups.push({
+            heading: contextual[0].group,
+            items: contextual.map((cmd) => ({ cmd, indices: [] })),
+          });
+        }
+
+        const recent = [];
+        readRecent().forEach((id) => {
+          const cmd = COMMANDS.find((c) => c.id === id);
+          // Contextual commands are excluded: "Open this competition",
+          // remembered on one competition, means nothing on the next page.
+          if (cmd && cmd.section !== 'contextual') recent.push({ cmd, indices: [] });
+        });
+        if (recent.length) groups.push({ heading: 'Recent', items: recent });
+
+        const actions = COMMANDS.filter((c) => c.section === 'action');
+        if (actions.length) {
+          groups.push({ heading: 'Actions', items: actions.map((cmd) => ({ cmd, indices: [] })) });
+        }
+
+        const nav = COMMANDS.filter((c) => c.section === 'navigation');
+        if (nav.length) {
+          groups.push({ heading: 'Navigation', items: nav.map((cmd) => ({ cmd, indices: [] })) });
+        }
+
+        return groups;
+      }
+
+      // Searching. The sections are kept, but ordered by their best member —
+      // otherwise the top-ranked command could sit under the third heading, and
+      // the first thing Enter runs would not be the best match.
+      const ranked = rankCommands(query, COMMANDS);
+      const order = [];
+      const byHeading = new Map();
+      ranked.forEach((r) => {
+        if (!byHeading.has(r.cmd.group)) { byHeading.set(r.cmd.group, []); order.push(r.cmd.group); }
+        byHeading.get(r.cmd.group).push({ cmd: r.cmd, indices: r.indices });
+      });
+      order.forEach((heading) => groups.push({ heading, items: byHeading.get(heading) }));
+      return groups;
+    }
+
+    function render() {
+      const query = input.value.trim();
+      listEl.textContent = '';
+      rows = [];
+
+      const groups = groupsFor(query);
+      let optionIndex = 0;
+      let groupIndex = 0;
+
+      groups.forEach((group) => {
+        const section = document.createElement('div');
+        section.className = 'cp-group';
+        section.setAttribute('role', 'group');
+
+        const heading = document.createElement('p');
+        heading.className = 'cp-group-h';
+        heading.id = 'cp-gh-' + groupIndex;
+        heading.textContent = group.heading;
+        section.setAttribute('aria-labelledby', heading.id);
+        section.appendChild(heading);
+        groupIndex++;
+
+        group.items.forEach((item) => {
+          const option = document.createElement('div');
+          option.className = 'cp-opt';
+          option.id = 'cp-o-' + optionIndex;
+          option.setAttribute('role', 'option');
+          option.setAttribute('aria-selected', 'false');
+
+          const label = document.createElement('span');
+          label.className = 'cp-opt-label';
+
+          // The search verb says what it will do with what was typed, rather
+          // than leaving the reader to guess whether Enter searches or merely
+          // opens the search page.
+          if (item.cmd.verb === 'search' && query) {
+            label.textContent = 'Search the federation for “' + query + '”';
+          } else {
+            paintLabel(label, item.cmd.label, item.indices);
+          }
+          option.appendChild(label);
+
+          if (item.cmd.href) {
+            const where = document.createElement('span');
+            where.className = 'cp-opt-where';
+            where.textContent = item.cmd.href;
+            option.appendChild(where);
+          }
+
+          const at = rows.length;
+          option.addEventListener('click', () => run(item.cmd, false));
+          option.addEventListener('mousemove', () => { if (active !== at) setActive(at); });
+
+          section.appendChild(option);
+          rows.push({ cmd: item.cmd, el: option });
+          optionIndex++;
+        });
+
+        listEl.appendChild(section);
+      });
+
+      const count = rows.length;
+      // A combobox with nothing to choose from is not expanded.
+      input.setAttribute('aria-expanded', count > 0 ? 'true' : 'false');
+      emptyEl.hidden = count > 0;
+      if (!count) {
+        emptyEl.textContent = query
+          ? 'Nothing matches “' + query + '”.'
+          : 'No commands are available to this account.';
+      }
+
+      setActive(count ? 0 : -1);
+      announce(count);
+    }
+
+    /** Debounced, so a typed word is one announcement rather than seven. */
+    function announce(count) {
+      window.clearTimeout(announceTimer);
+      announceTimer = window.setTimeout(() => {
+        liveEl.textContent = count === 0
+          ? 'No matches'
+          : count === 1 ? '1 command' : count + ' commands';
+      }, 350);
+    }
+
+    function setActive(index) {
+      if (active >= 0 && rows[active]) {
+        rows[active].el.setAttribute('aria-selected', 'false');
+        rows[active].el.classList.remove('on');
+      }
+      active = index;
+      if (index < 0 || !rows[index]) {
+        input.removeAttribute('aria-activedescendant');
+        return;
+      }
+      const el = rows[index].el;
+      el.setAttribute('aria-selected', 'true');
+      el.classList.add('on');
+      input.setAttribute('aria-activedescendant', el.id);
+      el.scrollIntoView({ block: 'nearest' });
+    }
+
+    function move(delta) {
+      if (!rows.length) return;
+      setActive((active + delta + rows.length) % rows.length);
+    }
+
+    // ── Running a command ───────────────────────────────────────────────────
+
+    function navigate(href, newTab) {
+      if (newTab) {
+        window.open(href, '_blank', 'noopener');
+        return;
+      }
+      // Focus is not restored: the document is about to be replaced.
+      closePalette(false);
+      window.location.assign(href);
+    }
+
+    function say(message) {
+      window.clearTimeout(announceTimer);
+      liveEl.textContent = message;
+    }
+
+    function copyLink() {
+      const url = window.location.href;
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(url).then(
+          () => say('Link copied'),
+          () => say('The browser refused the clipboard')
+        );
+        return;
+      }
+      say('The clipboard is not available here');
+    }
+
+    function run(cmd, newTab) {
+      remember(cmd.id);
+
+      if (cmd.verb === 'shortcuts') {
+        const back = paletteReturn;
+        closePalette(false);
+        openHelp(back);
+        return;
+      }
+      if (cmd.verb === 'copy-link') { copyLink(); return; }
+      if (cmd.verb === 'print') {
+        closePalette(true);
+        // After the dialog has gone: printing the palette over the page is not
+        // what anybody asked for.
+        window.setTimeout(() => window.print(), 0);
+        return;
+      }
+      if (cmd.verb === 'search') {
+        if (!cmd.href) return;
+        const query = input.value.trim();
+        navigate(query ? cmd.href + '?q=' + encodeURIComponent(query) : cmd.href, newTab);
+        return;
+      }
+      if (cmd.href) navigate(cmd.href, newTab);
+    }
+
+    // ── Opening, closing, and the page behind ───────────────────────────────
+
+    /**
+     * The rest of the document is made inert while a dialog is open.
+     *
+     * The Tab trap already stops keyboard focus escaping. This is for the other
+     * way out: a screen reader's virtual cursor, which walks the document and
+     * does not care about keydown handlers. Only elements this code marked are
+     * un-marked afterwards, so anything already inert stays inert.
+     */
+    function setBackgroundInert(on) {
+      Array.prototype.slice.call(document.body.children).forEach((el) => {
+        if (el === root || el === help) return;
+        if (on) {
+          if (el.hasAttribute('inert')) return;
+          el.setAttribute('inert', '');
+          el.setAttribute('data-cp-inert', '');
+        } else if (el.hasAttribute('data-cp-inert')) {
+          el.removeAttribute('inert');
+          el.removeAttribute('data-cp-inert');
+        }
+      });
+    }
+
+    function openPalette(seed) {
+      if (isHelpOpen()) closeHelp();
+      if (isOpen()) {
+        if (typeof seed === 'string') { input.value = seed; render(); }
+        input.focus();
+        input.select();
+        return;
+      }
+      paletteReturn = document.activeElement;
+      root.hidden = false;
+      document.documentElement.classList.add('cp-locked');
+      setBackgroundInert(true);
+      input.value = typeof seed === 'string' ? seed : '';
+      render();
+      input.focus();
+      input.select();
+    }
+
+    /** `restore` is false only when the page is about to change under us. */
+    function closePalette(restore) {
+      if (!isOpen()) return;
+      const back = paletteReturn;
+      paletteReturn = null;
+      root.hidden = true;
+      setActive(-1);
+      window.clearTimeout(announceTimer);
+      liveEl.textContent = '';
+      if (!isHelpOpen()) {
+        document.documentElement.classList.remove('cp-locked');
+        setBackgroundInert(false);
+      }
+      if (restore !== false && back && document.contains(back) && typeof back.focus === 'function') {
+        back.focus();
+      }
+    }
+
+    function openHelp(returnTo) {
+      if (isHelpOpen()) return;
+      helpReturn = returnTo || document.activeElement;
+      help.hidden = false;
+      document.documentElement.classList.add('cp-locked');
+      setBackgroundInert(true);
+      helpClose.focus();
+    }
+
+    function closeHelp() {
+      if (!isHelpOpen()) return;
+      const back = helpReturn;
+      helpReturn = null;
+      help.hidden = true;
+      if (!isOpen()) {
+        document.documentElement.classList.remove('cp-locked');
+        setBackgroundInert(false);
+      }
+      if (back && document.contains(back) && typeof back.focus === 'function') back.focus();
+    }
+
+    /** Cycle focus between the field and the close control, and nowhere else. */
+    function trap(event, stops) {
+      event.preventDefault();
+      const usable = stops.filter(Boolean);
+      if (!usable.length) return;
+      const at = usable.indexOf(document.activeElement);
+      const next = event.shiftKey
+        ? (at <= 0 ? usable.length - 1 : at - 1)
+        : (at === -1 || at === usable.length - 1 ? 0 : at + 1);
+      usable[next].focus();
+    }
+
+    // ── Keys ────────────────────────────────────────────────────────────────
+
+    function isTyping(el) {
+      if (!el) return false;
+      if (el.isContentEditable) return true;
+      const tag = el.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    }
+
+    root.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closePalette(true);
+        return;
+      }
+      if (event.key === 'Tab') { trap(event, [input, closeBtn]); return; }
+      if (!rows.length) return;
+
+      if (event.key === 'ArrowDown') { event.preventDefault(); move(1); }
+      else if (event.key === 'ArrowUp') { event.preventDefault(); move(-1); }
+      // Home and End move the list, not the caret. A palette query is a few
+      // characters and the list can be forty rows, so this is the trade the
+      // convention already makes — and §5 asks for it by name.
+      else if (event.key === 'Home') { event.preventDefault(); setActive(0); }
+      else if (event.key === 'End') { event.preventDefault(); setActive(rows.length - 1); }
+      else if (event.key === 'Enter') {
+        event.preventDefault();
+        if (active >= 0 && rows[active]) run(rows[active].cmd, event.metaKey || event.ctrlKey);
+      }
+    });
+
+    help.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeHelp();
+        return;
+      }
+      if (event.key === 'Tab') trap(event, [helpClose]);
+    });
+
+    document.addEventListener('keydown', (event) => {
+      // Taken deliberately. Ctrl+K and Cmd+K are the palette everywhere, and
+      // the browser binding they displace (Firefox's search bar) has an address
+      // bar and a menu as alternatives. Nothing else here touches a browser
+      // shortcut: Ctrl+N, Ctrl+T, Ctrl+W, Ctrl+P and Ctrl+F are left alone, and
+      // the single letters are bare.
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && (event.key === 'k' || event.key === 'K')) {
+        event.preventDefault();
+        if (isOpen()) closePalette(true); else openPalette();
+        return;
+      }
+
+      if (isOpen() || isHelpOpen()) return;
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      // Shift is NOT excluded: "?" is Shift and "/" on most layouts.
+      if (isTyping(event.target)) { chord = ''; return; }
+
+      if (event.key === '/') { event.preventDefault(); openPalette(); return; }
+      if (event.key === '?') { event.preventDefault(); openHelp(document.activeElement); return; }
+
+      const key = String(event.key || '').toLowerCase();
+
+      if (chord === 'g') {
+        chord = '';
+        window.clearTimeout(chordTimer);
+        const binding = CHORDS.find((c) => c.keys === 'g ' + key);
+        if (binding && binding.href) {
+          event.preventDefault();
+          window.location.assign(binding.href);
+          return;
+        }
+      }
+
+      if (key === 'g') {
+        chord = 'g';
+        window.clearTimeout(chordTimer);
+        chordTimer = window.setTimeout(() => { chord = ''; }, CHORD_WINDOW);
+        return;
+      }
+
+      if (key === 'n') {
+        // N does not open a "create" screen, because the federation does not
+        // have one — everything new starts on a form on a real page. So it opens
+        // the palette already typed, and what the reader sees is the set of
+        // starting points they can actually reach.
+        event.preventDefault();
+        openPalette('new');
+      }
+    });
+
+    // ── Pointer ─────────────────────────────────────────────────────────────
+
+    input.addEventListener('input', render);
+    backdrop.addEventListener('click', () => closePalette(true));
+    helpBackdrop.addEventListener('click', () => closeHelp());
+    closeBtn.addEventListener('click', () => closePalette(true));
+    helpClose.addEventListener('click', () => closeHelp());
+
+    // Without this the field blurs on mouse-down and the click lands on a list
+    // that has already been re-rendered under the pointer.
+    listEl.addEventListener('mousedown', (event) => event.preventDefault());
+
+    // The documented opt-in affordance: any element a page already renders.
+    document.addEventListener('click', (event) => {
+      const target = event.target;
+      const trigger = target && target.closest ? target.closest('[data-command-palette]') : null;
+      if (!trigger) return;
+      event.preventDefault();
+      openPalette(trigger.getAttribute('data-command-palette') || '');
+    });
+  }
+</script>
+
+<style is:global>
+  /* GLOBAL, AND NAMESPACED UNDER .cp.
+     Astro scopes styles by stamping the elements in the template, and the
+     results list is built in script — those nodes carry no scope attribute, so
+     scoped rules would never reach them. Every selector below is therefore
+     anchored on .cp so a global stylesheet cannot leak into the page. */
+
+  /* `hidden` must win over the layout below: a class selector outranks the
+     user-agent [hidden] rule. */
+  .cp[hidden] { display: none; }
+
+  .cp {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-palette);
+    display: grid;
+    justify-items: center;
+    align-content: start;
+    padding: 12vh var(--space-4) var(--space-8);
+  }
+
+  .cp .cp-backdrop {
+    position: fixed;
+    inset: 0;
+    /* No token exists for a scrim. This is the ink the --shadow-* tokens are
+       built from (rgba(26, 23, 19, …)), so the palette darkens the page in the
+       colour the rest of the system already casts shadows in, rather than
+       introducing a second black. */
+    background: rgba(26, 23, 19, 0.44);
+  }
+
+  .cp .cp-panel {
+    position: relative;
+    width: min(640px, 100%);
+    max-height: min(70vh, 620px);
+    display: flex;
+    flex-direction: column;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-xl);
+    overflow: hidden;
+    animation: cp-in var(--dur-fast) var(--ease-out);
+  }
+  @keyframes cp-in {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  /* ── The field ──────────────────────────────────────────────────────────── */
+
+  .cp .cp-field {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+  }
+  .cp .cp-icon { color: var(--muted); flex: none; }
+
+  .cp .cp-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    font-family: var(--font-body);
+    font-size: var(--text-md);
+    color: var(--white);
+    padding: var(--space-2) 0;
+    outline: none;
+  }
+  .cp .cp-input::placeholder { color: var(--muted); }
+  /* The field takes focus the instant the dialog opens, so a ring around it
+     would be permanent furniture rather than an indicator. The panel edge is
+     what identifies the control here; the ring returns on every other stop. */
+  /* WAS outline:none, on the argument that the field is focused the instant
+     the dialog opens so a ring would be permanent furniture.
+
+     True on open, and wrong every time after: focus returns here from a result
+     with the arrow keys and from the close button with Shift+Tab, and at those
+     moments there was nothing at all to show where the caret had gone. An
+     inset ring reads as part of the field rather than as a box around it. */
+  .cp .cp-input:focus-visible {
+    outline: 2px solid var(--gold-2);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  .cp .cp-close {
+    flex: none;
+    background: transparent;
+    border: 0;
+    padding: var(--space-1);
+    border-radius: var(--radius-xs);
+    color: var(--muted);
+    line-height: 0;
+  }
+  .cp .cp-close:hover { color: var(--white); }
+
+  .cp kbd {
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    line-height: 1.4;
+    color: var(--muted);
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: 2px var(--space-2);
+    white-space: nowrap;
+  }
+
+  /* ── Results ────────────────────────────────────────────────────────────── */
+
+  .cp .cp-results {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: var(--space-2) 0;
+    flex: 1 1 auto;
+  }
+
+  .cp .cp-group { padding: var(--space-1) 0 var(--space-2); }
+  .cp .cp-group + .cp-group { border-top: 1px solid var(--border); }
+  .cp .cp-group-h {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: var(--space-2) var(--space-4) var(--space-1);
+    margin: 0;
+  }
+
+  .cp .cp-opt {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-4);
+    min-height: 40px;
+    cursor: pointer;
+    color: var(--off-white);
+    font-size: var(--text-base);
+    line-height: 1.5;
+    scroll-margin: var(--space-8) 0;
+  }
+  /* Highlight, not selection: DOM focus never leaves the field, so this is the
+     visual half of aria-activedescendant. A background AND a rule, so it does
+     not rest on colour alone. */
+  .cp .cp-opt.on {
+    background: var(--card-2);
+    color: var(--white);
+    box-shadow: inset 2px 0 0 var(--gold);
+  }
+  .cp .cp-opt-label { flex: 1 1 auto; min-width: 0; }
+  .cp .cp-opt-label b { color: var(--gold-3); font-weight: 600; }
+
+  .cp .cp-opt-where {
+    flex: 0 1 auto;
+    font-size: var(--text-xs);
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 42%;
+  }
+
+  .cp .cp-empty {
+    padding: var(--space-6) var(--space-4);
+    color: var(--muted);
+    font-size: var(--text-base);
+    line-height: 1.6;
+  }
+
+  /* ── Footer ─────────────────────────────────────────────────────────────── */
+
+  .cp .cp-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-4);
+    border-top: 1px solid var(--border);
+    background: var(--card-2);
+    font-size: var(--text-xs);
+    color: var(--muted);
+  }
+  .cp .cp-legend { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .cp .cp-live { text-align: right; white-space: nowrap; }
+
+  /* ── The shortcuts panel ────────────────────────────────────────────────── */
+
+  .cp .cp-help-panel { max-height: min(80vh, 680px); }
+  .cp .cp-help-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-4);
+    border-bottom: 1px solid var(--border);
+  }
+  .cp .cp-help-head h2 {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    color: var(--white);
+    margin: 0;
+  }
+  .cp .cp-help-body {
+    overflow-y: auto;
+    padding: var(--space-2) var(--space-4) var(--space-6);
+  }
+  .cp .cp-help-body section { padding-top: var(--space-4); }
+  .cp .cp-help-body h3 {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--gold-2);
+    margin: 0 0 var(--space-2);
+    font-weight: 500;
+  }
+  .cp .cp-keys { list-style: none; margin: 0; padding: 0; }
+  .cp .cp-keys li {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-4);
+    padding: var(--space-2) 0;
+    font-size: var(--text-base);
+    color: var(--off-white);
+    border-bottom: 1px solid var(--border);
+  }
+  .cp .cp-keys li:last-child { border-bottom: 0; }
+  .cp .cp-keys-k {
+    flex: none;
+    min-width: 108px;
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-1);
+  }
+  .cp .cp-then { font-size: var(--text-xs); color: var(--muted); }
+  .cp .cp-note {
+    margin: var(--space-2) 0 0;
+    font-size: var(--text-xs);
+    color: var(--muted);
+    line-height: 1.6;
+    max-width: 56ch;
+  }
+
+  /* Scroll lock. On the document element, which this component does not own. */
+  html.cp-locked, html.cp-locked body { overflow: hidden; }
+
+  /* ── Phone ──────────────────────────────────────────────────────────────── */
+
+  @media (max-width: 640px) {
+    .cp { padding: var(--space-4) var(--space-2); }
+    .cp .cp-panel { max-height: calc(100vh - var(--space-8)); }
+    /* PART AL: a real touch target. */
+    .cp .cp-opt { min-height: 44px; align-items: center; }
+    /* The destination is the first thing to go: on a 360px screen the label is
+       the information and the path is a detail. */
+    .cp .cp-opt-where { display: none; }
+    .cp .cp-legend { display: none; }
+  }
+</style>

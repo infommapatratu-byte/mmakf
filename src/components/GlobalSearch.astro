@@ -1,0 +1,601 @@
+---
+/**
+ * FEDERATION SEARCH BOX — the input, and the results as you type (§10, §11).
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * IT IS A FORM FIRST AND A COMBOBOX SECOND
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * With JavaScript off this is a plain GET form posting `q` to /search, which
+ * renders the same answers on the server. Nothing below is required to reach a
+ * record — the dropdown is an accelerator, and the rule in this codebase is that
+ * an accelerator may be JavaScript-only while the road to the data may not.
+ *
+ * That is also why the panel is `hidden` in the markup rather than hidden in a
+ * stylesheet: a reader without JavaScript must never be shown an empty results
+ * shell that will never fill.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT THE SCREEN READER IS TOLD, AND WHY EACH PART IS THERE
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ *  · The count lives in an `aria-live="polite"` region. Results arrive
+ *    asynchronously and replace each other silently; without this, a reader who
+ *    cannot see the list is never told it changed, and typing feels like typing
+ *    into nothing.
+ *  · The input is a `combobox` and the panel a `listbox`, so the active row is
+ *    announced through `aria-activedescendant` — FOCUS ITSELF NEVER LEAVES THE
+ *    INPUT. Moving real focus into the list would break typing, which is the
+ *    reason the combobox pattern exists.
+ *  · Every group is a `role="group"` labelled by its own heading, because §10's
+ *    whole point is that one name returns an athlete AND a coach AND a
+ *    certificate, and a flat list of eleven rows throws that distinction away.
+ *  · Escape closes the panel and leaves focus on the input it was opened from.
+ *    There is no focus trap and there should not be: this is an inline listbox,
+ *    not an overlay, and trapping focus in it would strand a keyboard user.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * TWO CORRECTNESS DETAILS THAT ARE EASY TO MISS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ *  · EVERY RESPONSE BUT THE LATEST IS ABORTED. Debouncing alone does not stop a
+ *    slow response for "ku" landing after a fast one for "kumar" and replacing
+ *    the right answers with stale ones.
+ *  · RESULTS ARE BUILT WITH textContent, NEVER innerHTML. The strings are
+ *    federation records — names, cities, references — and a register is exactly
+ *    the place someone's name legitimately contains an ampersand or a bracket.
+ *
+ * A RESULT WITH NO PAGE IS STILL SHOWN, AS PLAIN TEXT. Most record types in this
+ * repository have no per-record route yet, so globalSearch() returns a null URL
+ * for them rather than inventing one. Hiding those rows would under-report the
+ * register; linking them would be a link to a 404. They are listed, marked, and
+ * Enter does nothing on them.
+ */
+import { MIN_QUERY_LENGTH, MAX_QUERY_LENGTH } from '@/lib/search';
+import { DEFAULT_PER_GROUP } from '@/lib/global-search';
+
+interface Props {
+  /** Where the no-JavaScript form posts. /search renders the same search server-side. */
+  action?: string;
+  /** The JSON endpoint the dropdown reads. */
+  endpoint?: string;
+  /** Visible-to-screen-readers label for the input. */
+  label?: string;
+  placeholder?: string;
+  /** Prefills the box — e.g. on /search, so the query survives a page load. */
+  value?: string;
+  perGroup?: number;
+  autofocus?: boolean;
+  class?: string;
+}
+
+const {
+  action = '/search',
+  endpoint = '/api/search/global',
+  label = 'Search the federation',
+  placeholder = 'A person, a dojo, a competition, a certificate number…',
+  value = '',
+  perGroup = DEFAULT_PER_GROUP,
+  autofocus = false,
+  class: className = '',
+} = Astro.props;
+
+// Unique per instance so more than one search box on a page cannot collide on
+// element ids — which would point one input's aria-controls at another's list.
+const uid = `gs-${Math.random().toString(36).slice(2, 9)}`;
+---
+
+<div
+  class:list={['gs', className]}
+  data-global-search
+  data-endpoint={endpoint}
+  data-per-group={String(perGroup)}
+  data-min={String(MIN_QUERY_LENGTH)}
+>
+  <form class="gs-form" method="get" action={action} role="search" aria-label={label}>
+    <label class="gs-label" for={`${uid}-input`}>{label}</label>
+    <div class="gs-row">
+      <input
+        id={`${uid}-input`}
+        class="gs-input"
+        type="search"
+        name="q"
+        value={value}
+        placeholder={placeholder}
+        maxlength={MAX_QUERY_LENGTH}
+        autocomplete="off"
+        autocorrect="off"
+        spellcheck={false}
+        autofocus={autofocus}
+        data-gs-input
+        role="combobox"
+        aria-expanded="false"
+        aria-controls={`${uid}-listbox`}
+        aria-autocomplete="list"
+        aria-haspopup="listbox"
+      />
+      <button class="btn btn-primary gs-submit" type="submit">Search</button>
+    </div>
+
+    {/* Announced, not merely displayed. Empty until there is something true to
+        say — an empty live region that says "0 results" before anyone has typed
+        interrupts a reader for no reason. */}
+    <div class="gs-status" data-gs-status role="status" aria-live="polite" aria-atomic="true"></div>
+  </form>
+
+  <div class="gs-panel" data-gs-panel hidden>
+    <div id={`${uid}-listbox`} class="gs-listbox" data-gs-listbox role="listbox" aria-label="Search results"></div>
+  </div>
+</div>
+
+<script>
+  // One initialiser per instance on the page.
+  document.querySelectorAll('[data-global-search]').forEach((root) => {
+    const el = root as HTMLElement;
+    const input = el.querySelector('[data-gs-input]') as HTMLInputElement | null;
+    const panel = el.querySelector('[data-gs-panel]') as HTMLElement | null;
+    const listbox = el.querySelector('[data-gs-listbox]') as HTMLElement | null;
+    const status = el.querySelector('[data-gs-status]') as HTMLElement | null;
+    const form = el.querySelector('form') as HTMLFormElement | null;
+    if (!input || !panel || !listbox || !status || !form) return;
+
+    const endpoint = el.dataset.endpoint || '/api/search/global';
+    const perGroup = el.dataset.perGroup || '';
+    const min = Number(el.dataset.min || '2');
+    const listboxId = listbox.id;
+
+    // ~180ms: long enough that a touch-typist produces one request per word
+    // rather than one per letter, short enough to feel like the box is keeping up.
+    const DEBOUNCE_MS = 180;
+
+    // Declared as `Opt[]` rather than `Array<{…}>`: the Astro compiler reads the
+    // `<{` of an inline generic inside a <script> as the start of a fragment and
+    // fails the build.
+    type Opt = { el: HTMLElement; url: string | null };
+    let options: Opt[] = [];
+    let activeIndex = -1;
+    let timer: number | undefined;
+    let controller: AbortController | null = null;
+    let suggestions: any = null;   // the empty-query answer, fetched at most once
+    let seq = 0;                   // guards against out-of-order responses
+
+    function setStatus(text: string) {
+      // Assigned only when it changes: rewriting identical text re-announces it.
+      if (status!.textContent !== text) status!.textContent = text;
+    }
+
+    function close() {
+      if (panel!.hidden) return;
+      panel!.hidden = true;
+      input!.setAttribute('aria-expanded', 'false');
+      input!.removeAttribute('aria-activedescendant');
+      activeIndex = -1;
+    }
+
+    function open() {
+      if (!panel!.hidden) return;
+      panel!.hidden = false;
+      input!.setAttribute('aria-expanded', 'true');
+    }
+
+    function setActive(next: number) {
+      if (!options.length) return;
+      if (activeIndex >= 0 && options[activeIndex]) {
+        options[activeIndex].el.setAttribute('aria-selected', 'false');
+      }
+      // Wraps, so ArrowUp from the top reaches the last result rather than
+      // stopping dead — the behaviour every other listbox on this site has.
+      activeIndex = (next + options.length) % options.length;
+      const opt = options[activeIndex];
+      opt.el.setAttribute('aria-selected', 'true');
+      input!.setAttribute('aria-activedescendant', opt.el.id);
+      opt.el.scrollIntoView({ block: 'nearest' });
+    }
+
+    function line(cls: string, text: string) {
+      const d = document.createElement('div');
+      d.className = cls;
+      d.textContent = text;
+      return d;
+    }
+
+    function render(data: any) {
+      listbox!.textContent = '';
+      options = [];
+      activeIndex = -1;
+      input!.removeAttribute('aria-activedescendant');
+
+      if (!data) {
+        close();
+        return;
+      }
+
+      // A REFUSAL, A FAILURE AND AN UNCONFIGURED DATABASE ARE NOT "NO RESULTS".
+      // Any payload carrying an error is printed as that error. Falling through
+      // to the group loop would render an empty `groups` array as "No results
+      // for kumar", which tells the caller the register is empty when in truth
+      // the query never ran.
+      if (data.error || data.state === 'not_configured') {
+        const msg =
+          data.error ||
+          'The federation database is not configured for this environment, so there is nothing to search.';
+        listbox!.appendChild(line('gs-message', msg));
+        setStatus(msg);
+        open();
+        return;
+      }
+
+      if (data.state === 'too_short') {
+        listbox!.appendChild(line('gs-message', 'Type at least ' + min + ' characters.'));
+        setStatus('Type at least ' + min + ' characters.');
+        open();
+        return;
+      }
+
+      const groups = Array.isArray(data.groups) ? data.groups : [];
+
+      if (!groups.length) {
+        const msg =
+          data.state === 'suggested'
+            ? 'Type to search the federation.'
+            : 'No results for ' + (data.query || '');
+        listbox!.appendChild(line('gs-message', msg));
+        setStatus(msg);
+        open();
+        return;
+      }
+
+      let n = 0;
+      for (const group of groups) {
+        const g = document.createElement('div');
+        g.className = 'gs-group';
+        g.setAttribute('role', 'group');
+
+        const headingId = listboxId + '-g' + n;
+        const heading = line('gs-group-title', String(group.label || group.kind));
+        heading.id = headingId;
+        // The group is named for the reader, which is how "an athlete AND a
+        // coach AND a certificate" survives being read aloud one row at a time.
+        g.setAttribute('aria-labelledby', headingId);
+        g.appendChild(heading);
+
+        for (const hit of group.hits || []) {
+          const id = listboxId + '-o' + n;
+          n += 1;
+
+          const opt = document.createElement('div');
+          opt.className = 'gs-option';
+          opt.id = id;
+          opt.setAttribute('role', 'option');
+          opt.setAttribute('aria-selected', 'false');
+
+          opt.appendChild(line('gs-title', String(hit.title ?? '')));
+          if (hit.subtitle) opt.appendChild(line('gs-sub', String(hit.subtitle)));
+
+          const meta = document.createElement('div');
+          meta.className = 'gs-meta';
+          if (hit.ref) meta.appendChild(line('gs-ref', String(hit.ref)));
+          if (!hit.url) {
+            // Said plainly rather than by styling alone: a row that cannot be
+            // opened is a fact about the site, not a disabled control.
+            meta.appendChild(line('gs-note', 'no page yet'));
+          }
+          if (meta.childNodes.length) opt.appendChild(meta);
+
+          const url = typeof hit.url === 'string' && hit.url ? hit.url : null;
+          if (url) {
+            opt.classList.add('is-linked');
+            opt.addEventListener('click', () => {
+              window.location.href = url;
+            });
+          }
+          options.push({ el: opt, url });
+          g.appendChild(opt);
+        }
+
+        if (group.truncated) {
+          g.appendChild(line('gs-note gs-more', 'More matched than are shown.'));
+        }
+        listbox!.appendChild(g);
+      }
+
+      if (data.state === 'suggested') {
+        setStatus(options.length + ' recent ' + (options.length === 1 ? 'record' : 'records') + '.');
+      } else {
+        const more = data.truncated ? ' More matched than are shown.' : '';
+        setStatus(
+          options.length +
+            (options.length === 1 ? ' result' : ' results') +
+            ' for ' +
+            (data.query || '') +
+            '.' +
+            more
+        );
+      }
+      open();
+    }
+
+    async function run(q: string) {
+      const trimmed = q.trim();
+
+      if (trimmed.length === 0 && suggestions) {
+        render(suggestions);
+        return;
+      }
+      if (trimmed.length > 0 && trimmed.length < min) {
+        render({ state: 'too_short', query: trimmed });
+        return;
+      }
+
+      // Only the newest request may paint. Debouncing alone lets a slow response
+      // for a shorter query land after a fast one for a longer query.
+      if (controller) controller.abort();
+      controller = new AbortController();
+      const mine = ++seq;
+
+      const url = new URL(endpoint, window.location.origin);
+      url.searchParams.set('q', trimmed);
+      if (perGroup) url.searchParams.set('perGroup', perGroup);
+
+      try {
+        const res = await fetch(url.toString(), {
+          headers: { Accept: 'application/json' },
+          credentials: 'same-origin',
+          signal: controller.signal,
+        });
+        const data = await res.json().catch(() => null);
+        if (mine !== seq) return;
+
+        if (!res.ok) {
+          // The server's own words where it gave them — "Sign in to search the
+          // federation", "Too many requests" — and a neutral sentence otherwise.
+          const msg =
+            (data && data.error) ||
+            (res.status === 429
+              ? 'Too many searches just now. Try again shortly.'
+              : 'The search could not be completed.');
+          render({ error: msg });
+          return;
+        }
+        if (trimmed.length === 0 && data && data.state === 'suggested') suggestions = data;
+        render(data);
+      } catch (err: any) {
+        // An abort is the expected outcome of typing another character, not a
+        // failure, and must not paint an error over live results.
+        if (err && err.name === 'AbortError') return;
+        if (mine !== seq) return;
+        render({ error: 'The search could not be completed.' });
+      }
+    }
+
+    function schedule() {
+      window.clearTimeout(timer);
+      const q = input!.value;
+      timer = window.setTimeout(() => run(q), DEBOUNCE_MS);
+    }
+
+    input.addEventListener('input', schedule);
+
+    input.addEventListener('focus', () => {
+      // An empty box on focus offers the caller's most recent records rather
+      // than nothing — and never the whole register.
+      if (input!.value.trim().length === 0) run('');
+      else if (options.length) open();
+    });
+
+    input.addEventListener('keydown', (event) => {
+      const e = event as KeyboardEvent;
+
+      if (e.key === 'Escape') {
+        if (!panel!.hidden) {
+          e.preventDefault();
+          close();
+          // Focus never left the input, so this restores nothing — it is here
+          // because the day this becomes an overlay, it must already be right.
+          input!.focus();
+        }
+        return;
+      }
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (panel!.hidden) {
+          run(input!.value);
+          return;
+        }
+        setActive(activeIndex + 1);
+        return;
+      }
+
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (panel!.hidden) return;
+        setActive(activeIndex - 1);
+        return;
+      }
+
+      if (e.key === 'Home' && !panel!.hidden && options.length) {
+        e.preventDefault();
+        setActive(0);
+        return;
+      }
+
+      if (e.key === 'End' && !panel!.hidden && options.length) {
+        e.preventDefault();
+        setActive(options.length - 1);
+        return;
+      }
+
+      if (e.key === 'Enter') {
+        const active = activeIndex >= 0 ? options[activeIndex] : null;
+        if (active && active.url) {
+          e.preventDefault();
+          window.location.href = active.url;
+          return;
+        }
+        // Nothing selected, or a record with no page: the form submits to
+        // /search, which is the full server-rendered answer. Enter is never a
+        // dead key.
+      }
+    });
+
+    // Closing on outside interaction, not on blur: blur fires before a click on
+    // a result registers, and hiding the list first makes the results unclickable.
+    document.addEventListener('pointerdown', (e) => {
+      if (!el.contains(e.target as Node)) close();
+    });
+
+    document.addEventListener('focusin', (e) => {
+      if (!el.contains(e.target as Node)) close();
+    });
+
+    form.addEventListener('submit', () => close());
+  });
+</script>
+
+<style>
+  .gs {
+    position: relative;
+  }
+
+  /* Visible to screen readers, not to the eye: the placeholder is not a label,
+     and a box with no label is unusable without sight. */
+  .gs-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .gs-row {
+    display: flex;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .gs-input {
+    flex: 1 1 320px;
+    min-width: 0;
+    padding: var(--space-4) var(--space-5);
+    background: var(--card);
+    color: var(--white);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    font-family: var(--font-body);
+    font-size: var(--text-md);
+  }
+  .gs-input::placeholder {
+    color: var(--muted);
+  }
+  .gs-input:focus-visible {
+    outline: 2px solid var(--gold);
+    outline-offset: 2px;
+    border-color: var(--gold);
+  }
+
+  .gs-status {
+    margin-top: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--muted);
+    min-height: 1em;
+  }
+
+  .gs-panel {
+    position: absolute;
+    z-index: var(--z-dropdown);
+    inset-inline: 0;
+    margin-top: var(--space-2);
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  .gs-panel[hidden] {
+    display: none;
+  }
+
+  .gs-listbox {
+    padding: var(--space-2) 0;
+  }
+
+  .gs-group + .gs-group {
+    border-top: 1px solid var(--border);
+    margin-top: var(--space-2);
+    padding-top: var(--space-2);
+  }
+
+  .gs-group-title {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold);
+    padding: var(--space-2) var(--space-5);
+  }
+
+  .gs-option {
+    padding: var(--space-3) var(--space-5);
+    border-inline-start: 3px solid transparent;
+    transition: background var(--dur-fast) var(--ease-out);
+  }
+  .gs-option.is-linked {
+    cursor: pointer;
+  }
+  .gs-option:hover,
+  .gs-option[aria-selected='true'] {
+    background: var(--card-2);
+    border-inline-start-color: var(--gold);
+  }
+
+  .gs-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: var(--text-base);
+    color: var(--white);
+  }
+  .gs-option.is-linked .gs-title {
+    color: var(--gold);
+  }
+
+  .gs-sub {
+    font-size: var(--text-sm);
+    color: var(--muted);
+    margin-top: var(--space-1);
+    line-height: 1.5;
+  }
+
+  .gs-meta {
+    display: flex;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+    align-items: baseline;
+    margin-top: var(--space-1);
+  }
+
+  .gs-ref,
+  .gs-note {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .gs-more {
+    padding: var(--space-2) var(--space-5) var(--space-3);
+  }
+
+  .gs-message {
+    padding: var(--space-4) var(--space-5);
+    font-size: var(--text-base);
+    color: var(--muted);
+    line-height: 1.6;
+  }
+</style>

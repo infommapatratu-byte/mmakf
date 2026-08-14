@@ -1,0 +1,770 @@
+---
+// The entity quick view (§18, over the §16 model in src/lib/entities.ts).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IT IS FOR
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Working a list means asking the same question of forty rows: is this the one?
+// Answering it by opening a record, reading four fields and pressing Back costs
+// two page loads and the reader's place in the list. This panel answers it in
+// place — photograph, identifier, the facts that decide it, what has happened
+// recently — and hands over to the full record when the answer is yes.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THE DATA IS ALREADY ON THE PAGE, AND NOT FETCHED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The obvious build fetches a record when a row is clicked. That needs an
+// endpoint, and an endpoint needs its own authorisation, its own scope filter
+// and its own audit entry — a second door into the register, opened so a
+// drawer can animate. The list has ALREADY read and authorised these rows to
+// draw them. So the page passes the same rows in, every quick view is rendered
+// server-side, and opening one is a class change.
+//
+// That is also what makes the JavaScript-off path real rather than claimed:
+// the pane for the record in the URL is in the HTML the server sent.
+//
+// The cost is honest and belongs to the caller — the quick view of every row on
+// the page is in the document. Pass the fields that decide "is this the one",
+// not the whole record.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// PROGRESSIVE ENHANCEMENT, AND ONE ARIA CLAIM THAT IS NOT MADE UNTIL IT IS TRUE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Every route through this component is a link. The row link is an href, Close
+// is an href, and both resolve server-side to a page with the panel open or
+// shut. With JavaScript the same links become a pushState and a class change.
+//
+// `aria-modal="true"` is set BY THE SCRIPT, not by the server. aria-modal tells
+// assistive technology that everything behind the dialog is unavailable, and
+// without JavaScript that is false — the list behind is still tabbable, because
+// nothing is trapping focus. Announcing a modal that does not exist sends a
+// screen-reader user looking for a boundary they will never find. So the server
+// renders an honest non-modal dialog, and the script upgrades it at the moment
+// the trap, the scroll lock and the Escape handler all actually exist.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// USAGE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//   import SidePanel, { type PanelEntity } from '@/components/SidePanel.astro';
+//   import { quickViewHref, token } from '@/lib/entities';
+//
+//   <td>
+//     <a href={quickViewHref(Astro.url, ref)} data-sp-open={token(ref)}>{row.name}</a>
+//   </td>
+//   <SidePanel entities={quickViews} />
+//
+// `data-sp-open` is what the script binds to. A row without it still works —
+// it navigates, and the server renders the panel open.
+
+import Icon from '@/components/Icon.astro';
+import Status from '@/components/Status.astro';
+import { initials } from '@/lib/people';
+import {
+  ENTITIES, PANEL_PARAM, closeHref, detailHref, token,
+  type EntityKind,
+} from '@/lib/entities';
+
+/** One fact. A fact with no value is not rendered — see below. */
+export interface PanelFact {
+  label: string;
+  value: string | number | null | undefined;
+  /** Render as a link, when the fact is itself a record with an address. */
+  href?: string | null;
+}
+
+export interface PanelActivityItem {
+  /** When it happened. A Date is printed as a plain ISO date. */
+  when: string | Date;
+  /** What happened, in the federation's own words. */
+  summary: string;
+  /** Who did it, where the record names somebody. */
+  by?: string | null;
+}
+
+export interface PanelEntity {
+  kind: EntityKind;
+  id: string | number;
+  /** The name a reader would call this record. */
+  title: string;
+  /** The identifier a person quotes. Labelled by the §16 descriptor. */
+  identifier?: string | null;
+  /** The raw database status. Rendered through Status.astro, never by hand. */
+  status?: string | null;
+  photoUrl?: string | null;
+  facts?: PanelFact[];
+  /** Most recent first. The page decides how many is recent. */
+  activity?: PanelActivityItem[];
+  /**
+   * Where a link to the whole record should go, when the caller knows better
+   * than the model does — a person's public register entry answers only while
+   * their standing is current, and only the caller knows that. Leave it unset
+   * and the §16 descriptor decides; set it to null to withhold it outright.
+   */
+  fullProfileHref?: string | null;
+}
+
+interface Props {
+  /** The quick view of every row on this page. Nothing renders when empty. */
+  entities: PanelEntity[];
+  /** Querystring parameter carrying the open record. One name federation-wide. */
+  param?: string;
+  /** Distinguishes two panels on one page. */
+  id?: string;
+}
+
+const { entities, param = PANEL_PARAM, id = 'sidepanel' } = Astro.props;
+
+// The URL is the state. Read it here rather than making every list page parse
+// its own querystring and agree with this component about the spelling.
+const openToken = Astro.url.searchParams.get(param);
+const isOpen = !!openToken;
+const openIndex = entities.findIndex((e) => token(e) === openToken);
+
+// The param names a record, and it is not one of the rows on this page. That is
+// a real state with a real cause — a shared link into a list that has since been
+// filtered, sorted or paged — and it is said out loud. It is NOT silently
+// treated as closed, which would leave the address claiming something the page
+// is ignoring, and it is NOT dressed up as "not found", which would suggest the
+// record has been deleted.
+const openIsUnknown = isOpen && openIndex < 0;
+
+const closeTo = closeHref(Astro.url, param);
+
+// A dangling aria-labelledby is worse than none: it names an element that is
+// not there, and a screen reader falls back to whatever it can find. While the
+// panel is shut there is no pane and so there is no name.
+const labelledBy = openIndex >= 0
+  ? `${id}-t-${openIndex}`
+  : openIsUnknown
+    ? `${id}-t-unknown`
+    : undefined;
+
+function factsOf(e: PanelEntity): PanelFact[] {
+  // A field the federation has not recorded renders as absent, not as an em
+  // dash and not as a placeholder. An empty cell in a table reads as zero and
+  // needs the dash; a labelled row in a panel reads as "recorded as nothing",
+  // which is a claim the record does not make.
+  return (e.facts ?? []).filter((f) => f.value !== null && f.value !== undefined && f.value !== '');
+}
+
+function whenText(w: string | Date): string {
+  return w instanceof Date ? w.toISOString().slice(0, 10) : String(w);
+}
+
+function profileHref(e: PanelEntity): string | null {
+  if (e.fullProfileHref !== undefined) return e.fullProfileHref;
+  return detailHref({ kind: e.kind, id: e.id, identifier: e.identifier });
+}
+---
+
+{entities.length > 0 && (
+  <div
+    class:list={['sp-root', isOpen && 'is-open']}
+    id={id}
+    data-sp
+    data-param={param}
+    data-close={closeTo}
+    hidden={!isOpen}
+  >
+    {/* Not a link and not a button. Dismissing by clicking away is a mouse
+        convenience that JavaScript provides; making it an anchor would put an
+        unnamed, screen-filling control in the tab order for everyone else. */}
+    <div class="sp-scrim" data-sp-scrim></div>
+
+    <aside
+      class="sp"
+      role="dialog"
+      tabindex="-1"
+      aria-labelledby={labelledBy}
+      data-sp-dialog
+    >
+      {/* A real link, so Close works before any script has run. */}
+      <a class="sp-close" href={closeTo} data-sp-close aria-label="Close quick view">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+          <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" />
+        </svg>
+      </a>
+
+      <div class="sp-scroll">
+        {/* The grab bar reads as a bottom sheet on a phone. Decorative: the
+            sheet is dismissed by Close, by Escape and by the scrim, never by a
+            drag gesture nobody can discover. */}
+        <div class="sp-grip" aria-hidden="true"></div>
+
+        {entities.map((e, i) => {
+          const d = ENTITIES[e.kind];
+          const facts = factsOf(e);
+          const activity = e.activity ?? [];
+          const full = profileHref(e);
+          return (
+            <div
+              class="sp-pane"
+              data-sp-pane={token(e)}
+              data-sp-label={`${id}-t-${i}`}
+              hidden={i !== openIndex}
+            >
+              <header class="sp-head">
+                <p class="sp-kind">
+                  <Icon name={d.icon} size={15} color="var(--gold-2)" />
+                  <span>{d.label}</span>
+                </p>
+
+                <div class="sp-ident">
+                  {e.photoUrl ? (
+                    <img class="sp-photo" src={e.photoUrl} alt={`Photograph of ${e.title}`} loading="lazy" decoding="async" />
+                  ) : (
+                    /* The monogram stands on its own. Where no photograph is
+                       held, nothing is said about it — the tile is decorative
+                       and the name it stands for is the heading beside it. */
+                    <span class="sp-mono" aria-hidden="true">{initials(e.title)}</span>
+                  )}
+
+                  <div class="sp-ident-text">
+                    <h2 class="sp-title" id={`${id}-t-${i}`}>{e.title}</h2>
+                    {e.identifier && (
+                      <p class="sp-id">
+                        <span class="sp-id-label">{d.identifierLabel}</span>
+                        <span class="sp-id-value">{e.identifier}</span>
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {e.status && (
+                  <p class="sp-status">
+                    <Status value={e.status} domain={d.statusDomain} />
+                  </p>
+                )}
+              </header>
+
+              {facts.length > 0 && (
+                <dl class="sp-facts">
+                  {facts.map((f) => (
+                    <div class="sp-fact">
+                      <dt>{f.label}</dt>
+                      <dd>{f.href ? <a href={f.href}>{f.value}</a> : f.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+
+              <section class="sp-activity" aria-labelledby={`${id}-a-${i}`}>
+                <h3 class="sp-sub" id={`${id}-a-${i}`}>Recent activity</h3>
+                {activity.length === 0 ? (
+                  /* An empty history is a true answer and is printed as one.
+                     A quick view that omits the section where there is nothing
+                     to show leaves the reader unable to tell "nothing has
+                     happened" from "this panel does not track that". */
+                  <p class="sp-none">Nothing has been recorded against this record.</p>
+                ) : (
+                  <ol class="sp-events">
+                    {activity.map((a) => (
+                      <li>
+                        <span class="sp-when">{whenText(a.when)}</span>
+                        <span class="sp-what">{a.summary}</span>
+                        {a.by && <span class="sp-by">{a.by}</span>}
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </section>
+
+              <footer class="sp-foot">
+                {/* Rendered ONLY where a route exists. Most federation records
+                    are administered from a list and have no page of their own
+                    yet; a button that leads to a 404 — or a disabled one
+                    apologising for it — is worse than no button. */}
+                {full && <a class="btn btn-primary sp-open" href={full}>Open full profile</a>}
+                <a class="btn btn-ghost" href={d.listPath}>{d.plural}</a>
+              </footer>
+            </div>
+          );
+        })}
+
+        {openIsUnknown && (
+          <div class="sp-pane" data-sp-missing hidden={false}>
+            <header class="sp-head">
+              <h2 class="sp-title" id={`${id}-t-unknown`}>Not on this page</h2>
+            </header>
+            <p class="sp-none" role="status">
+              The address asks for a record that is not among the rows shown
+              here. The list may have been filtered, sorted or paged since the
+              link was made. The record itself is unaffected.
+            </p>
+            <footer class="sp-foot">
+              <a class="btn btn-ghost" href={closeTo}>Back to the list</a>
+            </footer>
+          </div>
+        )}
+      </div>
+    </aside>
+  </div>
+)}
+
+<style>
+  .sp-root {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-modal);
+  }
+  .sp-root[hidden] { display: none; }
+
+  .sp-scrim {
+    position: absolute;
+    inset: 0;
+    background: rgba(26, 23, 19, 0.38);
+    opacity: 0;
+    transition: opacity var(--dur-base) var(--ease-out);
+  }
+  .sp-root.is-open .sp-scrim { opacity: 1; }
+
+  /* DESKTOP: a drawer against the right edge, so the list it came from stays
+     visible and the reader keeps their place in it. */
+  .sp {
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: min(430px, 100%);
+    display: flex;
+    flex-direction: column;
+    background: var(--card);
+    border-left: 1px solid var(--border);
+    box-shadow: var(--shadow-xl);
+    transform: translateX(100%);
+    transition: transform var(--dur-base) var(--ease-out);
+  }
+  .sp-root.is-open .sp { transform: none; }
+  .sp:focus { outline: none; }
+  .sp:focus-visible {
+    outline: 2px solid var(--gold-2);
+    outline-offset: -2px;
+  }
+
+  .sp-close {
+    position: absolute;
+    top: var(--space-3);
+    right: var(--space-3);
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-pill);
+    color: var(--off-white);
+    background: var(--card);
+    border: 1px solid var(--border);
+    transition: color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+  }
+  .sp-close:hover { color: var(--gold-2); border-color: var(--gold-dim); }
+
+  .sp-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: var(--space-5);
+  }
+
+  .sp-grip { display: none; }
+
+  .sp-pane[hidden] { display: none; }
+
+  .sp-kind {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    /* Clears the close control, which is 44px and absolutely placed. */
+    padding-right: 52px;
+    margin-bottom: var(--space-4);
+  }
+
+  .sp-ident {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+  .sp-photo,
+  .sp-mono {
+    flex: none;
+    width: 64px;
+    height: 64px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+  }
+  .sp-photo { object-fit: cover; }
+  .sp-mono {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--card-2);
+    color: var(--gold-3);
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    letter-spacing: 0.06em;
+  }
+  .sp-ident-text { min-width: 0; }
+  .sp-title {
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    font-weight: 500;
+    line-height: 1.2;
+    color: var(--white);
+    overflow-wrap: anywhere;
+  }
+  .sp-id {
+    margin-top: var(--space-2);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+  }
+  .sp-id-label {
+    font-family: var(--font-display);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  /* The identifier is what a person reads down a telephone, so it is set in
+     tabular figures — a proportional 1 next to a proportional 7 in a reference
+     is how a digit gets misheard. */
+  .sp-id-value {
+    font-variant-numeric: tabular-nums;
+    color: var(--off-white);
+    overflow-wrap: anywhere;
+  }
+
+  .sp-status { margin-top: var(--space-4); }
+
+  .sp-facts {
+    margin-top: var(--space-5);
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--border);
+    display: grid;
+    gap: var(--space-3);
+  }
+  .sp-fact {
+    display: grid;
+    grid-template-columns: minmax(0, 8rem) minmax(0, 1fr);
+    gap: var(--space-2) var(--space-4);
+    align-items: baseline;
+  }
+  .sp-fact dt {
+    font-family: var(--font-display);
+    font-size: 0.58rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .sp-fact dd {
+    font-size: var(--text-sm);
+    line-height: 1.6;
+    color: var(--off-white);
+    overflow-wrap: anywhere;
+  }
+
+  .sp-activity {
+    margin-top: var(--space-5);
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--border);
+  }
+  .sp-sub {
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    margin-bottom: var(--space-3);
+  }
+  .sp-none {
+    font-size: var(--text-sm);
+    line-height: 1.65;
+    color: var(--muted);
+  }
+  .sp-events {
+    list-style: none;
+    display: grid;
+    gap: var(--space-3);
+  }
+  .sp-events li {
+    display: grid;
+    gap: 2px;
+    padding-left: var(--space-4);
+    border-left: 2px solid var(--border-2);
+  }
+  .sp-when {
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+  }
+  .sp-what {
+    font-size: var(--text-sm);
+    line-height: 1.6;
+    color: var(--off-white);
+  }
+  .sp-by { font-size: var(--text-xs); color: var(--muted); }
+
+  .sp-foot {
+    margin-top: var(--space-6);
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+
+  /* MOBILE: a bottom sheet. A 430px drawer on a 360px screen is a full-screen
+     modal that has not admitted it — it covers the list it claims to sit beside,
+     and it drags the reader's thumb to the far edge of the phone to close it.
+     A sheet is honest about covering the page and puts its controls where a
+     hand already is. */
+  @media (max-width: 640px) {
+    .sp {
+      top: auto;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      width: 100%;
+      max-height: 86dvh;
+      border-left: 0;
+      border-top: 1px solid var(--border);
+      border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+      transform: translateY(100%);
+    }
+    .sp-grip {
+      display: block;
+      width: 40px;
+      height: 4px;
+      margin: 0 auto var(--space-4);
+      border-radius: var(--radius-pill);
+      background: var(--border-2);
+    }
+    .sp-scroll { padding: var(--space-4); }
+    .sp-close { top: var(--space-2); right: var(--space-2); }
+    .sp-foot > .btn { flex: 1 1 auto; justify-content: center; }
+  }
+</style>
+
+<style is:global>
+  /* Set on <html> while a panel is open. The page behind must not scroll under
+     the sheet — on a phone that is the difference between dismissing a panel
+     and losing your place in a list of four hundred rows. Global because the
+     script sets it on the document element, which is outside this component. */
+  html.sp-locked { overflow: hidden; }
+</style>
+
+<script>
+  // The accelerator. Everything below is optional: without it the row link
+  // navigates, the server renders the pane, and Close is a link back.
+  //
+  // What it adds is the part a server cannot do — opening without a page load,
+  // trapping focus, restoring it to the row that was clicked, and making the
+  // browser's Back button close the panel instead of leaving the list (§79).
+  interface PanelState {
+    root: HTMLElement;
+    dialog: HTMLElement;
+    param: string;
+    closeTo: string;
+    panes: HTMLElement[];
+    /** The element to hand focus back to. */
+    trigger: HTMLElement | null;
+    /** Did WE add the history entry that opened this? */
+    pushed: boolean;
+    hideTimer: number | null;
+  }
+
+  const FOCUSABLE = [
+    'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+    'select:not([disabled])', 'textarea:not([disabled])',
+    '[tabindex]:not([tabindex="-1"])',
+  ].join(',');
+
+  function setup(root: HTMLElement) {
+    const dialog = root.querySelector<HTMLElement>('[data-sp-dialog]');
+    const scrim = root.querySelector<HTMLElement>('[data-sp-scrim]');
+    if (!dialog) return;
+
+    const st: PanelState = {
+      root,
+      dialog,
+      param: root.dataset.param || 'view',
+      closeTo: root.dataset.close || location.pathname,
+      panes: Array.from(root.querySelectorAll<HTMLElement>('[data-sp-pane]')),
+      trigger: null,
+      pushed: false,
+      hideTimer: null,
+    };
+
+    const paneFor = (tok: string) =>
+      st.panes.find((p) => p.dataset.spPane === tok) ?? null;
+
+    function open(tok: string, trigger: HTMLElement | null) {
+      const pane = paneFor(tok);
+      if (!pane) return false;
+
+      if (st.hideTimer !== null) { window.clearTimeout(st.hideTimer); st.hideTimer = null; }
+      // Only remember a trigger when there is one. A deep link has no row to go
+      // back to, and overwriting a real trigger with null would strand focus.
+      if (trigger) st.trigger = trigger;
+
+      for (const p of st.panes) p.hidden = p !== pane;
+      const label = pane.dataset.spLabel;
+      if (label) st.dialog.setAttribute('aria-labelledby', label);
+
+      st.root.hidden = false;
+      // The claim becomes true here and not before: from this line the trap,
+      // the scroll lock and Escape are all in force.
+      st.dialog.setAttribute('aria-modal', 'true');
+      document.documentElement.classList.add('sp-locked');
+
+      // Two frames: one for the browser to lay the panel out at its off-screen
+      // start, one for the class that moves it. In a single frame the two
+      // states coalesce and the panel appears rather than arrives.
+      requestAnimationFrame(() => requestAnimationFrame(() => st.root.classList.add('is-open')));
+
+      st.dialog.focus();
+      return true;
+    }
+
+    function close() {
+      if (st.root.hidden) return;
+      st.root.classList.remove('is-open');
+      st.dialog.removeAttribute('aria-modal');
+      document.documentElement.classList.remove('sp-locked');
+
+      // Focus moves before the panel is display:none, so it is never taken from
+      // an element that is about to disappear — which drops it on <body> and
+      // sends the next Tab back to the top of the document.
+      const back = st.trigger;
+      st.trigger = null;
+      if (back && back.isConnected) back.focus();
+
+      st.hideTimer = window.setTimeout(() => {
+        st.root.hidden = true;
+        st.hideTimer = null;
+      }, 320);
+    }
+
+    /**
+     * Close, and put the address back.
+     *
+     * If we pushed the open state, going back is the correct dismissal: it
+     * restores the previous URL and leaves no forward entry that would reopen
+     * the panel. If the panel was in the URL the reader arrived on, there is
+     * nothing behind it — going back would leave the list entirely — so the
+     * address is rewritten in place instead.
+     */
+    function dismiss() {
+      if (st.pushed) {
+        st.pushed = false;
+        history.back();
+        return;
+      }
+      history.replaceState(null, '', st.closeTo);
+      close();
+    }
+
+    // ── Opening from a row ────────────────────────────────────────────────
+    document.addEventListener('click', (ev) => {
+      const target = ev.target as Element | null;
+      const link = target?.closest<HTMLElement>('[data-sp-open]');
+      if (!link) return;
+      // A modified click means "somewhere else" — a new tab, a new window, a
+      // download. Intercepting it would break a habit the browser owns.
+      if (ev.defaultPrevented) return;
+      const me = ev as MouseEvent;
+      if (me.button !== 0 || me.metaKey || me.ctrlKey || me.shiftKey || me.altKey) return;
+
+      const tok = link.dataset.spOpen;
+      if (!tok) return;
+      // Not a row this panel carries. Let the navigation happen: the server has
+      // the record and will render it. Silently doing nothing would be the one
+      // outcome worse than a page load.
+      if (!paneFor(tok)) return;
+
+      const href = link.getAttribute('href');
+      ev.preventDefault();
+      if (href) {
+        history.pushState({ sp: tok }, '', href);
+        st.pushed = true;
+      }
+      open(tok, link);
+    });
+
+    // ── Dismissing ────────────────────────────────────────────────────────
+    root.addEventListener('click', (ev) => {
+      const target = ev.target as Element | null;
+      if (target?.closest('[data-sp-close]')) {
+        ev.preventDefault();
+        dismiss();
+      }
+    });
+    scrim?.addEventListener('click', () => dismiss());
+
+    st.dialog.addEventListener('keydown', (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        dismiss();
+        return;
+      }
+      if (ev.key !== 'Tab') return;
+
+      // The trap. Queried on every press rather than cached, because which
+      // controls exist depends on which pane is showing.
+      const items = Array.from(st.dialog.querySelectorAll<HTMLElement>(FOCUSABLE))
+        .filter((el) => el.offsetParent !== null || el === document.activeElement);
+      if (items.length === 0) {
+        ev.preventDefault();
+        st.dialog.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+
+      if (ev.shiftKey && (active === first || active === st.dialog)) {
+        ev.preventDefault();
+        last.focus();
+      } else if (!ev.shiftKey && active === last) {
+        ev.preventDefault();
+        first.focus();
+      }
+    });
+
+    // ── The Back button (§79, §80) ────────────────────────────────────────
+    window.addEventListener('popstate', () => {
+      const tok = new URLSearchParams(location.search).get(st.param);
+      // Whatever brought us here, it was not us, so there is no pushed entry of
+      // ours to go back to. Dismissal from this state rewrites the address.
+      st.pushed = false;
+      if (tok && paneFor(tok)) open(tok, null);
+      else close();
+    });
+
+    // A deep link: the server already rendered the panel open. Take ownership
+    // of focus, so arriving by shared URL lands in the same place as arriving
+    // by click rather than at the top of the document behind the panel.
+    if (!root.hidden) {
+      st.dialog.setAttribute('aria-modal', 'true');
+      document.documentElement.classList.add('sp-locked');
+      const openTok = new URLSearchParams(location.search).get(st.param);
+      if (openTok) {
+        const t = document.querySelector<HTMLElement>(`[data-sp-open="${CSS.escape(openTok)}"]`);
+        if (t) st.trigger = t;
+      }
+      st.dialog.focus();
+    }
+  }
+
+  document.querySelectorAll<HTMLElement>('[data-sp]').forEach(setup);
+</script>
