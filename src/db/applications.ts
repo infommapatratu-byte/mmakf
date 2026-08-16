@@ -36,7 +36,11 @@ import crypto from 'node:crypto';
 import * as o from './operations.schema';
 import * as e from './engagement.schema';
 import { allocateFederationId, writeAudit, type AuditContext } from './federation';
-import { captureLead, resolveInstitution, submitTrainingRequest, type Audience, type LeadSource, AUDIENCES } from './engagement';
+import { activeFramework, computeFee } from './fees';
+import {
+  captureLead, resolveInstitution, submitTrainingRequest, isEngagementError,
+  type Audience, type LeadSource, AUDIENCES,
+} from './engagement';
 import { isUniqueViolation } from './pgerror';
 import {
   assertCanAnywhere, canAnywhere, visibleScopes,
@@ -530,6 +534,90 @@ export async function routeApplication(
   };
 }
 
+// ─── The applicant's key ────────────────────────────────────────────────────
+//
+// One application, one secret. It is the ONLY thing standing between a school's
+// submission and anybody who can count — refs are sequence-allocated
+// (MMAKF-APP-2026-000001) so the next one along is always guessable, and what
+// it would unlock is another institution's contact details, participant numbers
+// and requirements.
+//
+// Three properties, and all three are needed:
+//
+//   1. UNGUESSABLE. 32 random bytes from the CSPRNG, base64url. Not a hash of
+//      the ref, not a counter, not a timestamp — anything derived from data the
+//      applicant can see is not a secret.
+//   2. COMPARED IN CONSTANT TIME. See tokensMatch().
+//   3. LOOKED UP THE SAME WAY EVERYWHERE. Every path that accepts a token —
+//      resuming a draft, submitting a resumed draft, reading the status page —
+//      goes through applicationByRefAndToken() below. A second copy of this
+//      comparison is a second chance to write `===`.
+
+const ACCESS_TOKEN_BYTES = 32;
+
+/** A fresh key. The only place one is minted. */
+function newAccessToken(): string {
+  return crypto.randomBytes(ACCESS_TOKEN_BYTES).toString('base64url');
+}
+
+/**
+ * Compare the key on file with the key presented, without leaking it.
+ *
+ * `===` on strings stops at the first differing byte. That difference is
+ * measurable over enough requests, and it lets an attacker recover the token
+ * one character at a time rather than guessing 256 bits at once.
+ *
+ * Both sides are hashed BEFORE the comparison so timingSafeEqual always gets
+ * two buffers of identical length. The obvious alternative — test the lengths,
+ * then compare — puts the length itself on the fast path, and the length is
+ * information the holder of the real token never volunteered.
+ */
+function tokensMatch(stored: string | null | undefined, supplied: string | null | undefined): boolean {
+  if (!stored || !supplied) return false;
+  const a = crypto.createHash('sha256').update(String(stored), 'utf8').digest();
+  const b = crypto.createHash('sha256').update(String(supplied), 'utf8').digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * A value that matches nothing, compared against when the reference itself is
+ * unknown.
+ *
+ * Without it, "no such application" returns before any hashing happens and
+ * "wrong key" returns after it. That difference turns the status page into an
+ * oracle for which references exist, which is exactly what the page's single
+ * shared failure message was written to prevent.
+ */
+const NO_SUCH_APPLICATION = crypto.randomBytes(ACCESS_TOKEN_BYTES).toString('base64url');
+
+/**
+ * Load one application by reference AND key, or nothing.
+ *
+ * The reference selects the row and the key authorises it. Note that the key is
+ * NOT part of the WHERE clause: a SQL string comparison is the database's
+ * business to optimise, and `=` on a text column is free to stop early. The row
+ * comes back on the reference — which is guessable and guards nothing — and the
+ * secret is checked here, once, in constant time.
+ *
+ * Returns null for every failure. The caller cannot tell an unknown reference
+ * from a wrong key, and neither can the person holding it.
+ */
+async function applicationByRefAndToken(db: DB, ref: unknown, suppliedToken: unknown) {
+  const r = String(ref ?? '').trim();
+  const t = String(suppliedToken ?? '');
+  if (!r || !t) return null;
+
+  const [app] = await db.select().from(o.institutionApplications)
+    .where(eq(o.institutionApplications.ref, r)).limit(1);
+
+  if (!app) {
+    tokensMatch(NO_SUCH_APPLICATION, t);
+    return null;
+  }
+  if (!tokensMatch(app.accessToken, t)) return null;
+  return app;
+}
+
 // ─── Drafts ─────────────────────────────────────────────────────────────────
 
 function toNumberOrNull(v: unknown): number | null {
@@ -629,11 +717,7 @@ export async function saveDraft(db: DB, input: DraftInput) {
     if (!input.accessToken) {
       throw new ApplicationError('token_required', 'Resuming a draft needs the link that was issued with it.');
     }
-    const [existing] = await db.select().from(o.institutionApplications)
-      .where(and(
-        eq(o.institutionApplications.ref, input.ref),
-        eq(o.institutionApplications.accessToken, input.accessToken)
-      )).limit(1);
+    const existing = await applicationByRefAndToken(db, input.ref, input.accessToken);
 
     if (!existing) throw new ApplicationError('not_found', 'No draft matches that link.');
     if (existing.status !== 'draft') {
@@ -651,7 +735,7 @@ export async function saveDraft(db: DB, input: DraftInput) {
   }
 
   const ref = await allocateFederationId(db, 'APP', now.getFullYear());
-  const accessToken = crypto.randomBytes(24).toString('base64url');
+  const accessToken = newAccessToken();
 
   const [row] = await db.insert(o.institutionApplications).values({
     ref,
@@ -664,6 +748,31 @@ export async function saveDraft(db: DB, input: DraftInput) {
   }).returning();
 
   return { ref: row.ref, accessToken: row.accessToken, stepReached: row.stepReached, id: row.id };
+}
+
+/**
+ * The answers already given on a draft the applicant is resuming, or null.
+ *
+ * Exported so the wizard page does not have to hold its own query — and, far
+ * more importantly, does not have to hold its own token comparison. It did:
+ * src/pages/learn/apply.astro put `eq(accessToken, k)` straight into a WHERE
+ * clause, which is the string equality this module went to some trouble to get
+ * out of the resume and status paths. One page keeping its own copy is the
+ * whole mechanism defeated, because an applicant only needs one door.
+ *
+ * Null covers every failure — unknown reference, wrong key, and an application
+ * that has already been sent — because the caller's answer to all three is the
+ * same: this link does not open a draft.
+ */
+export async function draftPayload(
+  db: DB, ref: unknown, accessToken: unknown
+): Promise<Record<string, unknown> | null> {
+  const app = await applicationByRefAndToken(db, ref, accessToken);
+  if (!app) return null;
+  // A sent application is no longer editable. Returning its payload would let
+  // the wizard reopen it and quietly overwrite what MMAKF is already reviewing.
+  if (app.status !== 'draft') return null;
+  return (app.payload ?? {}) as Record<string, unknown>;
 }
 
 // ─── Submission ─────────────────────────────────────────────────────────────
@@ -726,11 +835,7 @@ export async function submitApplication(db: DB, input: SubmitInput): Promise<Sub
   // ── 1. The application itself ──
   let app: any;
   if (input.ref && input.accessToken) {
-    const [existing] = await db.select().from(o.institutionApplications)
-      .where(and(
-        eq(o.institutionApplications.ref, input.ref),
-        eq(o.institutionApplications.accessToken, input.accessToken)
-      )).limit(1);
+    const existing = await applicationByRefAndToken(db, input.ref, input.accessToken);
     if (!existing) throw new ApplicationError('not_found', 'No draft matches that link.');
     if (existing.status !== 'draft') {
       throw new ApplicationError('already_submitted', 'That application has already been sent to MMAKF.');
@@ -745,7 +850,7 @@ export async function submitApplication(db: DB, input: SubmitInput): Promise<Sub
     }).where(eq(o.institutionApplications.id, existing.id)).returning();
   } else {
     const ref = await allocateFederationId(db, 'APP', now.getFullYear());
-    const accessToken = crypto.randomBytes(24).toString('base64url');
+    const accessToken = newAccessToken();
     [app] = await db.insert(o.institutionApplications).values({
       ref,
       accessToken,
@@ -1131,9 +1236,13 @@ export async function applicationDetail(db: DB, principal: Principal, applicatio
     if (!ok) throw new ApplicationError('forbidden', 'That application is outside your scope.');
   }
 
+  // Every event, internal ones included — and in EXACTLY the order
+  // applicantStatus() uses, `at` then `id`. The applicant's timeline is a
+  // subset of this one, and a subset taken in a different order is not the same
+  // case seen from two sides, it is two accounts of it.
   const events = await db.select().from(o.applicationEvents)
     .where(eq(o.applicationEvents.applicationId, applicationId))
-    .orderBy(asc(o.applicationEvents.at));
+    .orderBy(asc(o.applicationEvents.at), asc(o.applicationEvents.id));
 
   const tasks = await db.select().from(o.tasks)
     .where(and(eq(o.tasks.subjectKind, 'institution_application'), eq(o.tasks.subjectId, applicationId)))
@@ -1153,16 +1262,22 @@ export async function applicationDetail(db: DB, principal: Principal, applicatio
  * Requires the token, returns only entries marked visible, and never exposes
  * routing, scoring, internal notes or the owner's identity. What a school is
  * shown is what MMAKF has chosen to tell it.
+ *
+ * THE FILTER IS THE `WHERE` CLAUSE, not a `.filter()` on the way out. An
+ * internal note that reaches this process and is discarded in JavaScript has
+ * already been in a response body's worth of memory on a page that renders to
+ * an unauthenticated reader; the row never leaves Postgres instead.
+ *
+ * The ORDER matters as much as the set. Several events are written inside one
+ * submission and share `at` to the millisecond, so `at` alone leaves ties for
+ * the database to break however it likes — and it need not break them the same
+ * way twice, or the same way here as on the administrator's screen. `id`
+ * settles them in the order they were actually recorded. See applicationDetail,
+ * which orders identically and for the same reason: two views of one case that
+ * disagree about sequence are two cases.
  */
 export async function applicantStatus(db: DB, ref: string, accessToken: string) {
-  if (!ref || !accessToken) throw new ApplicationError('not_found', 'No application matches that link.');
-
-  const [app] = await db.select().from(o.institutionApplications)
-    .where(and(
-      eq(o.institutionApplications.ref, ref),
-      eq(o.institutionApplications.accessToken, accessToken)
-    )).limit(1);
-
+  const app = await applicationByRefAndToken(db, ref, accessToken);
   if (!app) throw new ApplicationError('not_found', 'No application matches that link.');
 
   const events = await db.select({
@@ -1174,7 +1289,7 @@ export async function applicantStatus(db: DB, ref: string, accessToken: string) 
       eq(o.applicationEvents.applicationId, app.id),
       eq(o.applicationEvents.visibleToApplicant, true)
     ))
-    .orderBy(asc(o.applicationEvents.at));
+    .orderBy(asc(o.applicationEvents.at), asc(o.applicationEvents.id));
 
   return {
     ref: app.ref,
@@ -1182,6 +1297,15 @@ export async function applicantStatus(db: DB, ref: string, accessToken: string) 
     institutionName: app.institutionName,
     submittedAt: app.submittedAt,
     stepReached: app.stepReached,
+    /**
+     * When the federation last told this applicant something.
+     *
+     * The last VISIBLE entry, not `updatedAt`. A school that is shown "last
+     * updated today" and then reads a timeline whose newest line is three weeks
+     * old has been told the federation did something it has not been told
+     * about, which is worse than being told nothing.
+     */
+    lastUpdateAt: events.length ? events[events.length - 1].at : null,
     // NULL unless the federation has actually undertaken a response time. The
     // page renders nothing rather than a promise nobody made.
     respondBy: app.slaDueAt,

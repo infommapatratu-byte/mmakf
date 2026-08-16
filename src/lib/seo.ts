@@ -47,7 +47,7 @@ export const PRIVATE_PREFIXES = ['/admin', '/api', '/my', '/portal'] as const;
  * Directories under src/pages whose contents are public. Declaring these is
  * what makes an undeclared directory an error rather than a silent publication.
  */
-export const PUBLIC_SECTIONS = ['/athlete', '/people', '/learn', '/training', '/kata'] as const;
+export const PUBLIC_SECTIONS = ['/athlete', '/people', '/learn', '/training', '/kata', '/start'] as const;
 
 /**
  * Public URLs that exist and are deliberately NOT advertised, with the reason.

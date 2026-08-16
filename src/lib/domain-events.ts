@@ -367,6 +367,22 @@ export const EVENT_TYPES = {
     floor: 'official', publicFields: [],
     means: 'An institution applied for an MMAKF training programme.',
   },
+  /**
+   * The individual and parent path — /start/individual.
+   *
+   * Its own type rather than a reuse of INSTITUTION_APPLICATION_SUBMITTED,
+   * because the two are not the same fact and a consumer counting institutional
+   * applications must not be handed enquiries from parents.
+   *
+   * The floor matches its institutional sibling. The PAYLOAD is what keeps this
+   * safe rather than the floor: producers put identifiers and a `involvesMinor`
+   * flag on the feed and never the participant's own details, so an event about
+   * a seven-year-old carries no fact about the seven-year-old.
+   */
+  TRAINING_ENQUIRY_SUBMITTED: {
+    floor: 'official', publicFields: [],
+    means: 'An individual, or a parent on a child’s behalf, asked MMAKF for training.',
+  },
   INSTITUTION_APPLICATION_ROUTED: {
     floor: 'official', publicFields: [],
     means: 'An institutional application was assigned to a department or administrator.',

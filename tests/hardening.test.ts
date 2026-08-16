@@ -4,7 +4,7 @@
 // The test is what stops it coming back.
 
 import { describe, it, expect } from 'vitest';
-import { isSameOrigin, isJsonContentType } from '../src/lib/origin';
+import { isSameOrigin, isTrustedHost, isJsonContentType } from '../src/lib/origin';
 import { inScope, scopeList, scopeProblem, scopeLabel, type UnitScope } from '../src/lib/unit-scope';
 import { PRIVATE_KEYS, PUBLIC_KEYS, KEYS } from '../src/data/seed';
 import { recordId, reference, accessToken } from '../src/lib/refs';
@@ -176,5 +176,62 @@ describe('record identifiers no longer collide', () => {
     const tokens = Array.from({ length: 200 }, () => accessToken());
     expect(new Set(tokens).size).toBe(200);
     expect(tokens[0].length).toBeGreaterThanOrEqual(30);
+  });
+});
+
+// ── The apex domain, and the day every form on it was refused ───────────────
+describe('a POST that crossed the apex-to-www redirect', () => {
+  const h = (o: Record<string, string>) => new Headers(o);
+
+  it('accepts same-site between two hosts the federation serves', () => {
+    // THE LIVE BUG. Vercel 308-redirects mmakf.in to www.mmakf.in; a POST
+    // replayed across that redirect arrives as `same-site`, not `same-origin`,
+    // and every form on the apex was refused. A school lost a completed
+    // application on submit.
+    expect(isSameOrigin(
+      h({ 'sec-fetch-site': 'same-site', origin: 'https://mmakf.in' }),
+      'www.mmakf.in',
+    )).toBe(true);
+  });
+
+  it('REFUSES same-site from a subdomain the federation does not serve', () => {
+    // The reason the fix is an allowlist rather than accepting same-site.
+    // Lax cookies are site-scoped, so a subdomain an attacker takes over is
+    // same-site and would otherwise be able to drive authenticated writes.
+    // `same-site` never says WHICH subdomain; the allowlist does.
+    for (const evil of ['https://blog.mmakf.in', 'https://x.mmakf.in', 'https://staging.mmakf.in']) {
+      expect(isSameOrigin(h({ 'sec-fetch-site': 'same-site', origin: evil }), 'www.mmakf.in')).toBe(false);
+    }
+  });
+
+  it('refuses same-site with no Origin at all', () => {
+    expect(isSameOrigin(h({ 'sec-fetch-site': 'same-site' }), 'www.mmakf.in')).toBe(false);
+  });
+
+  it('still refuses cross-site outright', () => {
+    expect(isSameOrigin(
+      h({ 'sec-fetch-site': 'cross-site', origin: 'https://mmakf.in' }),
+      'www.mmakf.in',
+    )).toBe(false);
+  });
+
+  it('still accepts plain same-origin and direct navigation', () => {
+    expect(isSameOrigin(h({ 'sec-fetch-site': 'same-origin' }), 'www.mmakf.in')).toBe(true);
+    expect(isSameOrigin(h({ 'sec-fetch-site': 'none' }), 'www.mmakf.in')).toBe(true);
+  });
+
+  it('falls back to Origin for a browser that sends no Sec-Fetch-Site', () => {
+    expect(isSameOrigin(h({ origin: 'https://mmakf.in' }), 'www.mmakf.in')).toBe(true);
+    expect(isSameOrigin(h({ origin: 'https://evil.example' }), 'www.mmakf.in')).toBe(false);
+    expect(isSameOrigin(h({}), 'www.mmakf.in')).toBe(false);
+  });
+
+  it('every host the surface router serves is trusted', () => {
+    // Otherwise learn.mmakf.in could serve a form that admin.mmakf.in refuses.
+    for (const host of ['mmakf.in', 'www.mmakf.in', 'learn.mmakf.in', 'admin.mmakf.in']) {
+      expect(isTrustedHost(host), `${host} is served and is not trusted`).toBe(true);
+    }
+    expect(isTrustedHost('mmakf.in.evil.example')).toBe(false);
+    expect(isTrustedHost('notmmakf.in')).toBe(false);
   });
 });

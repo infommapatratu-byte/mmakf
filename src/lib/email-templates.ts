@@ -117,6 +117,31 @@ MMAKF is not able to take forward the application for {{institutionName}}.
 If circumstances change, you are welcome to apply again.${SIGNATURE}`,
   },
 
+  // ── The individual and parent path ──
+  //
+  // Addressed to whoever filled the form in. Where that is a parent, it is the
+  // PARENT who is written to and the child is not named — the message would
+  // otherwise put a child's name in a mailbox the federation cannot vouch for,
+  // and nothing here needs the name to be useful.
+  //
+  // It carries no status link because an individual enquiry has no status page
+  // to link to. A URL to a page that does not exist is worse than no URL.
+  training_enquiry_received: {
+    key: 'training_enquiry_received', topic: 'training',
+    requires: ['contactName', 'ref', 'summary'],
+    subject: 'MMAKF has your training enquiry — {{ref}}',
+    body: `Dear {{contactName}},
+
+MMAKF has received your enquiry about training.
+
+Your reference is {{ref}}, and this is what the federation has understood:
+
+{{summary}}
+
+If any of that is wrong, reply to this message and say so. The training office
+will be in touch about what is available near you and what it would cost.${SIGNATURE}`,
+  },
+
   quote_ready: {
     key: 'quote_ready', topic: 'institution',
     requires: ['contactName', 'institutionName', 'quoteRef', 'validUntil', 'portalUrl'],

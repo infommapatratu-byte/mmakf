@@ -1,4 +1,39 @@
 ---
+// /contact — how to reach the federation.
+//
+// THE REAL CONTACT DETAILS STAY. The headquarters address, the office hours,
+// admin@mmakf.in and the Grandmaster's address are the federation's own and are
+// the reason this page exists.
+//
+// WHAT WENT, AND WHY
+//
+// 1. THE HERO PILLS said "Walk-ins welcome" and "First class free". The first
+//    is the dojo-first voice the federation asked to have removed — MMAKF is a
+//    national federation and its headquarters is not a shopfront. The second is
+//    worse: it is a FEE CLAIM, and no fee rule exists anywhere in this system.
+//    A free first class is an offer nobody at the federation has made.
+//
+// 2. THE "PHONE / WHATSAPP" CARD held an email address. `fed.contact.phone` is
+//    deliberately EMPTY — the number published across this site was Sensei's
+//    personal mobile and the federation had it removed (src/data/seed.ts) — so
+//    the card was a heading for a channel that does not exist, with another
+//    channel's value under it. The office hours it carried are real, and they
+//    now sit under a heading that describes them.
+//
+// 3. THE "UPI / PAYMENTS" CARD rendered `fed.upi`, which is an empty string. It
+//    printed a blank gold line under a promise of "Fees, grading and equipment
+//    orders", and the federation's own FAQ says in as many words that no
+//    payment handle is published on this site.
+//
+// EVERY CARD IS NOW CONDITIONAL ON ITS VALUE. Production runs with the store
+// unconfigured and reads the seed, and a field that is blank there must produce
+// no card rather than an empty one. That is why the list is built in the
+// frontmatter and filtered, instead of five cards written out in the markup.
+//
+// The intake that used to sit at the foot of this page is gone with the rest of
+// the enquiry form; EnrollCTA now sends people to /learn/request, which records
+// what they send against a reference.
+
 import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import EnrollCTA from '@/components/EnrollCTA.astro';
@@ -7,74 +42,94 @@ import { get } from '@/lib/storage';
 export const prerender = false;
 
 const fed = await get('federation');
-const programs = await get<any[]>('programs');
 
-const mapQuery = encodeURIComponent(fed.contact.address || 'Patratu, Ramgarh, Jharkhand');
+const address = fed?.contact?.address ?? '';
+const hours = fed?.contact?.hours ?? '';
+const email = fed?.contact?.email ?? '';
+const emailSecondary = fed?.contact?.emailSecondary ?? '';
+
+// The map needs a place to point at. Without an address there is nothing to
+// show, and an iframe centred on a guess is worse than no map.
+const mapQuery = address ? encodeURIComponent(address) : '';
+
+interface ContactCard {
+  eyebrow: string;
+  /** Rendered as a mailto link when set, otherwise as plain text. */
+  mailto?: string;
+  value: string;
+  body: string;
+}
+
+const cards: ContactCard[] = [
+  {
+    eyebrow: 'Address',
+    value: `${fed?.shortName ?? 'MMAKF'} Headquarters`,
+    body: address,
+  },
+  {
+    eyebrow: 'Office hours',
+    value: hours,
+    body: 'When the headquarters is staffed. Correspondence is by email.',
+  },
+  {
+    eyebrow: 'Email — Federation',
+    mailto: email,
+    value: email,
+    body: 'Registration, affiliation, school programmes and federation queries.',
+  },
+  {
+    eyebrow: 'Email — Grandmaster',
+    mailto: emailSecondary,
+    value: emailSecondary,
+    body: 'Shihan Pramod Kumar Pathak — direct correspondence.',
+  },
+].filter((c) => c.value);
 ---
 
 <Base
   title="Contact — MMAKF"
-  description="Visit or contact MMAKF headquarters at Patratu, Jharkhand — address, phone, email, office hours and directions."
+  description="Contact MMAKF headquarters at Patratu, Jharkhand — address, email, office hours and directions."
 >
   <PageHero
-    eyebrow="Visit"
-    title={`Find the <em>dojo</em>.`}
-    lead={`${fed.contact.address}. ${fed.contact.hours}.`}
-    pills={['Walk-ins welcome', 'First class free']}
+    eyebrow="Contact"
+    title={`Reach the <em>federation</em>.`}
+    lead={[address, hours].filter(Boolean).join('. ')}
   />
 
   {/* ═══════ CONTACT CARDS + MAP ═══════ */}
   <section>
     <div class="container">
-      <div class="contact-layout">
+      <div class="contact-layout" class:list={[{ 'no-map': !mapQuery }]}>
         <div class="contact-cards">
-          <div class="card fade">
-            <div class="card-eyebrow">Address</div>
-            <div class="card-title" style="font-size:1.02rem">{fed.shortName} Headquarters</div>
-            <div class="card-body">{fed.contact.address}</div>
-          </div>
-          <div class="card fade">
-            <div class="card-eyebrow">Phone / WhatsApp</div>
-            <div class="card-title" style="font-size:1.02rem">
-              <a href="mailto:admin@mmakf.in" class="text-gold">admin@mmakf.in</a>
+          {cards.map((c) => (
+            <div class="card fade">
+              <div class="card-eyebrow">{c.eyebrow}</div>
+              <div class="card-title" style="font-size:1.02rem">
+                {c.mailto
+                  ? <a href={`mailto:${c.mailto}`} class="text-gold">{c.value}</a>
+                  : c.value}
+              </div>
+              {c.body && <div class="card-body">{c.body}</div>}
             </div>
-            <div class="card-body">{fed.contact.hours}</div>
-          </div>
-          <div class="card fade">
-            <div class="card-eyebrow">Email — Federation</div>
-            <div class="card-title" style="font-size:1.02rem">
-              <a href={`mailto:${fed.contact.email}`} class="text-gold">{fed.contact.email}</a>
-            </div>
-            <div class="card-body">Enrolment, affiliation, school programs and federation queries.</div>
-          </div>
-          <div class="card fade">
-            <div class="card-eyebrow">Email — Grandmaster</div>
-            <div class="card-title" style="font-size:1.02rem">
-              <a href={`mailto:${fed.contact.emailSecondary}`} class="text-gold">{fed.contact.emailSecondary}</a>
-            </div>
-            <div class="card-body">Shihan Pramod Kumar Pathak — direct correspondence.</div>
-          </div>
-          <div class="card fade">
-            <div class="card-eyebrow">UPI / Payments</div>
-            <div class="card-title" style="font-size:1.02rem"><span class="text-gold">{fed.upi}</span></div>
-            <div class="card-body">Fees, grading and equipment orders — any UPI app.</div>
-          </div>
+          ))}
         </div>
 
-        <div class="map-panel fade">
-          <iframe
-            title="MMAKF Headquarters — map"
-            src={`https://www.google.com/maps?q=${mapQuery}&output=embed`}
-            loading="lazy"
-            referrerpolicy="no-referrer-when-downgrade"
-            allowfullscreen
-          ></iframe>
-        </div>
+        {mapQuery && (
+          <div class="map-panel fade">
+            <iframe
+              title="MMAKF Headquarters — map"
+              src={`https://www.google.com/maps?q=${mapQuery}&output=embed`}
+              loading="lazy"
+              referrerpolicy="no-referrer-when-downgrade"
+              allowfullscreen
+            ></iframe>
+          </div>
+        )}
       </div>
     </div>
   </section>
 
-  <EnrollCTA programs={programs} />
+  <EnrollCTA />
 </Base>
 
 <style>
@@ -85,6 +140,9 @@ const mapQuery = encodeURIComponent(fed.contact.address || 'Patratu, Ramgarh, Jh
     align-items: start;
   }
   @media (max-width: 900px) { .contact-layout { grid-template-columns: 1fr; } }
+  /* No address in the record means no map, and a two-column grid with one
+     column filled would leave half the page blank. */
+  .contact-layout.no-map { grid-template-columns: 1fr; max-width: 42rem; }
   .contact-cards {
     display: grid;
     grid-template-columns: 1fr;

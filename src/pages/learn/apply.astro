@@ -34,12 +34,10 @@
 
 import Base from '@/layouts/Base.astro';
 import { isConfigured, db } from '@/db';
-import { WIZARD_STEPS, TOTAL_STEPS, validateSubmission, type WizardStep } from '@/db/applications';
+import { WIZARD_STEPS, TOTAL_STEPS, validateSubmission, draftPayload, type WizardStep } from '@/db/applications';
 import { submitApplicationRequest, statusFor } from '@/pages/api/learn/application';
 import { AUDIENCES } from '@/data/audiences';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
-import * as o from '@/db/operations.schema';
-import { and, eq } from 'drizzle-orm';
 
 export const prerender = false;
 
@@ -55,18 +53,17 @@ let saved: Record<string, unknown> = {};
 let problems: Array<{ field: string; message: string; step: number }> = [];
 let banner: { kind: 'error' | 'notice'; text: string } | null = null;
 
-/** Load the draft this applicant is resuming, if any. */
+/**
+ * Load the draft this applicant is resuming, if any.
+ *
+ * The query, and in particular the comparison of the applicant's key, belongs
+ * to src/db/applications.ts. This page had its own — `eq(accessToken, k)` in a
+ * WHERE clause — and a string equality is the one comparison that key must
+ * never get, whichever file writes it.
+ */
 async function loadDraft(r: string, k: string): Promise<Record<string, unknown> | null> {
   if (!isConfigured()) return null;
-  const rows = await db().select().from(o.institutionApplications)
-    .where(and(
-      eq(o.institutionApplications.ref, r),
-      eq(o.institutionApplications.accessToken, k)
-    )).limit(1);
-  const row = rows[0];
-  if (!row) return null;
-  if (row.status !== 'draft') return null;
-  return (row.payload ?? {}) as Record<string, unknown>;
+  return draftPayload(db(), r, k);
 }
 
 if (Astro.request.method === 'POST') {
@@ -152,11 +149,31 @@ if (Astro.request.method === 'POST') {
   }
 }
 
-// An audience carried in from /learn/schools etc.
+// An audience carried in from /learn/schools, /start, etc.
+//
+// TWO VOCABULARIES ARRIVE HERE. The audience pages send their own `kind` from
+// src/data/audiences.ts. /start sends the institution type step one itself
+// offers — and step one offers three that no audience page covers: `ngo`,
+// `club` and `other`. Seeding only from AUDIENCES meant a visitor who had just
+// answered "NGO" on /start reached step one with the dropdown empty and was
+// asked the same question a second time, which is exactly the kind of seam the
+// federation objected to.
+//
+// Neither vocabulary is trusted. The value is used only if the step-one field
+// actually lists it, so an `audience` parameter someone types by hand cannot
+// put an institution type into the draft that the form could never produce.
 const audienceParam = url.searchParams.get('audience');
 if (audienceParam && !saved.institutionType) {
   const known = AUDIENCES.find((a) => a.kind === audienceParam);
-  if (known) saved.institutionType = known.kind;
+  if (known) {
+    saved.institutionType = known.kind;
+  } else {
+    const typeField = WIZARD_STEPS.find((s) => s.step === 1)
+      ?.fields.find((f) => f.name === 'institutionType');
+    if ((typeField?.options ?? []).some((o) => o.value === audienceParam)) {
+      saved.institutionType = audienceParam;
+    }
+  }
 }
 
 const current: WizardStep = WIZARD_STEPS.find((s) => s.step === step) ?? WIZARD_STEPS[0];

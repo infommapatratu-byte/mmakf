@@ -1,20 +1,52 @@
 ---
 // The applicant's status page.
 //
-// Reached with the reference AND the private token issued when the application
-// was sent. Not reference plus contact email: references are sequence-allocated
-// and a school's contact address is usually printed on its own website, so both
-// halves of that pair are guessable and what they unlock is the school's own
-// submission.
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT OPENS IT
+// ─────────────────────────────────────────────────────────────────────────────
 //
-// Shows only entries the federation marked visible. No routing, no lead score,
-// no internal notes, no owner. What a school reads here is what MMAKF has
-// chosen to tell it — which is why applicantStatus() in src/db/applications.ts
-// filters in SQL rather than this page filtering after the fact.
+// The reference AND the private key issued when the application was started.
+// Not reference plus contact email: references are sequence-allocated, so the
+// next one along is always guessable, and a school's contact address is usually
+// printed on its own website — both halves of that pair are public and what
+// they would unlock is the school's own submission.
+//
+// Changing the ref in the address bar therefore reaches nothing. The key is
+// bound to one application, and applicantStatus() in src/db/applications.ts
+// compares it in constant time against the row the reference selected. A wrong
+// key and an unknown reference are the same answer here, deliberately: telling
+// them apart would make this page an oracle for which references are real.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IT SHOWS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The stage the case has reached, and every entry the federation marked visible
+// — no routing, no lead score, no internal notes, no owner. The filter is a SQL
+// predicate in applicantStatus(), not a pass over the rows here, so an internal
+// note never reaches this process at all.
+//
+// The timeline is rendered by CaseTimeline, which also renders the
+// administrator's view of the same case at /admin/applications/{id}. One
+// renderer, two row sets, and the row sets differ only by the stored
+// visible_to_applicant flag — so the two halves of a case cannot describe it
+// differently.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// NO DATE IS PROMISED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// MMAKF has published no service standard for institutional applications, so
+// slaDueAt is null on every row and the "respond by" line does not render. The
+// page says what has happened. It never says when the next thing will, and it
+// never marks anything late — there is no published deadline for anything here
+// to be late against.
 
 import Base from '@/layouts/Base.astro';
+import Status from '@/components/Status.astro';
+import CaseTimeline from '@/components/CaseTimeline.astro';
 import { isConfigured, db } from '@/db';
-import { applicantStatus, isApplicationError } from '@/db/applications';
+import { applicantStatus, TOTAL_STEPS } from '@/db/applications';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 
 export const prerender = false;
@@ -26,6 +58,15 @@ const ref = String(Astro.params.ref ?? '');
 const token = Astro.url.searchParams.get('k') ?? '';
 const justSent = Astro.url.searchParams.get('sent') === '1';
 
+// The address of this page CONTAINS the key. Two consequences, both handled
+// here rather than trusted to a default:
+//
+//   · no-store, because a shared or cached copy of this page is a copy of one
+//     school's contact details and requirements;
+//   · no-referrer, because every link a reader follows off this page would
+//     otherwise carry the key to wherever they went, in the Referer header.
+Astro.response.headers.set('Cache-Control', 'no-store, private');
+
 let view: any = null;
 let failure: string | null = null;
 
@@ -35,28 +76,19 @@ if (!isConfigured()) {
   try {
     view = await applicantStatus(db(), ref, token);
   } catch (err) {
-    // Deliberately the same message for a wrong token and a reference that does
-    // not exist. Distinguishing them would turn this page into an oracle for
-    // which references are real.
+    // Deliberately the same message for a wrong key and a reference that does
+    // not exist. See the note at the top.
     failure = 'No application matches that link. Check the address, including the part after ?k=.';
   }
 }
 
-const STATUS_WORDING: Record<string, string> = {
-  submitted: 'Received',
-  acknowledged: 'With the training office',
-  under_review: 'Under review',
-  information_requested: 'Waiting for information from you',
-  program_design: 'Programme being designed',
-  quoted: 'Quotation prepared',
-  proposed: 'Proposal sent',
-  approved: 'Approved',
-  contracted: 'Agreement in place',
-  declined: 'Not taken forward',
-  withdrawn: 'Withdrawn',
-  expired: 'Lapsed',
-  draft: 'Draft — not yet sent',
-};
+// A draft is not an application. It has been started and not sent, and the only
+// useful thing this page can offer is the way back into the form.
+const isDraft = !!view && view.status === 'draft';
+const resumeStep = Math.min(Math.max(Number(view?.stepReached) || 1, 1), TOTAL_STEPS);
+const resumeHref = view
+  ? `${h('/learn/apply')}?ref=${encodeURIComponent(view.ref)}&k=${encodeURIComponent(token)}&step=${resumeStep}`
+  : h('/learn/apply');
 
 function when(v: unknown): string {
   if (!v) return '';
@@ -70,8 +102,10 @@ function when(v: unknown): string {
   title={`Application ${ref} — MMAKF`}
   description="The status of an MMAKF training application."
 >
-  {/* A private page. Never indexed, never cached by an intermediary. */}
+  {/* A private page. Never indexed, never cached by an intermediary, and never
+      a source of a Referer header carrying the key in the address. */}
   <meta name="robots" content="noindex, nofollow" slot="head" />
+  <meta name="referrer" content="no-referrer" slot="head" />
 
   <div class="st">
     <div class="container st-inner">
@@ -100,19 +134,41 @@ function when(v: unknown): string {
           <p class="eyebrow">MMAKF training application</p>
           <h1 class="display-2">{view.institutionName}</h1>
 
+          {isDraft && (
+            <div class="st-draft" role="status">
+              <strong>This application has not been sent yet.</strong>
+              You reached step {resumeStep} of {TOTAL_STEPS}. Nothing has gone to
+              MMAKF, and nothing will until you finish the form.
+              <p class="st-draft-act">
+                <a class="btn btn-primary" href={resumeHref}>Continue the application</a>
+              </p>
+            </div>
+          )}
+
           <dl class="st-facts">
             <div>
               <dt>Reference</dt>
               <dd><code>{view.ref}</code></dd>
             </div>
             <div>
-              <dt>Status</dt>
-              <dd><span class="pill"><span class="pill-dot"></span>{STATUS_WORDING[view.status] ?? view.status}</span></dd>
+              <dt>Stage</dt>
+              {/* Drawn by Status and by nothing else, so `quoted` reads the
+                  same word here as it does on the federation's own screens.
+                  The dictionary's explanation is written for an administrator,
+                  so it is not attached here — the timeline below carries the
+                  sentence written for the applicant. */}
+              <dd><Status value={view.status} domain="application" withMeaning={false} /></dd>
             </div>
             {view.submittedAt && (
               <div>
                 <dt>Sent</dt>
                 <dd>{when(view.submittedAt)}</dd>
+              </div>
+            )}
+            {view.lastUpdateAt && (
+              <div>
+                <dt>Last update from MMAKF</dt>
+                <dd>{when(view.lastUpdateAt)}</dd>
               </div>
             )}
             {/* Rendered ONLY when the federation has actually undertaken a
@@ -128,20 +184,24 @@ function when(v: unknown): string {
 
           <section class="st-timeline">
             <h2 class="st-h2">Progress</h2>
-            {view.timeline.length === 0 ? (
-              <p class="st-lede">Nothing has been recorded against this application yet.</p>
-            ) : (
-              <ol class="tl">
-                {view.timeline.map((entry: any) => (
-                  <li>
-                    <span class="tl-dot" aria-hidden="true"></span>
-                    <div>
-                      <p class="tl-summary">{entry.summary}</p>
-                      <p class="tl-when">{when(entry.at)}</p>
-                    </div>
-                  </li>
-                ))}
-              </ol>
+            <CaseTimeline
+              entries={view.timeline}
+              domain="application"
+              label={`Progress of application ${view.ref}`}
+              empty={isDraft
+                ? 'Nothing has been recorded yet. Your answers are saved, and this page will show each step once the application is sent.'
+                : 'Nothing has been recorded against this application yet.'}
+            />
+            {!view.respondBy && !isDraft && (
+              /* Said outright rather than left as an absence. A school that
+                 sees no date assumes one exists and that this page is simply
+                 not showing it, and then waits against a deadline nobody set.
+                 MMAKF has published no response time, and that is the fact. */
+              <p class="st-note">
+                MMAKF has not published a response time for institutional
+                applications, so this page shows no target date. Each step
+                appears above once it has actually happened.
+              </p>
             )}
           </section>
 
@@ -162,49 +222,48 @@ function when(v: unknown): string {
 <style>
   .st { padding: 96px 0 80px; }
   .st-inner { max-width: 44rem; }
-  .st-lede { color: var(--muted); line-height: 1.7; max-width: 58ch; margin: 14px 0; }
-  .st-h2 { font-family: var(--font-display); font-size: 1.15rem; margin: 0 0 14px; }
+  .st-lede { color: var(--muted); line-height: var(--leading-relaxed); max-width: 58ch; margin: 14px 0; }
+  .st-h2 { font-family: var(--font-display); font-size: var(--text-lg); margin: 0 0 14px; }
   code {
     font-family: var(--font-accent, monospace);
-    background: var(--bg-2); padding: 2px 7px; border-radius: 4px; font-size: .95em;
+    background: var(--bg-2); padding: 2px 7px; border-radius: var(--radius-xs); font-size: .95em;
   }
 
-  .st-sent {
-    padding: 18px 20px; margin-bottom: 28px;
-    border-left: 3px solid var(--gold); background: var(--card); line-height: 1.6;
+  .st-sent, .st-draft {
+    padding: var(--space-5); margin-bottom: var(--space-6);
+    border-left: 3px solid var(--gold); background: var(--card);
+    line-height: var(--leading-normal);
   }
-  .st-sent strong { display: block; margin-bottom: 4px; }
+  .st-sent strong, .st-draft strong { display: block; margin-bottom: var(--space-1); }
+  .st-draft { margin-top: var(--space-6); }
+  .st-draft-act { margin: var(--space-4) 0 0; }
 
-  .st-facts { margin: 26px 0 0; display: grid; gap: 0; }
+  .st-facts { margin: var(--space-6) 0 0; display: grid; gap: 0; }
   .st-facts > div {
     display: grid; grid-template-columns: minmax(0, 18rem) minmax(0, 1fr);
-    gap: 4px 20px; padding: 13px 0; border-bottom: 1px solid var(--border);
+    gap: 4px var(--space-5); padding: 13px 0; border-bottom: 1px solid var(--border);
+    align-items: center;
   }
   .st-facts dt { color: var(--muted); font-size: .9rem; }
   .st-facts dd { margin: 0; }
 
-  .st-timeline { margin-top: 48px; }
-  .tl { list-style: none; margin: 0; padding: 0; }
-  .tl li {
-    display: grid; grid-template-columns: 22px 1fr; gap: 0 14px;
-    padding: 0 0 22px; position: relative;
-  }
-  .tl li:not(:last-child)::before {
-    content: ''; position: absolute; left: 5px; top: 14px; bottom: 0;
-    width: 1px; background: var(--border);
-  }
-  .tl-dot {
-    width: 11px; height: 11px; border-radius: 50%;
-    background: var(--gold); margin-top: 5px; position: relative; z-index: 1;
-  }
-  .tl-summary { margin: 0; line-height: 1.6; }
-  .tl-when { margin: 3px 0 0; font-size: .84rem; color: var(--muted); }
+  .st-timeline { margin-top: var(--space-12); }
 
-  .st-help { margin-top: 48px; padding-top: 26px; border-top: 1px solid var(--border); }
+  .st-note {
+    margin: var(--space-6) 0 0;
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 60ch;
+    font-size: var(--text-sm);
+  }
+
+  .st-help { margin-top: var(--space-12); padding-top: var(--space-6); border-top: 1px solid var(--border); }
 
   @media (max-width: 640px) {
     .st { padding: 78px 0 60px; }
-    .st-facts > div { grid-template-columns: 1fr; gap: 2px; }
+    .st-facts > div { grid-template-columns: 1fr; gap: 2px; align-items: start; }
     .st-facts dt { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
   }
 </style>

@@ -1,29 +1,102 @@
 ---
-// The federation's enquiry CTA. Posts to /api/enroll.
+// The federation's call to action, on eleven public pages.
 //
-// TWO CORRECTIONS LIVE IN THIS FILE, BOTH FROM THE FEDERATION.
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THIS USED TO BE, AND WHY IT HAD TO GO
+// ─────────────────────────────────────────────────────────────────────────────
 //
-// The first was a crash. A personal mobile number stood here as a DEFAULT
-// PARAMETER — the worst possible place for one, because a default survives
-// every attempt to remove the value from the data: nothing passes the prop, so
-// nothing can override it. Removing the destructured `phone` without removing
-// its three remaining uses took the HOMEPAGE DOWN with "phone is not defined".
-// The lesson is in the change: a contact detail belongs in the federation
-// record, read through `fed.contact`, never as a literal in a component.
+// Three fields — name, email, a programme select — posting to /api/enroll,
+// which appended a row to a Redis list and did nothing else. No lead, no owner,
+// no task, no timeline, nothing in /admin/leads. A visitor who filled it in had
+// contacted nobody, and the federation named this as the thing to fix.
 //
-// The second was positioning. This block said "Step onto the mat", "Your first
-// class is on us", "Walk in", and "Book Free Trial" — the language of a single
-// dojo selling monthly classes. MMAKF is a national federation, and the
-// federation named these exact phrases as the thing to correct. The enquiry
-// stays, because an individual wanting to train is a real and welcome visitor;
-// it is now one pathway among several rather than the site's only door.
+// It was also, measurably, BROKEN. The endpoint required `phone` and this form
+// never had a phone field, so every JavaScript submission was answered 400 and
+// the visitor saw "Could not submit". The <noscript> block underneath promised
+// "This form works without JavaScript", and it did not: a native form POST is
+// application/x-www-form-urlencoded and the handler only ever called
+// JSON.parse, so that path was answered 400 as well. Both arms failed. This
+// component has therefore never once delivered an enquiry to anybody.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THERE IS NO FORM HERE NOW, RATHER THAN A WORKING ONE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A second form would be a second intake. The engine already asks these
+// questions properly: /learn/request establishes who the training is for, and
+// /learn/apply walks WIZARD_STEPS (src/db/applications.ts) and validates each
+// step server-side before submitApplication() derives the institution, the
+// lead, the training request, the routing and the score from one submission.
+// Three fields collected here could not feed any of that, so they would either
+// be dropped again or be re-keyed by hand — and re-keying is the failure the
+// engine was built to end.
+//
+// So this band does the one thing a call to action on a marketing page should:
+// it sends somebody to the engine, and it shows them the shape of the journey
+// first so that clicking through is a decision rather than a leap.
+//
+// EVERY SENTENCE BELOW IS CHECKABLE. The three steps describe what
+// /learn/request and /learn/apply actually do. No response time is stated,
+// because the federation has published none. No fee, band or figure appears,
+// because no fee rule exists — every quotation path ends at a request.
+//
+// NO JAVASCRIPT. There is no script block and no form, so this works with
+// scripting disabled by construction rather than by promise.
+
+import { get } from '@/lib/storage';
 
 interface Props {
-  programs: any[];
-  /** The federation's own contact address, from the record. Never a person's. */
+  /**
+   * Accepted and deliberately IGNORED.
+   *
+   * It fed the programme select on the form described above, and eleven pages
+   * still pass it. What training somebody wants is now asked inside the engine,
+   * where the answer is validated and stored against a reference; a select here
+   * would be an unvalidated second copy of that question whose value goes
+   * nowhere. Stripping the prop from the eleven call sites is a mechanical
+   * follow-up — keeping it declared means this file, which a reader opens
+   * first, is where the reason lives.
+   */
+  programs?: unknown;
+  /**
+   * The federation's own contact address. Read from the federation record by
+   * default, never written as a literal: the last contact detail hard-coded
+   * into this file was a personal mobile number, and a default parameter is the
+   * one place a value cannot be removed from the data.
+   */
   email?: string;
 }
-const { programs, email = 'admin@mmakf.in' } = Astro.props;
+
+const { email } = Astro.props as Props;
+
+const fed = await get('federation');
+const contactEmail = email ?? fed?.contact?.email;
+
+// The journey as it is actually implemented, not as a brochure would describe
+// it. Step three is the property that makes this worth starting: the applicant
+// keeps a reference and a link, so the request is inspectable by the person who
+// sent it rather than disappearing into an inbox.
+const JOURNEY = [
+  {
+    heading: 'Say who the training is for',
+    body:
+      'An individual, a school, a university, a company, a government body or a ' +
+      'community organisation. The federation asks different things of each.',
+  },
+  {
+    heading: 'Answer what is needed to price it',
+    body:
+      'The same questions the training office would ask — roughly how many ' +
+      'people, where you are, and what you want run. It saves as you go, so you ' +
+      'can stop and come back to it.',
+  },
+  {
+    heading: 'Keep a reference and a status link',
+    body:
+      'Your request reaches the training office against a reference, and you ' +
+      'get a link that shows where it has actually got to.',
+  },
+];
 ---
 
 <section id="enroll" class="cta-section">
@@ -31,41 +104,51 @@ const { programs, email = 'admin@mmakf.in' } = Astro.props;
     <div class="cta-box fade">
       <div class="eyebrow center">Train with MMAKF</div>
       <h2 class="display-2" style="margin-top:16px">Begin your <em class="r">Karate-Do</em>.</h2>
-      <p class="lead" style="margin:18px auto 32px">
-        From an individual student to a school training hundreds, MMAKF delivers
-        structured Shotokan through a national network. Tell the federation what you
-        need and the right unit will answer.
+      <p class="lead cta-lead">
+        From one student to a school training hundreds, MMAKF delivers structured
+        Shotokan through a national network. Tell the federation what you need and
+        it goes to the unit that handles it.
       </p>
-      <form class="cta-form" data-enroll-form method="post" action="/api/enroll">
-        <label class="sr-only" for="enroll-name">Full name</label>
-        <input class="input" id="enroll-name" name="name" placeholder="Full name" required />
-        <label class="sr-only" for="enroll-email">Email address</label>
-        <input class="input" id="enroll-email" name="email" type="email" placeholder="Email address" required />
-        <label class="sr-only" for="enroll-program">What you are looking for</label>
-        <select class="input" id="enroll-program" name="program" required>
-          <option value="">What are you looking for?</option>
-          {programs.map((p: any) => <option value={p.name}>{p.name}</option>)}
-        </select>
-        <button type="submit" class="btn btn-gold">Send enquiry</button>
-      </form>
-      <div style="margin-top:12px;color:var(--muted);font-size:.74rem">
-        {/* No turnaround time is promised. The federation has not set one, and a
-            page that invents "we reply within 24 hours" makes a commitment
-            nobody in the office agreed to. */}
-        Used only to answer your enquiry. Fees depend on what you need — the
-        federation quotes against your own requirements rather than a price list.
+
+      <ol class="journey">
+        {JOURNEY.map((stepItem, i) => (
+          <li class="journey-step">
+            <span class="journey-n" aria-hidden="true">{String(i + 1).padStart(2, '0')}</span>
+            <span class="journey-main">
+              <span class="journey-heading">{stepItem.heading}</span>
+              <span class="journey-body">{stepItem.body}</span>
+            </span>
+          </li>
+        ))}
+      </ol>
+
+      <div class="cta-actions">
+        <a href="/learn/request" class="btn btn-primary">Request training &rarr;</a>
+        <a href="/learn" class="btn btn-ghost">Read what MMAKF does first</a>
       </div>
+
+      <p class="cta-note">
+        {/* No turnaround is promised. The federation has set no service
+            standard, and a page that invents "we reply within 24 hours" makes a
+            commitment nobody in the office agreed to. No fee appears either:
+            the federation quotes against your own requirements, and there is no
+            price list to quote from. */}
+        Fees depend on what you need — the federation quotes against your own
+        requirements rather than a price list.
+        {contactEmail && (
+          <>
+            {' '}Would rather not use a form? Write to{' '}
+            <a href={`mailto:${contactEmail}`} class="text-gold">{contactEmail}</a>{' '}
+            with your institution, roughly how many people, and where you are.
+          </>
+        )}
+      </p>
+
       <div class="cta-paths">
         <a href="/affiliation" class="btn btn-ghost">Affiliate a dojo &rarr;</a>
         <a href="/registration" class="btn btn-ghost">Register as a member &rarr;</a>
         <a href="/calendar" class="btn btn-ghost">Federation calendar &rarr;</a>
       </div>
-      <noscript>
-        <div style="margin-top:12px;color:var(--off-white);font-size:.82rem">
-          This form works without JavaScript. If it does not reach us, email
-          <a href={`mailto:${email}`} class="text-gold">{email}</a>.
-        </div>
-      </noscript>
     </div>
   </div>
 </section>
@@ -78,55 +161,79 @@ const { programs, email = 'admin@mmakf.in' } = Astro.props;
     text-align: center;
   }
   .cta-box { max-width: 720px; margin: 0 auto; }
-  .cta-form {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1.2fr auto;
-    gap: 10px;
-    margin-top: 32px;
+  .cta-lead { margin: var(--space-5) auto var(--space-8); }
+
+  /* The journey reads left-aligned even though the band is centred: three
+     sentences of explanation centred under one another are markedly harder to
+     scan than the same three set against a common left edge. */
+  .journey {
+    list-style: none;
+    margin: 0 auto var(--space-8);
+    padding: 0;
+    text-align: left;
+    max-width: 34rem;
   }
-  @media (max-width: 700px) { .cta-form { grid-template-columns: 1fr; } }
+  .journey-step {
+    display: grid;
+    grid-template-columns: 2.6rem minmax(0, 1fr);
+    gap: 0 var(--space-4);
+    padding: var(--space-4) 0;
+    border-top: 1px solid var(--border);
+  }
+  .journey-step:last-child { border-bottom: 1px solid var(--border); }
+  .journey-n {
+    font-family: var(--font-display);
+    font-size: var(--text-md);
+    /* --numeral, not --gold-dim: the dim gold is a 45% alpha decorative value
+       and this is text. */
+    color: var(--numeral);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.5;
+  }
+  .journey-main { display: block; }
+  .journey-heading {
+    display: block;
+    font-family: var(--font-display);
+    font-size: var(--text-md);
+    line-height: 1.4;
+    color: var(--white);
+  }
+  .journey-body {
+    display: block;
+    margin-top: var(--space-2);
+    color: var(--muted);
+    font-size: var(--text-base);
+    line-height: 1.65;
+  }
+
+  .cta-actions {
+    display: flex; flex-wrap: wrap; gap: var(--space-3);
+    justify-content: center;
+  }
+
+  .cta-note {
+    margin: var(--space-5) auto 0;
+    max-width: 46rem;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: 1.7;
+  }
 
   .cta-paths {
-    display: flex; flex-wrap: wrap; gap: 12px;
-    justify-content: center; margin-top: 26px;
+    display: flex; flex-wrap: wrap; gap: var(--space-3);
+    justify-content: center; margin-top: var(--space-6);
+    padding-top: var(--space-6);
+    border-top: 1px solid var(--border);
   }
 
-  /* Labels for every field. The inputs carried aria-label only, which a label
-     element does better: it also makes the label clickable, and
-     tests/accessibility.test.ts requires the for/id association. */
-  .sr-only {
-    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
-    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  @media (max-width: 700px) {
+    .journey-step { grid-template-columns: 1fr; gap: 0; }
+    .journey-n {
+      display: block;
+      font-size: var(--text-xs);
+      letter-spacing: .18em;
+      margin-bottom: var(--space-1);
+    }
+    .cta-actions .btn, .cta-paths .btn { width: 100%; }
   }
 </style>
-
-<script>
-  document.querySelectorAll('form[data-enroll-form]').forEach((form) => {
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const f = form as HTMLFormElement;
-      const btn = f.querySelector('button[type=submit]') as HTMLButtonElement | null;
-      const fd = new FormData(f);
-      const body = Object.fromEntries(fd.entries());
-      if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
-      try {
-        const res = await fetch('/api/enroll', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) throw new Error('bad status');
-        // NOT "we will call you shortly". Nobody has committed to a turnaround
-        // time, and the federation's contact route is now email — promising a
-        // telephone call was a commitment the office never made.
-        (window as any).showNotif('Oss. Your enquiry has reached the federation.');
-        f.reset();
-      } catch {
-        // Inputs are preserved so the visitor can retry (MASTER-SPEC F15).
-        (window as any).showNotif('Could not submit. Please email admin@mmakf.in.');
-      } finally {
-        if (btn) { btn.disabled = false; btn.textContent = 'Send enquiry'; }
-      }
-    });
-  });
-</script>

@@ -1,0 +1,572 @@
+---
+/**
+ * /start — the engagement engine's front door.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS PAGE EXISTS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The federation's finding was that the site was a set of frontend illusions:
+ * ten pages carrying an EnrollCTA that posted a name and an email into a Redis
+ * list, and a twenty-step application engine behind /learn/apply that almost
+ * nothing pointed at. A visitor could not get from "I want to work with MMAKF"
+ * to the thing that actually records an engagement.
+ *
+ * This page is the join. It asks ONE question — how are you engaging with
+ * MMAKF? — and every answer hands the visitor to the engine that handles that
+ * kind of engagement. It builds nothing itself: no form here writes a row, and
+ * there is no second intake. The institutional answers go to
+ * submitApplication() through /learn/apply, the individual answers go to the
+ * individual path, and a club seeking affiliation goes to /affiliation.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * NOT TWELVE RECTANGLES
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The federation objected, by name, to the answer to this question being a grid
+ * of identical cards. Twelve cards reading SCHOOL, COLLEGE, UNIVERSITY, NGO
+ * tell a reader nothing they did not already know, and the person this page is
+ * for is precisely the one who is NOT sure which they are: a trust that runs a
+ * school, a residents' association that calls itself a club, a college inside a
+ * university. So each option carries a real sentence describing the engagement
+ * rather than a label, and the reader identifies themselves by reading.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * IT IS TWELVE LINKS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * No JavaScript, no state machine, no client router. The first question of a
+ * twenty-step process must not be the one thing on the site that needs a
+ * working script — the applicants this page is aimed at are on Indian mobile
+ * networks, which is the same reason the wizard behind it is server-rendered.
+ * The one form on this page is a GET.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT IT MUST NOT SAY
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * No fee, no figure, no turnaround, no count of schools. MMAKF has published no
+ * fee framework and no service standard, so this page describes the SHAPE of
+ * the process and says plainly that it carries no dates. A five-stage journey
+ * with invented deadlines printed on it would be the tenth thing on this site
+ * the federation asked to have removed.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { isConfigured } from '@/db';
+import { get } from '@/lib/storage';
+import { href as surfaceHref, canonicalFor, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+// The federation's own address, from the record. Never a literal, and never a
+// person's — the EnrollCTA crash is the reason that rule is written down.
+const fed = await get<any>('federation');
+const fedEmail = String(fed?.contact?.email || '');
+
+/**
+ * The twelve ways an engagement begins, and where each one goes.
+ *
+ * `to` is an INTERNAL path. It is rendered through h() so the same definition
+ * serves www.mmakf.in and learn.mmakf.in without either link knowing which host
+ * it is on.
+ *
+ * The institutional answers all end at /learn/apply with an `audience`
+ * parameter, which is the existing twenty-step wizard seeding step one from the
+ * question the visitor has just answered. The parameter values are the
+ * institution types that step one itself lists (see WIZARD_STEPS in
+ * src/db/applications.ts) — not a vocabulary invented here, because a value the
+ * wizard does not recognise would silently drop and the applicant would be
+ * asked the same question twice.
+ *
+ * COLLEGE and UNIVERSITY both carry `university`. They are one option on the
+ * form ("University or college") and one audience in the database, and they are
+ * separated here only because a reader from a standalone college should not
+ * have to decide whether the federation counts them as a university before they
+ * can begin.
+ */
+interface Option {
+  /** The label, as the federation worded the question. */
+  label: string;
+  /** The sentence somebody unsure of which they are reads to find out. */
+  standfirst: string;
+  /** Where this answer hands the visitor. Internal path. */
+  to: string;
+  /** What is on the other side of the link, said plainly. */
+  destination: string;
+}
+
+const OPTIONS: Option[] = [
+  {
+    label: 'Individual',
+    standfirst:
+      'You want to train yourself — at an affiliated centre, at the headquarters dojo, or online, on the graded Shotokan syllabus or in self-defence alone.',
+    to: '/start/individual',
+    destination: 'Individual training',
+  },
+  {
+    label: 'Parent or guardian',
+    standfirst:
+      'You are arranging training for a child. The same path as an individual, with age, consent and the responsible adult recorded in your name rather than theirs.',
+    to: '/start/individual',
+    destination: 'Individual training',
+  },
+  {
+    label: 'School',
+    standfirst:
+      'A school wanting karate inside the school week — physical education, self-defence, or a full co-curricular programme, from one year group to every campus.',
+    to: '/learn/apply?audience=school',
+    destination: 'Institutional application',
+  },
+  {
+    label: 'College',
+    standfirst:
+      'A college running training for its own students: a taught programme, a student club, or a self-defence course on campus.',
+    to: '/learn/apply?audience=university',
+    destination: 'Institutional application',
+  },
+  {
+    label: 'University',
+    standfirst:
+      'A university — student clubs and campus sport, coach and referee education, or technical collaboration with a sports-science department.',
+    to: '/learn/apply?audience=university',
+    destination: 'Institutional application',
+  },
+  {
+    label: 'Corporate',
+    standfirst:
+      'A company arranging self-defence, women’s safety or continuing martial arts for its staff, at the workplace or at a federation centre.',
+    to: '/learn/apply?audience=corporate',
+    destination: 'Institutional application',
+  },
+  {
+    label: 'Government',
+    standfirst:
+      'A department or public body, working through its own technical review, financial review and procurement route. MMAKF supplies what each of those stages needs.',
+    to: '/learn/apply?audience=government',
+    destination: 'Institutional application',
+  },
+  {
+    label: 'NGO',
+    standfirst:
+      'A non-governmental organisation, trust or foundation running training for the people it serves rather than for its own staff.',
+    to: '/learn/apply?audience=ngo',
+    destination: 'Institutional application',
+  },
+  {
+    label: 'Community',
+    standfirst:
+      'A residents’ association, a colony hall, a neighbourhood group — somebody local organising a class, a camp or a course for the people around them.',
+    to: '/learn/apply?audience=community',
+    destination: 'Institutional application',
+  },
+  {
+    label: 'Sports organisation',
+    standfirst:
+      'A sports body, association or academy engaging MMAKF on training, officiating or competition — rather than bringing its own dojo into the federation’s network.',
+    to: '/learn/apply?audience=club',
+    destination: 'Institutional application',
+  },
+  {
+    label: 'Club or dojo',
+    standfirst:
+      'An existing club or dojo seeking affiliation. A different process, because you are joining the federation’s network rather than buying training from it — your instructors, grades and premises are what is assessed.',
+    to: '/affiliation',
+    destination: 'Affiliation',
+  },
+  {
+    label: 'Other institution',
+    standfirst:
+      'An institution none of the above describes. The application asks the same questions and lets you say what you are in your own words rather than forcing you into somebody else’s category.',
+    to: '/learn/apply?audience=other',
+    destination: 'Institutional application',
+  },
+];
+
+/**
+ * The five stages, so that somebody arriving knows this is a process with a
+ * status they can return to rather than a message into a void.
+ *
+ * NOT A TIMELINE. There is no duration on any stage and no date anywhere,
+ * because MMAKF has published no service standard — see the note under the
+ * list, which says so rather than leaving a reader to assume one.
+ */
+const STAGES = [
+  {
+    n: '01',
+    name: 'Discover',
+    body:
+      'You answer the question above and MMAKF shows you what it actually runs for an institution like yours — what a programme is assembled from, what the federation needs from you, and what it will not claim. Nothing is priced and nothing is committed.',
+  },
+  {
+    n: '02',
+    name: 'Configure',
+    body:
+      'The application asks what you need, for how many people, how often, in what batches, at what venue, and with what assessment. A programme is assembled from components rather than chosen off a shelf. It saves as you go and gives you a reference, so you can stop and come back.',
+  },
+  {
+    n: '03',
+    name: 'Review',
+    body:
+      'A training administrator reads the configuration and comes back to you if anything is unclear. A quotation is then issued against exactly what you configured, itemised so you can see how it was arrived at.',
+  },
+  {
+    n: '04',
+    name: 'Book',
+    body:
+      'You approve the quotation, and the agreement is written against the version you approved rather than one that can change afterwards. Instructors are assigned on qualification, location and availability, and the dates go into the calendar.',
+  },
+  {
+    n: '05',
+    name: 'Manage',
+    body:
+      'Sessions, attendance, assessments, grading records and documents sit in your portal against the same reference, for as long as the engagement runs.',
+  },
+];
+
+const schema = {
+  '@context': 'https://schema.org',
+  '@type': 'WebPage',
+  name: 'Begin an engagement with MMAKF',
+  description:
+    'How to begin with the Modern Martial Arts Karate-Do Federation of India, whether you are an individual, a parent, a school, a college, a university, a company, a government body, an NGO, a community group, a sports organisation or an existing club.',
+  url: canonicalFor(surface, '/start'),
+  isPartOf: {
+    '@type': 'WebSite',
+    name: 'Modern Martial Arts Karate-Do Federation of India',
+    url: 'https://www.mmakf.in',
+  },
+};
+---
+
+<Base
+  title="Start — how are you engaging with MMAKF?"
+  description="One question decides the rest: individual, parent, school, college, university, corporate, government, NGO, community, sports organisation, club or other institution. Each answer leads to the process MMAKF uses for it."
+>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+
+  <PageHero
+    eyebrow="Begin with MMAKF"
+    title="How are you engaging with <em>MMAKF</em>?"
+    lead="Your answer decides everything that follows — which questions you are asked, which process runs, and who at the federation picks it up. Discover, configure, review, book, manage: five stages, one reference, and a page that shows where yours has actually got to."
+  />
+
+  {!isConfigured() && (
+    /* The honest state, and the one production renders today: DATABASE_URL is
+       unset, so nothing submitted can be stored. Saying so HERE rather than
+       twenty steps later is the difference between a federation that is candid
+       and a form that wastes an afternoon of a principal's time. */
+    <div class="container">
+      <div class="st-notice" role="status">
+        <p>
+          <strong>Applications cannot be received at the moment.</strong>
+          The federation’s database is not reachable from this deployment, so
+          nothing entered into the forms behind these links can be stored.
+          {fedEmail && (
+            <> Write to <a href={`mailto:${fedEmail}`} class="text-gold">{fedEmail}</a> instead.</>
+          )}
+        </p>
+      </div>
+    </div>
+  )}
+
+  <section class="st-choose">
+    <div class="container">
+      <p class="eyebrow">The first question</p>
+      <h2 class="display-2">Read down the list. One of these is you.</h2>
+      <p class="body-txt st-intro">
+        There is no wrong answer and nothing is committed by choosing one — if
+        you pick the wrong door the federation moves the enquiry rather than
+        sending you back to the beginning.
+      </p>
+
+      <ol class="st-list">
+        {OPTIONS.map((opt, i) => (
+          <li class="st-item">
+            <a class="st-link" href={h(opt.to)}>
+              <span class="st-n" aria-hidden="true">{String(i + 1).padStart(2, '0')}</span>
+              <span class="st-main">
+                <span class="st-label">{opt.label}</span>
+                <span class="st-desc">{opt.standfirst}</span>
+                <span class="st-dest">{opt.destination}</span>
+              </span>
+              <span class="st-go" aria-hidden="true">&rarr;</span>
+            </a>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </section>
+
+  <section class="st-coach">
+    <div class="container">
+      <p class="eyebrow">Not on that list</p>
+      <h2 class="display-2">Coaching is a different door.</h2>
+      <p class="body-txt">
+        Coaching is not a way of engaging with MMAKF — it is applying to work for
+        the federation. Everything above asks what you need from MMAKF and is
+        assessed on that; a coaching application asks what you can teach, and is
+        assessed on grade, qualification, child-protection clearance and
+        availability. They are two different decisions taken by two different
+        parts of the federation, so they are two different applications.
+      </p>
+      <a class="btn btn-ghost" href={h('/learn/coaches')}>Apply to coach for MMAKF &rarr;</a>
+    </div>
+  </section>
+
+  <section class="st-stages">
+    <div class="container">
+      <p class="eyebrow">What you are starting</p>
+      <h2 class="display-2">Five stages, and a reference that survives all of them.</h2>
+      <ol class="st-stage-list">
+        {STAGES.map((s) => (
+          <li class="st-stage">
+            <span class="st-stage-n" aria-hidden="true">{s.n}</span>
+            <div class="st-stage-main">
+              <h3 class="st-stage-name">{s.name}</h3>
+              <p class="st-stage-body">{s.body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      <div class="st-note">
+        <p>
+          <strong>No stage above carries a date.</strong>
+          MMAKF has published no standard response time, so this page does not
+          tell you when a stage will finish and nothing in the system will ever
+          report your enquiry as late. What you are given instead is a reference
+          and a page that shows where your application has actually got to.
+        </p>
+        <p>
+          <strong>And no stage above carries a figure.</strong>
+          The federation prices a configuration rather than selling a price
+          list, and no fee rules are published, so every path here ends at a
+          request for a quotation. Any estimate you are shown before that
+          quotation exists is labelled as an estimate.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="st-resume">
+    <div class="container">
+      <div class="st-resume-inner">
+        <p class="eyebrow">Come back to one</p>
+        <h2 class="display-2">You have started already.</h2>
+        <p class="body-txt">
+          An application that has not been sent yet is a draft the federation is
+          holding for you. Enter the reference and the access code from the link
+          you were given and it opens where you left it.
+        </p>
+
+        <form class="st-form" method="get" action={h('/learn/apply')}>
+          <div class="st-field">
+            <label class="input-label" for="resume-ref">Reference</label>
+            <input class="input" id="resume-ref" name="ref" type="text" autocomplete="off" spellcheck="false" required />
+          </div>
+          <div class="st-field">
+            <label class="input-label" for="resume-k">Access code</label>
+            <input class="input" id="resume-k" name="k" type="text" autocomplete="off" spellcheck="false" required />
+            <p class="st-help" id="resume-k-help">The part of your link after <code>?k=</code>.</p>
+          </div>
+          <div class="st-field st-field-action">
+            <button type="submit" class="btn btn-primary">Open my draft</button>
+          </div>
+        </form>
+
+        <p class="st-help st-help-block">
+          Already sent it? Use the status link MMAKF gave you when it was
+          received — that page shows the stage the application has reached. A
+          client whose programme is running should go to the
+          {' '}<a href={h('/learn/portal')}>client portal</a> instead.
+        </p>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  /* ── The unconfigured notice ───────────────────────────────────────────── */
+  .st-notice {
+    margin: var(--space-8) 0 0;
+    padding: var(--space-5) var(--space-6);
+    border: 1px solid var(--border-2);
+    border-left: 3px solid var(--red);
+    border-radius: var(--radius-sm);
+    background: var(--card-2);
+  }
+  .st-notice p { margin: 0; line-height: 1.65; color: var(--off-white); }
+  .st-notice strong { display: block; color: var(--white); margin-bottom: var(--space-1); }
+
+  /* ── The twelve ────────────────────────────────────────────────────────── */
+  .st-choose { padding: var(--space-20) 0 var(--space-16); }
+  .st-intro { max-width: var(--max-w-prose); margin: var(--space-4) 0 0; }
+
+  .st-list {
+    list-style: none;
+    margin: var(--space-10) 0 0;
+    padding: 0;
+    counter-reset: none;
+  }
+  .st-item { border-top: 1px solid var(--border); }
+  .st-item:last-child { border-bottom: 1px solid var(--border); }
+
+  /* An editorial row, not a card: full-bleed rule above and below, a numeral in
+     the margin, and prose in a readable measure. The whole row is the target,
+     because a 12-word link inside a 60-word paragraph is a small target on a
+     phone and this page is mostly read on one. */
+  .st-link {
+    display: grid;
+    grid-template-columns: 62px minmax(0, 1fr) 32px;
+    align-items: start;
+    gap: 0 var(--space-5);
+    padding: var(--space-6) 0;
+    text-decoration: none;
+    color: inherit;
+  }
+  .st-link:hover { background: var(--card-2); }
+  .st-n {
+    font-family: var(--font-display);
+    font-size: 1.35rem;
+    line-height: 1.2;
+    color: var(--numeral);
+    font-variant-numeric: tabular-nums;
+  }
+  .st-main { display: block; min-width: 0; }
+  .st-label {
+    display: block;
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    letter-spacing: .01em;
+    color: var(--white);
+  }
+  .st-link:hover .st-label { color: var(--gold-3); }
+  .st-desc {
+    display: block;
+    margin-top: var(--space-2);
+    max-width: 62ch;
+    line-height: 1.65;
+    color: var(--off-white);
+  }
+  /* Where the link goes, said in words rather than left to the reader to guess
+     from a URL they cannot see on a touch device. */
+  .st-dest {
+    display: inline-block;
+    margin-top: var(--space-3);
+    font-size: var(--text-xs);
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .st-go {
+    font-size: 1.1rem;
+    line-height: 1.4;
+    color: var(--gold-2);
+    text-align: right;
+  }
+
+  /* ── Coaching ──────────────────────────────────────────────────────────── */
+  .st-coach {
+    padding: var(--space-16) 0;
+    background: var(--bg-2);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .st-coach .body-txt { max-width: var(--max-w-prose); margin: var(--space-4) 0 var(--space-8); }
+
+  /* ── The five stages ───────────────────────────────────────────────────── */
+  .st-stages { padding: var(--space-20) 0; }
+  .st-stage-list { list-style: none; margin: var(--space-10) 0 0; padding: 0; }
+  .st-stage {
+    display: grid;
+    grid-template-columns: 62px minmax(0, 62ch);
+    gap: 0 var(--space-5);
+    padding: var(--space-6) 0;
+    border-top: 1px solid var(--border);
+  }
+  .st-stage-n {
+    font-family: var(--font-display);
+    font-size: 1.35rem;
+    color: var(--gold-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .st-stage-main { min-width: 0; }
+  .st-stage-name {
+    margin: 0 0 var(--space-2);
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--white);
+  }
+  .st-stage-body { margin: 0; line-height: 1.7; color: var(--off-white); }
+
+  .st-note {
+    margin: var(--space-10) 0 0;
+    padding: var(--space-5) var(--space-6);
+    border-left: 2px solid var(--gold);
+    background: var(--card-2);
+    max-width: var(--max-w-prose);
+  }
+  .st-note p { margin: 0 0 var(--space-4); line-height: 1.7; color: var(--off-white); }
+  .st-note p:last-child { margin-bottom: 0; }
+  .st-note strong { color: var(--white); }
+
+  /* ── Resume ────────────────────────────────────────────────────────────── */
+  .st-resume {
+    padding: var(--space-16) 0 var(--space-20);
+    background: var(--bg-2);
+    border-top: 1px solid var(--border);
+  }
+  .st-resume-inner { max-width: var(--max-w-prose); }
+  .st-resume .body-txt { margin: var(--space-4) 0 var(--space-8); }
+
+  .st-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-4) var(--space-4);
+    align-items: start;
+  }
+  .st-field { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+  .st-field-action { grid-column: 1 / -1; }
+  .st-field-action .btn { justify-self: start; }
+
+  .st-help { margin: 0; font-size: var(--text-sm); color: var(--muted); line-height: 1.6; }
+  .st-help-block { margin-top: var(--space-6); }
+  .st-help code {
+    font-size: .9em;
+    padding: 1px 4px;
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-xs);
+    background: var(--card-2);
+  }
+
+  /* ── Phone ─────────────────────────────────────────────────────────────
+     Recomposed rather than shrunk. The margin numeral moves above the label
+     and becomes a small marker; squeezing it into a 40px column would push a
+     60-word standfirst into a 20-character measure, which is the thing that
+     makes an editorial list unreadable on a phone. */
+  @media (max-width: 760px) {
+    .st-choose, .st-stages { padding: var(--space-16) 0 var(--space-12); }
+    .st-link { grid-template-columns: 1fr 24px; gap: 0 var(--space-3); padding: var(--space-5) 0; }
+    .st-n {
+      grid-column: 1 / -1;
+      font-size: var(--text-sm);
+      letter-spacing: .18em;
+      color: var(--gold-3);
+      margin-bottom: var(--space-1);
+    }
+    .st-stage { grid-template-columns: 1fr; gap: 0; }
+    .st-stage-n {
+      display: block;
+      font-size: var(--text-sm);
+      letter-spacing: .18em;
+      margin-bottom: var(--space-1);
+    }
+    .st-form { grid-template-columns: 1fr; }
+  }
+</style>

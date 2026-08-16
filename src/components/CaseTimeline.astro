@@ -1,0 +1,227 @@
+---
+// One case's history, drawn once and read by both sides of it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS IS A COMPONENT AND NOT TWO LISTS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A school reading /learn/applications/MMAKF-APP-2026-000001 and an
+// administrator reading /admin/applications/1 are looking at the same case.
+// They are not looking at the same rows — application_events.visible_to_applicant
+// decides that, in SQL, in src/db/applications.ts — but they must be looking at
+// the same case in the same order, described in the same words.
+//
+// When the two sides were rendered by two templates, they could drift without
+// anybody noticing: a wording change on one page, a different sort on the
+// other, and the federation and the applicant end up quoting different
+// sequences of the same events down a telephone. There is now one renderer, so
+// the only difference between the two views is the set of rows handed to it —
+// which is the difference the schema intended.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IT DOES NOT DO
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// It renders what happened. It does not render what happens next.
+//
+// There is no greyed-out rail of forthcoming stages, because the federation has
+// published no service standard and a stage drawn ahead of the case is a
+// promise that it will be reached — which is false for every application that
+// is declined, withdrawn or lapses. The last entry is the last thing that
+// happened, and the list simply stops there.
+//
+// No entry carries a duration, an age or an "overdue" mark for the same reason.
+// Nothing here is ever late, because nothing here has a published deadline to
+// be late against.
+
+import Status from '@/components/Status.astro';
+import { LIFECYCLES, humanise } from '@/lib/status';
+
+export interface TimelineEntry {
+  at: Date | string | null | undefined;
+  /** The raw event kind. A lifecycle value becomes a status chip; anything
+      else becomes a quiet label. */
+  kind: string;
+  summary: string;
+  /**
+   * Marks an entry the applicant is NOT shown. Set from the stored flag by the
+   * operational surface; the applicant's own page never receives one, because
+   * those rows never left the database.
+   */
+  internal?: boolean;
+}
+
+export interface Props {
+  entries: TimelineEntry[];
+  /** Which lifecycle decides whether a `kind` is a stage of the case. */
+  domain?: string;
+  /**
+   * Label the entries the applicant cannot see.
+   *
+   * Off by default, and it must stay off by default: a component that announced
+   * "internal" unless told otherwise would eventually be dropped onto a
+   * public page still carrying the mark, and the mark is a far louder invitation
+   * to go looking than the note it sits beside.
+   */
+  markInternal?: boolean;
+  /** What to say when there is nothing. Required — see below. */
+  empty: string;
+  /** Accessible name for the list. */
+  label?: string;
+}
+
+const {
+  entries,
+  domain = 'application',
+  markInternal = false,
+  empty,
+  label = 'Case history',
+} = Astro.props;
+
+const rows = (entries ?? []).filter((e) => e && e.summary);
+
+// A `kind` that is a value in this domain's lifecycle is a STAGE of the case
+// and is drawn by Status — the only thing in this codebase that turns a stored
+// status into something a person reads. Everything else ('note', 'assigned',
+// 'possible_duplicate') is an aside about the case rather than a step through
+// it, and gets a plain label so the two cannot be mistaken for one another.
+const stages = new Set<string>(LIFECYCLES[domain] ?? []);
+const isStage = (kind: string) => stages.has(String(kind ?? '').toLowerCase());
+
+// Date only, never a clock.
+//
+// Several events are written in one transaction and share a timestamp to the
+// millisecond, so a time would suggest a precision the order does not have.
+// More to the point, this renders on a server whose timezone is a deployment
+// detail, and a wrong-by-hours clock beside a federation decision is worse than
+// no clock. The machine-readable instant goes in `datetime`, where it is
+// unambiguous.
+function iso(v: unknown): string | undefined {
+  if (!v) return undefined;
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
+function readable(v: unknown): string {
+  if (!v) return '';
+  const d = new Date(v as string);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+---
+
+{rows.length === 0 ? (
+  /* No sample row, no "for example". An empty case is an empty case, and the
+     sentence explaining it belongs to the page, which knows whose case it is. */
+  <p class="ct-empty">{empty}</p>
+) : (
+  <ol class="ct" aria-label={label}>
+    {rows.map((e) => (
+      <li class:list={['ct-item', e.internal && markInternal && 'ct-item-internal']}>
+        <span class="ct-dot" aria-hidden="true"></span>
+        <div class="ct-body">
+          <p class="ct-summary">{e.summary}</p>
+          <p class="ct-meta">
+            {isStage(e.kind) ? (
+              <Status value={e.kind} domain={domain} size="sm" bare withMeaning={false} />
+            ) : (
+              <span class="ct-kind">{humanise(e.kind)}</span>
+            )}
+            {iso(e.at) && (
+              <>
+                <span class="ct-sep" aria-hidden="true">·</span>
+                <time datetime={iso(e.at)}>{readable(e.at)}</time>
+              </>
+            )}
+            {markInternal && e.internal && (
+              <>
+                <span class="ct-sep" aria-hidden="true">·</span>
+                {/* Says who cannot see it rather than "internal", because the
+                    operational question an administrator actually has in front
+                    of this line is whether the school has already been told. */}
+                <span class="ct-private">Not shown to the applicant</span>
+              </>
+            )}
+          </p>
+        </div>
+      </li>
+    ))}
+  </ol>
+)}
+
+<style>
+  .ct-empty {
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 60ch;
+    margin: 0;
+  }
+
+  .ct { list-style: none; margin: 0; padding: 0; }
+
+  .ct-item {
+    display: grid;
+    grid-template-columns: 13px minmax(0, 1fr);
+    gap: 0 var(--space-4);
+    padding: 0 0 var(--space-6);
+    position: relative;
+  }
+
+  /* The rule joining one entry to the next. Decorative, so it is drawn with the
+     decorative border token and never carries text. */
+  .ct-item:not(:last-child)::before {
+    content: '';
+    position: absolute;
+    left: 5px;
+    top: 14px;
+    bottom: 0;
+    width: 1px;
+    background: var(--border);
+  }
+
+  .ct-dot {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--gold);
+    margin-top: 5px;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* An entry the applicant cannot see is drawn hollow. The written label beside
+     it carries the meaning — this only makes the two kinds separable at a
+     glance, and colour is not what distinguishes them (1.4.1). */
+  .ct-item-internal .ct-dot {
+    background: var(--bg);
+    border: 1px solid var(--border-2);
+  }
+
+  .ct-body { min-width: 0; }
+
+  .ct-summary {
+    margin: 0;
+    line-height: var(--leading-normal);
+    overflow-wrap: anywhere;
+  }
+
+  .ct-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin: var(--space-2) 0 0;
+    font-size: var(--text-xs);
+    color: var(--muted);
+  }
+
+  .ct-kind { text-transform: none; }
+  .ct-sep { color: var(--muted); }
+
+  .ct-private {
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-pill);
+    padding: 2px 8px;
+    color: var(--muted);
+  }
+</style>

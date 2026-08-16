@@ -1,0 +1,469 @@
+---
+// One institutional application, as the training office works it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS PAGE HAD TO EXIST
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// It was already being linked to. src/db/automations.ts puts
+// `/admin/applications/{id}` into the notification that tells an administrator
+// a school has applied — and until now that address was a 404. The federation's
+// own automation pointed at nothing.
+//
+// Worse, the applicant could read the case history and the administrator could
+// not. /learn/applications/{ref} has shown a timeline since it was written;
+// /admin/applications listed rows and offered no way into any of them. Two
+// halves of one case, and only the outside half could see how it had moved.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE SAME TIMELINE, NOT A SIMILAR ONE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The entries here are rendered by CaseTimeline, which is the component the
+// applicant's page uses, ordered by applicationDetail() with the same `at, id`
+// clause applicantStatus() uses. The only difference between the two views is
+// the row set: this one is every event, the applicant's is the subset carrying
+// visible_to_applicant.
+//
+// So the entries the school has already read appear here in the same words and
+// the same order, and the ones it has not are marked as such. An administrator
+// picking up the phone can see exactly what the person on the other end has
+// been told — which is the thing two separately-written timelines could never
+// guarantee.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTHORISATION
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// applicationDetail() enforces it, not this page: it needs `engagement:read`
+// and it refuses an application outside the caller's scopes. The shell's
+// `requires` is the courtesy that keeps an unauthorised administrator off the
+// screen; the refusal that matters is the one in src/db/applications.ts.
+//
+// The applicant's access token is NOT on this screen, and cannot be — the
+// query strips it before returning. An administrator has no use for it, and a
+// value nobody needs is a value that leaks from a screenshot.
+
+import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import CaseTimeline from '@/components/CaseTimeline.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere } from '@/lib/rbac';
+import { applicationDetail, isApplicationError } from '@/db/applications';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+// The route parameter is a database id and nothing else. A non-numeric one is
+// not an error worth a stack trace — it is an address that was typed wrong.
+const id = Number(Astro.params.id);
+const idIsValid = Number.isInteger(id) && id > 0;
+
+const configured = isConfigured();
+
+let detail: any = null;
+let refusal: string | null = null;
+let failure: string | null = null;
+
+if (principal && canAnywhere(principal, 'engagement:read') && configured && idIsValid) {
+  try {
+    detail = await applicationDetail(db(), principal, id);
+  } catch (err: any) {
+    if (isApplicationError(err) && (err.code === 'not_found' || err.code === 'forbidden')) {
+      // One sentence for both. An administrator whose scope excludes an
+      // application does not need to learn that it exists, and the two answers
+      // being identical is what stops this page enumerating the register.
+      refusal = 'No application with that reference is available to this account.';
+    } else {
+      failure = String(err?.message ?? err);
+    }
+  }
+}
+
+const app = detail?.application ?? null;
+const events = (detail?.events ?? []) as any[];
+const tasks = (detail?.tasks ?? []) as any[];
+const score = detail?.score ?? null;
+
+// The timeline entries, in the shape CaseTimeline reads. `internal` is the
+// stored flag and nothing else — this page does not decide who sees what, the
+// column does.
+const timeline = events.map((e) => ({
+  at: e.at,
+  kind: e.kind,
+  summary: e.summary,
+  internal: e.visibleToApplicant !== true,
+}));
+
+const shownToApplicant = events.filter((e) => e.visibleToApplicant === true).length;
+
+const fmtDate = (v: unknown): string | null => {
+  if (!v) return null;
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+};
+
+const num = (v: unknown): string | null =>
+  v === null || v === undefined || v === '' ? null : String(v);
+
+const yesNo = (v: unknown): string | null =>
+  v === true ? 'Yes' : v === false ? 'No' : null;
+
+const MODES: Record<string, string> = {
+  on_site: 'At the institution’s premises',
+  at_dojo: 'At an MMAKF centre',
+  online: 'Online',
+  hybrid: 'A combination',
+};
+
+// Every row is a stored value or nothing. There is no default, no placeholder
+// and no "typically" — an institution that did not answer a question is shown
+// as not having answered it.
+const requestRows: Array<{ label: string; value: string | null }> = app ? [
+  { label: 'Where', value: [app.campusName, app.addressLine, app.city, app.stateName, app.postcode].filter(Boolean).join(', ') || null },
+  { label: 'Campuses taking part', value: num(app.campusCount) },
+  { label: 'Community size', value: num(app.populationCount) },
+  { label: 'Expected participants', value: num(app.participantCount) },
+  { label: 'Batches', value: num(app.batchCount) },
+  { label: 'Age groups', value: Array.isArray(app.ageBands) && app.ageBands.length ? app.ageBands.join(', ') : null },
+  { label: 'Sessions per week', value: num(app.frequencyPerWeek) },
+  { label: 'Duration in weeks', value: num(app.durationWeeks) },
+  { label: 'Preferred start', value: fmtDate(app.preferredStart) },
+  { label: 'Delivery', value: app.mode ? (MODES[app.mode] ?? String(app.mode)) : null },
+  { label: 'Instructors expected', value: num(app.instructorsRequired) },
+  { label: 'Assessment wanted', value: yesNo(app.wantsAssessment) },
+  { label: 'Grading wanted', value: yesNo(app.wantsGrading) },
+  { label: 'Certification wanted', value: yesNo(app.wantsCertification) },
+  { label: 'Competition preparation wanted', value: yesNo(app.wantsCompetition) },
+] : [];
+
+const contactRows: Array<{ label: string; value: string | null }> = app ? [
+  { label: 'Contact', value: [app.contactName, app.contactRole].filter(Boolean).join(' — ') || null },
+  { label: 'Email', value: app.contactEmail ?? null },
+  { label: 'Telephone', value: app.contactPhone ?? null },
+  { label: 'Approver', value: [app.decisionMakerName, app.decisionMakerRole].filter(Boolean).join(' — ') || null },
+  { label: 'Approver’s email', value: app.decisionMakerEmail ?? null },
+] : [];
+
+const infra = (app?.infrastructure ?? null) as any;
+const infraRows: Array<{ label: string; value: string | null }> = infra ? [
+  { label: 'Indoor hall or covered space', value: yesNo(infra.hasHall) },
+  { label: 'Mats', value: yesNo(infra.hasMats) },
+  { label: 'Changing rooms', value: yesNo(infra.hasChangingRooms) },
+  { label: 'Floor area', value: infra.floorArea || null },
+  { label: 'Notes on the space', value: infra.notes || null },
+].filter((r) => r.value !== null) : [];
+
+const pageTitle = app ? app.institutionName : 'Application';
+---
+
+<AdminShell
+  title={pageTitle}
+  requires="engagement:read"
+  entity={app ? { kind: 'institution_application', id: app.id, label: app.ref } : null}
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Applications', url: h('/admin/applications') },
+      ...(app ? [{ name: app.ref, url: h(`/admin/applications/${app.id}`) }] : []),
+    ],
+    title: pageTitle,
+    description: app
+      ? 'Everything below was derived from one form submission. Nothing on this screen was re-entered by hand.'
+      : undefined,
+    secondary: [{ label: 'All applications', href: h('/admin/applications') }],
+  }}
+>
+  {app && (
+    <Fragment slot="meta">
+      <Status value={app.status} domain="application" />
+      <span class="ap-ref">{app.ref}</span>
+    </Fragment>
+  )}
+
+  {!configured ? (
+    /* Neither an error nor an empty register: this deployment has no database
+       to hold one. It is what production renders today. */
+    <p class="ap-note">
+      The federation database is not reachable from this deployment, so this
+      application cannot be read. That is not a failure and not a missing
+      record: the applications live in the federation's database, and this
+      deployment has no connection to one.
+    </p>
+  ) : !idIsValid || refusal ? (
+    <ErrorState
+      title="That application is not available."
+      safe={refusal ?? 'The address does not name an application. Nothing has been changed — this was a read.'}
+      body="It may have been removed, or it may sit outside the states, districts and institutions this account can see."
+      retryHref={null}
+      secondary={{ label: 'All applications', href: h('/admin/applications') }}
+    />
+  ) : failure ? (
+    <ErrorState
+      title="The application could not be read."
+      safe="Nothing has been changed. This was a read, so the application was not moved, decided or withdrawn."
+      retryHref={h(`/admin/applications/${id}`)}
+      secondary={{ label: 'All applications', href: h('/admin/applications') }}
+      detail={failure}
+    />
+  ) : app ? (
+    <div class="ap">
+
+      <section class="ap-sec" aria-labelledby="ap-history">
+        <h2 class="ap-h2" id="ap-history">Case history</h2>
+        <p class="ap-sub">
+          {shownToApplicant === 0
+            ? 'Nothing here has been shown to the applicant.'
+            : shownToApplicant === events.length
+              ? 'The applicant sees every entry below, in this order.'
+              : `The applicant sees ${shownToApplicant} of these ${events.length} entries, in this order. The rest are marked.`}
+          {' '}It is the same list, from the same table, as the school reads on
+          its own status page.
+        </p>
+        <CaseTimeline
+          entries={timeline}
+          domain="application"
+          markInternal
+          label={`Case history for ${app.ref}`}
+          empty="Nothing has been recorded against this application yet."
+        />
+      </section>
+
+      <section class="ap-sec" aria-labelledby="ap-request">
+        <h2 class="ap-h2" id="ap-request">What was asked for</h2>
+        {app.requirements && <p class="ap-quote">{app.requirements}</p>}
+        {app.specialRequirements && (
+          <p class="ap-quote">
+            <span class="ap-quote-h">Special requirements.</span> {app.specialRequirements}
+          </p>
+        )}
+        {app.instructorRequirement && (
+          <p class="ap-quote">
+            <span class="ap-quote-h">Instructor requirement.</span> {app.instructorRequirement}
+          </p>
+        )}
+        <dl class="ap-facts">
+          {requestRows.map((r) => (
+            <div>
+              <dt>{r.label}</dt>
+              {/* An unanswered question reads as unanswered. It does not read
+                  as zero, and it does not read as a plausible number. */}
+              <dd class:list={[!r.value && 'ap-unstated']}>{r.value ?? 'Not stated'}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      {infraRows.length > 0 && (
+        <section class="ap-sec" aria-labelledby="ap-infra">
+          <h2 class="ap-h2" id="ap-infra">The space</h2>
+          <dl class="ap-facts">
+            {infraRows.map((r) => (
+              <div>
+                <dt>{r.label}</dt>
+                <dd>{r.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      )}
+
+      <section class="ap-sec" aria-labelledby="ap-contact">
+        <h2 class="ap-h2" id="ap-contact">Who to speak to</h2>
+        <dl class="ap-facts">
+          {contactRows.map((r) => (
+            <div>
+              <dt>{r.label}</dt>
+              <dd class:list={[!r.value && 'ap-unstated']}>{r.value ?? 'Not stated'}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      <section class="ap-sec" aria-labelledby="ap-work">
+        <h2 class="ap-h2" id="ap-work">Work on this application</h2>
+        {tasks.length === 0 ? (
+          <p class="ap-sub">No task has been raised against this application.</p>
+        ) : (
+          <div class="ap-scroll">
+            <table class="ap-table">
+              <caption class="sr-only">Tasks raised against application {app.ref}</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Task</th>
+                  <th scope="col">Assigned to</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Due</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tasks.map((t: any) => (
+                  <tr>
+                    <td>{t.title}</td>
+                    <td>{t.assignedRole ? String(t.assignedRole).replace(/_/g, ' ').toLowerCase() : 'Unassigned'}</td>
+                    <td><Status value={t.status} domain="task" size="sm" /></td>
+                    {/* Null unless somebody set one. The federation has
+                        published no service standard, so this column is
+                        normally empty and nothing on it is ever late. */}
+                    <td class:list={[!t.dueAt && 'ap-unstated']}>{fmtDate(t.dueAt) ?? 'No date set'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section class="ap-sec" aria-labelledby="ap-triage">
+        <h2 class="ap-h2" id="ap-triage">Triage</h2>
+        <p class="ap-sub">
+          A queue order, not a judgement of the institution. Every component is
+          listed so it can be disagreed with.
+        </p>
+        <dl class="ap-facts">
+          <div>
+            <dt>Owner</dt>
+            <dd class:list={[!app.ownerRole && !app.ownerUserId && 'ap-unstated']}>
+              {app.ownerRole
+                ? String(app.ownerRole).replace(/_/g, ' ').toLowerCase()
+                : app.ownerUserId
+                  ? 'A named administrator'
+                  : 'Unassigned — waiting in the national queue'}
+            </dd>
+          </div>
+          <div>
+            <dt>Score</dt>
+            <dd>{score ? String(score.score) : String(app.leadScore ?? '—')}</dd>
+          </div>
+          <div>
+            <dt>Sent</dt>
+            <dd class:list={[!app.submittedAt && 'ap-unstated']}>{fmtDate(app.submittedAt) ?? 'Not sent — still a draft'}</dd>
+          </div>
+          <div>
+            <dt>MMAKF has undertaken to respond by</dt>
+            {/* Null on every row, because no service standard has been set.
+                Saying so is the honest answer; a date here would be the system
+                inventing a commitment the federation never made. */}
+            <dd class:list={[!app.slaDueAt && 'ap-unstated']}>
+              {fmtDate(app.slaDueAt) ?? 'No response time has been published for institutional applications.'}
+            </dd>
+          </div>
+        </dl>
+        {score && score.reasons?.length > 0 && (
+          <ul class="ap-reasons">
+            {score.reasons.map((r: string) => <li>{r}</li>)}
+          </ul>
+        )}
+      </section>
+
+    </div>
+  ) : (
+    <ErrorState
+      title="That application is not available."
+      safe="Nothing has been changed — this was a read."
+      retryHref={null}
+      secondary={{ label: 'All applications', href: h('/admin/applications') }}
+    />
+  )}
+</AdminShell>
+
+<style>
+  .ap-ref {
+    font-family: var(--font-accent, monospace);
+    font-size: var(--text-sm);
+    color: var(--muted);
+  }
+
+  .ap-note {
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 60ch;
+  }
+
+  .ap-sec { margin-top: var(--space-10); }
+  .ap-sec:first-child { margin-top: var(--space-6); }
+
+  .ap-h2 {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    margin: 0 0 var(--space-3);
+  }
+
+  .ap-sub {
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 64ch;
+    margin: 0 0 var(--space-5);
+    font-size: var(--text-sm);
+  }
+
+  .ap-quote {
+    margin: 0 0 var(--space-4);
+    padding: var(--space-4) var(--space-5);
+    border-left: 2px solid var(--border-2);
+    background: var(--card-2);
+    line-height: var(--leading-normal);
+    max-width: 68ch;
+    overflow-wrap: anywhere;
+  }
+  .ap-quote-h { color: var(--muted); }
+
+  .ap-facts { margin: 0; display: grid; gap: 0; }
+  .ap-facts > div {
+    display: grid;
+    grid-template-columns: minmax(0, 18rem) minmax(0, 1fr);
+    gap: 4px var(--space-5);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .ap-facts dt { color: var(--muted); font-size: var(--text-sm); }
+  .ap-facts dd { margin: 0; overflow-wrap: anywhere; }
+
+  /* A value nobody supplied. --muted, not --muted-2: this is text, and
+     --muted-2 is decorative and fails contrast. */
+  .ap-unstated { color: var(--muted); font-style: italic; }
+
+  .ap-reasons {
+    margin: var(--space-5) 0 0;
+    padding-left: var(--space-5);
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-relaxed);
+  }
+
+  /* 1.4.10 — a wide table scrolls inside its own container rather than
+     widening the page. */
+  .ap-scroll { overflow-x: auto; }
+
+  .ap-table { width: 100%; border-collapse: collapse; min-width: 34rem; }
+  .ap-table th, .ap-table td {
+    text-align: start;
+    padding: var(--space-3) var(--space-4) var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .ap-table th {
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  @media (max-width: 720px) {
+    .ap-facts > div { grid-template-columns: 1fr; gap: 2px; }
+    .ap-facts dt {
+      font-size: var(--text-xs);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+  }
+</style>
