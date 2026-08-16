@@ -328,7 +328,7 @@ function requestedKinds(kinds: SearchKind[] | undefined): readonly SearchKind[] 
  *  · text — prose (summary, description, body). Substring only, ranked last,
  *    because a word appearing mid-paragraph is the weakest evidence of intent.
  */
-type FieldRole = 'identifier' | 'name' | 'text';
+export type FieldRole = 'identifier' | 'name' | 'text';
 
 /**
  * Relevance tiers. Exact identifier first, then prefix, then substring — as
@@ -360,7 +360,7 @@ function tierFor(role: FieldRole, how: MatchHow): number | null {
   return how === 'substring' ? TIERS.text_substring : null;
 }
 
-interface MatchField {
+export interface MatchField {
   field: string;
   column: any;
   role: FieldRole;
@@ -381,7 +381,7 @@ function conditionsFor(q: string, f: MatchField): Array<{ tier: number; cond: SQ
 }
 
 /** WHERE predicate: the row matched at least one field. */
-function matchPredicate(q: string, fields: MatchField[]): SQL {
+export function matchPredicate(q: string, fields: MatchField[]): SQL {
   const conds = fields.flatMap((f) => conditionsFor(q, f)).map((c) => c.cond);
   // Unreachable with a non-empty field list, but a searcher whose fields were
   // accidentally emptied must return nothing rather than everything.
@@ -397,7 +397,7 @@ function matchPredicate(q: string, fields: MatchField[]): SQL {
  * exact identifier match could be discarded in favour of a substring hit.
  * Tier numbers are compile-time constants, never input, hence sql.raw.
  */
-function rankExpression(q: string, fields: MatchField[]): SQL {
+export function rankExpression(q: string, fields: MatchField[]): SQL {
   const ordered = fields.flatMap((f) => conditionsFor(q, f)).sort((a, b) => a.tier - b.tier);
   const parts: SQL[] = [sql`CASE`];
   for (const c of ordered) parts.push(sql`WHEN ${c.cond} THEN ${sql.raw(String(c.tier))}`);
@@ -420,7 +420,7 @@ function snippet(value: string, at: number): string {
  * is to drop the row: a hit whose explanation we cannot produce is a hit we
  * cannot stand behind.
  */
-function explainMatch(
+export function explainMatch(
   q: string,
   fields: Array<{ field: string; role: FieldRole; value: unknown }>
 ): MatchExplanation | null {
@@ -469,12 +469,12 @@ function explainMatch(
  * principal holding only that level resolves to `none` — an unresolvable scope
  * grants nothing (invariant 3), it does not fall through to unfiltered.
  */
-type ScopeFilter =
+export type ScopeFilter =
   | { reach: 'all' }
   | { reach: 'none' }
   | { reach: 'scoped'; predicate: SQL };
 
-function scopeFilter(
+export function scopeFilter(
   principal: Principal | null,
   action: Action,
   columns: { state?: any; district?: any; dojo?: any }

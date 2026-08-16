@@ -1,0 +1,1528 @@
+---
+// ═══════════════════════════════════════════════════════════════════════════
+// The federation's one table (§97, §54, §82, §83, §80).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Athletes, competitions, registrations, coaches, leads, grading panels and the
+// disciplinary register are seven different nouns that need the same seven
+// behaviours: filter, order, page, select, act on the selection, read on a
+// phone, and come back tomorrow to the same view. §97 says that is one
+// component, not seven — and seven is what a codebase gets when each page
+// solves it the afternoon it is written.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// EVERYTHING ESSENTIAL HAPPENS WITHOUT JAVASCRIPT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The filters are a <form method="get">. The sortable headers are submit
+// buttons on that same form, reaching it through the `form` attribute so the
+// table does not have to live inside it. The pages are links. All of it lands
+// in the querystring, the server reads the querystring, and the reader gets
+// HTML back. Switch JavaScript off and every one of those still works.
+//
+// That is not a purity exercise. A data table's filters are the ONLY route to
+// the data; a filter that needs a bundle to have downloaded is a register that
+// is unreadable on a stadium's wifi. The things JavaScript adds here are the
+// things that are genuinely optional — the select-all, the running count, the
+// collapse on a phone, the saved views. Each one is an accelerator, and each
+// one is rendered `hidden` and revealed by the script that operates it, so a
+// control that cannot work is never on screen.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY SORT BUTTONS DO NOT COLLIDE WITH THE FILTER FORM
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The obvious construction — a hidden <input name="sort"> in the filter form,
+// plus header buttons that submit their own `sort` — sends BOTH values, and
+// URLSearchParams.get() returns the hidden one. Sorting would silently never
+// work.
+//
+// So there is no hidden sort input. Exactly one submit button is activated per
+// submission, and each one carries the sort it means: a header button carries
+// the sort it is asking for, and the toolbar's Apply button carries the sort
+// already in force. Ordering therefore survives a filter change, filters
+// survive a re-sort, and the URL never grows a second `sort`.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THIS COMPONENT WILL NOT DO
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// It has no data of its own. No sample row, no default filter option, no
+// placeholder name in an empty state. It renders what it is given, and when it
+// is given nothing it says so in words.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// USE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//   const query = readTableQuery(Astro.url, {
+//     sortable: ['name', 'submitted_at'],
+//     filters: ['status'],
+//     defaultSort: { key: 'submitted_at', dir: 'desc' },
+//   });
+//
+//   <Table
+//     id="registrations"
+//     caption="Registrations"
+//     query={query}
+//     columns={[...]}
+//     filters={[...]}
+//     rows={rows}
+//     rowId={(r) => String(r.id)}
+//   />
+
+import Status from '@/components/Status.astro';
+// The four non-ready states are not this component's to design. src/components/
+// states/ owns them, and it owns the arguments about them too — that an empty
+// state must offer a way out, that a skeleton must name what it is waiting for,
+// that a failure must say what is still safe. A table that wrote its own would
+// be a fifth opinion on all three.
+//
+// There is no Denied component to delegate to, and deliberately so: a
+// permission boundary is prose that names the authority required, which is
+// rendered below rather than dressed up as an absence.
+import EmptyState from '@/components/states/EmptyState.astro';
+import Skeleton from '@/components/states/Skeleton.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+
+import {
+  readTableQuery, withParams, pageHref, sortParam, nextSort, ariaSort,
+  totalPages, shownRange, PER_OPTIONS,
+  type Sort, type TableQuery,
+} from './query';
+import { applyFilters, applySort, applyPage } from './local';
+import type { Bulk, Column, Dataset, Filter, Row, TableState } from './types';
+
+export interface Props {
+  /** Stable across renders: it namespaces the DOM ids AND the saved views. */
+  id: string;
+  /** What this table is. Becomes the table's <caption> and its accessible name. */
+  caption: string;
+  columns: Column[];
+  rows?: Row[];
+  /** See Dataset in types.ts. 'complete' means this component does the work. */
+  dataset?: Dataset;
+  state?: TableState;
+  /**
+   * From readTableQuery(). Optional — the table will read the URL itself, which
+   * is right for a 'complete' dataset and wrong for a 'page' one, because the
+   * page needed the same answer before it could fetch anything.
+   */
+  query?: TableQuery;
+  filters?: Filter[];
+  /**
+   * Rows matching the current filters across ALL pages.
+   *
+   * null is a legitimate answer from a source that cannot cheaply count, and it
+   * is rendered as a missing total rather than as a guess. It costs the
+   * select-all-matching control, which cannot honestly offer a number it does
+   * not have.
+   */
+  total?: number | null;
+  /** Required before any row can be selected. No id, no checkbox. */
+  rowId?: (row: Row) => string;
+  bulk?: Bulk | null;
+  /** A qualification the reader needs before trusting the rows. */
+  note?: string | null;
+  /** What is absent, as a sentence: "No coaches have applied yet." */
+  emptyTitle?: string;
+  emptyBody?: string;
+  /**
+   * §104's way forward, for a register that is empty with no filter applied.
+   *
+   * It is optional here and required by EmptyState, which is not a
+   * contradiction: when a filter is what emptied the table, clearing it IS the
+   * way forward and this component supplies it. When the register is genuinely
+   * empty and the caller has named no destination, the empty state is printed
+   * as prose with no button, because a link this component invented would go
+   * somewhere it has never heard of.
+   */
+  emptyAction?: { label: string; href: string };
+  /** What failed, in the reader's terms. */
+  errorTitle?: string;
+  /** §57: what is still safe. Overridable, because only the caller knows. */
+  errorSafe?: string;
+  /** The reference the reader quotes when they report the fault. */
+  errorId?: string | null;
+  errorDetail?: string | null;
+  deniedMessage?: string | null;
+  /** The rbac action that would have permitted this read. */
+  deniedAction?: string | null;
+  /** §105: the operation being waited on. Never an indefinite "Loading". */
+  loadingLabel?: string;
+  /** Namespaces sort/page/per when two tables share one page. */
+  paramPrefix?: string;
+  /** The §83 saved-view control. On by default wherever there are filters. */
+  savedViews?: boolean;
+  defaultSort?: Sort | null;
+  /** Offer a page-size control. */
+  pageSize?: boolean;
+}
+
+const {
+  id,
+  caption,
+  columns,
+  rows = [],
+  dataset = 'complete',
+  state = 'ready',
+  query,
+  filters = [],
+  total: totalProp = null,
+  rowId,
+  bulk = null,
+  note = null,
+  emptyTitle,
+  emptyBody,
+  emptyAction,
+  errorTitle,
+  errorSafe,
+  errorId = null,
+  errorDetail = null,
+  deniedMessage = null,
+  deniedAction = null,
+  loadingLabel,
+  paramPrefix = '',
+  savedViews,
+  defaultSort = null,
+  pageSize = true,
+} = Astro.props;
+
+const prefix = paramPrefix;
+const sortableKeys = columns.filter((c) => c.sortable).map((c) => c.key);
+const filterKeys = filters.map((f) => f.key);
+
+const q =
+  query ??
+  readTableQuery(Astro.url, {
+    sortable: sortableKeys,
+    filters: filterKeys,
+    defaultSort,
+    prefix,
+  });
+
+// ── The rows on screen ──────────────────────────────────────────────────────
+// In a 'complete' dataset the filtering, ordering and paging all happen here,
+// during the server render, which is exactly why they still work with the
+// browser's JavaScript switched off.
+let matched: Row[] = rows;
+if (dataset === 'complete') {
+  matched = applySort(applyFilters(rows, filters, q.filters, columns), q.sort, columns);
+}
+const total: number | null = dataset === 'complete' ? matched.length : totalProp;
+
+const pages = total === null ? null : totalPages(total, q.per);
+
+// ── A page number past the end of the results ───────────────────────────────
+//
+// `?page=9` outlives the rows it was written for. It arrives from a saved view,
+// from a bookmark, from a link a colleague sent before the queue was worked
+// through, and from somebody editing the address bar. Slicing at that offset
+// returns nothing, and nothing is then indistinguishable from an empty
+// register — the table would print "There are no registrations to show" over a
+// register holding two hundred of them, which is a lie about federation data
+// and the sort of lie an officer would act on.
+//
+// Where this component does its own paging it can simply answer with the last
+// page that exists. Where the caller paged in SQL the rows are already fetched
+// and cannot be re-fetched from here, so the reader is told plainly instead —
+// see `outOfRange` below.
+const viewPage = pages !== null && q.page > pages ? pages : q.page;
+const qv: TableQuery = viewPage === q.page ? q : { ...q, page: viewPage };
+
+const pageRows: Row[] = dataset === 'complete' ? applyPage(matched, viewPage, q.per) : rows;
+
+// The caller asked storage for a page that is not there. Distinct from empty.
+const outOfRange = total !== null && total > 0 && pageRows.length === 0;
+
+const range = shownRange(viewPage, q.per, pageRows.length);
+
+const activeFilters = Object.keys(q.filters).length;
+const clearHref = withParams(q, {
+  ...Object.fromEntries(filterKeys.map((k) => [k, null])),
+  [`${prefix}page`]: null,
+});
+
+// ── Columns ────────────────────────────────────────────────────────────────
+// The first column titles the record when a row collapses on a phone, unless
+// some column claims that job. A record whose heading is "Yes" is not a record.
+const anyPrimary = columns.some((c) => c.primary);
+// Without an explicit choice the record keeps its first column and its status.
+// The first column is what the row is called; the status is the one field that
+// decides whether the reader needs to open the record at all, and a collapsed
+// queue that hides it is a queue nobody can triage.
+const isPrimary = (c: Column, i: number) =>
+  anyPrimary ? !!c.primary : i === 0 || !!c.status;
+const secondaryCount = columns.filter((c, i) => !isPrimary(c, i)).length;
+const collapsible = secondaryCount > 0;
+
+const selectable = !!bulk && !!rowId;
+// A bulk bar whose checkboxes cannot address a row would post an empty set to a
+// real endpoint. Said out loud rather than rendered as a dead column.
+const bulkUnaddressable = !!bulk && !rowId;
+
+// Singular and plural are both declared rather than derived. Deriving one from
+// the other means guessing at English, and the guess is wrong for exactly the
+// words a federation uses — entry, panel, category.
+const nounOne = bulk?.noun ?? 'row';
+const nounPlural = bulk?.nounPlural ?? 'rows';
+const selField = bulk?.field ?? 'ids';
+
+const qFormId = `${id}-q`;
+const bFormId = `${id}-b`;
+const capId = `${id}-cap`;
+
+// Parameters this table does not own ride along as hidden inputs, so filtering
+// one table does not wipe the state of everything else on the page.
+const owned = new Set([`${prefix}sort`, `${prefix}page`, `${prefix}per`, ...filterKeys]);
+const carried: Array<[string, string]> = [];
+for (const [k, v] of q.params.entries()) if (!owned.has(k)) carried.push([k, v]);
+
+const showPageSize = pageSize && (total === null || total > PER_OPTIONS[0]!);
+const hasTools = filters.length > 0 || showPageSize;
+const needsForm = hasTools || sortableKeys.length > 0;
+const showSaved = savedViews ?? filters.length > 0;
+
+const NUM = new Intl.NumberFormat('en-IN');
+
+/**
+ * A value, as text.
+ *
+ * null becomes an em dash and NEVER an empty cell: a blank in a column of
+ * figures reads as zero to anyone scanning down it, and a blank in a column of
+ * dates reads as "not recorded yet" when it may mean "does not apply".
+ */
+function format(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—';
+  if (v === true) return 'Yes';
+  if (v === false) return 'No';
+  if (typeof v === 'number') return Number.isFinite(v) ? NUM.format(v) : '—';
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (Array.isArray(v)) return v.length ? v.map(format).join(', ') : '—';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+function text(c: Column, r: Row): string {
+  return format(c.render ? c.render(r) : r[c.key]);
+}
+
+function statusValue(c: Column, r: Row): string | null {
+  const v = c.render ? c.render(r) : r[c.key];
+  return v === null || v === undefined || v === '' ? null : String(v);
+}
+
+function statusDomain(c: Column): string | undefined {
+  return typeof c.status === 'object' && c.status ? c.status.domain : undefined;
+}
+
+function alignOf(c: Column): string {
+  const a = c.align ?? (c.numeric ? 'end' : 'start');
+  return `dtx-a-${a}`;
+}
+
+/**
+ * What a row is called, for the checkbox and the expand button.
+ *
+ * A column drawn by a component or by Status is skipped: this component cannot
+ * know what somebody else's component prints, and falling back to the raw value
+ * gives "Select [object Object]" — an accessible name worse than none. The
+ * first primary column that renders as text wins; if none does, the row is
+ * named "this record", which at least does not claim to be a reference.
+ */
+function labelOf(r: Row): string {
+  const primary =
+    columns.find((c, i) => isPrimary(c, i) && !c.component && !c.status) ??
+    columns.find((c, i) => isPrimary(c, i) && !c.component);
+  const t = primary ? text(primary, r) : '';
+  return t && t !== '—' ? t : 'this record';
+}
+
+function nextDirLabel(c: Column): string {
+  const same = q.sort && q.sort.key === c.key;
+  const dir = same ? (q.sort!.dir === 'asc' ? 'desc' : 'asc') : (c.initialDir ?? 'asc');
+  if (c.numeric) return dir === 'asc' ? 'sort lowest first' : 'sort highest first';
+  return dir === 'asc' ? 'sort ascending' : 'sort descending';
+}
+
+// ── Pagination, worked out here rather than in the template ─────────────────
+// The Astro compiler reads a `<` inside a template expression as the start of
+// an element, so anything that has to compare magnitudes is settled first.
+type PageItem = { kind: 'page'; n: number } | { kind: 'gap' };
+const pageItems: PageItem[] = [];
+if (pages !== null) {
+  // A window around the current page. A hundred page links is a paragraph of
+  // numbers nobody reads, and a tab stop for every one of them.
+  const shown = Array.from({ length: pages }, (_, i) => i + 1).filter(
+    (n) => n === 1 || n === pages || Math.abs(n - viewPage) <= 2,
+  );
+  let previous = 0;
+  for (const n of shown) {
+    if (previous && n - previous > 1) pageItems.push({ kind: 'gap' });
+    pageItems.push({ kind: 'page', n });
+    previous = n;
+  }
+}
+const hasPrev = viewPage > 1;
+// With no total there is no last page to know about, so "there is a next page"
+// becomes "this page came back full" — a guess about navigation, never printed
+// as a count.
+const hasNext = pages === null ? pageRows.length === q.per : viewPage < pages;
+const showPager = pages === null || pages > 1;
+
+// What the non-ready states are told.
+const columnCount = columns.length + (selectable ? 1 : 0);
+
+// §57 wants the reader told what survived the failure. Rendering a table is a
+// READ, so the true answer is the same every time and can be said without the
+// caller having to think about it — which is exactly the sentence a caller
+// would otherwise leave out.
+const safeByDefault =
+  'Nothing has been changed. This was a read that failed, so no record was written, moved or deleted.';
+
+// A filtered-empty table, a page past the end, and an empty register are three
+// different facts. The first two have an obvious way out; only the third may
+// genuinely have none, and only the third is allowed to say the register is
+// empty — because only the third knows it.
+const emptyHeadline = outOfRange
+  ? `Page ${NUM.format(q.page)} is past the end of these results.`
+  : activeFilters > 0
+    ? 'No records match these filters.'
+    : (emptyTitle ?? `There are no ${caption.toLowerCase()} to show.`);
+const emptyBodyText = outOfRange
+  ? `The current filters match ${NUM.format(total ?? 0)} ${total === 1 ? nounOne : nounPlural}, none of which fall on this page.`
+  : activeFilters > 0
+    ? undefined
+    : emptyBody;
+const emptyWayForward = outOfRange
+  ? { label: 'Go to the first page', href: pageHref(q, 1) }
+  : activeFilters > 0
+    ? { label: 'Clear filters', href: clearHref }
+    : emptyAction;
+
+const isReady = state === 'ready';
+const hasRows = isReady && pageRows.length > 0;
+---
+
+<div
+  class="dtx"
+  data-dtx={id}
+  data-total={total === null ? undefined : String(total)}
+  data-page-rows={String(pageRows.length)}
+  data-noun-one={nounOne}
+  data-noun-many={nounPlural}
+>
+  {/* ── Filters, page size, saved views ───────────────────────────────── */}
+  {needsForm && (
+    <form
+      id={qFormId}
+      method="get"
+      class:list={['dtx-tools', !hasTools && 'dtx-tools-bare']}
+      aria-label={`Filter ${caption}`}
+    >
+      {carried.map(([k, v]) => <input type="hidden" name={k} value={v} />)}
+
+      {hasTools && (
+        <div class="dtx-tools-row">
+          {/* `f.value` is the fallback and never the override: what the URL
+              says always wins, so a reader's own choice cannot be overwritten
+              by a caller's default. See Filter.value in types.ts for why a
+              default is shown here but is not counted as an active filter. */}
+          {filters.map((f) => (
+            <div class="dtx-field">
+              <label class="input-label" for={`${id}-f-${f.key}`}>{f.label}</label>
+              {f.type === 'select' || (!f.type && f.options) ? (
+                <select class="input dtx-input" id={`${id}-f-${f.key}`} name={f.key}>
+                  <option value="">{f.anyLabel ?? 'Any'}</option>
+                  {(f.options ?? []).map((o) => (
+                    <option value={o.value} selected={(q.filters[f.key] ?? f.value ?? '') === o.value}>{o.label}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  class="input dtx-input"
+                  id={`${id}-f-${f.key}`}
+                  name={f.key}
+                  type={f.type === 'date' ? 'date' : 'search'}
+                  value={q.filters[f.key] ?? f.value ?? ''}
+                  placeholder={f.placeholder}
+                />
+              )}
+            </div>
+          ))}
+
+          {showPageSize && (
+            <div class="dtx-field dtx-field-per">
+              <label class="input-label" for={`${id}-per`}>Rows per page</label>
+              <select class="input dtx-input" id={`${id}-per`} name={`${prefix}per`}>
+                {PER_OPTIONS.map((n) => (
+                  <option value={String(n)} selected={q.per === n}>{n}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/*
+            The default submit button, and the one implicit submission uses when
+            somebody presses Enter in a search box. It carries the sort in force
+            so that filtering does not quietly reorder the table. See the note at
+            the top of this file about why there is no hidden sort input.
+          */}
+          <div class="dtx-field dtx-field-go">
+            <button
+              type="submit"
+              class="btn btn-gold dtx-apply"
+              name={q.sort ? `${prefix}sort` : undefined}
+              value={q.sort ? sortParam(q.sort) : undefined}
+            >{filters.length > 0 ? 'Apply' : 'Update'}</button>
+            {activeFilters > 0 && (
+              <a class="dtx-clear" href={clearHref}>Clear {activeFilters === 1 ? 'filter' : 'filters'}</a>
+            )}
+          </div>
+        </div>
+      )}
+    </form>
+  )}
+
+  {showSaved && (
+    <details class="dtx-saved" data-dtx-saved hidden>
+      <summary>Saved views</summary>
+      <div class="dtx-saved-body">
+        <p class="dtx-saved-note">
+          Saved in this browser only. Nothing is sent to the federation, so a view does not
+          follow you to another machine and cannot be shared with a colleague — the stored,
+          account-wide version of this is not built.
+        </p>
+        <ul class="dtx-saved-list" data-dtx-saved-list aria-live="polite"></ul>
+        <div class="dtx-saved-new">
+          <label class="input-label" for={`${id}-savename`}>Name this view</label>
+          <div class="dtx-saved-new-row">
+            <input class="input dtx-input" id={`${id}-savename`} type="text" maxlength="60" data-dtx-saved-name />
+            <button type="button" class="btn btn-ghost" data-dtx-saved-add>Save current view</button>
+          </div>
+        </div>
+      </div>
+    </details>
+  )}
+
+  {/* ── The five states ───────────────────────────────────────────────── */}
+  {state === 'loading' && (
+    <Fragment>
+      <p class="dtx-caption dtx-caption-solo">{caption}</p>
+      <Skeleton
+        label={loadingLabel ?? `Loading ${caption.toLowerCase()}`}
+        variant="table"
+        rows={4}
+        columns={columnCount}
+        visibleLabel={false}
+      />
+    </Fragment>
+  )}
+
+  {state === 'error' && (
+    <Fragment>
+      <p class="dtx-caption dtx-caption-solo">{caption}</p>
+      <ErrorState
+        title={errorTitle ?? `${caption} could not be read.`}
+        safe={errorSafe ?? safeByDefault}
+        errorId={errorId}
+        detail={errorDetail}
+      />
+    </Fragment>
+  )}
+
+  {state === 'denied' && (
+    <Fragment>
+      <p class="dtx-caption dtx-caption-solo">{caption}</p>
+      <div class="dtx-denied">
+        <p class="dtx-denied-msg">
+          {deniedMessage ??
+            'Your account does not hold the authority needed to read these records. This is a permission boundary and not an empty register — there may well be records here.'}
+        </p>
+        {deniedAction && (
+          <p class="dtx-denied-need">Needs <code>{deniedAction}</code></p>
+        )}
+      </div>
+    </Fragment>
+  )}
+
+  {isReady && pageRows.length === 0 && (
+    <Fragment>
+      <p class="dtx-caption dtx-caption-solo">{caption}</p>
+      {note && <p class="dtx-note">{note}</p>}
+      {emptyWayForward ? (
+        <EmptyState title={emptyHeadline} body={emptyBodyText} action={emptyWayForward} />
+      ) : (
+        <div class="dtx-denied">
+          <p class="dtx-denied-msg">{emptyHeadline}</p>
+          {emptyBodyText && <p class="dtx-note">{emptyBodyText}</p>}
+        </div>
+      )}
+    </Fragment>
+  )}
+
+  {hasRows && (
+    <Fragment>
+      {/* ── Bulk actions (§82) ──────────────────────────────────────────
+          A separate form from the filters, and a sibling of the table rather
+          than its parent: the checkboxes reach it with the `form` attribute,
+          which keeps one <form> from having to contain the other. */}
+      {selectable && bulk && (
+        <form id={bFormId} method="post" action={bulk.action} class="dtx-bulk" data-dtx-bulk>
+          <input type="hidden" name="returnTo" value={Astro.url.search || '?'} />
+          {/*
+            The filters, verbatim, so the server can re-derive the set when the
+            reader asks for everything matching rather than everything ticked.
+          */}
+          <input type="hidden" name="filters" value={Astro.url.search || ''} />
+          <input type="hidden" name="scope" value="selection" data-dtx-scope />
+
+          <div class="dtx-bulk-bar" role="group" aria-label={`Actions for selected ${nounPlural}`}>
+            <p class="dtx-count" role="status" data-dtx-count>
+              Tick {nounPlural} below, then choose an action.
+            </p>
+
+            <div class="dtx-bulk-actions">
+              {bulk.actions.map((a) => (
+                <button
+                  type="submit"
+                  name="action"
+                  value={a.name}
+                  class:list={['btn', a.destructive ? 'btn-ghost dtx-danger' : 'btn-gold']}
+                  data-dtx-action
+                  data-confirm={a.destructive ? `${a.label}: this cannot be undone. Continue?` : undefined}
+                >{a.label}</button>
+              ))}
+            </div>
+          </div>
+
+          {total !== null && pages !== null && pages > 1 && (
+            <p class="dtx-scope" data-dtx-matchwrap hidden>
+              <button type="button" class="dtx-scope-btn" aria-pressed="false" data-dtx-matchall>
+                Select all {NUM.format(total)} {nounPlural} matching the current filters
+              </button>
+            </p>
+          )}
+
+          {pages !== null && pages > 1 && (
+            <p class="dtx-scope-note">
+              A tick covers this page only. Moving to another page clears it —
+              {total !== null
+                ? ' use the control above to act on every matching record instead.'
+                : ' this table cannot count the whole matching set, so a selection larger than one page is refused.'}
+            </p>
+          )}
+        </form>
+      )}
+
+      {bulkUnaddressable && (
+        <p class="dtx-scope-note">
+          Bulk actions are not offered here: these records carry no identifier this table
+          could send, so a selection could not name what it had selected.
+        </p>
+      )}
+
+      {/* ── The table ───────────────────────────────────────────────────
+          The ARIA roles are not decoration. Below the breakpoint the CSS
+          changes `display` on the table, the rows and the cells to turn each
+          row into a record (§54), and a browser drops table semantics the
+          moment display changes. Stating the roles keeps the thing a table for
+          a screen reader at every width. */}
+      <div class="tbl-scroll dtx-scroll">
+        <table class="dtx-table" role="table" aria-labelledby={capId}>
+          {/*
+            The id sits on the caption's TEXT and not on the whole <caption>.
+            aria-labelledby concatenates everything inside the element it points
+            at, so with the id on the caption a table carrying a note would be
+            announced as "Registrations, entries recorded before the transfer
+            window are held in a separate register, table" — a paragraph read
+            out as a name, every time the reader enters the table. The note is
+            still in the caption, still read in reading order, and no longer
+            part of what the table is called.
+          */}
+          <caption class="dtx-caption">
+            <span id={capId}>{caption}</span>
+            {note && <span class="dtx-note">{note}</span>}
+          </caption>
+
+          <thead role="rowgroup">
+            <tr role="row">
+              {selectable && (
+                <th scope="col" role="columnheader" class="dtx-selh">
+                  <span class="dtx-allwrap" data-dtx-allwrap hidden>
+                    <input type="checkbox" class="dtx-check" data-dtx-all aria-label={`Select every ${nounOne} on this page`} />
+                  </span>
+                  <span class="dtx-sr">Select</span>
+                </th>
+              )}
+
+              {columns.map((c) => (
+                <th
+                  scope="col"
+                  role="columnheader"
+                  class:list={['dtx-h', alignOf(c)]}
+                  style={c.width ? `width:${c.width}` : undefined}
+                  aria-sort={c.sortable ? ariaSort(q.sort, c.key) : undefined}
+                >
+                  {c.sortable ? (
+                    <button
+                      type="submit"
+                      form={qFormId}
+                      name={`${prefix}sort`}
+                      value={nextSort(q.sort, c.key, c.initialDir)}
+                      class="dtx-sortbtn"
+                    >
+                      <span>{c.header}</span>
+                      <span class="dtx-sr">, {nextDirLabel(c)}</span>
+                      <span class="dtx-arrow" aria-hidden="true">
+                        {q.sort && q.sort.key === c.key ? (q.sort.dir === 'asc' ? '↑' : '↓') : '↕'}
+                      </span>
+                    </button>
+                  ) : (
+                    <span>{c.header}</span>
+                  )}
+                  {c.hint && <span class="dtx-hint">{c.hint}</span>}
+                </th>
+              ))}
+
+              {collapsible && (
+                <th scope="col" role="columnheader" class="dtx-moreh"><span class="dtx-sr">Record</span></th>
+              )}
+            </tr>
+          </thead>
+
+          <tbody role="rowgroup">
+            {pageRows.map((r, ri) => {
+              const rid = rowId ? rowId(r) : null;
+              const rowDomId = `${id}-r${ri}`;
+              const rowLabel = labelOf(r);
+              return (
+                <tr role="row" id={rowDomId} data-dtx-row-el>
+                  {/*
+                    The cell is rendered whenever the table is selectable, even
+                    for a row whose id came back empty. Dropping the <td> would
+                    shift every remaining cell in that row one column to the
+                    left, silently filing each value under the wrong heading —
+                    and a table that mislabels a value is worse than a table
+                    that admits one row cannot be ticked.
+                  */}
+                  {selectable && (
+                    <td role="cell" class="dtx-sel" data-keep="y">
+                      {rid ? (
+                        <input
+                          type="checkbox"
+                          class="dtx-check"
+                          form={bFormId}
+                          name={selField}
+                          value={rid}
+                          data-dtx-row
+                          aria-label={`Select ${rowLabel}`}
+                        />
+                      ) : (
+                        <span class="dtx-sr">This record carries no identifier, so it cannot be selected.</span>
+                      )}
+                    </td>
+                  )}
+
+                  {columns.map((c, ci) => {
+                    const C = c.component as any;
+                    const link = c.href ? c.href(r) : null;
+                    return (
+                      <td
+                        role="cell"
+                        class:list={['dtx-c', alignOf(c), c.numeric && 'dtx-num']}
+                        data-label={c.header}
+                        data-keep={isPrimary(c, ci) ? 'y' : undefined}
+                      >
+                        {c.status ? (
+                          <Status value={statusValue(c, r)} domain={statusDomain(c)} />
+                        ) : C ? (
+                          <C {...(c.componentProps ? c.componentProps(r) : { value: r[c.key], row: r })} />
+                        ) : link ? (
+                          <a class="dtx-link" href={link}>{text(c, r)}</a>
+                        ) : (
+                          text(c, r)
+                        )}
+                      </td>
+                    );
+                  })}
+
+                  {collapsible && (
+                    <td role="cell" class="dtx-more" data-keep="y">
+                      <button
+                        type="button"
+                        class="dtx-expand"
+                        aria-controls={rowDomId}
+                        data-dtx-expand
+                        data-row-label={rowLabel}
+                        hidden
+                      >
+                        <span class="dtx-expand-txt">More</span>
+                        <span class="dtx-sr" data-dtx-expand-sr>fields for {rowLabel}</span>
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* ── Pagination ─────────────────────────────────────────────────
+          Links, because moving to page three is navigation and navigation is
+          what a link is for: it is shareable, it is in the history, and the
+          Back button returns to page two. */}
+      <nav class="dtx-pager" aria-label={`${caption}: pages`}>
+        <p class="dtx-range">
+          {total === null
+            ? `Showing ${NUM.format(range.from)}–${NUM.format(range.to)}`
+            : `Showing ${NUM.format(range.from)}–${NUM.format(range.to)} of ${NUM.format(total)}`}
+        </p>
+
+        {showPager && (
+          <ul class="dtx-pages">
+            <li>
+              {hasPrev ? (
+                <a class="dtx-page" rel="prev" href={pageHref(qv, viewPage - 1)}>Previous</a>
+              ) : (
+                <span class="dtx-page dtx-page-off" aria-disabled="true">Previous</span>
+              )}
+            </li>
+
+            {pageItems.map((it) => (
+              <li class:list={[it.kind === 'gap' && 'dtx-gap']} aria-hidden={it.kind === 'gap' ? 'true' : undefined}>
+                {it.kind === 'gap' ? (
+                  '…'
+                ) : it.n === viewPage ? (
+                  <span class="dtx-page dtx-page-now" aria-current="page">{it.n}</span>
+                ) : (
+                  <a class="dtx-page" href={pageHref(qv, it.n)}>{it.n}</a>
+                )}
+              </li>
+            ))}
+
+            <li>
+              {hasNext ? (
+                <a class="dtx-page" rel="next" href={pageHref(qv, viewPage + 1)}>Next</a>
+              ) : (
+                <span class="dtx-page dtx-page-off" aria-disabled="true">Next</span>
+              )}
+            </li>
+          </ul>
+        )}
+      </nav>
+    </Fragment>
+  )}
+</div>
+
+<style>
+  .dtx { min-width: 0; }
+  .dtx [hidden] { display: none !important; }
+
+  .dtx-sr {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* Permission boundary, and the empty register with nowhere to go. */
+  .dtx-denied {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    border-radius: var(--radius);
+    background: var(--card-2);
+    padding: var(--space-5);
+  }
+  .dtx-denied-msg {
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    color: var(--white);
+    max-width: var(--max-w-prose);
+  }
+  .dtx-denied-need {
+    margin-top: var(--space-3);
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .dtx-denied-need code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--gold-2);
+  }
+
+  /* ── Caption ── */
+  .dtx-caption {
+    caption-side: top;
+    text-align: left;
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--white);
+    padding: 0 0 var(--space-3);
+  }
+  .dtx-caption-solo { margin-bottom: var(--space-3); }
+  .dtx-note {
+    display: block;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 400;
+    letter-spacing: var(--tracking-normal);
+    text-transform: none;
+    line-height: var(--leading-normal);
+    color: var(--muted);
+    margin-top: var(--space-2);
+    max-width: var(--max-w-prose);
+  }
+
+  /* ── Toolbar ── */
+  .dtx-tools {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    margin-bottom: var(--space-4);
+  }
+  .dtx-tools-bare { background: none; border: 0; padding: 0; margin: 0; }
+
+  .dtx-tools-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-3);
+  }
+  .dtx-field { flex: 1 1 190px; min-width: 0; }
+  .dtx-field-per { flex: 0 0 auto; }
+  .dtx-field-go {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+  .dtx-input { min-height: 44px; }
+  .dtx-apply { padding: var(--space-3) var(--space-6); }
+  .dtx-clear {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--gold-2);
+    border-bottom: 1px solid var(--gold-dim);
+  }
+  .dtx-clear:hover { color: var(--gold-3); }
+
+  /* ── Saved views (§83) ── */
+  .dtx-saved {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    margin-bottom: var(--space-4);
+  }
+  .dtx-saved > summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 var(--space-4);
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .dtx-saved > summary:hover { color: var(--gold-2); }
+  .dtx-saved-body {
+    padding: 0 var(--space-4) var(--space-4);
+    display: grid;
+    gap: var(--space-4);
+  }
+  .dtx-saved-note {
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
+    color: var(--muted);
+    max-width: var(--max-w-prose);
+  }
+  .dtx-saved-list { list-style: none; display: grid; gap: var(--space-2); }
+  .dtx-saved-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding-left: var(--space-3);
+  }
+  .dtx-saved-list a {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    font-size: var(--text-sm);
+    color: var(--white);
+    overflow-wrap: anywhere;
+  }
+  .dtx-saved-list a:hover { color: var(--gold-2); }
+  .dtx-saved-list button {
+    background: none;
+    border: 0;
+    min-height: 44px;
+    padding: 0 var(--space-3);
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .dtx-saved-list button:hover { color: var(--red-2); }
+  .dtx-saved-new-row { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+  .dtx-saved-new-row .dtx-input { flex: 1 1 200px; }
+
+  /* ── Bulk bar (§82) ── */
+  .dtx-bulk {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card-2);
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-3);
+  }
+  .dtx-bulk-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+  .dtx-count {
+    font-size: var(--text-sm);
+    color: var(--white);
+    min-width: 0;
+  }
+  .dtx-bulk-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+  .dtx-bulk-actions .btn { padding: var(--space-3) var(--space-5); }
+  .dtx-danger { color: var(--red-2); border-color: var(--red-3); }
+  .dtx-danger:hover { border-color: var(--red); color: var(--red); }
+
+  .dtx-scope { margin-top: var(--space-3); }
+  .dtx-scope-btn {
+    background: none;
+    border: 0;
+    padding: var(--space-2) 0;
+    min-height: 44px;
+    font-size: var(--text-sm);
+    color: var(--gold-2);
+    text-align: left;
+    border-bottom: 1px solid var(--gold-dim);
+  }
+  .dtx-scope-btn[aria-pressed='true'] { color: var(--gold-3); font-weight: 600; }
+  .dtx-scope-note {
+    margin-top: var(--space-3);
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
+    color: var(--muted);
+    max-width: var(--max-w-prose);
+  }
+
+  /* ── Table ── */
+  .dtx-scroll {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    max-width: 100%;
+  }
+  .dtx-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: var(--text-sm);
+  }
+  .dtx-table th,
+  .dtx-table td {
+    text-align: left;
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    overflow-wrap: anywhere;
+  }
+  .dtx-table th {
+    background: var(--card-2);
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .dtx-table tbody tr:last-child td { border-bottom: 0; }
+  .dtx-table td { color: var(--off-white); }
+  .dtx-a-end { text-align: right; }
+  .dtx-a-center { text-align: center; }
+  .dtx-num { font-variant-numeric: tabular-nums; }
+  .dtx-link { color: var(--white); border-bottom: 1px solid var(--gold-dim); }
+  .dtx-link:hover { color: var(--gold-2); }
+
+  .dtx-sortbtn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: none;
+    border: 0;
+    padding: 0;
+    min-height: 44px;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+  .dtx-sortbtn:hover { color: var(--gold-2); }
+  .dtx-arrow { color: var(--gold-2); font-size: var(--text-sm); }
+  /* WCAG 1.4.3: --muted-2 is 1.87:1 and global.css marks it decorative only.
+     The unsorted arrow is a glyph a reader is meant to see, so it takes --muted.
+     aria-sort already carries the state for anyone not looking at colour. */
+  .dtx-h[aria-sort='none'] .dtx-arrow { color: var(--muted); }
+  .dtx-hint {
+    display: block;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-normal);
+    text-transform: none;
+    color: var(--muted);
+    white-space: normal;
+    max-width: 24ch;
+    margin-top: var(--space-1);
+  }
+
+  .dtx-selh, .dtx-sel { width: 1%; white-space: nowrap; }
+  /* WCAG 2.5.8 asks for 24 CSS pixels, and asks it of the CONTROL — margin
+     around a checkbox moves its neighbours, it does not enlarge the box the
+     pointer has to hit. So the box itself is 24px, and the spacing below only
+     keeps the next target clear of it. */
+  .dtx-check {
+    width: var(--space-6);
+    height: var(--space-6);
+    accent-color: var(--red);
+    cursor: pointer;
+  }
+  .dtx-sel, .dtx-selh { padding: var(--space-2) var(--space-4); }
+  .dtx-sel .dtx-check, .dtx-selh .dtx-check { margin: var(--space-2) 0; }
+
+  .dtx-moreh, .dtx-more { width: 1%; }
+  .dtx-expand {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 var(--space-3);
+    background: none;
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .dtx-expand:hover { border-color: var(--gold-dim); color: var(--gold-2); }
+
+  /* ── Pagination ── */
+  .dtx-pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+  }
+  .dtx-range {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .dtx-pages { list-style: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); }
+  .dtx-page {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--off-white);
+    font-variant-numeric: tabular-nums;
+  }
+  a.dtx-page:hover { border-color: var(--gold-dim); color: var(--gold-2); }
+  .dtx-page-now { border-color: var(--gold); color: var(--gold-2); font-weight: 600; }
+  /* A disabled page control. WCAG exempts inactive components from contrast,
+     and this project's guard is deliberately absolute — so 'disabled' is shown
+     by removing the affordance (no border tint, no hover, no pointer) rather
+     than by making the number too faint to read. */
+  .dtx-page-off {
+    color: var(--muted);
+    border-color: transparent;
+    pointer-events: none;
+  }
+  .dtx-gap { color: var(--muted); padding: 0 var(--space-1); }
+
+  /* ═══ §54: below the breakpoint every row becomes a RECORD ═══
+     Nine columns in a 360px viewport are unreadable however far they slide, so
+     this is not a horizontal scroll. Each row becomes a card, each cell prints
+     its column name above its value, and everything past the record's title
+     folds away behind one button.
+
+     The breakpoint is written out because a media query cannot read a custom
+     property; 760px is the same figure global.css uses for .tbl-scroll's own
+     mobile affordance, and the two must agree. */
+  @media (max-width: 760px) {
+    .dtx-scroll {
+      overflow-x: visible;
+      background: none;
+      border: 0;
+      border-radius: 0;
+    }
+    .dtx-table { display: block; }
+    .dtx-table > caption { display: block; }
+    .dtx-table > thead {
+      position: absolute;
+      width: 1px; height: 1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .dtx-table > tbody { display: block; }
+    .dtx-table > tbody > tr {
+      display: block;
+      position: relative;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--card);
+      padding: var(--space-4);
+      /* Room for the absolutely positioned More button, which is 44px wide. */
+      padding-right: var(--space-16);
+      margin-bottom: var(--space-3);
+    }
+    .dtx-table > tbody > tr > td {
+      display: block;
+      width: auto;
+      border-bottom: 0;
+      padding: var(--space-2) 0;
+      text-align: left;
+    }
+    .dtx-table > tbody > tr > td::before {
+      content: attr(data-label);
+      display: block;
+      font-family: var(--font-display);
+      font-size: var(--text-xs);
+      letter-spacing: var(--tracking-wide);
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: var(--space-1);
+    }
+    .dtx-table > tbody > tr > td.dtx-sel::before,
+    .dtx-table > tbody > tr > td.dtx-more::before { content: none; }
+
+    /* The record's title, and the one cell that reads as a heading. */
+    .dtx-table > tbody > tr > td[data-keep]:not(.dtx-sel):not(.dtx-more) {
+      font-size: var(--text-md);
+      color: var(--white);
+    }
+
+    /* Collapsed: only what the row is called, and its status. Set by the
+       script; without JavaScript every field stays on screen, which is the
+       right failure — too much information rather than none. */
+    .dtx-table > tbody > tr[data-collapsed] > td:not([data-keep]) { display: none; }
+
+    .dtx-more {
+      position: absolute;
+      top: var(--space-3);
+      right: var(--space-3);
+      padding: 0;
+      width: auto;
+    }
+    .dtx-sel { padding: 0 0 var(--space-2); }
+    .dtx-sel .dtx-check { margin: 0; }
+
+    .dtx-tools-row { gap: var(--space-4); }
+    .dtx-field, .dtx-field-per, .dtx-field-go { flex: 1 1 100%; }
+    .dtx-pager { justify-content: flex-start; }
+  }
+</style>
+
+<script>
+  // Everything below is an ACCELERATOR. The table already filters, sorts, pages
+  // and posts a selection without any of it — see the header comment. What this
+  // adds is the running count, the select-all, the record collapse on a phone,
+  // and the saved views, and every control it operates is rendered `hidden` so
+  // that a control which cannot work is never on screen.
+
+  type El = HTMLElement;
+
+  const BREAKPOINT = '(max-width: 760px)';
+  const viewsKey = (id: string) => `mmakf.datatable.views.${id}`;
+
+  function setup(root: El) {
+    const id = root.getAttribute('data-dtx') || '';
+    const totalAttr = root.getAttribute('data-total');
+    const total = totalAttr === null ? null : Number(totalAttr);
+    const one = root.getAttribute('data-noun-one') || 'row';
+    const many = root.getAttribute('data-noun-many') || 'rows';
+
+    // ── Selection (§82) ────────────────────────────────────────────────────
+    const boxes = Array.from(
+      root.querySelectorAll<HTMLInputElement>('input[data-dtx-row]'),
+    );
+    const all = root.querySelector<HTMLInputElement>('input[data-dtx-all]');
+    const allWrap = root.querySelector<El>('[data-dtx-allwrap]');
+    const count = root.querySelector<El>('[data-dtx-count]');
+    const scope = root.querySelector<HTMLInputElement>('input[data-dtx-scope]');
+    const matchAll = root.querySelector<HTMLButtonElement>('[data-dtx-matchall]');
+    const matchWrap = root.querySelector<El>('[data-dtx-matchwrap]');
+    const actions = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-dtx-action]'));
+
+    if (boxes.length) {
+      if (allWrap) allWrap.hidden = false;
+      if (matchWrap) matchWrap.hidden = false;
+    }
+
+    function everythingMatching(): boolean {
+      return !!scope && scope.value === 'filtered';
+    }
+
+    function say() {
+      const n = boxes.filter((b) => b.checked).length;
+      if (all) {
+        all.checked = n > 0 && n === boxes.length;
+        // Neither ticked nor unticked is the truthful state for a partial
+        // selection, and the tri-state box is the only control that can say so.
+        all.indeterminate = n > 0 && n < boxes.length;
+      }
+      // An action that would post an empty selection is not offered. The button
+      // is enabled again the moment there is something to act on, so this is a
+      // JavaScript nicety and not the guard — the endpoint must refuse an empty
+      // set as well, because none of this runs when the script does not.
+      for (const b of actions) b.disabled = n === 0 && !everythingMatching();
+
+      if (!count) return;
+
+      let next: string;
+      if (everythingMatching() && total !== null) {
+        next = `All ${total} ${total === 1 ? one : many} matching the current filters are selected.`;
+      } else if (n === 0) {
+        next = `Tick ${many} below, then choose an action.`;
+      } else if (total !== null && n === total) {
+        // One page IS the whole filtered set here, so say that rather than
+        // leaving the reader to wonder what is off screen.
+        next = `All ${n} ${n === 1 ? one : many} matching the current filters are selected.`;
+      } else {
+        next = `${n} ${n === 1 ? one : many} selected on this page.`;
+      }
+
+      // Written only when it has actually changed. This is a role="status"
+      // region, so every assignment is an announcement — and the first call
+      // happens during setup, when the wording is already what the server
+      // rendered. Assigning it anyway would interrupt a screen-reader user
+      // reading the page to tell them nothing has happened yet.
+      if (count.textContent?.trim() !== next) count.textContent = next;
+    }
+
+    function setMatchAll(on: boolean) {
+      if (scope) scope.value = on ? 'filtered' : 'selection';
+      if (matchAll) matchAll.setAttribute('aria-pressed', on ? 'true' : 'false');
+      for (const b of boxes) b.checked = on;
+      say();
+    }
+
+    for (const b of boxes) {
+      b.addEventListener('change', () => {
+        // Untick anything and the reader is no longer asking for "everything
+        // matching" — the claim would stop being true the instant it was made.
+        if (everythingMatching() && !b.checked) setMatchAll(false);
+        else say();
+      });
+    }
+
+    if (all) {
+      all.addEventListener('change', () => {
+        for (const b of boxes) b.checked = all.checked;
+        if (!all.checked && everythingMatching()) setMatchAll(false);
+        else say();
+      });
+    }
+
+    if (matchAll) {
+      matchAll.addEventListener('click', () => {
+        setMatchAll(matchAll.getAttribute('aria-pressed') !== 'true');
+      });
+    }
+
+    for (const b of actions) {
+      const confirmText = b.getAttribute('data-confirm');
+      if (!confirmText) continue;
+      b.addEventListener('click', (e) => {
+        if (!window.confirm(confirmText)) e.preventDefault();
+      });
+    }
+
+    if (boxes.length) say();
+
+    // ── §54: records collapse on a phone ───────────────────────────────────
+    const rowEls = Array.from(root.querySelectorAll<El>('tr[data-dtx-row-el]'));
+    const expanders = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-dtx-expand]'));
+    const narrow = window.matchMedia(BREAKPOINT);
+
+    function label(btn: HTMLButtonElement, open: boolean) {
+      const txt = btn.querySelector<El>('.dtx-expand-txt');
+      const sr = btn.querySelector<El>('[data-dtx-expand-sr]');
+      const name = btn.getAttribute('data-row-label') || 'this record';
+      if (txt) txt.textContent = open ? 'Less' : 'More';
+      if (sr) sr.textContent = `fields for ${name}`;
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    function applyLayout() {
+      for (const btn of expanders) {
+        btn.hidden = !narrow.matches;
+        const tr = btn.closest('tr');
+        if (!tr) continue;
+        if (narrow.matches) {
+          const open = tr.hasAttribute('data-open');
+          if (!open) tr.setAttribute('data-collapsed', '');
+          label(btn, open);
+        } else {
+          tr.removeAttribute('data-collapsed');
+          btn.removeAttribute('aria-expanded');
+        }
+      }
+      if (!narrow.matches) for (const tr of rowEls) tr.removeAttribute('data-collapsed');
+    }
+
+    for (const btn of expanders) {
+      btn.addEventListener('click', () => {
+        const tr = btn.closest('tr');
+        if (!tr) return;
+        const open = tr.hasAttribute('data-open');
+        if (open) {
+          tr.removeAttribute('data-open');
+          tr.setAttribute('data-collapsed', '');
+        } else {
+          tr.setAttribute('data-open', '');
+          tr.removeAttribute('data-collapsed');
+        }
+        label(btn, !open);
+      });
+    }
+
+    if (expanders.length) {
+      applyLayout();
+      narrow.addEventListener('change', applyLayout);
+    }
+
+    // ── §83: saved views ───────────────────────────────────────────────────
+    const saved = root.querySelector<El>('[data-dtx-saved]');
+    if (!saved || !id) return;
+
+    const list = saved.querySelector<El>('[data-dtx-saved-list]');
+    const nameInput = saved.querySelector<HTMLInputElement>('[data-dtx-saved-name]');
+    const addBtn = saved.querySelector<HTMLButtonElement>('[data-dtx-saved-add]');
+
+    type View = { name: string; query: string };
+
+    function read(): View[] {
+      // localStorage throws outright in a locked-down browser profile and in
+      // private mode on some engines. A saved view is a convenience; losing it
+      // must not take the table down with it.
+      try {
+        const raw = window.localStorage.getItem(viewsKey(id));
+        const parsed: unknown = raw ? JSON.parse(raw) : [];
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter(
+          (v): v is View =>
+            !!v && typeof (v as View).name === 'string' && typeof (v as View).query === 'string',
+        );
+      } catch {
+        return [];
+      }
+    }
+
+    function write(views: View[]) {
+      try {
+        window.localStorage.setItem(viewsKey(id), JSON.stringify(views));
+      } catch {
+        /* Storage refused. The list on screen still reflects this session. */
+      }
+    }
+
+    function draw() {
+      if (!list) return;
+      const views = read();
+      list.textContent = '';
+      if (views.length === 0) {
+        const li = document.createElement('li');
+        li.className = 'dtx-saved-none';
+        li.textContent = 'No views saved yet.';
+        list.appendChild(li);
+        return;
+      }
+      for (const v of views) {
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.href = v.query || '?';
+        a.textContent = v.name;
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.textContent = 'Remove';
+        del.setAttribute('aria-label', `Remove saved view ${v.name}`);
+        del.addEventListener('click', () => {
+          write(read().filter((x) => x.name !== v.name));
+          draw();
+        });
+        li.appendChild(a);
+        li.appendChild(del);
+        list.appendChild(li);
+      }
+    }
+
+    if (addBtn) {
+      addBtn.addEventListener('click', () => {
+        const name = (nameInput?.value || '').trim().slice(0, 60);
+        if (!name) {
+          nameInput?.focus();
+          return;
+        }
+        const views = read().filter((v) => v.name !== name);
+        views.push({ name, query: window.location.search || '?' });
+        write(views);
+        if (nameInput) nameInput.value = '';
+        draw();
+      });
+    }
+
+    saved.hidden = false;
+    draw();
+  }
+
+  for (const root of Array.from(document.querySelectorAll<El>('[data-dtx]'))) setup(root);
+</script>

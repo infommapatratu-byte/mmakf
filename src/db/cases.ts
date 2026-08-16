@@ -121,11 +121,20 @@ const MEDICAL_READ: Action = 'person:read_pii';
 const MEDICAL_WRITE: Action = 'person:write';
 
 /**
- * The support desk. Tickets carry a contact email and phone, so handling one is
- * handling personal data; `person:read_pii` is the existing action that says so.
- * Raising a ticket is not gated — see raiseTicket.
+ * The support desk.
+ *
+ * Was `person:read_pii`, on the reasoning that a ticket carries a contact email
+ * and phone so handling one is handling personal data. True, but it made the
+ * desk a side effect of holding PII authority for some other reason — which
+ * gave the safeguarding officer the general help desk, and gave the help desk
+ * to nobody whose job it actually was. SUPPORT_AGENT holds 'support:read' and
+ * deliberately not 'person:read_pii'.
+ *
+ * Scope is unchanged: assertTicketDesk still resolves the raiser's unit and
+ * checks the action THERE, so a dojo administrator sees their own dojo's
+ * tickets and no others. Raising a ticket remains ungated — see raiseTicket.
  */
-const SUPPORT_DESK: Action = 'person:read_pii';
+const SUPPORT_DESK: Action = 'support:read';
 
 async function subjectScope(db: DB, personId: number | null | undefined) {
   if (personId == null) return null;

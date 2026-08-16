@@ -1,0 +1,654 @@
+---
+// The lead pipeline — every enquiry the federation has received, and the
+// channel that introduced it.
+//
+// A LEAD AND AN INSTITUTIONAL APPLICATION ARE NOT THE SAME OBJECT, and this
+// page must never present them as one. An application (/admin/applications) is
+// a school formally asking for a programme, and submitting one also records the
+// enquiry here — though NOT always as a new row. submitApplication() calls
+// captureLead(), which folds the enquiry into the applicant's open lead when
+// they already have one, and which is wrapped in a try/catch: an application
+// whose lead could not be written is filed with a `lead_failed` event against
+// itself and never appears here at all. So the count of applications and the
+// count of leads are not two views of one number, and this page must not be
+// read as if they were.
+// A lead can exist with no application behind it at all — somebody who found a
+// video, sent one email, and has filled in nothing. Collapsing the two screens
+// would either hide those enquiries or imply an application nobody submitted.
+// They are shown as linked, never as equal: a lead's training requests appear
+// on its detail panel, and an application reaches this page only as the lead it
+// was folded into.
+//
+// A LEAD IS ALSO NOT A MEMBER. Until somebody identifies it against a canonical
+// institution or person, an enquiry is an enquiry — it is not on the register
+// /verify answers from. The detail panel says which of the two a row is.
+//
+// Rows are scope-filtered in SQL by leadPipeline(); nothing here filters an
+// array to decide who may see what. A lead with no unit attached is national-
+// only by that function's fail-closed reading, which is why a state account can
+// see fewer leads than it might expect.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THIS PAGE NOW RENDERS THROUGH THE SHARED SYSTEM, AND WHY
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// PageHeader (§12) carries the pipeline as its tab strip. The nine stages were
+// a bespoke `.pipe` list with its own counting, its own colours and its own
+// idea of what "current" meant; they are real links to real querystrings, which
+// is exactly what PageHeader's tabs are, and the counts on them are counted
+// from rows this page actually read.
+//
+// Status.astro (§102) draws every status. The old `.pill` here painted `won`,
+// `lost` and `dormant` in one grey, so a pipeline could not be triaged at a
+// glance — which is the entire job of a pipeline.
+//
+// DataTable (§97, PART AL) is the register. It replaces a wide table AND a
+// duplicate card list that had to be edited twice for every change, and it is
+// what supplies filtering, ordering, paging and the phone layout.
+//
+// ONE BEHAVIOUR CHANGED, DELIBERATELY. The filtered list used to be a SECOND
+// SQL query with its own limit, while the stage counts came from the first.
+// Two windows, presented as one screen: selecting `qualified` could list a lead
+// that the counts above it had never seen. There is now one read, the counts
+// and the rows come from it, and its size is stated on the table rather than
+// implied.
+
+import AdminShell from '@/components/AdminShell.astro';
+import PageHeader from '@/components/PageHeader.astro';
+import Status from '@/components/Status.astro';
+import Table from '@/components/DataTable/Table.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import type { Column, Filter } from '@/components/DataTable/types';
+import { readTableQuery, type TableQuery } from '@/components/DataTable/query';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes, ForbiddenError } from '@/lib/rbac';
+import {
+  leadPipeline, leadDetail, sourceAttribution, isEngagementError,
+  LEAD_SOURCES, AUDIENCES, type Audience,
+} from '@/db/engagement';
+// Whether a fee framework is published is a fact about the database, and
+// /admin/fees can change it. Read it rather than assert it — see below.
+import { activeFramework } from '@/db/fees';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+// The nine states, in the order the schema declares them — which is the order a
+// lead travels. Sorting this strip by volume would put the fullest column first
+// and stop it being a pipeline.
+const PIPELINE = [
+  'new', 'qualifying', 'qualified', 'quoted', 'proposed',
+  'won', 'lost', 'dormant', 'disqualified',
+] as const;
+
+// Both filters are validated against the enum rather than passed through, so a
+// hand-typed query string cannot reach the SQL builder — or the table's own
+// filtering — with a value the column has never held.
+const statusParam = Astro.url.searchParams.get('status') ?? '';
+const status = (PIPELINE as readonly string[]).includes(statusParam) ? statusParam : '';
+const audienceParam = Astro.url.searchParams.get('audience') ?? '';
+const audience: Audience | '' =
+  (AUDIENCES as readonly string[]).includes(audienceParam) ? (audienceParam as Audience) : '';
+
+const leadParam = Astro.url.searchParams.get('lead') ?? '';
+const leadId = /^[0-9]{1,9}$/.test(leadParam) ? Number(leadParam) : null;
+
+const BOARD_LIMIT = 500;   // leadPipeline() caps here anyway
+
+interface Attribution { source: string; total: number; won: number; wonOf: string }
+
+let board: any[] = [];
+let boardTruncated = false;
+let scope: 'all' | 'scoped' | 'none' = 'none';
+let attribution: Attribution[] = [];
+let attributionExact = true;
+let detail: any = null;
+let detailProblem: string | null = null;
+let detailFailure: string | null = null;
+
+// THREE ABSENCES, NOT ONE (CONTENT-ARCHITECTURE §5.4). "There is no database on
+// this deployment", "the read failed" and "there are no leads" are different
+// facts and are told in different words by different components. They used to
+// share one `unavailable` string, which meant an unconfigured deployment —
+// the state production is actually in — was reported as a fault.
+let notConfigured = false;
+let readError: string | null = null;
+
+// Three states, not two. "Could not tell" is a real answer here: the pipeline
+// does not depend on the fee framework, so a failure to read it must not take
+// the page down — and it must not be reported as "none is published" either.
+let framework: 'published' | 'none' | 'unknown' = 'unknown';
+
+if (principal && canAnywhere(principal, 'engagement:read')) {
+  if (!isConfigured()) {
+    notConfigured = true;
+  } else {
+    try {
+      // ONE read, scoped in SQL. The stage counts, the attribution and the rows
+      // in the table are all taken from it, so the three cannot disagree.
+      // Filtering by stage or audience is then done by the table over the same
+      // rows rather than by a second query with its own window.
+      const all = await leadPipeline(db(), principal, { limit: BOARD_LIMIT });
+      board = all.rows;
+      boardTruncated = all.truncated;
+      scope = all.scope;
+
+      // ── Attribution, and why there are two paths to it ──────────────────
+      // sourceAttribution() aggregates every lead in the table with no scope
+      // predicate. That is right for a national account and wrong for a state
+      // one: it would tell one state how many enquiries another received.
+      // A scoped account therefore has its figures counted from rows the SQL
+      // scope predicate has already returned — and the price of that honesty
+      // is that they stop at BOARD_LIMIT, which is declared to the reader
+      // rather than hidden.
+      const scopes = visibleScopes(principal, 'engagement:read');
+      if (scopes.kind === 'all') {
+        attribution = await sourceAttribution(db(), principal);
+        attributionExact = true;
+      } else {
+        const by = new Map<string, { total: number; won: number }>();
+        for (const r of board) {
+          const key = String(r.firstSource ?? 'unknown');
+          const entry = by.get(key) ?? { total: 0, won: 0 };
+          entry.total += 1;
+          if (r.status === 'won') entry.won += 1;
+          by.set(key, entry);
+        }
+        attribution = [...by.entries()]
+          .map(([source, v]) => ({ source, total: v.total, won: v.won, wonOf: `${v.won} of ${v.total}` }))
+          .sort((a, b) => b.total - a.total);
+        attributionExact = !boardTruncated;
+      }
+
+      if (leadId != null) {
+        try {
+          detail = await leadDetail(db(), principal, leadId);
+        } catch (err: any) {
+          if (isEngagementError(err) || err instanceof ForbiddenError) {
+            // ONE message for "no such lead" and for "outside your scope". They
+            // are different failures and telling them apart would let anyone
+            // with engagement:read count the federation's leads in states that
+            // are not theirs by walking the identifiers.
+            //
+            // This is a BOUNDARY, so it is prose and not an ErrorState: nothing
+            // failed, and dressing a refusal as a fault sends the reader to
+            // report a bug that does not exist.
+            detailProblem = 'No lead with that identifier is visible to this account.';
+          } else {
+            // Anything else is the read failing, which is not a judgement about
+            // the lead. Reporting it as "not visible to this account" would be a
+            // claim about authorisation that nothing here established.
+            detailFailure = String(err?.message ?? err);
+          }
+        }
+      }
+    } catch (err: any) {
+      readError = String(err?.message ?? err);
+    }
+
+    // Separate from the pipeline read, and deliberately after it: the page is
+    // about leads, and a fee framework that cannot be read is a footnote rather
+    // than a reason to show nothing. Skipped once the pipeline itself has
+    // failed, since the sentence it feeds is not rendered on that branch.
+    if (!readError) {
+      try {
+        framework = (await activeFramework(db(), new Date().toISOString().slice(0, 10)))
+          ? 'published'
+          : 'none';
+      } catch {
+        framework = 'unknown';
+      }
+    }
+  }
+}
+
+const label = (v: unknown) => String(v ?? '').replace(/_/g, ' ');
+const countIn = (s: string) => board.filter((r) => r.status === s).length;
+
+const asDate = (v: unknown) => {
+  if (!v) return null;
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+const fmt = (v: unknown) => {
+  const d = asDate(v);
+  return d ? d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+};
+const fmtAt = (v: unknown) => {
+  const d = asDate(v);
+  return d
+    ? d.toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '—';
+};
+
+/** Filters are preserved across every link, so opening a lead does not lose the view. */
+const listHref = (over: { status?: string; audience?: string; lead?: number }) => {
+  const q = new URLSearchParams();
+  const st = over.status !== undefined ? over.status : status;
+  const au = over.audience !== undefined ? over.audience : audience;
+  if (st) q.set('status', st);
+  if (au) q.set('audience', au);
+  if (over.lead) q.set('lead', String(over.lead));
+  const qs = q.toString();
+  return `${h('/admin/leads')}${qs ? `?${qs}` : ''}${over.lead ? '#lead' : ''}`;
+};
+
+// Channels the enum knows about that have introduced nobody. Worth naming: a
+// channel with no leads is a finding about the federation's outreach, and it is
+// invisible if the table only lists the channels that did produce something.
+//
+// It is only SAID when the counts behind it are complete. A channel missing
+// from the 500 most recently changed leads has not been shown to have
+// introduced nobody — it has been shown to be absent from a sample — and
+// printing "no lead has arrived through youtube" on that basis would be a
+// finding this page invented. Hence the attributionExact guard at the call
+// site, and the scoped wording below.
+const heard = new Set(attribution.map((a) => a.source));
+const silent = LEAD_SOURCES.filter((s) => !heard.has(s));
+const silentLead = scope === 'scoped'
+  ? 'No lead in this account’s own states and districts has arrived through'
+  : 'No lead has arrived through';
+
+/** utm is open JSON; only string-able, non-empty entries are shown. */
+const utmEntries = (v: unknown): [string, string][] =>
+  v && typeof v === 'object' && !Array.isArray(v)
+    ? Object.entries(v as Record<string, unknown>)
+        .filter(([, x]) => x !== null && x !== undefined && x !== '')
+        .map(([k, x]) => [k, String(x)] as [string, string])
+    : [];
+
+// ─── The table ──────────────────────────────────────────────────────────────
+//
+// The contact's email address and telephone number are deliberately NOT
+// columns. They are on the detail panel instead, because a list gets
+// photographed on a phone and forwarded, and a register of contact details is a
+// different disclosure from a register of enquiries.
+const leadColumns: Column[] = [
+  {
+    key: 'ref', header: 'Reference', primary: true, sortable: true,
+    href: (r: any) => listHref({ lead: r.id }),
+  },
+  {
+    key: 'contactName', header: 'Contact', primary: true, sortable: true,
+    // "not given" rather than an em dash. A blank in this column means the
+    // enquiry arrived without a name, which is a fact about the enquiry.
+    render: (r: any) => r.contactName ?? 'not given',
+  },
+  { key: 'audience', header: 'Audience', render: (r: any) => label(r.audience) },
+  // The city as it was typed. leadPipeline returns unit IDs, not unit names,
+  // and "state 7" tells an administrator nothing — so the id is not printed as
+  // if it were a place.
+  { key: 'city', header: 'City', render: (r: any) => r.city ?? 'not given' },
+  { key: 'status', header: 'Status', status: { domain: 'lead' } },
+  { key: 'firstSource', header: 'Introduced by', render: (r: any) => label(r.firstSource) },
+  { key: 'lastSource', header: 'Last touch', render: (r: any) => label(r.lastSource) },
+  {
+    key: 'updatedAt', header: 'Last change', sortable: true, initialDir: 'desc',
+    render: (r: any) => fmt(r.updatedAt),
+  },
+];
+
+const leadFilters: Filter[] = [
+  {
+    key: 'status', label: 'Stage', type: 'select', anyLabel: 'Every stage',
+    options: PIPELINE.map((s) => ({ value: s, label: label(s) })),
+  },
+  {
+    key: 'audience', label: 'Audience', type: 'select', anyLabel: 'All audiences',
+    options: AUDIENCES.map((a) => ({ value: a, label: label(a) })),
+  },
+];
+
+// The table reads its own sort, page and page-size out of the URL, and then the
+// FILTER values are replaced with the ones validated against the enum above.
+// Left alone, `?status=nonsense` would match no row and empty the table under a
+// header saying no filter had been applied — the same divergence between what a
+// screen claims and what it shows that this page has been bitten by before.
+const leadQuery: TableQuery = {
+  ...readTableQuery(Astro.url, {
+    sortable: ['ref', 'contactName', 'updatedAt'],
+    filters: ['status', 'audience'],
+    defaultSort: { key: 'updatedAt', dir: 'desc' },
+  }),
+  filters: {
+    ...(status ? { status } : {}),
+    ...(audience ? { audience } : {}),
+  },
+};
+
+const attributionColumns: Column[] = [
+  { key: 'source', header: 'Channel', primary: true, render: (r: any) => label(r.source) },
+  { key: 'total', header: 'Leads', numeric: true, sortable: true, initialDir: 'desc' },
+  // The fraction, with its denominator. One of one and three hundred of three
+  // hundred are both a hundred per cent and mean entirely different things.
+  { key: 'wonOf', header: 'Won', align: 'end' },
+];
+
+const pipelineTabs = [
+  ...PIPELINE.map((s) => ({
+    label: label(s),
+    href: listHref({ status: s }),
+    count: countIn(s),
+    current: status === s,
+  })),
+  {
+    label: 'All stages',
+    href: listHref({ status: '' }),
+    count: board.length,
+    current: !status,
+  },
+];
+---
+
+<AdminShell
+  title="Leads"
+  requires="engagement:read"
+  intro="Every enquiry the federation has received, where it has reached, and which channel introduced it. A lead is an enquiry — it becomes a client institution or a member only when somebody identifies it as one."
+>
+  {notConfigured ? (
+    <p class="note">
+      The federation database is not reachable from this deployment, so no leads
+      can be listed. Enquiries are still arriving wherever the site is served
+      from a configured environment; this deployment simply cannot read them.
+      Nothing has been lost and nothing is waiting here.
+    </p>
+  ) : readError ? (
+    <ErrorState
+      title="The lead pipeline could not be read."
+      safe="Nothing has been changed. This was a read that failed, so no enquiry was altered, moved or lost — every lead is still where it was."
+      detail={readError}
+    />
+  ) : scope === 'none' ? (
+    <p class="note">
+      This account holds <code>engagement:read</code>, but not over any state or
+      district. A lead is located by the unit it belongs to, so a binding at
+      institution or dojo scope matches none of them and this page shows
+      nothing. That is the intended reading rather than a fault: an enquiry that
+      has not been placed in a state could belong to any of them.
+    </p>
+  ) : (
+    <>
+      {/* AdminShell prints the h1, so this header prints an h2 — a page with
+          two h1s gives a screen-reader user two competing titles. It does not
+          stick, because it heads a section rather than the page and a sticky
+          band here would cover the intro above it on the way back up. */}
+      <PageHeader
+        title="Pipeline"
+        headingLevel="h2"
+        sticky={false}
+        description="Nothing reaches quoted on its own: a lead is quoted when somebody prepares and sends a quotation. Won, lost and disqualified are closed — a further enquiry from the same contact opens a new lead rather than reviving one of these."
+        secondary={[
+          {
+            label: 'Applications',
+            href: h('/admin/applications'),
+          },
+          {
+            label: 'Fee framework',
+            href: h('/admin/fees'),
+          },
+        ]}
+        tabs={pipelineTabs}
+      >
+        <Fragment slot="meta">
+          {/* Counted, not estimated. The number is the rows this page read. */}
+          <span class="meta-chip">
+            {board.length}{boardTruncated ? '+' : ''} in scope
+          </span>
+          {scope === 'scoped' && (
+            <span class="meta-chip">this account’s own states and districts</span>
+          )}
+        </Fragment>
+      </PageHeader>
+
+      <p class="legend">
+        Counted over {boardTruncated ? `the ${BOARD_LIMIT} most recently changed leads in scope` : 'the leads in scope'},
+        which is also the set the table below filters.
+        {framework === 'none' && (
+          <> No fee framework is published for today, so every quotation this
+          pipeline reaches is prepared by hand.</>
+        )}
+        {framework === 'unknown' && (
+          <> Whether a fee framework is published could not be read just now, so
+          nothing is claimed here about how a quotation would be produced.</>
+        )}
+      </p>
+
+      <Table
+        id="leads"
+        caption="Leads in scope"
+        columns={leadColumns}
+        filters={leadFilters}
+        rows={board}
+        query={leadQuery}
+        note={boardTruncated
+          ? `The ${BOARD_LIMIT} most recently changed leads in scope. Filtering and ordering happen over those, not over the whole register.`
+          : null}
+        emptyTitle="No lead has been recorded in this scope."
+        emptyBody="A lead is recorded when somebody enquires — through an enquiry path on the site, or alongside an institutional application. An application does not always add a row here: an enquiry from a contact who already has an open lead is folded into that lead, and an application whose lead could not be written is filed against the application itself. Nothing on this page is seeded or sampled, so an empty pipeline is a fact about the enquiries the federation has received and not a fact about the database."
+        emptyAction={{ label: 'Check applications', href: h('/admin/applications') }}
+      />
+
+      <section class="attr" aria-labelledby="attr-h">
+        <h2 class="sec-h" id="attr-h">Where these enquiries came from</h2>
+        <p class="sec-p">
+          Counted on <strong>first touch</strong> — the channel that introduced
+          somebody, not the one they happened to return through. That is the one
+          worth deciding about.
+        </p>
+
+        {attribution.length === 0 ? (
+          <p class="sec-p">
+            Nothing to attribute yet: no lead has been recorded in this scope, so
+            there is no evidence here about which channels work and none is
+            estimated.
+          </p>
+        ) : (
+          <>
+            <Table
+              id="attribution"
+              caption="Leads by the channel that introduced them"
+              columns={attributionColumns}
+              rows={attribution}
+              paramPrefix="a"
+              defaultSort={{ key: 'total', dir: 'desc' }}
+              pageSize={false}
+              savedViews={false}
+            />
+
+            {silent.length > 0 && attributionExact && (
+              <p class="sec-p">
+                {silentLead} {silent.map(label).join(', ')}.
+              </p>
+            )}
+            {!attributionExact && (
+              <p class="sec-p">
+                Counted from the {BOARD_LIMIT} most recently changed leads this
+                account can see. There are more, so read these as a floor rather
+                than a total.
+              </p>
+            )}
+            {scope === 'scoped' && (
+              <p class="sec-p">
+                Counted over this account's own states and districts. The
+                national figures are deliberately not shown here: one unit's
+                enquiry volume is not another unit's to read.
+              </p>
+            )}
+          </>
+        )}
+      </section>
+
+      {leadId != null && (
+        <section class="detail" id="lead" aria-labelledby="detail-h">
+          {detailFailure ? (
+            <>
+              <h2 class="sec-h" id="detail-h">Lead not shown</h2>
+              <ErrorState
+                title="That lead could not be read."
+                safe="Nothing has been changed. The lead itself is untouched — this was a read that failed."
+                detail={detailFailure}
+                secondary={{ label: 'Back to the pipeline', href: listHref({}) }}
+              />
+            </>
+          ) : detailProblem || !detail ? (
+            <>
+              <h2 class="sec-h" id="detail-h">Lead not shown</h2>
+              <p class="sec-p">{detailProblem ?? 'That lead could not be read.'}</p>
+              <p><a class="btn btn-ghost" href={listHref({})}>Back to the pipeline</a></p>
+            </>
+          ) : (
+            <>
+              <h2 class="sec-h" id="detail-h"><code>{detail.lead.ref}</code></h2>
+              <p class="d-top">
+                <Status value={detail.lead.status} domain="lead" />
+                <span class="muted">{label(detail.lead.audience)}</span>
+              </p>
+
+              <dl class="d-list">
+                <div><dt>Contact</dt><dd>{detail.lead.contactName ?? 'not given'}</dd></div>
+                <div><dt>Email</dt><dd>{detail.lead.contactEmail ?? 'not given'}</dd></div>
+                <div><dt>Telephone</dt><dd>{detail.lead.contactPhone ?? 'not given'}</dd></div>
+                <div><dt>City</dt><dd>{detail.lead.city ?? 'not given'}</dd></div>
+                <div><dt>Introduced by</dt><dd>{label(detail.lead.firstSource)}</dd></div>
+                <div><dt>Landed on</dt><dd>{detail.lead.firstLandingPath ?? 'not recorded'}</dd></div>
+                <div><dt>Last touch</dt><dd>{label(detail.lead.lastSource)}</dd></div>
+                <div><dt>First seen</dt><dd>{fmt(detail.lead.createdAt)}</dd></div>
+                <div><dt>Last change</dt><dd>{fmt(detail.lead.updatedAt)}</dd></div>
+                {detail.lead.lostReason && (
+                  <div><dt>Reason</dt><dd>{detail.lead.lostReason}</dd></div>
+                )}
+              </dl>
+
+              {utmEntries(detail.lead.utm).length > 0 && (
+                <>
+                  <h3 class="sec-h3">Campaign parameters, as they arrived</h3>
+                  <dl class="d-list">
+                    {utmEntries(detail.lead.utm).map(([k, v]) => (
+                      <div><dt>{k}</dt><dd>{v}</dd></div>
+                    ))}
+                  </dl>
+                </>
+              )}
+
+              {/* The identification state, said plainly, because it is the
+                  difference between a prospect and a record the federation
+                  stands behind. */}
+              {detail.lead.institutionId || detail.lead.personId ? (
+                <p class="sec-p">
+                  Identified against
+                  {detail.lead.institutionId && <> an institution record (#{detail.lead.institutionId})</>}
+                  {detail.lead.institutionId && detail.lead.personId && <> and</>}
+                  {detail.lead.personId && <> a person record (#{detail.lead.personId})</>}.
+                </p>
+              ) : (
+                <p class="sec-p">
+                  Not identified against a canonical record. Until somebody
+                  identifies it, this is an enquiry: it is not a client
+                  institution and it is not on the member register.
+                </p>
+              )}
+
+              <h3 class="sec-h3">Training requests</h3>
+              <p class="sec-p">
+                What this lead has actually asked the federation to deliver. An
+                institutional application arrives as one of these; a lead may
+                have none, and an enquiry with none is still a lead.
+              </p>
+              {detail.requests.length === 0 ? (
+                <p class="sec-p muted">No training request has been recorded against this lead.</p>
+              ) : (
+                <ul class="reqs">
+                  {detail.requests.map((q: any) => (
+                    <li>
+                      <p class="r-top"><code>{q.ref}</code> <Status value={q.status} size="sm" /></p>
+                      <p class="r-meta">
+                        {label(q.audience)}
+                        {q.mode ? <> · {label(q.mode)}</> : <> · <span class="muted">delivery mode not stated</span></>}
+                        {q.preferredStartOn
+                          ? <> · preferred start {fmt(q.preferredStartOn)}</>
+                          : <> · <span class="muted">no preferred start given</span></>}
+                        {' · '}submitted {fmt(q.createdAt)}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <h3 class="sec-h3">Activity</h3>
+              {detail.activities.length === 0 ? (
+                <p class="sec-p muted">Nothing has been recorded against this lead.</p>
+              ) : (
+                <ol class="acts">
+                  {detail.activities.map((a: any) => (
+                    <li>
+                      <p class="a-s">{a.summary}</p>
+                      <p class="a-m">{label(a.kind)} · {fmtAt(a.at)}</p>
+                    </li>
+                  ))}
+                </ol>
+              )}
+
+              <p><a class="btn btn-ghost" href={listHref({})}>Back to the pipeline</a></p>
+            </>
+          )}
+        </section>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
+  }
+  .note code { font-family: var(--font-accent, monospace); }
+
+  /* The meta chips carry counts this page actually took. They are not statuses
+     and are deliberately not drawn as one — a chip that looks like a Status
+     chip and is not would teach the reader to misread both. */
+  .meta-chip {
+    font-size: var(--text-xs);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    padding: 3px 10px;
+    line-height: 1.5;
+  }
+
+  .legend { color: var(--muted); font-size: .87rem; line-height: 1.7; max-width: 66ch; margin: 18px 0 22px; }
+
+  .muted { color: var(--muted); }
+  code { font-family: var(--font-accent, monospace); font-size: .9em; }
+
+  .attr, .detail { margin-top: 34px; border-top: 1px solid var(--border); padding-top: 24px; }
+  .sec-h { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 10px; }
+  .sec-h3 { font-family: var(--font-display); font-size: .95rem; margin: 24px 0 8px; }
+  .sec-p { color: var(--muted); font-size: .88rem; line-height: 1.7; max-width: 66ch; margin: 0 0 14px; }
+
+  .d-top { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; text-transform: capitalize; }
+  .d-list { margin: 0 0 8px; display: grid; gap: 5px; max-width: 52rem; }
+  .d-list > div { display: grid; grid-template-columns: 15ch minmax(0, 1fr); gap: 14px; font-size: .88rem; }
+  .d-list dt { color: var(--muted); }
+  .d-list dd { margin: 0; overflow-wrap: anywhere; }
+
+  .reqs, .acts { list-style: none; margin: 0; padding: 0; }
+  .reqs li, .acts li { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .r-top { display: flex; align-items: center; gap: 10px; margin: 0 0 4px; }
+  .r-meta, .a-m { margin: 4px 0 0; font-size: .8rem; color: var(--muted); text-transform: capitalize; }
+  .a-s { margin: 0; font-size: .9rem; line-height: 1.6; }
+
+  .btn { margin-top: 18px; }
+
+  @media (max-width: 900px) {
+    .d-list > div { grid-template-columns: 1fr; gap: 0; }
+    .d-list dt { font-size: .78rem; }
+  }
+</style>

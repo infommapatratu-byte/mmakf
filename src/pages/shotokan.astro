@@ -1,0 +1,190 @@
+---
+// Shotokan — the sport the federation practises.
+//
+// PART P asks for indexable entity pages built on real content. This is one:
+// substantive prose about a subject MMAKF genuinely teaches, not a page built
+// around a keyword. The syllabus table is the federation's own record, and
+// nothing here adds a requirement MMAKF has not set.
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const syllabus = (await get<any[]>('syllabus')) || [];
+
+const schema = {
+  '@context': 'https://schema.org',
+  '@type': 'Article',
+  headline: 'Shotokan karate and the MMAKF syllabus',
+  about: { '@type': 'Thing', name: 'Shotokan karate' },
+  publisher: {
+    '@type': 'SportsOrganization',
+    name: 'Modern Martial Arts Karate-Do Federation of India',
+    url: 'https://www.mmakf.in',
+  },
+  url: 'https://www.mmakf.in/shotokan',
+};
+---
+
+<Base
+  title="Shotokan karate — the style MMAKF teaches"
+  description="What Shotokan karate is, how kihon, kata and kumite fit together, and how the MMAKF syllabus is organised from white belt to Dan grade."
+>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+
+  <PageHero
+    eyebrow="The sport"
+    title="Shotokan"
+    lede="The style the federation practises, and the way its syllabus is built."
+  />
+
+  <div class="container sho">
+    <section class="sho-sec">
+      <h2 class="display-2">Three parts, practised together</h2>
+      <p class="body-txt">
+        Shotokan is organised around three kinds of practice, and a grading
+        examines all three. They are not stages: a beginner does all three from
+        the first month, and a Dan grade is still doing all three.
+      </p>
+      <dl class="sho-defs">
+        <div>
+          <dt>Kihon <span class="jp" lang="ja">基本</span></dt>
+          <dd>
+            The fundamentals — stance, stepping, blocking, striking, kicking —
+            practised alone so the shape is right before it is used under
+            pressure.
+          </dd>
+        </div>
+        <div>
+          <dt>Kata <span class="jp" lang="ja">型</span></dt>
+          <dd>
+            Set sequences against imagined opponents. Each carries a body of
+            technique in a fixed order, which is how the style was transmitted
+            for generations without being written down.
+          </dd>
+        </div>
+        <div>
+          <dt>Kumite <span class="jp" lang="ja">組手</span></dt>
+          <dd>
+            Practice with a partner. It begins entirely prearranged — both people
+            know what is coming — and becomes freer as control improves.
+          </dd>
+        </div>
+      </dl>
+      <p class="body-txt">
+        <a href="/kata">The kata library</a> covers each form the federation
+        teaches, individually.
+      </p>
+    </section>
+
+    <section class="sho-sec">
+      <h2 class="display-2">The grades</h2>
+      <p class="body-txt">
+        Progress is marked in kyu grades counting down to first kyu, then in Dan
+        grades counting up. Below is the federation's own record of what each
+        step requires.
+      </p>
+
+      {syllabus.length === 0 ? (
+        <p class="body-txt">The syllabus is not available at the moment.</p>
+      ) : (
+        <>
+          <p class="tbl-hint">Scroll the table sideways to see every column.</p>
+          <div class="tbl-scroll">
+            <table class="sho-tbl">
+              <caption class="sr-only">The MMAKF Shotokan syllabus</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Grade</th><th scope="col">Belt</th>
+                  <th scope="col">Kihon</th><th scope="col">Kata</th><th scope="col">Kumite</th>
+                </tr>
+              </thead>
+              <tbody>
+                {syllabus.map((s: any) => (
+                  <tr>
+                    <th scope="row">{s.grade}</th>
+                    <td>{s.belt}</td><td>{s.kihon}</td><td>{s.kata}</td><td>{s.kumite}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <ul class="sho-cards" aria-label="The MMAKF Shotokan syllabus">
+            {syllabus.map((s: any) => (
+              <li>
+                <p class="sc-grade">{s.grade}</p>
+                <p class="sc-belt">{s.belt}</p>
+                <dl>
+                  <div><dt>Kihon</dt><dd>{s.kihon}</dd></div>
+                  <div><dt>Kata</dt><dd>{s.kata}</dd></div>
+                  <div><dt>Kumite</dt><dd>{s.kumite}</dd></div>
+                </dl>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      <p class="body-txt">
+        <a href="/belt-system">How grading works</a> sets out who examines, and
+        under whose authority.
+      </p>
+    </section>
+
+    <section class="sho-sec">
+      <h2 class="display-2">Where to practise it</h2>
+      <p class="body-txt">
+        MMAKF teaches Shotokan at its headquarters and at affiliated centres, and
+        runs it as a programme inside schools, companies and universities.
+      </p>
+      <p class="sho-links">
+        <a class="btn btn-ghost" href="/network">Affiliated centres</a>
+        <a class="btn btn-ghost" href="/training">Training and engagement</a>
+      </p>
+    </section>
+  </div>
+</Base>
+
+<style>
+  .sho { padding-bottom: 88px; }
+  .sho-sec { margin-top: 56px; max-width: 68ch; }
+  .body-txt { line-height: 1.75; color: var(--muted); margin: 14px 0; }
+  .sho-defs { margin: 26px 0; }
+  .sho-defs > div { padding: 16px 0; border-top: 1px solid var(--border); }
+  .sho-defs dt { font-family: var(--font-display); font-size: 1.1rem; }
+  .jp { color: var(--gold-2); margin-left: 8px; font-size: .95em; }
+  .sho-defs dd { margin: 6px 0 0; color: var(--muted); line-height: 1.7; }
+
+  .sho-tbl { width: 100%; border-collapse: collapse; font-size: .88rem; margin-top: 16px; }
+  .sho-tbl th, .sho-tbl td {
+    padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .sho-tbl thead th {
+    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); font-weight: 400; white-space: nowrap;
+  }
+  .sho-tbl tbody th { font-family: var(--font-display); font-weight: 400; white-space: nowrap; }
+
+  .sho-cards { display: none; list-style: none; margin: 16px 0 0; padding: 0; }
+  .sho-links { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; }
+
+  /* Recomposed for a phone rather than scrolled: five columns of Japanese
+     technique names inside a 360px viewport is unreadable however far it
+     slides sideways. */
+  @media (max-width: 780px) {
+    .tbl-scroll, .tbl-hint { display: none; }
+    .sho-cards { display: block; }
+    .sho-cards li { padding: 18px 0; border-top: 1px solid var(--border); }
+    .sc-grade { margin: 0; font-family: var(--font-display); font-size: 1.05rem; }
+    .sc-belt { margin: 2px 0 10px; color: var(--gold-2); font-size: .86rem; }
+    .sho-cards dl { margin: 0; display: grid; gap: 6px; }
+    .sho-cards dl > div { display: grid; grid-template-columns: 7ch 1fr; gap: 10px; font-size: .86rem; }
+    .sho-cards dt { color: var(--muted); }
+    .sho-cards dd { margin: 0; line-height: 1.55; }
+    .sho-links .btn { flex: 1 1 100%; text-align: center; }
+  }
+</style>

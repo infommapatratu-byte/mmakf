@@ -43,7 +43,12 @@ export const credentialStatus = pgEnum('credential_status', [
   'active', 'expired', 'suspended', 'revoked',
 ]);
 
-export const scopeType = pgEnum('scope_type', ['national', 'state', 'district', 'dojo']);
+// 'institution' was added in 0011. It is a TENANT scope, not a rung of the
+// federation hierarchy: national/state/district/dojo describe where a resource
+// sits inside MMAKF, while 'institution' describes a client that sits outside
+// it entirely. See scopeContains() in src/lib/rbac.ts, which gives an
+// institution binding no federation resource at all.
+export const scopeType = pgEnum('scope_type', ['national', 'state', 'district', 'dojo', 'institution']);
 
 export const auditAction = pgEnum('audit_action', [
   'create', 'update', 'delete', 'approve', 'reject', 'revoke',

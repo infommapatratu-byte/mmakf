@@ -1,0 +1,80 @@
+---
+// The federation's documents.
+//
+// A register of what MMAKF holds, with a link where a copy has been published
+// and NO link where one has not. A row with an empty URL renders as recorded
+// rather than as a broken download — a document register whose links 404 is
+// worse than one that says plainly which documents are not yet published.
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const documents = (await get<any[]>('documents')) || [];
+const categories = [...new Set(documents.map((d: any) => d.cat).filter(Boolean))];
+const published = documents.filter((d: any) => d.url);
+---
+
+<Base
+  title="Documents and regulations — MMAKF"
+  description="The constitution, bye-laws, regulations and official documents of the Modern Martial Arts Karate-Do Federation of India."
+>
+  <PageHero
+    eyebrow="Federation"
+    title="Documents"
+    lede="The federation's constitution, regulations and official papers."
+  />
+
+  <div class="container docs">
+    <p class="docs-note">
+      {published.length} of {documents.length} documents on this register have a
+      published copy. The rest are listed because the federation holds them;
+      where no copy is linked, none has been published yet.
+    </p>
+
+    {categories.map((cat) => (
+      <section class="doc-sec">
+        <h2 class="display-2">{cat}</h2>
+        <ul class="doc-list">
+          {documents.filter((d: any) => d.cat === cat).map((d: any) => (
+            <li>
+              <div>
+                <p class="d-title">{d.url ? <a href={d.url}>{d.title}</a> : d.title}</p>
+                {d.ref && <p class="d-ref"><code>{d.ref}</code></p>}
+              </div>
+              <span class={d.url ? 'd-state d-pub' : 'd-state'}>
+                {d.url ? 'Published' : 'Held, not published'}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))}
+
+    {documents.length === 0 && (
+      <p class="docs-note">The register is not available at the moment.</p>
+    )}
+  </div>
+</Base>
+
+<style>
+  .docs { padding-bottom: 88px; }
+  .docs-note { color: var(--muted); line-height: 1.7; max-width: 62ch; }
+  .doc-sec { margin-top: 48px; }
+  .doc-list { list-style: none; margin: 20px 0 0; padding: 0; }
+  .doc-list li {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 20px;
+    padding: 15px 0; border-top: 1px solid var(--border);
+  }
+  .d-title { margin: 0; font-family: var(--font-display); font-size: 1.05rem; }
+  .d-ref { margin: 4px 0 0; font-size: .8rem; color: var(--muted); }
+  .d-state {
+    font-size: .76rem; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); flex-shrink: 0;
+  }
+  .d-pub { color: var(--gold-2); }
+  code { font-family: var(--font-accent, monospace); }
+  @media (max-width: 640px) { .doc-list li { flex-direction: column; gap: 6px; } }
+</style>

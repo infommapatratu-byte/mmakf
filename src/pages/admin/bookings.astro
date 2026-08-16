@@ -1,0 +1,628 @@
+---
+// The agenda: every booking in a window, in the order it actually happens.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY AN AGENDA AND NOT A LIST
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A booking register sorted by reference or by creation date answers "what have
+// we taken?" — which nobody in the office asks. The question is "what is
+// happening, and who is standing where when it does". So the default ordering
+// is by start time, the day is a column beside it, and the window is a
+// parameter rather than "everything ever", because an agenda that begins in
+// 2024 is a report, not an agenda.
+//
+// The rows used to be grouped under a heading per IST calendar day. They are
+// now the shared table's rows with a Day column, and the trade is written out
+// where the columns are declared — §97 has one table, and a shared component
+// that grew a grouping mode for one caller would stop being shared.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// TIME IS IST, AND THAT IS NOT A FORMATTING CHOICE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The day boundaries come from istDayRange() in src/db/booking.ts, not from
+// `new Date(iso)`. Midnight UTC is 05:30 in Patratu, so a window built the
+// naive way silently drops the first five and a half hours of the day the
+// administrator asked for and silently includes the last five and a half of the
+// day before — a 07:00 class missing from Tuesday and present on Monday.
+//
+// OVERLAP IS HALF-OPEN, everywhere on this page: [10:00,11:00) and
+// [11:00,12:00) do not overlap. That is why the window predicate is
+// `startsAt < to AND endsAt > from` with a strict `>`, and why the collision
+// test below is `a.start < b.end && b.start < a.end`. A back-to-back pair is
+// two bookings, not a clash, and reporting it as one would train the office to
+// ignore the warning that matters.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE IS A WHERE CLAUSE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// visibleScopes() is applied inside the query, never by filtering the result.
+// A booking reaches a scoped administrator through the coach's unit, the dojo
+// it is held at, or the client institution — a district administrator sees a
+// session in their district because the SQL says so, and sees nothing else
+// because the SQL says that too. A booking attached to none of the three is
+// invisible to anyone but a national reader, which is the fail-closed reading
+// and is deliberate.
+
+import AdminShell from '@/components/AdminShell.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import Table from '@/components/DataTable/Table.astro';
+import { readTableQuery } from '@/components/DataTable/query';
+import type { Column, Filter } from '@/components/DataTable/types';
+import { isConfigured, db } from '@/db';
+import { statusOf } from '@/lib/status';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import * as s from '@/db/schema';
+import { and, or, eq, gt, lt, inArray, asc } from 'drizzle-orm';
+import {
+  BOOKING_KINDS, BLOCKING_STATUSES, RELEASING_STATUSES,
+  istDayRange, istDayOf, istTimeOf,
+} from '@/db/booking';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+// The status list is DERIVED from the two lists src/db/booking.ts already
+// maintains rather than retyped here. Retyping it is how a page ends up
+// offering a filter for a status the domain no longer has.
+const STATUSES: string[] = [...BLOCKING_STATUSES, ...RELEASING_STATUSES];
+const KINDS: string[] = [...BOOKING_KINDS];
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const params = Astro.url.searchParams;
+
+// The default window. Today is the only non-arbitrary anchor an agenda has; the
+// fortnight after it is a VIEW LENGTH, chosen so the page opens on something
+// and changeable in the query string. It is not a federation rule about how far
+// ahead booking runs — MMAKF has published no such rule and this page does not
+// imply one.
+const todayIst = istDayOf(new Date());
+const defaultTo = istDayOf(new Date(Date.now() + 13 * 86_400_000));
+
+const askedFrom = params.get('from') ?? '';
+const askedTo = params.get('to') ?? '';
+const from = ISO_DATE.test(askedFrom) ? askedFrom : todayIst;
+const to = ISO_DATE.test(askedTo) ? askedTo : defaultTo;
+const datesIgnored = (askedFrom !== '' && !ISO_DATE.test(askedFrom))
+  || (askedTo !== '' && !ISO_DATE.test(askedTo));
+
+// An unknown status or kind is dropped rather than passed to the query: the
+// column is an enum, and Postgres rejects a value outside it with an error that
+// would read to an administrator as "the bookings module is broken".
+const askedStatus = params.get('status') ?? '';
+const askedKind = params.get('kind') ?? '';
+const status = STATUSES.includes(askedStatus) ? askedStatus : '';
+const kind = KINDS.includes(askedKind) ? askedKind : '';
+
+// A ceiling, so one enormous window cannot make this page the slowest thing in
+// the federation. When it bites the reader is told, rather than shown a
+// truncated agenda that looks complete.
+const LIMIT = 400;
+
+// ISO dates sort correctly as plain strings, so an inverted window needs no
+// Date to detect. It is caught HERE rather than left to istDayRange(), which
+// throws on it: a thrown domain error would land in the same alert box as "the
+// database is unreachable" and tell an administrator the system is broken when
+// they have simply picked the two dates the wrong way round.
+const rangeInverted = to < from;
+
+let rows: any[] = [];
+// A deployment with no database and a query that threw are different facts
+// (CONTENT-ARCHITECTURE §5.4) and were one string in one alert box. Only the
+// second is a failure, and only the second has anything to retry.
+let notConfigured = false;
+let readFailed = false;
+/** The driver's own words. Behind the Details disclosure, never the headline. */
+let failureDetail: string | null = null;
+let noScope = false;
+// Whether this reader's authority is national. Used only to word the empty
+// state: "nothing in this window" and "nothing in this window that you may see"
+// are different statements, and a scoped administrator must not be told the
+// first when only the second was checked.
+let nationalReader = false;
+
+if (principal && canAnywhere(principal, 'booking:read') && !rangeInverted) {
+  if (!isConfigured()) {
+    notConfigured = true;
+  } else {
+    try {
+      const window = istDayRange(from, to);
+      const conds: any[] = [
+        // Half-open, and padded by nothing: a booking that ends exactly when the
+        // window opens is not in the window.
+        lt(s.bookings.startsAt, window.to),
+        gt(s.bookings.endsAt, window.from),
+      ];
+      if (status) conds.push(eq(s.bookings.status, status as any));
+      if (kind) conds.push(eq(s.bookings.kind, kind as any));
+
+      const scopes = visibleScopes(principal, 'booking:read');
+      nationalReader = scopes.kind === 'all';
+      if (scopes.kind === 'none') {
+        noScope = true;
+      } else {
+        if (scopes.kind === 'scoped') {
+          const clauses: any[] = [];
+          if (scopes.states.length) {
+            clauses.push(
+              inArray(s.persons.stateUnitId, scopes.states),
+              inArray(s.institutions.stateUnitId, scopes.states),
+              inArray(s.dojos.stateUnitId, scopes.states),
+            );
+          }
+          if (scopes.districts.length) {
+            clauses.push(
+              inArray(s.persons.districtUnitId, scopes.districts),
+              inArray(s.institutions.districtUnitId, scopes.districts),
+              inArray(s.dojos.districtUnitId, scopes.districts),
+            );
+          }
+          if (scopes.dojos.length) {
+            clauses.push(
+              inArray(s.bookings.dojoId, scopes.dojos),
+              inArray(s.persons.dojoId, scopes.dojos),
+            );
+          }
+          if (scopes.institutions.length) {
+            clauses.push(inArray(s.bookings.institutionId, scopes.institutions));
+          }
+          conds.push(or(...clauses));
+        }
+
+        rows = await (db() as any)
+          .select({
+            b: s.bookings,
+            coachName: s.persons.fullName,
+            dojoName: s.dojos.name,
+            institutionName: s.institutions.name,
+          })
+          .from(s.bookings)
+          .leftJoin(s.persons, eq(s.persons.id, s.bookings.coachPersonId))
+          .leftJoin(s.dojos, eq(s.dojos.id, s.bookings.dojoId))
+          .leftJoin(s.institutions, eq(s.institutions.id, s.bookings.institutionId))
+          .where(and(...conds))
+          .orderBy(asc(s.bookings.startsAt), asc(s.bookings.endsAt))
+          .limit(LIMIT);
+      }
+    } catch (err: any) {
+      readFailed = true;
+      failureDetail = String(err?.message ?? err);
+    }
+  }
+}
+
+const truncated = rows.length >= LIMIT;
+
+// ── Collisions ──────────────────────────────────────────────────────────────
+//
+// Two bookings collide when their OCCUPANCY overlaps — the session plus the
+// travel and setup buffer either side, which is the interval the coach and the
+// hall are actually spoken for — and they share a coach or a venue.
+//
+// Only statuses that CONSUME time are compared. A cancelled booking gave the
+// slot back; a completed one did not, because the coach stood in the hall
+// either way. That is BLOCKING_STATUSES, and it is imported rather than
+// restated so the two cannot drift apart.
+const BLOCKING = new Set<string>(BLOCKING_STATUSES as readonly string[]);
+
+const occupancy = (b: any) => ({
+  s: new Date(b.startsAt).getTime() - (b.bufferBeforeMinutes ?? 0) * 60_000,
+  e: new Date(b.endsAt).getTime() + (b.bufferAfterMinutes ?? 0) * 60_000,
+});
+
+// A booking records its venue as a dojo OR as free text — there is no venueId
+// on `bookings`, so the venue register cannot be joined to it. Two bookings
+// therefore share a venue only when they name the same dojo, or the same text.
+// Case and surrounding space are normalised; nothing else is guessed at.
+const venueKey = (b: any): string | null => {
+  if (b.dojoId != null) return `dojo:${b.dojoId}`;
+  const t = typeof b.venue === 'string' ? b.venue.trim().toLowerCase() : '';
+  return t ? `venue:${t}` : null;
+};
+
+// The label a collision is REPORTED under must name what actually matched.
+// venueKey() prefers the dojo reference over the free text, so a booking that
+// carries both has been tied to its neighbour by the dojo id — printing the
+// typed-in room name instead would send the office to look at the wrong thing,
+// and would print only one of the two rows' text when the two differ.
+const venueLabel = (r: any): string =>
+  r.b.dojoId != null
+    ? (r.dojoName ?? `dojo #${r.b.dojoId}`)
+    : String(r.b.venue ?? '').trim();
+
+const blocking = rows.filter((r) => BLOCKING.has(r.b.status));
+const collisions: Array<{ a: any; b: any; shared: string; what: 'coach' | 'venue' }> = [];
+
+// O(n squared) over at most LIMIT rows. An early break is not safe here: a
+// buffer moves a booking's occupancy earlier than its start, so occupancy start
+// is not monotonic even though start time is.
+for (let i = 0; i < blocking.length; i++) {
+  for (let j = i + 1; j < blocking.length; j++) {
+    const A = blocking[i];
+    const B = blocking[j];
+    const oa = occupancy(A.b);
+    const ob = occupancy(B.b);
+    if (!(oa.s < ob.e && ob.s < oa.e)) continue;      // half-open overlap
+
+    const sharedCoach = A.b.coachPersonId != null && A.b.coachPersonId === B.b.coachPersonId;
+    const ka = venueKey(A.b);
+    const sharedVenue = ka != null && ka === venueKey(B.b);
+    if (!sharedCoach && !sharedVenue) continue;
+
+    collisions.push({
+      a: A,
+      b: B,
+      what: sharedCoach ? 'coach' : 'venue',
+      shared: sharedCoach
+        ? (A.coachName ?? `coach #${A.b.coachPersonId}`)
+        : venueLabel(A),
+    });
+  }
+}
+const clashing = new Set<number>();
+for (const c of collisions) { clashing.add(c.a.b.id); clashing.add(c.b.b.id); }
+
+// ── Presentation helpers ────────────────────────────────────────────────────
+
+const label = (v: unknown) => String(v ?? '').replace(/_/g, ' ');
+
+// The day label is formatted in UTC on purpose: `iso` is already the IST
+// calendar day, so re-applying a timezone here would shift it a second time.
+const dayLabel = (iso: string) => {
+  const d = new Date(`${iso}T00:00:00Z`);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString('en-IN', {
+        weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
+      });
+};
+
+/** The same day, short enough to sit in a column beside eight other values. */
+const dayShort = (iso: string) => {
+  const d = new Date(`${iso}T00:00:00Z`);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString('en-IN', {
+        weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC',
+      });
+};
+
+const clock = (r: any) => `${istTimeOf(r.b.startsAt)}–${istTimeOf(r.b.endsAt)}`;
+
+const buffers = (b: any) => {
+  const before = b.bufferBeforeMinutes ?? 0;
+  const after = b.bufferAfterMinutes ?? 0;
+  if (!before && !after) return null;
+  return `${before} min before, ${after} min after`;
+};
+
+// A blank `venue` string is not a venue. `??` would keep it and print an empty
+// cell that reads as "recorded, and it is nothing"; trimming first lets the
+// dojo name, or the honest "not recorded", take its place.
+const whereOf = (r: any) => {
+  const t = typeof r.b.venue === 'string' ? r.b.venue.trim() : '';
+  return t || r.dojoName || null;
+};
+
+// ── The status views, as tab links ──────────────────────────────────────────
+//
+// Built from the URL AS IT ACTUALLY IS rather than from the resolved values, and
+// query-only.
+//
+// Both of those are load-bearing. Query-only because on admin.mmakf.in this page
+// is served at /bookings and the middleware rewrites it to /admin/bookings
+// internally — a link that rebuilt the pathname would be rewritten a second
+// time and land on nothing. From the URL as it is, because PageHeader decides
+// which tab is current by checking that every parameter a tab names is
+// satisfied: a tab href carrying the DEFAULT window, on a bare URL that names no
+// window, satisfies nothing, and every tab would come back not-current.
+const tabHref = (v: string) => {
+  const p = new URLSearchParams(Astro.url.search);
+  if (v) p.set('status', v);
+  else p.delete('status');
+  // A different view starts at its own first page, not at page four of the
+  // last one.
+  p.delete('page');
+  const q = p.toString();
+  return q ? `?${q}` : '?';
+};
+
+// ── The agenda, as rows for the one shared table (§97) ──────────────────────
+//
+// This page carried a hand-written eight-column table AND a hand-written second
+// copy of the same eight values as cards for a phone. DataTable renders both
+// from one declaration — filtered, ordered and paged on the server, so all of
+// it still works with JavaScript off — and two copies of one row can no longer
+// disagree about what a booking says.
+//
+// WHAT IS LOST, SAID OUT LOUD: the rows used to be grouped under a heading per
+// IST calendar day. DataTable does not group, and a shared table that grew a
+// grouping mode for one caller would stop being shared. The day is a column
+// instead, the default order is still start time ascending, so the reading
+// order is unchanged — and the day is now something a reader can order BY.
+//
+// The row objects are flat and hold only what the columns declare: the table's
+// free-text search reads the declared columns, so a row carrying the whole
+// booking record would put its internal notes inside the reach of a filter box.
+const agendaRows = rows.map((r) => ({
+  id: r.b.id,
+  day: istDayOf(r.b.startsAt),
+  // Sorted on the instant, printed as the clock. Ordering the printed form puts
+  // 09:00 after 10:00 in half the collations there are.
+  startMs: new Date(r.b.startsAt).getTime(),
+  time: clock(r),
+  ref: r.b.ref,
+  kind: r.b.kind,
+  status: r.b.status,
+  coach: r.coachName ?? null,
+  venue: whereOf(r),
+  client: r.institutionName ?? null,
+  mode: r.b.mode ?? null,
+  buffer: buffers(r.b),
+  // The clash marker is a WORD in a cell, not a red edge on a row. A colour on
+  // the row cannot survive the collapse to a record, cannot be searched for,
+  // and is not a difference a reader who does not see colour can find (WCAG
+  // 1.4.1). The detail — what is shared with what — is in the section above.
+  overlap: clashing.has(r.b.id) ? 'Overlaps another booking' : null,
+}));
+
+const agendaColumns: Column[] = [
+  { key: 'day', header: 'Day', render: (r) => dayShort(String(r.day)), sortable: true, primary: true },
+  {
+    key: 'startMs',
+    header: 'Time',
+    render: (r) => r.time as string,
+    sortable: true,
+    initialDir: 'asc',
+    numeric: true,
+    // numeric for the ordering and the tabular figures; start-aligned because a
+    // time of day is not a quantity to be compared down a right edge.
+    align: 'start',
+    primary: true,
+  },
+  { key: 'ref', header: 'Reference', sortable: true, primary: true },
+  { key: 'kind', header: 'Kind', render: (r) => label(r.kind), sortable: true },
+  { key: 'status', header: 'Status', status: { domain: 'booking' }, sortable: true, primary: true },
+  // "none recorded" rather than the table's em dash: for a coach the difference
+  // between "not recorded" and "nobody is assigned" is the difference between a
+  // clerical gap and an empty hall, and the em dash reads as either.
+  { key: 'coach', header: 'Coach', render: (r) => (r.coach as string) ?? 'none recorded' },
+  { key: 'venue', header: 'Venue', render: (r) => (r.venue as string) ?? 'not recorded' },
+  { key: 'client', header: 'For' },
+  { key: 'mode', header: 'Mode', render: (r) => (r.mode ? label(r.mode) : null) },
+  { key: 'buffer', header: 'Buffer', hint: 'Travel and setup either side' },
+  { key: 'overlap', header: 'Overlap', primary: true },
+];
+
+const agendaFilters: Filter[] = [
+  // The window is applied in SQL — see istDayRange above, and the note at the
+  // top of this file about why the day boundaries cannot come from a bare Date.
+  // These two fields put it in the reader's hands and then have nothing left to
+  // match: the rows this table holds ARE the window.
+  //
+  // `value` rather than a seeded query value. The window the page actually used
+  // is shown in the field, so a reader who named no window is not left guessing
+  // which fortnight they are looking at — but it is NOT counted as a filter
+  // they applied. It used to be, and the cost was paid on the empty screen: the
+  // default view reported "No records match these filters" over an agenda
+  // nobody had filtered, and offered a Clear link that led back to the same
+  // fortnight. An empty diary must be allowed to say it is an empty diary.
+  { key: 'from', label: 'From', type: 'date', value: from, match: () => true },
+  { key: 'to', label: 'To', type: 'date', value: to, match: () => true },
+  {
+    key: 'kind',
+    label: 'Kind',
+    type: 'select',
+    anyLabel: 'Any kind',
+    options: KINDS.map((k) => ({ value: k, label: label(k) })),
+  },
+  {
+    key: 'q',
+    label: 'Search',
+    type: 'search',
+    placeholder: 'Reference, coach or venue',
+  },
+];
+
+const tableQuery = readTableQuery(Astro.url, {
+  sortable: ['day', 'startMs', 'ref', 'kind', 'status'],
+  filters: ['from', 'to', 'kind', 'q'],
+  defaultSort: { key: 'startMs', dir: 'asc' },
+});
+---
+
+<AdminShell
+  title="Agenda"
+  requires="booking:read"
+  intro="Bookings in a date window, in the order they happen. Times are India Standard Time, which is what the coach and the hall are working to."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Agenda', url: h('/admin/bookings') },
+    ],
+    /* Status is the one dimension an agenda is read along — "what is still only
+       requested", "what is confirmed" — so it is the tab strip, and the window,
+       the kind and the search sit in the table's own toolbar with the rest of
+       the filtering. Two rows of chips did the same job before, and neither of
+       them told a screen reader which one was in force.
+
+       No counts on the tabs: a number beside each status would take one query
+       per status, and this page counts nothing it has not counted.
+
+       No action bar. Nothing on this page creates, moves or cancels a booking,
+       and §13's one dominant action is not something to invent for a header. */
+    tabs: [
+      { label: 'Any status', href: tabHref('') },
+      /* The tab reads what the chip in the row reads, because both ask the same
+         dictionary. The chips this replaced printed the raw enum with its
+         underscores swapped for spaces and leaned on text-transform to make it
+         look deliberate — which gave "qualification required" on the filter and
+         "Qualification required" in the table, two spellings of one status on
+         one screen. That is exactly what §102 was written against. */
+      ...STATUSES.map((v) => ({ label: statusOf(v, 'booking').label, href: tabHref(v) })),
+    ],
+  }}
+>
+  <Fragment slot="meta">
+    {/* §12's metadata row. Only numbers this page actually counted: the rows it
+        loaded, and the collisions it found among them. Neither is a total for
+        the federation and neither is described as one. */}
+    {rows.length > 0 && (
+      <span class="meta-chip">{rows.length} {rows.length === 1 ? 'booking' : 'bookings'}</span>
+    )}
+    {collisions.length > 0 && (
+      <span class="meta-chip meta-warn">
+        {collisions.length === 1 ? 'One collision' : `${collisions.length} collisions`}
+      </span>
+    )}
+  </Fragment>
+
+  {datesIgnored && (
+    <p class="note warn" role="status">
+      A date in the address was not a calendar date, so it was ignored and the
+      default window is shown. Dates are written as YYYY-MM-DD.
+    </p>
+  )}
+
+  {rangeInverted ? (
+    <p class="note warn" role="status">
+      The window ends before it starts — {dayLabel(to)} is earlier than
+      {' '}{dayLabel(from)} — so nothing was read. Put the earlier date in
+      "From". This is the dates as typed, not a fault in the bookings module.
+    </p>
+  ) : notConfigured ? (
+    /* Not ErrorState: nothing failed. There is no database attached to this
+       deployment, so there is no diary to assemble and nothing to retry. */
+    <p class="note">
+      The federation database is not reachable from this deployment, so no
+      agenda can be assembled. Bookings are held in the database, not in this
+      page.
+    </p>
+  ) : readFailed ? (
+    <ErrorState
+      title="The agenda could not be read."
+      safe="Nothing has been changed. This was a read, so no booking was created, moved or cancelled — and no slot was released."
+      detail={failureDetail}
+    />
+  ) : noScope ? (
+    <p class="note">
+      This account holds the right to read bookings, but in no unit that has
+      any. Reading bookings is granted within a state, a district, a dojo or a
+      client institution, and none of this account's bindings covers one.
+    </p>
+  ) : (
+    <>
+      {collisions.length > 0 && (
+        <section class="clash" role="status">
+          <h2 class="sec-h">
+            {collisions.length === 1 ? 'One collision in this window' : `${collisions.length} collisions in this window`}
+          </h2>
+          <p class="sec-p">
+            The same coach or the same venue is spoken for twice at once. Buffers
+            count: a session that fits the hour but not the travel time either
+            side is still a collision, and it is still somebody driving across a
+            city they cannot cross.
+          </p>
+          <ul>
+            {collisions.map((c) => (
+              <li>
+                <strong>{c.what === 'coach' ? c.shared : `Venue: ${c.shared}`}</strong>
+                <span class="muted"> — {dayLabel(istDayOf(c.a.b.startsAt))}</span>
+                <br />
+                <code>{c.a.b.ref}</code> {clock(c.a)} ({label(c.a.b.kind)})
+                <span class="muted"> overlaps </span>
+                <code>{c.b.b.ref}</code> {clock(c.b)} ({label(c.b.b.kind)})
+              </li>
+            ))}
+          </ul>
+          <p class="sec-p small">
+            Compared here: the bookings on this page, against each other. Not
+            programme sessions, not coach leave, and not anything outside this
+            window or outside what this account may see — so this is a floor on
+            the collisions that exist, not a certificate that there are no
+            others.
+          </p>
+        </section>
+      )}
+
+      {/* "more than LIMIT" would be a count nobody made: the query stops at the
+          ceiling and never learns the total. It reports the ceiling, which is
+          the number it does know. */}
+      {truncated && (
+        <p class="note warn" role="status">
+          This window reached the ceiling of {LIMIT} bookings, and only that many
+          are shown, earliest first. How many more there are was not counted.
+          Narrow the dates to see the rest — and read the collisions above as
+          covering only what is listed.
+        </p>
+      )}
+
+      <Table
+        id="agenda"
+        caption={`Bookings from ${dayLabel(from)} to ${dayLabel(to)}`}
+        columns={agendaColumns}
+        filters={agendaFilters}
+        rows={agendaRows}
+        query={tableQuery}
+        defaultSort={{ key: 'startMs', dir: 'asc' }}
+        note={
+          'An empty agenda is an empty diary, not a refusal: a booking appears here the moment a slot is taken, because taking the slot is what creates the row.'
+          + (nationalReader
+            ? ''
+            : ' This account reads bookings in its own units only, so an absence here is not a statement about the federation\'s diary as a whole.')
+        }
+        emptyTitle={`No booking falls between ${dayLabel(from)} and ${dayLabel(to)}.`}
+        emptyAction={{ label: 'Back to operations', href: h('/admin') }}
+      />
+    </>
+  )}
+</AdminShell>
+
+<style>
+  /* §12's metadata row, beside the title. Small, quiet, and only ever a number
+     this page counted. */
+  .meta-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    font-size: var(--text-xs);
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  /* --numeral, not --red-3: global.css declares --red-3 a decorative hairline
+     at 1.49:1 and this is text somebody has to read. --numeral measures 4.87:1
+     on --card-2 and is the project's warning ink. */
+  .meta-warn { color: var(--numeral); border-color: rgba(149, 86, 79, 0.4); }
+
+  .note, .clash {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
+  }
+  .note { margin: 18px 0 0; }
+  .note.warn { border-left-color: var(--red); }
+  .clash { border-left-color: var(--red); margin: 22px 0 26px; }
+  .sec-h { font-family: var(--font-display); font-size: 1rem; margin: 0 0 8px; color: var(--off-white); }
+  .sec-p { margin: 0 0 12px; font-size: .9rem; }
+  .sec-p.small { font-size: .82rem; margin: 12px 0 0; }
+  .clash ul { margin: 0; padding-left: 18px; }
+  .clash li { margin: 8px 0; font-size: .88rem; line-height: 1.6; }
+
+  .muted { color: var(--muted); }
+  code { font-family: var(--font-accent, monospace); font-size: .95em; }
+
+  /* No phone rules for the agenda itself. DataTable turns each booking into a
+     record below 760px (§54, PART AL) — which is the second copy of these rows
+     this file used to maintain by hand, and the copy that could drift. */
+</style>

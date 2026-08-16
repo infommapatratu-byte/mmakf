@@ -1,0 +1,230 @@
+---
+// One audience, rendered as an editorial page.
+//
+// NOT A CARD GRID. The federation was explicit: "DO NOT BUILD THE WEBSITE AS
+// [rectangle][rectangle][rectangle]". So this is a long-form page — a
+// standfirst, numbered sections with real prose, an asymmetric process
+// sequence, and a single action at the end — which is also the shape that
+// serves search: a crawler reads paragraphs, not a grid of six-word cards.
+//
+// The same component renders /learn/schools and /karate-for-schools. One
+// definition, two surfaces, no chance of the SEO landing page and the platform
+// page describing the federation differently.
+
+import type { Audience } from '@/data/audiences';
+import { PROCESS_STEPS } from '@/data/audiences';
+import { href as surfaceHref } from '@/lib/surface';
+import type { Surface } from '@/lib/surface';
+
+export interface Props {
+  audience: Audience;
+  surface: Surface;
+  /** Other audiences, for the tail of the page. */
+  siblings?: Audience[];
+}
+
+const { audience, surface, siblings = [] } = Astro.props;
+const others = siblings.filter((a) => a.slug !== audience.slug);
+---
+
+<article class="aud">
+  <header class="aud-hero">
+    <div class="container">
+      <p class="eyebrow">Training and engagement</p>
+      <h1 class="display-1">{audience.title}</h1>
+      <p class="aud-standfirst">{audience.standfirst}</p>
+      <div class="aud-actions">
+        <a class="btn btn-primary" href={surfaceHref(surface, audience.action.href)}>{audience.action.label}</a>
+        <a class="btn btn-ghost" href={surfaceHref(surface, '/learn')}>All audiences</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="container aud-body">
+    {audience.sections.map((section, i) => (
+      <section class="aud-sec">
+        <div class="aud-sec-num" aria-hidden="true">{String(i + 1).padStart(2, '0')}</div>
+        <div class="aud-sec-main">
+          <h2 class="display-2">{section.heading}</h2>
+          <p class="body-txt">{section.body}</p>
+          {section.points && section.points.length > 0 && (
+            <ul class="aud-points">
+              {section.points.map((p) => <li>{p}</li>)}
+            </ul>
+          )}
+        </div>
+      </section>
+    ))}
+
+    <section class="aud-sec aud-needs">
+      <div class="aud-sec-num" aria-hidden="true">{String(audience.sections.length + 1).padStart(2, '0')}</div>
+      <div class="aud-sec-main">
+        <h2 class="display-2">What MMAKF needs from you</h2>
+        <p class="body-txt">
+          None of this has to be settled before you apply. It is what the
+          conversation will be about, and knowing it in advance makes that
+          conversation shorter.
+        </p>
+        <ul class="aud-points">
+          {audience.needsFromYou.map((n) => <li>{n}</li>)}
+        </ul>
+      </div>
+    </section>
+  </div>
+
+  <section class="aud-process">
+    <div class="container">
+      <p class="eyebrow">From enquiry to first session</p>
+      <h2 class="display-2">What happens after you apply.</h2>
+      <ol class="proc">
+        {PROCESS_STEPS.map((step) => (
+          <li class="proc-step">
+            <span class="proc-n" aria-hidden="true">{step.n}</span>
+            <div>
+              <h3 class="proc-title">{step.title}</h3>
+              <p class="proc-body">{step.body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <p class="proc-note">
+        {/* The one thing this page must not do is invent a turnaround. */}
+        MMAKF has not published a standard response time, so no stage above
+        carries one. You are given a reference and a page that shows where your
+        application has actually got to, rather than a promise about when it
+        will move.
+      </p>
+    </div>
+  </section>
+
+  <section class="aud-cta">
+    <div class="container">
+      <h2 class="display-2">{audience.action.label}.</h2>
+      <p class="body-txt">
+        The form saves as you go. You can stop at any point and come back to it
+        with the link you are given.
+      </p>
+      <a class="btn btn-primary" href={surfaceHref(surface, audience.action.href)}>{audience.action.label}</a>
+    </div>
+  </section>
+
+  {others.length > 0 && (
+    <nav class="aud-others container" aria-label="Other audiences">
+      <p class="eyebrow">MMAKF also works with</p>
+      <ul>
+        {others.map((o) => (
+          <li>
+            <a href={surfaceHref(surface, `/learn/${o.slug}`)}>
+              <strong>{o.navLabel}</strong>
+              <span>{o.title}</span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  )}
+</article>
+
+<style>
+  .aud-hero {
+    padding: 96px 0 56px;
+    border-bottom: 1px solid var(--border);
+  }
+  .aud-standfirst {
+    font-family: var(--font-display);
+    font-size: clamp(1.15rem, 2.4vw, 1.55rem);
+    line-height: 1.5;
+    max-width: 34ch;
+    margin: 22px 0 0;
+    color: var(--muted);
+  }
+  .aud-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 34px; }
+
+  .aud-body { padding: 12px 0 0; }
+
+  /* Asymmetric: a numeral in the margin, prose in a readable measure. Not two
+     equal columns, which is a grid wearing a different hat. */
+  .aud-sec {
+    display: grid;
+    grid-template-columns: 88px minmax(0, 62ch);
+    gap: 0 32px;
+    padding: 56px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .aud-sec:last-child { border-bottom: 0; }
+  .aud-sec-num {
+    font-family: var(--font-display);
+    font-size: 2.1rem;
+    color: var(--gold-dim);
+    line-height: 1;
+    padding-top: .35em;
+    font-variant-numeric: tabular-nums;
+  }
+  .aud-sec-main h2 { margin: 0 0 16px; }
+  .aud-points { margin: 20px 0 0; padding: 0; list-style: none; }
+  .aud-points li {
+    position: relative;
+    padding: 10px 0 10px 22px;
+    border-top: 1px solid var(--border);
+    line-height: 1.6;
+  }
+  .aud-points li::before {
+    content: ''; position: absolute; left: 2px; top: 1.15em;
+    width: 8px; height: 1px; background: var(--gold);
+  }
+
+  .aud-process { background: var(--bg-2); padding: 88px 0; }
+  .proc { list-style: none; margin: 40px 0 0; padding: 0; }
+  .proc-step {
+    display: grid;
+    grid-template-columns: 54px minmax(0, 58ch);
+    gap: 0 24px;
+    padding: 22px 0;
+    border-top: 1px solid var(--border);
+  }
+  .proc-n {
+    font-family: var(--font-display);
+    font-size: 1.5rem; color: var(--gold-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .proc-title { margin: 0 0 6px; font-size: 1.05rem; }
+  .proc-body { margin: 0; color: var(--muted); line-height: 1.65; }
+  .proc-note {
+    margin: 40px 0 0; padding: 20px 22px;
+    border-left: 2px solid var(--gold);
+    background: var(--card);
+    color: var(--muted);
+    max-width: 62ch; line-height: 1.65;
+  }
+
+  .aud-cta { padding: 88px 0; }
+  .aud-cta .body-txt { max-width: 52ch; margin: 16px 0 28px; }
+
+  .aud-others { padding: 0 0 88px; }
+  .aud-others ul { list-style: none; margin: 20px 0 0; padding: 0; }
+  .aud-others li { border-top: 1px solid var(--border); }
+  .aud-others a {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px;
+    padding: 18px 0; text-decoration: none;
+  }
+  .aud-others a:hover strong { color: var(--gold-2); }
+  .aud-others strong { font-family: var(--font-display); font-size: 1.1rem; min-width: 9ch; }
+  .aud-others span { color: var(--muted); }
+
+  /* ── Phone ──────────────────────────────────────────────────────────────
+     RECOMPOSED, not shrunk. The margin numeral moves above the heading and
+     becomes a small label rather than being squeezed into a 40px column where
+     it would push the prose to a 20-character measure. */
+  @media (max-width: 760px) {
+    .aud-hero { padding: 72px 0 40px; }
+    .aud-sec, .proc-step { grid-template-columns: 1fr; gap: 0; }
+    .aud-sec-num {
+      font-size: 1rem; padding: 0 0 8px;
+      letter-spacing: .18em; color: var(--gold-2);
+    }
+    .proc-step { padding: 18px 0; }
+    .proc-n { font-size: 1.1rem; display: block; margin-bottom: 4px; }
+    .aud-process, .aud-cta { padding: 64px 0; }
+    .aud-actions .btn { flex: 1 1 100%; text-align: center; }
+  }
+</style>

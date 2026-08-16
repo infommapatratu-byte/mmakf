@@ -1,0 +1,649 @@
+---
+// The programme builder — the catalogue, and what is actually being delivered.
+//
+// TWO TABLES, NOT ONE, AND THEY ARE NOT THE SAME KIND OF THING.
+//
+//   programTemplates  — the menu. A configurable shape the federation can
+//                       offer: "school Shotokan, ages 8 to 12, twice a week,
+//                       twelve weeks, on site".
+//   trainingPrograms  — the meal. One template-shaped thing being delivered to
+//                       one named client, with dates and a status.
+//
+// They are kept visually separate on this page because collapsing them is the
+// mistake that makes an administrator think a draft template is a programme
+// somebody is running.
+//
+// A NOTE ON WHAT CANNOT BE SHOWN. There is no column joining a running
+// programme back to the template it was built from — trainingPrograms carries a
+// serviceId and a proposalId, and the template reference lives only on
+// institutionApplications.programTemplateId. So this page does not print a
+// "built from" column, because it would have to guess. That absence is stated
+// on the page rather than papered over: an administrator who expects the link
+// needs to know it does not exist.
+
+import AdminShell from '@/components/AdminShell.astro';
+import PageHeader from '@/components/PageHeader.astro';
+import Table from '@/components/DataTable/Table.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import type { Column, Filter } from '@/components/DataTable/types';
+import { readTableQuery, type TableQuery } from '@/components/DataTable/query';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes, type Action } from '@/lib/rbac';
+import { and, asc, desc, eq, inArray, or, sql } from 'drizzle-orm';
+import * as o from '@/db/operations.schema';
+import * as e from '@/db/engagement.schema';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+// The three authoring authorities, read once. They govern what this screen
+// OFFERS; they are not what enforces anything, which is the point AdminShell
+// makes about the menu and applies equally here.
+const mayWrite = !!principal && canAnywhere(principal, 'program:write');
+const mayApprove = !!principal && canAnywhere(principal, 'program:approve');
+const mayPublish = !!principal && canAnywhere(principal, 'program:publish');
+
+const TEMPLATE_STATUSES = ['draft', 'under_review', 'approved', 'published', 'archived'] as const;
+
+// Normalised, not merely read. An unrecognised ?status= used to leave the query
+// unfiltered while the page still said the list had been filtered by it — so the
+// screen showed every template under the sentence "no template is at X", with X
+// being whatever the caller typed. An unknown status is now simply no filter.
+const rawStatus = Astro.url.searchParams.get('status') || '';
+const statusFilter = (TEMPLATE_STATUSES as readonly string[]).includes(rawStatus) ? rawStatus : '';
+
+// Both lists are capped. The cap is tracked because a silently truncated list is
+// a list that lies about being the whole of anything.
+const ROW_LIMIT = 200;
+
+let templates: any[] = [];
+let running: any[] = [];
+let participantCounts = new Map<number, number>();
+let statusCounts = new Map<string, number>();
+let audienceMismatch = new Set<number>();
+// THREE ABSENCES, NOT ONE (CONTENT-ARCHITECTURE §5.4). "There is no database
+// on this deployment", "the read failed" and "there is nothing recorded" are
+// different facts, told in different words by different components. They shared
+// one string, which reported the unconfigured deployment — the state production
+// is actually in — as a fault somebody would go and chase.
+let notConfigured = false;
+let readError: string | null = null;
+let templatesCapped = false;
+let runningCapped = false;
+
+// True when this account's authority is SCOPED and the catalogue is therefore
+// unreadable to it — the catalogue itself is national either way. It changes
+// what an empty catalogue MEANS, so it is tracked separately from "no rows".
+let catalogueOutOfScope = false;
+// True only for a national reader, whose delivery list is unfiltered. Anything
+// the page wants to say about the register AS A WHOLE may only be said then.
+let deliveryIsUnfiltered = false;
+
+if (principal && canAnywhere(principal, 'program:read')) {
+  if (!isConfigured()) {
+    notConfigured = true;
+  } else {
+    try {
+      const conn = db();
+      const scopes = visibleScopes(principal, 'program:read');
+
+      // ── The catalogue ────────────────────────────────────────────────────
+      // A template has no state, no district and no institution: it is a
+      // national artefact. rbac.scopeContains() already says what that means —
+      // a resource with no location is reachable only from a national binding —
+      // and this predicate is that rule expressed in SQL rather than re-decided
+      // here. A state administrator therefore sees an empty catalogue, and the
+      // page says why instead of implying the federation has published nothing.
+      const templateScope =
+        scopes.kind === 'all' ? sql`true` : sql`false`;
+      catalogueOutOfScope = scopes.kind !== 'all';
+      deliveryIsUnfiltered = scopes.kind === 'all';
+
+      const templateWhere: any[] = [templateScope];
+      if (statusFilter) {
+        templateWhere.push(eq(o.programTemplates.status, statusFilter as any));
+      }
+
+      templates = await conn.select({
+        id: o.programTemplates.id,
+        code: o.programTemplates.code,
+        title: o.programTemplates.title,
+        audience: o.programTemplates.audience,
+        status: o.programTemplates.status,
+        summary: o.programTemplates.summary,
+        serviceId: o.programTemplates.serviceId,
+        serviceTitle: e.services.title,
+        minParticipants: o.programTemplates.minParticipants,
+        maxParticipants: o.programTemplates.maxParticipants,
+        sessionsPerWeek: o.programTemplates.sessionsPerWeek,
+        durationWeeks: o.programTemplates.durationWeeks,
+        sessionMinutes: o.programTemplates.sessionMinutes,
+        minInstructorGrade: o.programTemplates.minInstructorGrade,
+        instructorsRequired: o.programTemplates.instructorsRequired,
+        includesAssessment: o.programTemplates.includesAssessment,
+        includesGrading: o.programTemplates.includesGrading,
+        includesCertification: o.programTemplates.includesCertification,
+        includesCompetition: o.programTemplates.includesCompetition,
+        includesReporting: o.programTemplates.includesReporting,
+        modes: o.programTemplates.modes,
+        approvedAt: o.programTemplates.approvedAt,
+        publishedAt: o.programTemplates.publishedAt,
+        archivedAt: o.programTemplates.archivedAt,
+        updatedAt: o.programTemplates.updatedAt,
+      })
+        .from(o.programTemplates)
+        .leftJoin(e.services, eq(e.services.id, o.programTemplates.serviceId))
+        .where(and(...templateWhere))
+        // Ordered by audience then title, not by status. An administrator opens
+        // this asking "what can we offer a school?"; grouping by status would
+        // scatter the answer across five blocks of the table.
+        .orderBy(asc(o.programTemplates.audience), asc(o.programTemplates.title))
+        .limit(ROW_LIMIT);
+      templatesCapped = templates.length === ROW_LIMIT;
+
+      // The lifecycle counts are of the WHOLE catalogue, and they are counted in
+      // SQL rather than off the rows above.
+      //
+      // Counting the fetched array was wrong twice over: with ?status=draft on,
+      // every other stage printed 0 — and "Approved 0" on an administrator's
+      // screen reads as "the federation has approved nothing", which is a
+      // statement about the federation, not about a filter. The row cap did the
+      // same thing more quietly. Only run for a national reader, because that is
+      // the only account these counts are shown to.
+      if (scopes.kind === 'all') {
+        const byStatus = await conn.select({
+          status: o.programTemplates.status,
+          n: sql<number>`count(*)::int`,
+        }).from(o.programTemplates).groupBy(o.programTemplates.status);
+        statusCounts = new Map(byStatus.map((r: any) => [String(r.status), Number(r.n)]));
+      }
+
+      // A template names an audience AND a service, and serviceAudiences records
+      // which audiences a service is offered to — where a row is absent, the
+      // schema says it is NOT offered to them. So a template can point at a
+      // service its own audience is not registered for. That is a real
+      // inconsistency in the federation's own records, derived entirely from
+      // stored rows, and it is flagged rather than quietly rendered as fine.
+      const serviceIds = [...new Set(templates.map((t) => t.serviceId).filter((v): v is number => v != null))];
+      if (serviceIds.length) {
+        const pairs = await conn.select({
+          serviceId: e.serviceAudiences.serviceId,
+          audience: e.serviceAudiences.audience,
+        }).from(e.serviceAudiences).where(inArray(e.serviceAudiences.serviceId, serviceIds));
+        const offered = new Set(pairs.map((p: any) => `${p.serviceId}:${p.audience}`));
+        for (const t of templates) {
+          if (t.serviceId != null && !offered.has(`${t.serviceId}:${t.audience}`)) audienceMismatch.add(t.id);
+        }
+      }
+
+      // ── What is actually being delivered ─────────────────────────────────
+      // Unlike a template, a running programme HAS a place and a client, so the
+      // scope filter is a real WHERE clause and a state administrator sees their
+      // own state's deliveries.
+      const runWhere: any[] = [];
+      if (scopes.kind === 'none') {
+        runWhere.push(sql`false`);
+      } else if (scopes.kind === 'scoped') {
+        const clauses: any[] = [];
+        if (scopes.states.length) clauses.push(inArray(e.trainingPrograms.stateUnitId, scopes.states));
+        if (scopes.districts.length) clauses.push(inArray(e.trainingPrograms.districtUnitId, scopes.districts));
+        if (scopes.institutions.length) clauses.push(inArray(e.trainingPrograms.institutionId, scopes.institutions));
+        // A dojo-scoped binding produces no clause at all — trainingPrograms
+        // carries no dojo column, so there is nothing for it to match. That
+        // falls to `false` rather than to no predicate, which is the difference
+        // between seeing nothing and seeing everything.
+        runWhere.push(clauses.length ? or(...clauses) : sql`false`);
+      }
+
+      running = await conn.select({
+        id: e.trainingPrograms.id,
+        code: e.trainingPrograms.code,
+        title: e.trainingPrograms.title,
+        status: e.trainingPrograms.status,
+        mode: e.trainingPrograms.mode,
+        startsOn: e.trainingPrograms.startsOn,
+        endsOn: e.trainingPrograms.endsOn,
+        sessionsPlanned: e.trainingPrograms.sessionsPlanned,
+        venue: e.trainingPrograms.venue,
+        institutionId: e.trainingPrograms.institutionId,
+        institutionName: e.institutions.name,
+        institutionKind: e.institutions.kind,
+        serviceTitle: e.services.title,
+      })
+        .from(e.trainingPrograms)
+        .leftJoin(e.institutions, eq(e.institutions.id, e.trainingPrograms.institutionId))
+        .leftJoin(e.services, eq(e.services.id, e.trainingPrograms.serviceId))
+        .where(runWhere.length ? and(...runWhere) : undefined)
+        // Delivery first, history last. A completed programme from two years ago
+        // sorting above one running this week would make the screen useless for
+        // the job it is opened to do.
+        .orderBy(
+          sql`case ${e.trainingPrograms.status} when 'running' then 0 when 'scheduled' then 1 when 'planned' then 2 when 'paused' then 3 else 4 end`,
+          desc(e.trainingPrograms.startsOn)
+        )
+        .limit(ROW_LIMIT);
+      runningCapped = running.length === ROW_LIMIT;
+
+      // Counted from the ids the scoped query already returned, so this cannot
+      // widen what the account may see however the counts are joined.
+      const programIds = running.map((r) => r.id);
+      if (programIds.length) {
+        const counts = await conn.select({
+          programId: e.programParticipants.programId,
+          n: sql<number>`count(*)::int`,
+        })
+          .from(e.programParticipants)
+          .where(inArray(e.programParticipants.programId, programIds))
+          .groupBy(e.programParticipants.programId);
+        participantCounts = new Map(counts.map((c: any) => [c.programId, Number(c.n)]));
+      }
+    } catch (err: any) {
+      readError = String(err?.message ?? err);
+    }
+  }
+}
+
+/**
+ * The lifecycle, and what entering each state actually does.
+ *
+ * `approved` and `published` are separate states, and the separation is the
+ * reason this list is on the screen rather than in a wiki. A programme can be
+ * approved internally — technically sound, deliverable, quotable — long before
+ * the federation wants it advertised. Collapsing the two would mean every
+ * internal approval immediately changes the public website, which is a decision
+ * the technical reviewer is not the right person to be taking by accident.
+ */
+const LIFECYCLE: Array<{ status: string; label: string; means: string }> = [
+  { status: 'draft', label: 'Draft', means: 'Being written. It cannot be selected on an application and appears nowhere outside this screen.' },
+  { status: 'under_review', label: 'Under review', means: 'Submitted for technical reading. Still not offered to anybody.' },
+  { status: 'approved', label: 'Approved', means: 'The federation stands behind it internally: it may be configured for a client and quoted. It is NOT on the public site.' },
+  { status: 'published', label: 'Published', means: 'Advertised publicly. This is the only state that changes what the outside world can see.' },
+  { status: 'archived', label: 'Archived', means: 'Withdrawn from the catalogue. No new application may select it; anything already being delivered is untouched.' },
+];
+
+/**
+ * The forward move from each state, and the authority it needs.
+ *
+ * Only the FORWARD move is listed. Archiving is reachable from several states
+ * and is not a step in a sequence, so printing it in a "next" column would
+ * suggest a progression that does not exist.
+ */
+const NEXT_MOVE: Record<string, { to: string; action: Action; note?: string } | null> = {
+  draft: { to: 'under review', action: 'program:write' },
+  under_review: { to: 'approved', action: 'program:approve' },
+  approved: { to: 'published', action: 'program:publish', note: 'changes the public site' },
+  published: null,
+  archived: null,
+};
+
+const holds = (a: Action) =>
+  a === 'program:write' ? mayWrite : a === 'program:approve' ? mayApprove : mayPublish;
+
+const label = (s: unknown) => String(s ?? '').replace(/_/g, ' ');
+
+const fmtDate = (v: unknown) => {
+  if (!v) return '—';
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+};
+
+// Nullable throughout, and rendered as an absence rather than as a zero. A
+// template the federation has not yet specified is INCOMPLETE, and "0 sessions
+// a week" reads as a decision somebody took.
+const shape = (t: any) => {
+  const bits: string[] = [];
+  if (t.sessionsPerWeek != null) bits.push(`${t.sessionsPerWeek}×/week`);
+  if (t.durationWeeks != null) bits.push(`${t.durationWeeks} weeks`);
+  if (t.sessionMinutes != null) bits.push(`${t.sessionMinutes} min`);
+  return bits.length ? bits.join(' · ') : null;
+};
+
+const groupSize = (t: any) => {
+  if (t.minParticipants == null && t.maxParticipants == null) return null;
+  if (t.minParticipants != null && t.maxParticipants != null) return `${t.minParticipants}–${t.maxParticipants}`;
+  return t.minParticipants != null ? `${t.minParticipants} or more` : `up to ${t.maxParticipants}`;
+};
+
+const includes = (t: any) => {
+  const bits: string[] = [];
+  if (t.includesAssessment) bits.push('assessment');
+  if (t.includesGrading) bits.push('grading');
+  if (t.includesCertification) bits.push('certification');
+  if (t.includesCompetition) bits.push('competition');
+  if (t.includesReporting) bits.push('reporting');
+  return bits.length ? bits.join(', ') : null;
+};
+
+const modesOf = (t: any) =>
+  Array.isArray(t.modes) && t.modes.length ? t.modes.map((m: unknown) => label(m)).join(', ') : null;
+
+// ─── The two registers, through the one shared table ────────────────────────
+//
+// Nine and ten columns respectively, and both used to be written twice — once
+// as a wide table and once as a card list for the phone, with a comment on each
+// asking the next author to keep them in step. DataTable does the collapse, so
+// there is one description of each register and no second copy to drift.
+
+const templateColumns: Column[] = [
+  { key: 'code', header: 'Code', primary: true, sortable: true },
+  {
+    key: 'title', header: 'Programme', primary: true, sortable: true,
+    // The inconsistency is appended to the name rather than given a column of
+    // its own: it is a fact about THIS template, derived from stored rows, and
+    // a column would be nine-tenths empty.
+    render: (t: any) => (audienceMismatch.has(t.id)
+      ? `${t.title} — service not offered to this audience`
+      : t.title),
+  },
+  { key: 'audience', header: 'Audience', sortable: true, render: (t: any) => label(t.audience) },
+  { key: 'serviceTitle', header: 'Service', render: (t: any) => t.serviceTitle ?? 'none linked' },
+  { key: 'shape', header: 'Shape', render: (t: any) => shape(t) ?? 'not specified' },
+  { key: 'group', header: 'Group', render: (t: any) => groupSize(t) ?? 'not specified' },
+  { key: 'includes', header: 'Includes', render: (t: any) => includes(t) ?? 'not specified' },
+  { key: 'modes', header: 'Delivery', render: (t: any) => modesOf(t) ?? 'not specified' },
+  { key: 'status', header: 'Status', status: true },
+  {
+    key: 'next', header: 'Next move',
+    render: (t: any) => {
+      const move = NEXT_MOVE[t.status];
+      if (!move) return 'no forward move';
+      if (!holds(move.action)) return `needs ${move.action}`;
+      return move.note ? `to ${move.to} — ${move.note}` : `to ${move.to}`;
+    },
+  },
+];
+
+const templateFilters: Filter[] = [
+  {
+    key: 'status', label: 'Status', type: 'select', anyLabel: 'Every status',
+    options: TEMPLATE_STATUSES.map((v) => ({ value: v, label: label(v) })),
+  },
+];
+
+// The status the SQL query was actually filtered by, not the raw querystring.
+// The two came apart once already — an unrecognised value left the query
+// unfiltered while the page claimed a filter — and handing the raw value to the
+// table would re-open it from the other end, emptying a table the query had
+// filled.
+const templateQuery: TableQuery = {
+  ...readTableQuery(Astro.url, {
+    sortable: ['code', 'title', 'audience'],
+    filters: ['status'],
+    prefix: 't',
+  }),
+  filters: statusFilter ? { status: statusFilter } : {},
+};
+
+const runningColumns: Column[] = [
+  { key: 'code', header: 'Code', primary: true, sortable: true },
+  { key: 'title', header: 'Programme', primary: true, sortable: true },
+  { key: 'institutionName', header: 'Client', sortable: true, render: (r: any) => r.institutionName ?? 'not linked' },
+  { key: 'serviceTitle', header: 'Service', render: (r: any) => r.serviceTitle ?? 'none linked' },
+  // `paused` on a programme means delivery halted BY AGREEMENT, not a failure —
+  // which is exactly the distinction the status dictionary's `program` domain
+  // exists to hold.
+  { key: 'status', header: 'Status', status: { domain: 'program' } },
+  { key: 'mode', header: 'Delivery', render: (r: any) => (r.mode ? label(r.mode) : 'not specified') },
+  { key: 'startsOn', header: 'Starts', sortable: true, initialDir: 'desc', render: (r: any) => fmtDate(r.startsOn) },
+  { key: 'endsOn', header: 'Ends', render: (r: any) => fmtDate(r.endsOn) },
+  { key: 'sessionsPlanned', header: 'Sessions', numeric: true, render: (r: any) => r.sessionsPlanned ?? '—' },
+  {
+    key: 'participants', header: 'Participants', numeric: true,
+    // Every participant row, including those who have left. A current headcount
+    // is a different number, and calling this one "current" would be a small
+    // invention.
+    render: (r: any) => participantCounts.get(r.id) ?? 0,
+  },
+];
+
+const runningQuery: TableQuery = readTableQuery(Astro.url, {
+  sortable: ['code', 'title', 'institutionName', 'startsOn'],
+  prefix: 'r',
+});
+
+/**
+ * The tabs over the catalogue.
+ *
+ * The count comes from the SQL aggregate over the WHOLE catalogue, and it is
+ * only attached where that aggregate was actually taken — a scoped account
+ * never runs it, and PageHeader prints nothing at all for an omitted count
+ * rather than falling back to a zero nobody counted.
+ */
+const templateTabs = [
+  {
+    label: 'All',
+    href: h('/admin/programs'),
+    count: catalogueOutOfScope ? undefined : [...statusCounts.values()].reduce((a, b) => a + b, 0),
+    current: !statusFilter,
+  },
+  ...TEMPLATE_STATUSES.map((v) => ({
+    label: label(v),
+    href: `${h('/admin/programs')}?status=${v}`,
+    count: catalogueOutOfScope ? undefined : (statusCounts.get(v) ?? 0),
+    current: statusFilter === v,
+  })),
+];
+---
+
+<AdminShell
+  title="Programmes"
+  requires="program:read"
+  intro="The catalogue of programmes the federation can offer, and the programmes actually being delivered to clients. The first is a menu; the second is what is on the table."
+>
+  {notConfigured ? (
+    <p class="note">
+      The federation database is not reachable from this deployment, so neither
+      the programme catalogue nor the running programmes can be listed. Nothing
+      has been lost and nothing is waiting here: there is no system of record on
+      this deployment to read one from.
+    </p>
+  ) : readError ? (
+    <ErrorState
+      title="The programme register could not be read."
+      safe="Nothing has been changed. No template and no delivery record was altered — this was a read that failed, and every programme is still being delivered exactly as it was."
+      detail={readError}
+    />
+  ) : (
+    <>
+      {/* ── The catalogue ─────────────────────────────────────────────────── */}
+      <section class="block" aria-label="Programme catalogue">
+        {/* AdminShell prints the h1, so this prints an h2 — a page with two h1s
+            gives a screen-reader user two competing titles. It does not stick:
+            it heads a section, and there are two sections on this page.
+
+            THE PRIMARY ACTION IS A REFUSAL, and that is the point. §70: there is
+            no route that moves a template's status, and a button that silently
+            does nothing is worse than no button. PageHeader renders an
+            unavailable action as a focusable control carrying its reason rather
+            than removing it — which is the honest rendering of "this cannot be
+            done here yet", where a missing button teaches nobody why. */}
+        <PageHeader
+          title="Templates"
+          headingLevel="h2"
+          sticky={false}
+          description="A configurable shape the federation can offer — an audience, a service, a length, a group size and what it includes. A template carries no price, and there is no column for one: money comes from the fee framework when a configuration is quoted, so a figure stored here would be a second, competing answer to the same question."
+          primary={{
+            label: 'Move a template on',
+            href: h('/admin/programs'),
+            unavailable: 'Moves are not made from this screen. The lifecycle below is the record model and the authorities are real, but no route in this system changes a template’s status, so a template is moved by whoever runs the database.',
+          }}
+          secondary={[
+            { label: 'Fee framework', href: h('/admin/fees') },
+            { label: 'Quotations', href: h('/admin/quotes') },
+          ]}
+          tabs={templateTabs}
+        >
+          <Fragment slot="meta">
+            {templatesCapped && (
+              <span class="meta-chip">first {ROW_LIMIT} shown</span>
+            )}
+            {catalogueOutOfScope && (
+              <span class="meta-chip">not readable at this account’s scope</span>
+            )}
+          </Fragment>
+        </PageHeader>
+
+        <ol class="cycle" aria-label="Template lifecycle">
+          {LIFECYCLE.map((s) => (
+            <li>
+              <p class="cy-h">
+                <span class="cy-l">{s.label}</span>
+                {/* Counted over the whole catalogue, so this is a fact about the
+                    federation's records rather than about the current filter.
+                    Shown only where that count was actually taken. */}
+                {!catalogueOutOfScope && <span class="cy-n">{statusCounts.get(s.status) ?? 0}</span>}
+              </p>
+              <p class="cy-m">{s.means}</p>
+            </li>
+          ))}
+        </ol>
+
+        <p class="authority">
+          This account may
+          {mayWrite ? <> <strong>author and edit</strong></> : <> not author</>},
+          {mayApprove ? <> <strong>approve</strong></> : <> not approve</>}, and
+          {mayPublish ? <> <strong>publish</strong></> : <> not publish</>} a
+          template. Publishing is the step that changes the public website, which
+          is why it is a separate authority from approval.
+        </p>
+
+        {catalogueOutOfScope ? (
+          <p class="note">
+            The programme catalogue is national — a template belongs to no state,
+            district or institution — so it is only readable from a national
+            binding, and this account's authority is scoped. This is not an empty
+            catalogue; it is one you are not the reader of. Deliveries in your own
+            scope are listed below as normal.
+          </p>
+        ) : (
+          /* The empty action's label names where the link actually goes. There
+             is no services screen in this system, so an action promising one
+             would send an administrator looking for a page that does not
+             exist; quotations is where an empty catalogue is felt. */
+          <Table
+            id="templates"
+            caption="Programme templates"
+            columns={templateColumns}
+            filters={templateFilters}
+            rows={templates}
+            query={templateQuery}
+            paramPrefix="t"
+            note={templatesCapped
+              ? `The first ${ROW_LIMIT} templates by audience and title. The lifecycle counts above are of the whole catalogue; this table is not.`
+              : null}
+            emptyTitle="No programme template has been recorded."
+            emptyBody="Until one exists here, every institutional enquiry is designed by hand from the service list, and nothing on the public site is generated from this catalogue."
+            emptyAction={{ label: "See what this blocks — quotations", href: h("/admin/quotes") }}
+          />
+        )}
+      </section>
+
+      {/* ── Delivery ──────────────────────────────────────────────────────── */}
+      <section class="block" aria-labelledby="run-h">
+        <h2 id="run-h">Running programmes</h2>
+        <p class="lede">
+          Programmes being delivered to a named client. A row appears here when a
+          proposal has been accepted and turned into a delivery record — not when
+          an application is approved.
+        </p>
+        <p class="lede small">
+          A delivery record does not say which template it was built from: it
+          carries a service and a proposal, and the template reference is kept on
+          the application. So the two halves of this page cannot be joined, and
+          nothing below is inferred from anything above.
+        </p>
+
+        {/* Two different facts about an empty list, and only one of them is
+           knowable from a scoped account. A national reader's query carries no
+           scope predicate, so an empty result IS an empty register and saying
+           so is true. A scoped reader's query does carry one, so "nothing has
+           been recorded" would be an assertion about rows this page never
+           looked at — which is why the two sentences are separate. */}
+        <Table
+          id="running"
+          caption="Programmes being delivered"
+          columns={runningColumns}
+          rows={running}
+          query={runningQuery}
+          paramPrefix="r"
+          note={runningCapped
+            ? `The first ${ROW_LIMIT} programmes, delivery first and history last.`
+            : null}
+          emptyTitle={deliveryIsUnfiltered
+            ? "No programme is being delivered."
+            : "No programme is being delivered in the scope this account can read."}
+          emptyBody={deliveryIsUnfiltered
+            ? "This account reads the register nationally and it is unfiltered, so the register itself holds nothing — no proposal has yet been turned into a delivery record."
+            : "This list is scope-filtered in the query, so it does not say whether anything is running elsewhere in the federation."}
+          emptyAction={{ label: "Back to the catalogue", href: h("/admin/programs") }}
+        />
+      </section>
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .block { padding: 0; border: 0; }
+  .block + .block { margin-top: 52px; padding-top: 40px; border-top: 1px solid var(--border); }
+  h2 {
+    font-family: var(--font-display); font-size: 1.45rem; line-height: 1.25;
+    margin: 0 0 10px;
+  }
+  .lede { color: var(--muted); line-height: 1.75; max-width: 68ch; margin: 0 0 8px; }
+  .lede.small { font-size: .9rem; }
+  .lede strong { color: var(--off-white); }
+
+  /* The lifecycle, as a sequence rather than a grid of equal rectangles — the
+     order is the meaning, and five identical cards would hide it. */
+  .cycle {
+    list-style: none; margin: 22px 0 20px; padding: 0;
+    border-left: 1px solid var(--border);
+  }
+  .cycle li { padding: 0 0 16px 18px; position: relative; }
+  .cycle li::before {
+    content: ''; position: absolute; left: -4px; top: 7px;
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--bg-2); border: 1px solid var(--gold-dim);
+  }
+  .cy-h { display: flex; align-items: baseline; gap: 10px; margin: 0; }
+  .cy-l {
+    font-family: var(--font-display); font-size: .74rem;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--gold-2);
+  }
+  .cy-n { font-variant-numeric: tabular-nums; font-size: .92rem; color: var(--off-white); }
+  .cy-m { margin: 4px 0 0; color: var(--muted); font-size: .9rem; line-height: 1.65; max-width: 66ch; }
+
+  .authority { color: var(--muted); line-height: 1.7; max-width: 66ch; margin: 0 0 14px; }
+  .authority strong { color: var(--gold-2); }
+
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
+  }
+
+  /* Counts and qualifications taken from rows this page read. Deliberately
+     not shaped like a Status chip: one is a number, the other is a state. */
+  .meta-chip {
+    font-size: var(--text-xs); color: var(--muted);
+    border: 1px solid var(--border); border-radius: var(--radius-pill);
+    padding: 3px 10px; line-height: 1.5;
+  }
+
+  .muted { color: var(--muted); }
+  code { font-family: var(--font-accent, monospace); font-size: .88em; }
+
+  /* ── Phone (PART AL) ─────────────────────────────────────────────────────
+     Both registers become records below 900px, and DataTable owns that for
+     every register in the federation. This file no longer keeps a second copy
+     of either table in step with the first. */
+  @media (max-width: 900px) {
+    .cycle { margin-top: 18px; }
+  }
+</style>

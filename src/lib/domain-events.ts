@@ -362,6 +362,68 @@ export const EVENT_TYPES = {
   },
 
   // Casework. These are the reason classification exists at all.
+  // ── Training, engagement and operations (added with migration 0011) ──
+  INSTITUTION_APPLICATION_SUBMITTED: {
+    floor: 'official', publicFields: [],
+    means: 'An institution applied for an MMAKF training programme.',
+  },
+  INSTITUTION_APPLICATION_ROUTED: {
+    floor: 'official', publicFields: [],
+    means: 'An institutional application was assigned to a department or administrator.',
+  },
+  INSTITUTION_APPLICATION_DECIDED: {
+    floor: 'official', publicFields: [],
+    means: 'An institutional application was approved, declined or otherwise concluded.',
+  },
+  QUOTE_ISSUED: {
+    floor: 'official', publicFields: [],
+    means: 'A quotation was issued to an institution under a stated fee framework version.',
+  },
+  QUOTE_APPROVED: {
+    floor: 'official', publicFields: [],
+    means: 'A quotation was approved internally and may be sent.',
+  },
+  CONTRACT_SIGNED: {
+    floor: 'official', publicFields: [],
+    means: 'An institution signed an agreement for a programme.',
+  },
+  PROGRAM_SCHEDULED: {
+    floor: 'official', publicFields: [],
+    means: 'A training programme was scheduled into sessions.',
+  },
+  PROGRAM_SESSION_DELIVERED: {
+    floor: 'official', publicFields: [],
+    means: 'A programme session was delivered and attendance recorded.',
+  },
+  COACH_APPLICATION_SUBMITTED: {
+    floor: 'official', publicFields: [],
+    means: 'Somebody applied to teach for MMAKF.',
+  },
+  COACH_APPROVED: {
+    floor: 'official', publicFields: [],
+    means: 'A coach completed the recruitment stages and was approved.',
+  },
+  COACH_ASSIGNMENT_RECOMMENDED: {
+    floor: 'official', publicFields: [],
+    means: 'The assignment engine shortlisted coaches for a programme. A recommendation, not an appointment.',
+  },
+  COACH_ASSIGNMENT_CONFIRMED: {
+    floor: 'official', publicFields: [],
+    means: 'A named administrator confirmed a coach onto a programme.',
+  },
+  SCHEDULE_CHANGED: {
+    floor: 'official', publicFields: [],
+    means: 'A session was moved or cancelled; the institution, coach and participants are affected.',
+  },
+  TASK_ESCALATED: {
+    floor: 'official', publicFields: [],
+    means: 'A task passed its escalation deadline and was raised to a higher role.',
+  },
+  SUPPORT_TICKET_ESCALATED: {
+    floor: 'official', publicFields: [],
+    means: 'A support ticket passed its published response deadline without a reply.',
+  },
+
   SUPPORT_TICKET_OPENED: {
     floor: 'confidential', publicFields: [],
     means: 'A support ticket was opened.',

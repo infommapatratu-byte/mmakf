@@ -1,0 +1,311 @@
+---
+// The individual fee estimator.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THIS PAGE HAS BEEN A 404 ON PRODUCTION
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// /training linked here and to /training/individual, and neither was ever
+// built. Both have been returning 404 to anybody who followed the link.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IT DOES WHEN THERE ARE NO PUBLISHED RULES
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// It says so, and offers to take a quotation request. It does NOT show a
+// placeholder, an "indicative" figure, a "from ₹X" or a range.
+//
+// The fee framework currently holds no published rules at all — the federation
+// has not supplied them — so today this page always ends at "request a
+// quotation". That is the honest state of the system, and the moment MMAKF
+// publishes a framework the same page starts returning real, itemised figures
+// with no code change.
+//
+// The alternative was tempting and is exactly what the federation asked to have
+// removed: nine monthly prices scattered across the site, each one a number
+// somebody invented.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db } from '@/db';
+import { activeFramework, computeFee, formatINR, isFeeError, type FeeInputs } from '@/db/fees';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const q = Astro.url.searchParams;
+
+const answered = q.has('go');
+
+const inputs = {
+  city: (q.get('city') ?? '').trim(),
+  ageBand: q.get('ageBand') ?? '',
+  experience: q.get('experience') ?? '',
+  objective: q.get('objective') ?? '',
+  mode: q.get('mode') ?? '',
+  sessionsPerWeek: Number(q.get('sessionsPerWeek')) || null,
+  durationWeeks: Number(q.get('durationWeeks')) || null,
+};
+
+type Outcome =
+  | { kind: 'priced'; totalMinor: number; lines: Array<{ label: string; amountMinor: number }>; frameworkCode: string }
+  | { kind: 'quote_needed'; because: string }
+  | { kind: 'unavailable'; because: string };
+
+let outcome: Outcome | null = null;
+
+if (answered) {
+  if (!isConfigured()) {
+    outcome = {
+      kind: 'unavailable',
+      because: 'The federation’s database is not reachable from this deployment, so no fee can be looked up.',
+    };
+  } else {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const framework = await activeFramework(db(), today);
+
+      if (!framework) {
+        outcome = {
+          kind: 'quote_needed',
+          because:
+            'MMAKF has not published a fee framework covering today’s date. Until it does, every fee is set by quotation rather than calculated.',
+        };
+      } else {
+        const feeInputs = {
+          audience: 'individual',
+          participants: 1,
+          city: inputs.city || null,
+          ageBand: inputs.ageBand || null,
+          mode: inputs.mode || null,
+          sessionsPerWeek: inputs.sessionsPerWeek,
+          durationWeeks: inputs.durationWeeks,
+          experience: inputs.experience || null,
+          objective: inputs.objective || null,
+        } as unknown as FeeInputs;
+
+        const computation = await computeFee(db(), framework.id, feeInputs);
+
+        // A framework that exists but produces no lines for this combination
+        // has NOT priced it. Reporting ₹0 would be worse than reporting
+        // nothing — somebody would believe it.
+        if (!computation.lines.length || computation.totalMinor <= 0) {
+          outcome = {
+            kind: 'quote_needed',
+            because:
+              `The published framework (${framework.code}) has no rule covering this combination, so it produces no figure. ` +
+              'A quotation is the way to get one.',
+          };
+        } else {
+          outcome = {
+            kind: 'priced',
+            totalMinor: computation.totalMinor,
+            lines: computation.lines.map((l: any) => ({ label: l.label ?? l.description ?? 'Component', amountMinor: l.amountMinor })),
+            frameworkCode: framework.code,
+          };
+        }
+      }
+    } catch (err: any) {
+      outcome = isFeeError(err)
+        ? { kind: 'quote_needed', because: err.message }
+        : { kind: 'unavailable', because: 'The fee could not be calculated. Please request a quotation.' };
+    }
+  }
+}
+
+const AGE_BANDS = [
+  { v: '4-6', l: '4 to 6' }, { v: '7-9', l: '7 to 9' }, { v: '10-12', l: '10 to 12' },
+  { v: '13-15', l: '13 to 15' }, { v: '16-18', l: '16 to 18' }, { v: 'adult', l: 'Adult' },
+];
+const EXPERIENCE = [
+  { v: 'beginner', l: 'Starting from the beginning' },
+  { v: 'returning', l: 'Returning after a break' },
+  { v: 'graded', l: 'Already hold a grade' },
+];
+const OBJECTIVES = [
+  { v: 'general', l: 'General training and fitness' },
+  { v: 'syllabus', l: 'The graded Shotokan syllabus' },
+  { v: 'self_defence', l: 'Self-defence' },
+  { v: 'competition', l: 'Competition' },
+];
+const MODES = [
+  { v: 'at_dojo', l: 'At an MMAKF centre' },
+  { v: 'online', l: 'Online' },
+  { v: 'hybrid', l: 'A combination' },
+];
+---
+
+<Base
+  title="Estimate your MMAKF training fee"
+  description="Tell MMAKF where you are, your age and how often you want to train, and the federation's fee framework returns the applicable fee — or tells you a quotation is needed."
+  breadcrumbs={[
+    { name: 'Training', url: '/training' },
+    { name: 'Estimate a fee', url: '/training/estimate' },
+  ]}
+>
+  <div class="est">
+    <div class="container est-inner">
+      <p class="eyebrow">Training and engagement</p>
+      <h1 class="display-2">What will it cost?</h1>
+      <p class="est-lede">
+        MMAKF has one fee framework, applied to a configuration. Answer these and
+        it will either return the applicable fee, itemised, or tell you plainly
+        that your combination needs a quotation. It will not invent a figure.
+      </p>
+
+      <form method="GET" class="est-form">
+        <input type="hidden" name="go" value="1" />
+
+        <div class="est-grid">
+          <div class="est-field">
+            <label class="input-label" for="city">Where are you?</label>
+            <input class="input" id="city" name="city" value={inputs.city} autocomplete="address-level2" placeholder="City or town" />
+          </div>
+
+          <div class="est-field">
+            <label class="input-label" for="ageBand">Age</label>
+            <select class="input" id="ageBand" name="ageBand">
+              <option value="">Choose…</option>
+              {AGE_BANDS.map((a) => <option value={a.v} selected={inputs.ageBand === a.v}>{a.l}</option>)}
+            </select>
+          </div>
+
+          <div class="est-field">
+            <label class="input-label" for="experience">Experience</label>
+            <select class="input" id="experience" name="experience">
+              <option value="">Choose…</option>
+              {EXPERIENCE.map((a) => <option value={a.v} selected={inputs.experience === a.v}>{a.l}</option>)}
+            </select>
+          </div>
+
+          <div class="est-field">
+            <label class="input-label" for="objective">What are you training for?</label>
+            <select class="input" id="objective" name="objective">
+              <option value="">Choose…</option>
+              {OBJECTIVES.map((a) => <option value={a.v} selected={inputs.objective === a.v}>{a.l}</option>)}
+            </select>
+          </div>
+
+          <div class="est-field">
+            <label class="input-label" for="mode">How would you train?</label>
+            <select class="input" id="mode" name="mode">
+              <option value="">Choose…</option>
+              {MODES.map((a) => <option value={a.v} selected={inputs.mode === a.v}>{a.l}</option>)}
+            </select>
+          </div>
+
+          <div class="est-field">
+            <label class="input-label" for="sessionsPerWeek">Sessions a week</label>
+            <input class="input" id="sessionsPerWeek" name="sessionsPerWeek" type="number" min="1" max="14"
+              inputmode="numeric" value={inputs.sessionsPerWeek ?? ''} />
+          </div>
+
+          <div class="est-field">
+            <label class="input-label" for="durationWeeks">For how many weeks</label>
+            <input class="input" id="durationWeeks" name="durationWeeks" type="number" min="1"
+              inputmode="numeric" value={inputs.durationWeeks ?? ''} />
+          </div>
+        </div>
+
+        <button class="btn btn-primary" type="submit">Check the fee</button>
+      </form>
+
+      {outcome && (
+        <section class="est-out" aria-live="polite">
+          {outcome.kind === 'priced' && (
+            <>
+              <p class="eyebrow">Under framework {outcome.frameworkCode}</p>
+              <p class="est-total">{formatINR(outcome.totalMinor)}</p>
+              <table class="est-table">
+                <caption class="sr-only">How this figure was reached</caption>
+                <tbody>
+                  {outcome.lines.map((l) => (
+                    <tr><th scope="row">{l.label}</th><td>{formatINR(l.amountMinor)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+              <p class="est-note">
+                Calculated from the framework published by the federation. To
+                proceed, or if anything about your situation differs from the
+                answers above, request a quotation.
+              </p>
+              <a class="btn btn-ghost" href={h('/learn/apply?audience=individual')}>Request a quotation</a>
+            </>
+          )}
+
+          {outcome.kind === 'quote_needed' && (
+            <>
+              <p class="eyebrow">No calculated fee</p>
+              <h2 class="est-h2">This needs a quotation.</h2>
+              <p class="est-note">{outcome.because}</p>
+              <p class="est-note">
+                That is not a refusal — it is the federation declining to show
+                you a number it has not agreed. Send the same answers as a
+                request and MMAKF will come back with a real figure.
+              </p>
+              <a class="btn btn-primary" href={h('/learn/apply?audience=individual')}>Request a quotation</a>
+            </>
+          )}
+
+          {outcome.kind === 'unavailable' && (
+            <>
+              <p class="eyebrow">Unavailable</p>
+              <p class="est-note">{outcome.because}</p>
+              <a class="btn btn-ghost" href="mailto:admin@mmakf.in">Write to MMAKF</a>
+            </>
+          )}
+        </section>
+      )}
+
+      <section class="est-why">
+        <h2 class="est-h2">Why there is no price list</h2>
+        <p class="est-note">
+          MMAKF used to advertise nine separately-priced monthly programmes —
+          Shotokan, kata, kumite, children's, women's and so on — as though they
+          were nine products. They are components of one training system, and
+          pricing them separately meant the same person paid differently
+          depending on which page they landed on. There is now one framework, and
+          it is applied to what you actually want to do.
+        </p>
+      </section>
+    </div>
+  </div>
+</Base>
+
+<style>
+  .est { padding: 96px 0 80px; }
+  .est-inner { max-width: 46rem; }
+  .est-lede { color: var(--muted); line-height: 1.7; max-width: 56ch; margin: 16px 0 34px; }
+  .est-h2 { font-family: var(--font-display); font-size: 1.3rem; margin: 8px 0 12px; }
+  .est-note { color: var(--muted); line-height: 1.7; max-width: 58ch; margin: 12px 0 20px; }
+
+  .est-grid {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px; margin-bottom: 26px;
+  }
+  .est-field:first-child { grid-column: 1 / -1; }
+
+  .est-out {
+    margin: 44px 0; padding: 28px;
+    border: 1px solid var(--border); border-left: 3px solid var(--gold);
+    border-radius: var(--radius); background: var(--card);
+  }
+  .est-total {
+    font-family: var(--font-display); font-size: clamp(2rem, 6vw, 3rem);
+    margin: 8px 0 20px; color: var(--gold-2); font-variant-numeric: tabular-nums;
+  }
+  .est-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+  .est-table th, .est-table td { padding: 10px 0; border-bottom: 1px solid var(--border); text-align: left; }
+  .est-table th { font-weight: 400; color: var(--muted); }
+  .est-table td { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .est-why { margin-top: 56px; padding-top: 28px; border-top: 1px solid var(--border); }
+
+  @media (max-width: 640px) {
+    .est { padding: 78px 0 60px; }
+    .est-grid { grid-template-columns: 1fr; gap: 18px; }
+    .est-form .btn { width: 100%; text-align: center; }
+    .est-out { padding: 20px; }
+  }
+</style>

@@ -1,0 +1,104 @@
+---
+// The federation's network.
+//
+// PART A asked for the headquarters to be reclassified: the Hombu is not the
+// federation, it is a node of it — FEDERATION → NETWORK → HEADQUARTERS. This is
+// that page. The Hombu appears here as one entry among the affiliated centres,
+// distinguished by its status rather than by being the site's subject.
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+const branches = (await get<any[]>('branches')) || [];
+const isHq = (b: any) => /headquarters|hombu/i.test(`${b?.status ?? ''} ${b?.name ?? ''}`);
+const hq = branches.filter(isHq);
+const centres = branches.filter((b: any) => !isHq(b));
+const districts = [...new Set(branches.map((b: any) => b.district).filter(Boolean))];
+---
+
+<Base
+  title="The MMAKF network — affiliated centres"
+  description="The headquarters, affiliated dojos and training centres of the Modern Martial Arts Karate-Do Federation of India."
+>
+  <PageHero
+    eyebrow="Federation"
+    title="Network"
+    lede="Where MMAKF trains — the headquarters, and the centres affiliated to the federation."
+  />
+
+  <div class="container net">
+    <dl class="net-stats">
+      <div><dt>Centres on the register</dt><dd>{branches.length}</dd></div>
+      <div><dt>Districts</dt><dd>{districts.length}</dd></div>
+    </dl>
+    <p class="net-note">
+      This counts entries on the federation's own register and nothing else. No
+      claim is made here about student numbers, or about centres the federation
+      has not recorded.
+    </p>
+
+    {hq.length > 0 && (
+      <section class="net-sec">
+        <h2 class="display-2">Headquarters</h2>
+        <ul class="net-list">
+          {hq.map((b: any) => (
+            <li>
+              <p class="n-name">{b.name}</p>
+              <p class="n-where">{[b.city, b.district].filter(Boolean).join(' · ')}</p>
+              {b.incharge && <p class="n-who">Officer in charge: {b.incharge}</p>}
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
+
+    <section class="net-sec">
+      <h2 class="display-2">Affiliated centres</h2>
+      {centres.length === 0 ? (
+        <p class="net-note">No affiliated centres are on the register.</p>
+      ) : (
+        <ul class="net-list">
+          {centres.map((b: any) => (
+            <li>
+              <p class="n-name">{b.name}</p>
+              <p class="n-where">{[b.city, b.district].filter(Boolean).join(' · ')}</p>
+              {b.incharge && <p class="n-who">Officer in charge: {b.incharge}</p>}
+              {b.status && <p class="n-status">{b.status}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+
+    <section class="net-sec net-cta">
+      <h2 class="display-2">Affiliate a dojo.</h2>
+      <p class="net-note">
+        A centre meeting the federation's technical and administrative standards
+        may apply for a charter.
+      </p>
+      <a class="btn btn-primary" href="/affiliation">How affiliation works</a>
+    </section>
+  </div>
+</Base>
+
+<style>
+  .net { padding-bottom: 88px; }
+  .net-stats { display: flex; flex-wrap: wrap; gap: 0 46px; margin: 0 0 14px; }
+  .net-stats dt { font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .net-stats dd {
+    margin: 6px 0 0; font-family: var(--font-display); font-size: 2.2rem;
+    font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .net-note { color: var(--muted); line-height: 1.7; max-width: 60ch; margin: 12px 0 0; }
+  .net-sec { margin-top: 56px; }
+  .net-list { list-style: none; margin: 24px 0 0; padding: 0; }
+  .net-list li { padding: 18px 0; border-top: 1px solid var(--border); }
+  .n-name { margin: 0; font-family: var(--font-display); font-size: 1.15rem; }
+  .n-where { margin: 4px 0 0; color: var(--gold-2); font-size: .9rem; }
+  .n-who, .n-status { margin: 4px 0 0; color: var(--muted); font-size: .86rem; }
+  .net-cta .btn { margin-top: 20px; }
+  @media (max-width: 640px) { .net-stats dd { font-size: 1.6rem; } }
+</style>

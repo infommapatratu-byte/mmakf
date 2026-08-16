@@ -1,0 +1,547 @@
+---
+// The venue register.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// A VENUE IS NOT A DOJO
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A dojo is a MEMBER of the federation — `dojos` carries an affiliation status
+// and affiliation dates, it hangs off a state and a district, and it appears on
+// the register of who belongs. A venue is a ROOM: a school hall, a hired mat
+// space, a corporate gym, a stadium floor. That is why they are two tables and
+// why this page is not the affiliation register wearing a different title —
+// withdrawing a venue closes a room, deleting a dojo would remove a member of
+// the federation.
+//
+// The link between them is `venues.dojoId`, which the SCHEMA makes nullable: a
+// venue need not be a dojo. What proportion of the federation's rooms are its
+// own dojos is not a fact this page has, and it does not guess at one — the
+// register is empty until somebody enters a room into it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ABSENT IS NOT THE SAME AS NONE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `accessibility` is JSON and it is nullable. A NULL there means NOBODY HAS
+// SURVEYED THIS ROOM — it does not mean the room has no step-free access, and
+// this page will never say that it does. The difference matters to the person
+// deciding whether a wheelchair user can attend a grading: "unrecorded" sends
+// them to make a telephone call, "no step-free access" sends them to cancel.
+// The same rule applies inside the JSON: a key recorded as null is a question
+// the surveyor did not answer, so it is skipped rather than rendered as "no".
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE IS A WHERE CLAUSE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// visibleScopes() is applied inside the query. A state administrator sees the
+// venues in their state because the SQL says so. A venue with no state, no
+// district, no dojo and no institution recorded is visible only to a national
+// reader — fail-closed, and worth knowing about if a row seems to be missing.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS IS NOT THE SHARED TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §97's one table is for rows: values of the same shape, in columns a reader
+// scans down. A venue is not a row. It is an address, a keyholder, two
+// measurements, three variable-length lists read out of JSON, an accessibility
+// finding that is usually the ABSENCE of a finding, and a set of blackout
+// periods — and the accessibility paragraph alone is longer than any cell a
+// table can hold. Forcing it into columns would either truncate the one
+// sentence on this page that must not be truncated, or make every row as tall
+// as it.
+//
+// The §12 header, the status dictionary and the state components are adopted;
+// the record list is deliberately kept.
+
+import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import * as s from '@/db/schema';
+import * as o from '@/db/operations.schema';
+import { and, or, eq, gt, asc, desc, inArray } from 'drizzle-orm';
+import { istDayOf, istTimeOf } from '@/db/booking';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+// `active` is a real boolean column, so this is the one filter that can be
+// offered without inventing a taxonomy. Venue KIND is free text with a default
+// of 'other' and the federation has not published a fixed list, so it is shown
+// on each record and not turned into a set of filter chips that would imply one.
+const show = Astro.url.searchParams.get('show') === 'withdrawn' ? 'withdrawn'
+  : Astro.url.searchParams.get('show') === 'all' ? 'all'
+  : 'in-use';
+
+const LIMIT = 300;
+
+let venues: any[] = [];
+const blackoutsByVenue = new Map<number, any[]>();
+// "Not configured" and "could not be read" are different absences and are told
+// apart here (CONTENT-ARCHITECTURE §5.4). One is a deployment with no system of
+// record — nothing failed, and there is nothing to retry. The other is a
+// failure, which is what ErrorState is for.
+let notConfigured = false;
+let readFailed = false;
+/** The driver's own words. Behind the Details disclosure, never the headline. */
+let failureDetail: string | null = null;
+let noScope = false;
+// Whether this reader's authority is national. It only ever changes the WORDING
+// of the empty state: "the register is empty" and "nothing in the register that
+// you may see" are different claims, and a state administrator whose state has
+// no rooms must not be told the federation has none.
+let nationalReader = false;
+
+if (principal && canAnywhere(principal, 'venue:read')) {
+  if (!isConfigured()) {
+    notConfigured = true;
+  } else {
+    try {
+      const conds: any[] = [];
+      if (show === 'in-use') conds.push(eq(o.venues.active, true));
+      if (show === 'withdrawn') conds.push(eq(o.venues.active, false));
+
+      const scopes = visibleScopes(principal, 'venue:read');
+      nationalReader = scopes.kind === 'all';
+      if (scopes.kind === 'none') {
+        noScope = true;
+      } else {
+        if (scopes.kind === 'scoped') {
+          const clauses: any[] = [];
+          if (scopes.states.length) clauses.push(inArray(o.venues.stateUnitId, scopes.states));
+          if (scopes.districts.length) clauses.push(inArray(o.venues.districtUnitId, scopes.districts));
+          if (scopes.dojos.length) clauses.push(inArray(o.venues.dojoId, scopes.dojos));
+          if (scopes.institutions.length) clauses.push(inArray(o.venues.institutionId, scopes.institutions));
+          conds.push(or(...clauses));
+        }
+
+        venues = await (db() as any)
+          .select({
+            v: o.venues,
+            dojoName: s.dojos.name,
+            stateName: s.stateUnits.name,
+            districtName: s.districtUnits.name,
+            institutionName: s.institutions.name,
+          })
+          .from(o.venues)
+          .leftJoin(s.dojos, eq(s.dojos.id, o.venues.dojoId))
+          .leftJoin(s.stateUnits, eq(s.stateUnits.id, o.venues.stateUnitId))
+          .leftJoin(s.districtUnits, eq(s.districtUnits.id, o.venues.districtUnitId))
+          .leftJoin(s.institutions, eq(s.institutions.id, o.venues.institutionId))
+          // Rooms still in use first, then alphabetical. A withdrawn venue is
+          // kept rather than deleted because past sessions point at it.
+          .where(conds.length ? and(...conds) : undefined)
+          .orderBy(desc(o.venues.active), asc(o.venues.name))
+          .limit(LIMIT);
+
+        // Blackouts are fetched only for venues this reader already passed the
+        // scope filter on, so the second query cannot widen what the first
+        // allowed. Only periods that have NOT yet ended are read: a blackout
+        // that finished last March closes nothing today, and listing it would
+        // make a live closure harder to spot.
+        const ids = venues.map((r) => r.v.id);
+        if (ids.length) {
+          const rows: any[] = await (db() as any)
+            .select()
+            .from(o.venueBlackouts)
+            .where(and(
+              inArray(o.venueBlackouts.venueId, ids),
+              gt(o.venueBlackouts.endsAt, new Date()),
+            ))
+            .orderBy(asc(o.venueBlackouts.startsAt))
+            .limit(1000);
+          for (const b of rows) {
+            const list = blackoutsByVenue.get(b.venueId) ?? [];
+            list.push(b);
+            blackoutsByVenue.set(b.venueId, list);
+          }
+        }
+      }
+    } catch (err: any) {
+      readFailed = true;
+      failureDetail = String(err?.message ?? err);
+    }
+  }
+}
+
+const truncated = venues.length >= LIMIT;
+
+// ── Reading the JSON columns without inventing anything ─────────────────────
+
+interface Fact { label: string; value: string | null; }
+
+/**
+ * Turn a JSON column into facts, or return null meaning NOTHING WAS RECORDED.
+ *
+ * An empty array and an empty object both come back as null: a survey that
+ * recorded no items and a survey that never happened are indistinguishable in
+ * the data, and the honest reading of an indistinguishable pair is the weaker
+ * one. A key whose value is null is dropped for the same reason — the surveyor
+ * left it blank, and rendering it as "no" would put a finding in the register
+ * that nobody made.
+ */
+function factsOf(v: unknown): Fact[] | null {
+  if (v === null || v === undefined) return null;
+
+  if (Array.isArray(v)) {
+    const items = v
+      .filter((x) => x !== null && x !== undefined)
+      .map((x) => String(x).trim())
+      .filter(Boolean);
+    return items.length ? items.map((x) => ({ label: x, value: null })) : null;
+  }
+
+  if (typeof v === 'object') {
+    const out: Fact[] = [];
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (val === null || val === undefined) continue;
+      const key = k.replace(/[_-]+/g, ' ').trim();
+      if (typeof val === 'boolean') out.push({ label: key, value: val ? 'yes' : 'no' });
+      else if (typeof val === 'object') out.push({ label: key, value: JSON.stringify(val) });
+      else {
+        const t = String(val).trim();
+        if (t) out.push({ label: key, value: t });
+      }
+    }
+    return out.length ? out : null;
+  }
+
+  const t = String(v).trim();
+  return t ? [{ label: t, value: null }] : null;
+}
+
+const placeOf = (r: any) => [r.v.city, r.districtName, r.stateName]
+  .map((x: unknown) => (typeof x === 'string' ? x.trim() : ''))
+  .filter(Boolean)
+  .join(', ');
+
+const stamp = (at: unknown) => {
+  const d = new Date(at as string);
+  if (Number.isNaN(d.getTime())) return '—';
+  const iso = istDayOf(d);
+  const day = new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-IN', {
+    day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
+  });
+  return `${day} ${istTimeOf(d)}`;
+};
+
+const label = (v: unknown) => String(v ?? '').replace(/_/g, ' ');
+
+const inUse = venues.filter((r) => r.v.active).length;
+---
+
+<AdminShell
+  title="Venues"
+  requires="venue:read"
+  intro="Rooms the federation trains in. A venue is a room, not a member: a dojo holds a charter and appears on the affiliation register, while a school hall hired for a term appears only here."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Venues', url: h('/admin/venues') },
+    ],
+    /* The three standing views, as real links carrying real querystrings (§79,
+       §80) rather than the hand-rolled chip row this replaced — so a view can
+       be bookmarked, sent to a colleague and reached with JavaScript off, and
+       so the current one is announced with aria-current rather than shown only
+       by a background colour.
+
+       Query-only hrefs. On admin.mmakf.in this page is served at /venues and
+       the middleware rewrites it to /admin/venues internally, so a link that
+       rebuilt the pathname would be rewritten a second time.
+
+       No counts on the tabs. A number beside "Withdrawn" would have to be
+       counted, and this page counts only the view it loaded. */
+    tabs: [
+      { label: 'In use', href: '?' },
+      { label: 'Withdrawn', href: '?show=withdrawn' },
+      { label: 'All', href: '?show=all' },
+    ],
+  }}
+>
+  {notConfigured ? (
+    /* Not ErrorState: nothing failed. There is no database attached to this
+       deployment, so there is no register to read and nothing to retry. */
+    <p class="note">
+      The federation database is not reachable from this deployment, so the
+      venue register cannot be read. Nothing is missing — the register lives in
+      the database, not in this page.
+    </p>
+  ) : readFailed ? (
+    <ErrorState
+      title="The venue register could not be read."
+      safe="Nothing has been changed. This was a read, so no room was added, edited or withdrawn."
+      detail={failureDetail}
+    />
+  ) : noScope ? (
+    <p class="note">
+      This account holds the right to read the venue register, but in no unit
+      that has one. Venue access is granted within a state, a district, a dojo
+      or a client institution, and none of this account's bindings covers one.
+    </p>
+  ) : venues.length === 0 ? (
+    /* §104: the way out is real and it depends on which emptiness this is. A
+       view filtered to one standing can be widened; the whole register being
+       empty cannot, and that empty state goes back to the module list rather
+       than pretending there is somewhere else to look. */
+    show === 'withdrawn' ? (
+      <EmptyState
+        title={nationalReader
+          ? 'No venue has been withdrawn.'
+          : 'No withdrawn venue falls within what this account may read.'}
+        body={nationalReader
+          ? 'A room taken out of use is kept in the register rather than deleted, because past sessions point at it.'
+          : 'That is not the same as none having been withdrawn. A room taken out of use is kept in the register rather than deleted, because past sessions point at it.'}
+        action={{ label: 'Show every room', href: '?show=all' }}
+      />
+    ) : show === 'in-use' ? (
+      <EmptyState
+        title={nationalReader
+          ? 'No room is currently in use.'
+          : 'No room in use falls within what this account may read.'}
+        body={nationalReader
+          ? 'Either nothing has been entered in the register yet, or every room in it has been withdrawn. The next view answers which.'
+          : 'This account reads venues in its own state, district, dojo or client institution. A room with none of those recorded against it is visible only to a national reader.'}
+        action={{ label: 'Show every room', href: '?show=all' }}
+      />
+    ) : (
+      <EmptyState
+        title={nationalReader
+          ? 'The venue register is empty.'
+          : 'No venue falls within what this account may read.'}
+        body={nationalReader
+          ? 'That is not a statement that the federation trains nowhere — it means no room has been entered here yet. A venue is recorded when a programme is scheduled into it, and until then this page has nothing to show and will not fill itself with examples.'
+          : 'That is not a statement that the register is empty, nor that the federation trains nowhere — this account reads venues in its own state, district, dojo or client institution, and a room with none of those recorded against it is visible only to a national reader.'}
+        action={{ label: 'Back to operations', href: h('/admin') }}
+      />
+    )
+  ) : (
+    <>
+      <p class="count">
+        {venues.length} {venues.length === 1 ? 'venue' : 'venues'} listed
+        {show === 'all' && <>, of which {inUse} in use</>}.
+      </p>
+
+      {/* Not "holds more than LIMIT": the query stops at the ceiling and never
+          counts the remainder, and the order is rooms-in-use-first THEN
+          alphabetical, which is not the same as alphabetical. */}
+      {truncated && (
+        <p class="note warn" role="status">
+          This filter reached the ceiling of {LIMIT} venues, and only that many
+          are listed — rooms in use first, then by name. How many more there are
+          was not counted. Filter by standing to narrow it.
+        </p>
+      )}
+
+      <ul class="reg">
+        {venues.map((r) => {
+          const facilities = factsOf(r.v.facilities);
+          const access = factsOf(r.v.accessibility);
+          const equipment = factsOf(r.v.equipment);
+          const blackouts = blackoutsByVenue.get(r.v.id) ?? [];
+          const place = placeOf(r);
+          return (
+            <li>
+              <div class="ident">
+                <p class="v-name">{r.v.name}</p>
+                <p class="v-meta">
+                  <code>{r.v.code}</code> · {label(r.v.kind)}
+                </p>
+                {/* The standing of the room, through the one component that
+                    turns a stored value into a word a person reads. `active` is
+                    a boolean here, so it is mapped to the two values the venue
+                    domain defines — and the domain is what stops "withdrawn"
+                    being read with the applications meaning of the word.
+
+                    It is a chip on EVERY room, not a marker on the withdrawn
+                    ones. A page that marks only the exceptions leaves the
+                    reader to infer the rule, and the row that says nothing is
+                    the row they scroll past. */}
+                <p class="v-standing">
+                  <Status value={r.v.active ? 'active' : 'withdrawn'} domain="venue" size="sm" />
+                </p>
+                {r.dojoName && (
+                  <p class="v-rel">
+                    Chartered dojo: <strong>{r.dojoName}</strong>
+                  </p>
+                )}
+                {r.institutionName && (
+                  <p class="v-rel">Client: <strong>{r.institutionName}</strong></p>
+                )}
+                <p class="v-addr">
+                  {r.v.addressLine && <>{r.v.addressLine}<br /></>}
+                  {place || <span class="muted">No address recorded.</span>}
+                  {r.v.postcode && <> {r.v.postcode}</>}
+                </p>
+                {(r.v.contactName || r.v.contactPhone) && (
+                  <p class="v-rel">
+                    {/* `||`, not `??`: a keyholder recorded as an empty string
+                        is an unnamed keyholder, not a person called "". */}
+                    Keyholder: {r.v.contactName || 'unnamed'}
+                    {r.v.contactPhone && <> · {r.v.contactPhone}</>}
+                  </p>
+                )}
+              </div>
+
+              <div class="detail">
+                <dl class="specs">
+                  <div>
+                    <dt>Capacity</dt>
+                    <dd>{r.v.capacity != null ? `${r.v.capacity} people` : <span class="muted">not recorded</span>}</dd>
+                  </div>
+                  <div>
+                    <dt>Mat area</dt>
+                    <dd>{r.v.matAreaSqm != null ? `${r.v.matAreaSqm} sq m` : <span class="muted">not recorded</span>}</dd>
+                  </div>
+                </dl>
+
+                <div class="blk">
+                  <p class="blk-h">Facilities</p>
+                  {facilities ? (
+                    <ul class="chips">
+                      {facilities.map((f) => (
+                        <li>{f.label}{f.value && <>: {f.value}</>}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p class="muted small">Not recorded.</p>
+                  )}
+                </div>
+
+                {equipment && (
+                  <div class="blk">
+                    <p class="blk-h">Equipment</p>
+                    <ul class="chips">
+                      {equipment.map((f) => (
+                        <li>{f.label}{f.value && <>: {f.value}</>}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <div class="blk">
+                  <p class="blk-h">Accessibility</p>
+                  {access ? (
+                    <ul class="chips">
+                      {access.map((f) => (
+                        <li>{f.label}{f.value && <>: {f.value}</>}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    /* The sentence this whole page turns on. UNRECORDED, never
+                       "no step-free access" — nobody has surveyed this room. */
+                    <p class="unrec">
+                      Unrecorded. Nobody has surveyed this room, so nothing is
+                      known either way — this is not a finding that the venue
+                      lacks step-free access. Ask the keyholder before telling
+                      anybody it is or is not accessible.
+                    </p>
+                  )}
+                </div>
+
+                <div class="blk">
+                  <p class="blk-h">Blackout periods</p>
+                  {blackouts.length ? (
+                    <ul class="bl">
+                      {blackouts.map((b: any) => (
+                        <li>
+                          <span class="bl-when">{stamp(b.startsAt)} — {stamp(b.endsAt)}</span>
+                          <span class="bl-why">{b.reason ?? 'No reason recorded.'}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p class="muted small">
+                      None current or upcoming. Periods that have already ended
+                      are not listed.
+                    </p>
+                  )}
+                </div>
+
+                {r.v.notes && <p class="v-notes">{r.v.notes}</p>}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
+  }
+  .note.warn { border-left-color: var(--red); margin: 0 0 20px; }
+  .count { font-size: .82rem; color: var(--muted); margin: 0 0 18px; }
+
+  .reg { list-style: none; margin: 0; padding: 0; }
+  .reg > li {
+    display: grid; grid-template-columns: minmax(0, 20rem) minmax(0, 1fr);
+    gap: 0 36px; padding: 22px 0; border-bottom: 1px solid var(--border);
+  }
+  /* A withdrawn room used to be dimmed to 68% opacity. Opacity does not dim a
+     marker, it dims a RECORD — the address, the keyholder's telephone number
+     and the accessibility finding all lost contrast together, and those are
+     exactly what somebody looks up about a room that has gone out of use.
+     The standing is now said in words by the status chip, which carries the
+     fact at full strength (WCAG 1.4.3). */
+
+  .v-name { margin: 0; font-family: var(--font-display); font-size: 1.12rem; }
+  .v-meta { margin: 4px 0 0; font-size: .82rem; color: var(--muted); text-transform: capitalize; }
+  .v-standing { margin: 8px 0 0; }
+  .v-rel { margin: 8px 0 0; font-size: .85rem; color: var(--muted); }
+  .v-addr { margin: 10px 0 0; font-size: .85rem; color: var(--muted); line-height: 1.6; }
+  .v-notes { margin: 14px 0 0; font-size: .85rem; color: var(--muted); line-height: 1.7; max-width: 62ch; }
+
+  .specs { margin: 0 0 14px; display: flex; flex-wrap: wrap; gap: 0 28px; }
+  .specs dt { font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .specs dd { margin: 2px 0 0; font-size: .92rem; font-variant-numeric: tabular-nums; }
+
+  .blk { margin: 0 0 14px; }
+  .blk-h {
+    font-size: .7rem; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); font-weight: 400; margin: 0 0 6px;
+  }
+  .chips { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; }
+  .chips li {
+    padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
+    font-size: .78rem; text-transform: capitalize; line-height: 1.5;
+  }
+
+  .unrec {
+    margin: 0; padding: 10px 14px; border-left: 2px solid var(--red);
+    background: var(--bg-2); font-size: .84rem; color: var(--muted);
+    line-height: 1.65; max-width: 58ch;
+  }
+
+  .bl { list-style: none; margin: 0; padding: 0; }
+  .bl li {
+    display: flex; flex-wrap: wrap; gap: 4px 14px;
+    padding: 6px 0; border-bottom: 1px dotted var(--border); font-size: .84rem;
+  }
+  .bl-when { font-variant-numeric: tabular-nums; }
+  .bl-why { color: var(--muted); }
+
+  .muted { color: var(--muted); }
+  .small { font-size: .84rem; }
+  code { font-family: var(--font-accent, monospace); font-size: .95em; text-transform: none; }
+
+  /* PART AL: a two-column record becomes one column on a phone rather than
+     squeezing the address into eight characters. */
+  @media (max-width: 900px) {
+    .reg > li { grid-template-columns: 1fr; gap: 14px; }
+    .specs { gap: 0 22px; }
+  }
+</style>

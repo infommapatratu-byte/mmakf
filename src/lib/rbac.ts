@@ -32,10 +32,43 @@ export const ROLES = [
   'MEMBER',
   'FINANCE_OFFICER',
   'SAFEGUARDING_OFFICER',
+
+  // ── Operations roles ──────────────────────────────────────────────────────
+  // The federation runs a training and engagement operation alongside the
+  // sport. These roles exist because the alternative is "give them
+  // FEDERATION_ADMIN", and that hands someone who schedules school programmes
+  // the authority to revoke ranks and finalise competition results.
+  'TRAINING_DIRECTOR',
+  'TRAINING_OPERATIONS',
+  'SCHOOL_PROGRAM_MANAGER',
+  'CORPORATE_PROGRAM_MANAGER',
+  'UNIVERSITY_PROGRAM_MANAGER',
+  'COACH_MANAGER',
+  'COMPETITION_ADMIN',
+  'EDUCATION_OFFICER',
+  'MEDIA_OFFICER',
+  'SUPPORT_AGENT',
+  'HR_OFFICER',
+  'MEDICAL_OFFICER',
+  'AUDITOR',
+
+  // ── Institution-side roles ────────────────────────────────────────────────
+  // Held by people at a client school, corporate or university — never by
+  // federation staff. They are bound at 'institution' scope, which contains no
+  // federation resource at all, so they cannot reach federation data whatever
+  // id they guess.
+  'INSTITUTION_ADMIN',
+  'INSTITUTION_COORDINATOR',
+  'PARENT',
 ] as const;
 
 export type Role = (typeof ROLES)[number];
-export type ScopeType = 'national' | 'state' | 'district' | 'dojo';
+
+// 'institution' is a TENANT scope, not another rung of the federation
+// hierarchy. A school is a client, not a unit: it sits outside
+// national/state/district/dojo entirely, and that is exactly what makes it
+// safe. scopeContains() gives an institution binding no federation resource.
+export type ScopeType = 'national' | 'state' | 'district' | 'dojo' | 'institution';
 
 /** Actions are `domain:verb`. Keep them coarse enough to reason about. */
 export type Action =
@@ -65,7 +98,40 @@ export type Action =
   // either: approving what may be offered for sale is an editorial and
   // standing decision, and a finance officer reconciling settlements has no
   // business deciding whether a gi may be advertised.
-  | 'marketplace:read' | 'marketplace:review' | 'marketplace:suspend';
+  | 'marketplace:read' | 'marketplace:review' | 'marketplace:suspend'
+
+  // ── Operations ────────────────────────────────────────────────────────────
+  // Coach management is separate from 'person:*'. Every coach is a person, but
+  // reading a person record is not the same authority as reading someone's
+  // interview notes, references and performance history.
+  | 'coach:read' | 'coach:write' | 'coach:review' | 'coach:assign'
+  // A programme is the configured thing a client receives. Distinct from
+  // 'content:*', which is editorial copy.
+  | 'program:read' | 'program:write' | 'program:approve' | 'program:publish'
+  // Quoting is split three ways deliberately. Reading a quote, issuing one and
+  // approving one are three different jobs, and one person holding all three is
+  // how a discount gets granted with nobody else in the room.
+  | 'quote:read' | 'quote:issue' | 'quote:approve'
+  // The pricing RULES, as opposed to the quotes produced from them. PART AC:
+  // institution users must never reach these. Nor may most federation staff —
+  // whoever edits a rule changes every future quote silently.
+  | 'feeframework:read' | 'feeframework:write' | 'feeframework:publish'
+  | 'contract:read' | 'contract:write'
+  | 'booking:read' | 'booking:write'
+  | 'venue:read' | 'venue:write'
+  | 'attendance:read' | 'attendance:write'
+  | 'task:read' | 'task:write'
+  | 'support:read' | 'support:write' | 'support:escalate'
+  | 'document:read' | 'document:write'
+  | 'report:read' | 'export:run'
+  | 'workflow:read' | 'workflow:write'
+  | 'notification:read' | 'notification:send'
+  | 'seo:read' | 'seo:write'
+  // HR and medical sit deliberately outside NATIONAL_FULL. PART X says HR data
+  // must not be exposed to ordinary administrators, and for this purpose a
+  // federation administrator is an ordinary administrator.
+  | 'hr:read' | 'hr:write'
+  | 'medical:read' | 'medical:write';
 
 export interface Binding {
   role: Role;
@@ -88,6 +154,14 @@ export interface Resource {
   dojoId?: number | null;
   /** For self-service: the person this resource belongs to. */
   personId?: number | null;
+  /**
+   * The client institution this resource belongs to, if any.
+   *
+   * A federation resource leaves this undefined, and that is what keeps an
+   * institution binding away from it: `undefined === 7` is false, so the check
+   * fails closed without needing a rule written per resource type.
+   */
+  institutionId?: number | null;
 }
 
 // ─── Role → permitted actions ───────────────────────────────────────────────
@@ -108,11 +182,53 @@ const NATIONAL_FULL: Action[] = [
   'user:read', 'user:write', 'role:grant',
   'engagement:read', 'engagement:write',
   'marketplace:read', 'marketplace:review', 'marketplace:suspend',
+  'coach:read', 'coach:write', 'coach:review', 'coach:assign',
+  'program:read', 'program:write', 'program:approve', 'program:publish',
+  'quote:read', 'quote:issue', 'quote:approve',
+  'feeframework:read', 'feeframework:write', 'feeframework:publish',
+  'contract:read', 'contract:write',
+  'booking:read', 'booking:write',
+  'venue:read', 'venue:write',
+  'attendance:read', 'attendance:write',
+  'task:read', 'task:write',
+  'support:read', 'support:write', 'support:escalate',
+  'document:read', 'document:write',
+  'report:read', 'export:run',
+  'workflow:read', 'workflow:write',
+  'notification:read', 'notification:send',
+  'seo:read', 'seo:write',
+  // Note the two that are ABSENT: 'hr:*' and 'medical:*'. Their absence is why
+  // HR_OFFICER and MEDICAL_OFFICER appear in RESTRICTED_ROLES below — the
+  // no-amplification rule in canGrantRole() then stops a FEDERATION_ADMIN from
+  // minting one of those roles and reading the data through it.
 ];
 
 const GRANTS: Record<Role, Action[]> = {
-  // Full authority including safeguarding and role granting.
-  SUPER_ADMIN: [...NATIONAL_FULL, 'safeguarding:read', 'safeguarding:write'],
+  /**
+   * The root of the authority tree. Holds everything, including the three
+   * action families NATIONAL_FULL deliberately withholds.
+   *
+   * 'hr:*' and 'medical:*' were originally omitted here as well as from
+   * NATIONAL_FULL, on the reasoning that nobody should hold HR data casually.
+   * The effect was that NOBODY COULD GRANT HR_OFFICER OR MEDICAL_OFFICER AT
+   * ALL: canGrantRole() refuses to confer an action the granter does not
+   * already hold, so both roles existed, conferred real authority, and were
+   * unassignable. tests/tenant-isolation.test.ts found it by asking whether a
+   * SUPER_ADMIN could grant one.
+   *
+   * Restoring them here does not widen ordinary administration by one action.
+   * FEDERATION_ADMIN still holds neither, and both roles remain in
+   * RESTRICTED_ROLES, so conferring them stays a SUPER_ADMIN act — which is the
+   * separation PART X actually asked for. The root of a tree holding everything
+   * beneath it is the point of having a root; SUPER_ADMIN already holds
+   * safeguarding, which is more sensitive than either.
+   */
+  SUPER_ADMIN: [
+    ...NATIONAL_FULL,
+    'safeguarding:read', 'safeguarding:write',
+    'hr:read', 'hr:write',
+    'medical:read', 'medical:write',
+  ],
 
   // Operational national administration — no safeguarding case access.
   FEDERATION_ADMIN: NATIONAL_FULL,
@@ -132,6 +248,9 @@ const GRANTS: Record<Role, Action[]> = {
     'rank:read', 'certificate:read', 'certificate:issue',
     'competition:read', 'competition:write', 'result:read',
     'content:read', 'content:write', 'audit:read', 'user:read',
+    // Held the help desk through 'person:read_pii' before it was re-gated on
+    // 'support:*'. Granted explicitly so the change narrowed nobody's reach.
+    'support:read', 'support:write',
   ],
 
   // Technical authority: syllabus, gradings, ranks — not finance or users.
@@ -154,6 +273,8 @@ const GRANTS: Record<Role, Action[]> = {
     'competition:read', 'competition:write', 'result:read', 'result:enter',
     'content:read',
     'engagement:read', 'engagement:write',
+    // As GENERAL_SECRETARY above: preserved across the support desk re-gating.
+    'support:read', 'support:write',
     // Scoped by their binding, so a state administrator reviews the sellers and
     // listings of their own state and no other. Note this does NOT include
     // 'role:grant': a state administrator still cannot confer a role, so the
@@ -168,6 +289,7 @@ const GRANTS: Record<Role, Action[]> = {
     'person:read', 'person:read_pii', 'person:write',
     'membership:read', 'rank:read', 'grading:read',
     'competition:read', 'result:read', 'result:enter', 'content:read',
+    'support:read', 'support:write',
   ],
 
   DOJO_ADMIN: [
@@ -175,6 +297,7 @@ const GRANTS: Record<Role, Action[]> = {
     'person:read', 'person:read_pii', 'person:write',
     'membership:read', 'rank:read', 'grading:read',
     'competition:read', 'result:read', 'content:read',
+    'support:read', 'support:write',
   ],
 
   INSTRUCTOR: [
@@ -193,8 +316,210 @@ const GRANTS: Record<Role, Action[]> = {
   ATHLETE: ['person:read', 'rank:read', 'certificate:read', 'competition:read', 'result:read', 'content:read'],
   MEMBER: ['person:read', 'content:read'],
 
-  FINANCE_OFFICER: ['finance:read', 'finance:write', 'person:read', 'membership:read', 'audit:read', 'content:read', 'engagement:read'],
+  FINANCE_OFFICER: [
+    'finance:read', 'finance:write', 'person:read', 'membership:read', 'audit:read',
+    'content:read', 'engagement:read',
+    // Finance reconciles against quotes and contracts, so it reads both — and
+    // issues neither. Reading the money a programme will bring in is a
+    // different authority from setting it.
+    'quote:read', 'contract:read', 'report:read', 'export:run', 'document:read',
+    // Restored explicitly when src/db/fees.ts stopped gating the fee framework
+    // on 'finance:write'. Finance could author and publish a framework through
+    // that action, so it keeps both — and now holds them by name, where the
+    // grant can be argued with, rather than as a side effect of a payments
+    // permission.
+    'feeframework:read', 'feeframework:write', 'feeframework:publish',
+  ],
   SAFEGUARDING_OFFICER: ['safeguarding:read', 'safeguarding:write', 'person:read', 'person:read_pii', 'audit:read'],
+
+  // ── Operations ────────────────────────────────────────────────────────────
+
+  // Owns the training and engagement operation end to end. Reads the fee
+  // framework, and cannot write it: changing a pricing rule alters every future
+  // quote at once, which is a federation-level act rather than an operational
+  // one.
+  TRAINING_DIRECTOR: [
+    'person:read', 'content:read', 'unit:read', 'dojo:read',
+    'engagement:read', 'engagement:write',
+    'program:read', 'program:write', 'program:approve', 'program:publish',
+    'quote:read', 'quote:issue', 'quote:approve',
+    'feeframework:read',
+    'contract:read', 'contract:write',
+    'booking:read', 'booking:write',
+    'venue:read', 'attendance:read',
+    'coach:read', 'coach:assign',
+    'task:read', 'task:write',
+    'document:read', 'document:write',
+    'support:read',
+    'report:read', 'export:run',
+    'workflow:read',
+    'notification:read', 'notification:send',
+  ],
+
+  // Runs the day to day: intake, programme configuration, scheduling,
+  // attendance. Issues quotes and cannot approve them — the one separation in
+  // this file that exists to stop a single person discounting unobserved.
+  TRAINING_OPERATIONS: [
+    'person:read', 'content:read',
+    'engagement:read', 'engagement:write',
+    'program:read', 'program:write',
+    'quote:read', 'quote:issue',
+    'booking:read', 'booking:write',
+    'venue:read', 'attendance:read', 'attendance:write',
+    'coach:read',
+    'task:read', 'task:write',
+    'document:read',
+    'support:read', 'support:write',
+    'report:read',
+    'notification:read', 'notification:send',
+  ],
+
+  // The three sector managers hold an identical action set. They are separate
+  // ROLES because the lead router needs to know who handles schools and who
+  // handles corporates, and role identity carries that meaning where the action
+  // set cannot. See routeLead() in src/db/applications.ts.
+  SCHOOL_PROGRAM_MANAGER: [
+    'person:read', 'content:read', 'engagement:read', 'engagement:write',
+    'program:read', 'program:write', 'quote:read', 'quote:issue',
+    'booking:read', 'booking:write', 'venue:read',
+    'attendance:read', 'attendance:write', 'coach:read',
+    'task:read', 'task:write', 'document:read',
+    'support:read', 'support:write', 'report:read',
+    'notification:read', 'notification:send',
+  ],
+  CORPORATE_PROGRAM_MANAGER: [
+    'person:read', 'content:read', 'engagement:read', 'engagement:write',
+    'program:read', 'program:write', 'quote:read', 'quote:issue',
+    'booking:read', 'booking:write', 'venue:read',
+    'attendance:read', 'attendance:write', 'coach:read',
+    'task:read', 'task:write', 'document:read',
+    'support:read', 'support:write', 'report:read',
+    'notification:read', 'notification:send',
+  ],
+  UNIVERSITY_PROGRAM_MANAGER: [
+    'person:read', 'content:read', 'engagement:read', 'engagement:write',
+    'program:read', 'program:write', 'quote:read', 'quote:issue',
+    'booking:read', 'booking:write', 'venue:read',
+    'attendance:read', 'attendance:write', 'coach:read',
+    'task:read', 'task:write', 'document:read',
+    'support:read', 'support:write', 'report:read',
+    'notification:read', 'notification:send',
+  ],
+
+  // Runs the coach pipeline and assignment. Holds person:read_pii because
+  // screening a candidate means reading their documents. Holds no 'hr:*' — pay,
+  // leave and grievance sit with HR_OFFICER and are not visible from here.
+  COACH_MANAGER: [
+    'person:read', 'person:read_pii', 'content:read',
+    'coach:read', 'coach:write', 'coach:review', 'coach:assign',
+    'booking:read', 'attendance:read', 'venue:read',
+    'engagement:read', 'program:read',
+    'task:read', 'task:write',
+    'document:read', 'document:write',
+    'report:read',
+    'notification:read', 'notification:send',
+  ],
+
+  COMPETITION_ADMIN: [
+    'person:read', 'content:read', 'unit:read', 'dojo:read',
+    'competition:read', 'competition:write',
+    'result:read', 'result:enter', 'result:finalize',
+    'venue:read', 'venue:write', 'booking:read',
+    'task:read', 'task:write', 'document:read',
+    'report:read', 'notification:read', 'notification:send',
+  ],
+
+  EDUCATION_OFFICER: [
+    'person:read', 'content:read', 'content:write',
+    'program:read', 'program:write',
+    'certificate:read', 'grading:read',
+    'document:read', 'document:write',
+    'task:read', 'report:read', 'notification:read',
+  ],
+
+  MEDIA_OFFICER: [
+    'content:read', 'content:write', 'document:read',
+    'seo:read', 'seo:write', 'person:read', 'notification:read',
+  ],
+
+  // Answers tickets. Deliberately has no person:read_pii: a support agent needs
+  // to find the account that raised a ticket, not to read its identity
+  // documents.
+  SUPPORT_AGENT: [
+    'person:read', 'content:read',
+    'support:read', 'support:write', 'support:escalate',
+    'task:read', 'task:write',
+    'engagement:read', 'booking:read', 'program:read', 'document:read',
+    'notification:read', 'notification:send',
+  ],
+
+  // PART X. Restricted at grant time — see RESTRICTED_ROLES.
+  HR_OFFICER: [
+    'hr:read', 'hr:write',
+    'person:read', 'person:read_pii',
+    'coach:read',
+    'task:read', 'task:write',
+    'document:read', 'document:write',
+    'report:read', 'audit:read',
+  ],
+
+  MEDICAL_OFFICER: [
+    'medical:read', 'medical:write',
+    'person:read', 'person:read_pii', 'audit:read',
+  ],
+
+  // Read-only by construction. There is no writing verb anywhere in this list,
+  // which is the whole point: an auditor who can change a record is not an
+  // auditor.
+  AUDITOR: [
+    'audit:read',
+    'unit:read', 'dojo:read', 'person:read',
+    'membership:read', 'rank:read', 'grading:read', 'certificate:read',
+    'competition:read', 'result:read',
+    'content:read', 'finance:read',
+    'engagement:read', 'program:read', 'quote:read', 'feeframework:read',
+    'contract:read', 'booking:read', 'venue:read', 'attendance:read',
+    'coach:read', 'task:read', 'support:read', 'document:read',
+    'workflow:read', 'report:read', 'export:run', 'notification:read',
+  ],
+
+  // ── Institution side ──────────────────────────────────────────────────────
+  // Bound at 'institution' scope. Note what is missing from all three:
+  // 'feeframework:*' (PART AC — a client must never see the pricing rules),
+  // 'quote:issue', 'quote:approve', 'finance:*' and 'certificate:issue'.
+
+  INSTITUTION_ADMIN: [
+    'person:read', 'content:read',
+    'program:read',
+    'quote:read', 'contract:read',
+    'booking:read', 'booking:write',
+    'attendance:read',
+    'document:read',
+    'support:read', 'support:write',
+    'report:read',
+    'task:read',
+    'notification:read',
+  ],
+
+  INSTITUTION_COORDINATOR: [
+    'person:read', 'content:read',
+    'program:read', 'booking:read',
+    'attendance:read', 'attendance:write',
+    'document:read',
+    'support:read', 'support:write',
+    'notification:read',
+  ],
+
+  // A parent sees their own child and nothing else. The narrowing to "their own
+  // child" is not done here — it is a row-level predicate applied where the
+  // query is built, because this module answers about scopes, not about
+  // families.
+  PARENT: [
+    'person:read', 'content:read',
+    'attendance:read', 'certificate:read', 'grading:read',
+    'support:read', 'support:write',
+    'notification:read',
+  ],
 };
 
 // ─── Scope logic ────────────────────────────────────────────────────────────
@@ -226,6 +551,12 @@ function scopeContains(b: Binding, r: Resource): boolean {
       return b.scopeId != null && r.districtUnitId === b.scopeId;
     case 'dojo':
       return b.scopeId != null && r.dojoId === b.scopeId;
+    case 'institution':
+      // Both sides must be present. A federation resource carries no
+      // institutionId, so this is false for every one of them — which is how a
+      // client's administrator is kept out of federation data without a rule
+      // having to be written per resource type.
+      return b.scopeId != null && r.institutionId != null && r.institutionId === b.scopeId;
     default:
       return false;
   }
@@ -305,7 +636,17 @@ export function assertCanAnywhere(
  * casework, and SUPER_ADMIN is the root of the authority tree — neither may be
  * minted by ordinary national administration (§41, §53).
  */
-const RESTRICTED_ROLES: Role[] = ['SUPER_ADMIN', 'SAFEGUARDING_OFFICER'];
+const RESTRICTED_ROLES: Role[] = [
+  'SUPER_ADMIN',
+  'SAFEGUARDING_OFFICER',
+  // PART X: HR data must not reach ordinary administrators. Listing these here
+  // is belt to the no-amplification braces — NATIONAL_FULL omits 'hr:*' and
+  // 'medical:*', so a FEDERATION_ADMIN already fails that check. Both stay,
+  // because the day someone adds 'hr:read' to NATIONAL_FULL to make a report
+  // work, this line is what still refuses.
+  'HR_OFFICER',
+  'MEDICAL_OFFICER',
+];
 
 /** Does a binding's scope contain the scope a new binding is being made in? */
 function bindingScopeCovers(b: Binding, target: { scopeType: ScopeType; scopeId: number | null }): boolean {
@@ -369,9 +710,9 @@ export function actionsForRole(role: Role): Action[] {
 export function visibleScopes(
   principal: Principal | null | undefined,
   action: Action
-): { kind: 'all' } | { kind: 'none' } | { kind: 'scoped'; states: number[]; districts: number[]; dojos: number[] } {
+): { kind: 'all' } | { kind: 'none' } | { kind: 'scoped'; states: number[]; districts: number[]; dojos: number[]; institutions: number[] } {
   if (!principal) return { kind: 'none' };
-  const states: number[] = [], districts: number[] = [], dojos: number[] = [];
+  const states: number[] = [], districts: number[] = [], dojos: number[] = [], institutions: number[] = [];
   let national = false;
 
   for (const b of principal.bindings) {
@@ -381,11 +722,12 @@ export function visibleScopes(
     else if (b.scopeType === 'state' && b.scopeId != null) states.push(b.scopeId);
     else if (b.scopeType === 'district' && b.scopeId != null) districts.push(b.scopeId);
     else if (b.scopeType === 'dojo' && b.scopeId != null) dojos.push(b.scopeId);
+    else if (b.scopeType === 'institution' && b.scopeId != null) institutions.push(b.scopeId);
   }
 
   if (national) return { kind: 'all' };
-  if (!states.length && !districts.length && !dojos.length) return { kind: 'none' };
-  return { kind: 'scoped', states, districts, dojos };
+  if (!states.length && !districts.length && !dojos.length && !institutions.length) return { kind: 'none' };
+  return { kind: 'scoped', states, districts, dojos, institutions };
 }
 
 /** Convenience for building principals from the legacy session types. */

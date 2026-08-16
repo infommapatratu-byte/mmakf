@@ -1,0 +1,399 @@
+---
+// The shape of what is coming (§55, §105).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS IS NOT A SPINNER
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §55: never a blank page while loading. A spinner satisfies that letter and
+// misses the point — it says "something is happening" and nothing else. The
+// reader of a rankings table and the reader of a certificate both watch the
+// same circle turn, learn nothing about what is arriving, and cannot begin to
+// read until it stops.
+//
+// A skeleton that mirrors the SHAPE tells them: four columns are coming, or six
+// cards, or a form of nine fields. The eye settles on the layout before the data
+// lands, so when it does land nothing jumps and nothing has to be re-found.
+// That is the whole argument for the variants below, and it is why there is no
+// generic `variant="box"`: a skeleton that does not resemble its content is a
+// spinner wearing a rectangle.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY `label` IS REQUIRED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §105: never an indefinite "Loading…". The word on its own is the same failure
+// as the spinner — it names no operation, so it can neither be waited on
+// sensibly nor reported when it never finishes. Making `label` non-optional in
+// the type means a skeleton cannot be rendered without somebody having decided
+// what it is the reader is waiting for: "Loading your ranking", "Processing
+// registration", "Checking eligibility".
+//
+// Pass the operation as a phrase with no trailing punctuation. The ellipsis is
+// added here so it is the same ellipsis everywhere.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THE BOXES ARE HIDDEN FROM ASSISTIVE TECHNOLOGY
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A table skeleton of six rows by five columns is thirty-six empty elements. A
+// screen reader walking them announces nothing useful thirty-six times, which is
+// materially worse than silence. So every shimmering box is inside one
+// aria-hidden subtree, and the operation is carried ONCE by a single
+// visually-hidden region. `aria-busy` tells assistive technology the region is
+// not finished, which is the honest machine-readable version of what the
+// shimmer says to the eye.
+//
+// The live region sits OUTSIDE the aria-busy wrapper, and that is not tidiness.
+// aria-busy="true" instructs assistive technology to withhold updates from the
+// subtree until it goes false — and this wrapper never goes false, because the
+// skeleton is replaced wholesale rather than filled in. A live region nested
+// inside it is therefore muted for the entire time it exists.
+//
+// Be honest about what the region can and cannot do. A live region is announced
+// when its contents CHANGE; content already present when the page loads is not.
+// This component is server-rendered, so on a first paint the sentence is read
+// when the reader navigates to it, not spoken at them. The region earns its
+// place for the other case — a skeleton swapped in client-side — and for the
+// rest it is simply the only text in the component that assistive technology is
+// allowed to reach.
+//
+//   <Skeleton label="Loading the register" variant="table" rows={6} columns={5} />
+//   <Skeleton label="Processing registration" variant="form" rows={4} />
+//   <Skeleton label="Loading your ranking" variant="stats" count={4} />
+
+export type SkeletonVariant =
+  | 'text' | 'table' | 'cards' | 'list' | 'stats' | 'form' | 'detail';
+
+export interface Props {
+  /**
+   * The operation, named. REQUIRED — see §105 above.
+   * No trailing full stop or ellipsis; one is added.
+   */
+  label: string;
+  /** Which shape is coming. Pick the one the real content will have. */
+  variant?: SkeletonVariant;
+  /** Rows for `table`, lines for `text`, fields for `form`, pairs for `detail`. */
+  rows?: number;
+  /** Columns for `table`. */
+  columns?: number;
+  /** How many cards, list rows or stat tiles. */
+  count?: number;
+  /**
+   * Print the operation above the shape. On by default: a reader who cannot see
+   * the eventual heading still deserves to know what is being fetched. Turn it
+   * off only when a real heading directly above already says it.
+   */
+  visibleLabel?: boolean;
+  /**
+   * Emit the live region. Turn OFF when an ancestor already announces this wait
+   * — two live regions for one operation talk over each other. With it off the
+   * visible label stops being aria-hidden, so the operation is still reachable
+   * as ordinary text rather than the component going completely silent.
+   */
+  announce?: boolean;
+  class?: string;
+}
+
+const {
+  label,
+  variant = 'text',
+  rows = 4,
+  columns = 4,
+  count = 3,
+  visibleLabel = true,
+  announce = true,
+  class: className = '',
+} = Astro.props;
+
+// Varied widths, because real text does not come in equal blocks and a grid of
+// identical bars reads as a loading graphic rather than as absent content.
+// Deliberately a fixed cycle rather than Math.random: a skeleton that renders
+// differently on every request is untestable and, on a slow connection where it
+// is visible for seconds, faintly alarming.
+const WIDTHS = [92, 78, 88, 71, 84, 96, 75, 86];
+const widthAt = (i: number) => `${WIDTHS[Math.abs(i) % WIDTHS.length] ?? 88}%`;
+
+const rowList = Array.from({ length: Math.max(1, rows) }, (_, i) => i);
+const colList = Array.from({ length: Math.max(1, columns) }, (_, i) => i);
+const itemList = Array.from({ length: Math.max(1, count) }, (_, i) => i);
+
+// One ellipsis, added once. A caller who has already typed "…" or "..." does not
+// get two.
+const waiting = `${label.replace(/[.…\s]+$/, '')}…`;
+---
+
+<div class:list={['sk', className]} data-skeleton>
+  {announce && <p class="sr-only" role="status">{waiting}</p>}
+
+  <div class="sk-busy" aria-busy="true">
+    {visibleLabel && <p class="sk-label" aria-hidden={announce ? 'true' : undefined}>{waiting}</p>}
+
+    <div class="sk-shape" aria-hidden="true">
+    {variant === 'text' && rowList.map((i) => (
+      <span
+        class="sk-b sk-line"
+        style={`width:${i === rowList.length - 1 && rowList.length > 1 ? '58%' : widthAt(i)}`}
+      ></span>
+    ))}
+
+    {variant === 'table' && (
+      <div class="sk-table" style={`--sk-cols:${colList.length}`}>
+        <div class="sk-thead">
+          {colList.map((c) => (
+            <span class="sk-b sk-th" style={`width:${widthAt(c + 2)}`}></span>
+          ))}
+        </div>
+        {rowList.map((r) => (
+          <div class="sk-tr">
+            {colList.map((c) => (
+              <span class="sk-b sk-td" style={`width:${widthAt(r * 3 + c)}`}></span>
+            ))}
+          </div>
+        ))}
+      </div>
+    )}
+
+    {variant === 'cards' && (
+      <div class="sk-cards">
+        {itemList.map((i) => (
+          <div class="sk-card">
+            <span class="sk-b sk-icon"></span>
+            <span class="sk-b sk-title" style={`width:${widthAt(i)}`}></span>
+            <span class="sk-b sk-line" style={`width:${widthAt(i + 1)}`}></span>
+            <span class="sk-b sk-line" style={`width:${widthAt(i + 2)}`}></span>
+            <span class="sk-b sk-line" style="width:52%"></span>
+          </div>
+        ))}
+      </div>
+    )}
+
+    {variant === 'list' && (
+      <div class="sk-list">
+        {itemList.map((i) => (
+          <div class="sk-row">
+            <span class="sk-b sk-avatar"></span>
+            <span class="sk-row-text">
+              <span class="sk-b sk-title" style={`width:${widthAt(i)}`}></span>
+              <span class="sk-b sk-line" style={`width:${widthAt(i + 3)}`}></span>
+            </span>
+            <span class="sk-b sk-pill"></span>
+          </div>
+        ))}
+      </div>
+    )}
+
+    {variant === 'stats' && (
+      <div class="sk-stats">
+        {itemList.map((i) => (
+          <div class="sk-stat">
+            <span class="sk-b sk-cap" style={`width:${widthAt(i + 2)}`}></span>
+            <span class="sk-b sk-figure"></span>
+            <span class="sk-b sk-line" style={`width:${widthAt(i + 5)}`}></span>
+          </div>
+        ))}
+      </div>
+    )}
+
+    {variant === 'form' && (
+      <div class="sk-form">
+        {rowList.map((i) => (
+          <div class="sk-field">
+            <span class="sk-b sk-cap" style={`width:${widthAt(i + 1)}`}></span>
+            <span class="sk-b sk-input"></span>
+          </div>
+        ))}
+        <span class="sk-b sk-btn"></span>
+      </div>
+    )}
+
+    {variant === 'detail' && (
+      <div class="sk-detail">
+        <span class="sk-b sk-head"></span>
+        <span class="sk-b sk-line" style="width:46%"></span>
+        <div class="sk-dl">
+          {rowList.map((i) => (
+            <Fragment>
+              <span class="sk-b sk-cap" style={`width:${widthAt(i)}`}></span>
+              <span class="sk-b sk-line" style={`width:${widthAt(i + 4)}`}></span>
+            </Fragment>
+          ))}
+        </div>
+      </div>
+    )}
+  </div>
+  </div>
+</div>
+
+<style>
+  .sk { min-width: 0; }
+  /* Carries aria-busy so the live region above can sit outside it. Layout is
+     unchanged: both are plain blocks. */
+  .sk-busy { min-width: 0; }
+
+  .sk-label {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: var(--space-3);
+  }
+
+  /* The bar. One rule, because a skeleton whose pieces shimmer at different
+     rates reads as several things loading rather than one. */
+  .sk-b {
+    display: block;
+    border-radius: var(--radius-xs);
+    background: linear-gradient(
+      90deg,
+      var(--card-2) 0%,
+      var(--bg-2) 45%,
+      var(--card-2) 90%
+    );
+    background-size: 220% 100%;
+    animation: sk-sweep 1.5s var(--ease-in-out) infinite;
+  }
+  /* prefers-reduced-motion is handled globally in global.css, which stops this
+     on a single frame. Not re-implemented here, and not fought: a still bar is
+     a perfectly good skeleton. */
+  @keyframes sk-sweep {
+    from { background-position: 120% 0; }
+    to   { background-position: -80% 0; }
+  }
+
+  .sk-line   { height: var(--space-3); }
+  .sk-title  { height: var(--space-4); }
+  .sk-cap    { height: var(--space-2); }
+  .sk-head   { height: var(--space-6); width: 62%; }
+
+  .sk-shape > .sk-line + .sk-line { margin-top: var(--space-3); }
+
+  /* ── table ──────────────────────────────────────────────────────────────
+     Real column widths, a real header band and real row rules, so the reader
+     counts the columns before the first cell arrives. */
+  .sk-table {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    overflow: hidden;
+  }
+  .sk-thead, .sk-tr {
+    display: grid;
+    grid-template-columns: repeat(var(--sk-cols, 4), minmax(0, 1fr));
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    align-items: center;
+  }
+  .sk-thead {
+    background: var(--card-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .sk-tr { border-bottom: 1px solid var(--border); }
+  .sk-tr:last-child { border-bottom: 0; }
+  .sk-th { height: var(--space-2); }
+  .sk-td { height: var(--space-3); }
+
+  /* ── cards ───────────────────────────────────────────────────────────── */
+  .sk-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: var(--space-4);
+  }
+  .sk-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    padding: var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .sk-icon {
+    width: var(--space-12);
+    height: var(--space-12);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-2);
+  }
+
+  /* ── list ────────────────────────────────────────────────────────────── */
+  .sk-list {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+  }
+  .sk-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-4);
+    border-bottom: 1px solid var(--border);
+  }
+  .sk-row:last-child { border-bottom: 0; }
+  .sk-avatar {
+    width: var(--space-10);
+    height: var(--space-10);
+    border-radius: var(--radius-pill);
+    flex: none;
+  }
+  .sk-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .sk-pill {
+    width: var(--space-16);
+    height: var(--space-5);
+    border-radius: var(--radius-pill);
+    flex: none;
+  }
+
+  /* ── stats ───────────────────────────────────────────────────────────── */
+  .sk-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: var(--space-4);
+  }
+  .sk-stat {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    padding: var(--space-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  /* The figure is deliberately the biggest bar in the tile — the number is what
+     the reader came for, and its size is the tile's information hierarchy. */
+  .sk-figure { height: var(--space-8); width: 58%; }
+
+  /* ── form ────────────────────────────────────────────────────────────── */
+  .sk-form { display: flex; flex-direction: column; gap: var(--space-5); }
+  .sk-field { display: flex; flex-direction: column; gap: var(--space-2); }
+  .sk-input {
+    height: var(--space-12);
+    border-radius: var(--radius);
+    width: 100%;
+  }
+  .sk-btn {
+    height: var(--space-12);
+    width: var(--space-32);
+    max-width: 100%;
+    border-radius: var(--radius);
+  }
+
+  /* ── detail ──────────────────────────────────────────────────────────── */
+  .sk-detail { display: flex; flex-direction: column; gap: var(--space-3); }
+  .sk-dl {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+    gap: var(--space-4);
+    align-items: center;
+    margin-top: var(--space-4);
+  }
+  @media (max-width: 640px) {
+    .sk-dl { grid-template-columns: minmax(0, 1fr); gap: var(--space-2); }
+  }
+</style>

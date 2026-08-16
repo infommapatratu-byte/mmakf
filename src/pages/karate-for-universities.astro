@@ -1,0 +1,48 @@
+---
+// SEO landing page on the public federation for the universities audience.
+//
+// Same content as /learn/universities, rendered from the same definition. One
+// audience, one description — a landing page that said something different
+// from the platform page would be two answers to one question, and PART BA
+// calls a page built for a keyword rather than a reader a doorway page.
+//
+// This one is not: it carries the substantive content, and the canonical is
+// its own address because it IS the public federation's page on the subject.
+
+import Base from '@/layouts/Base.astro';
+import AudienceEditorial from '@/components/AudienceEditorial.astro';
+import { AUDIENCES, audienceBySlug } from '@/data/audiences';
+import { canonicalFor, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const audience = audienceBySlug('universities')!;
+
+const schema = {
+  '@context': 'https://schema.org',
+  '@type': 'Service',
+  name: audience.title,
+  description: audience.standfirst,
+  serviceType: 'Martial arts training',
+  areaServed: { '@type': 'Country', name: 'India' },
+  provider: {
+    '@type': 'SportsOrganization',
+    name: 'Modern Martial Arts Karate-Do Federation of India',
+    url: 'https://www.mmakf.in',
+  },
+  url: canonicalFor(surface, '/karate-for-universities'),
+};
+---
+
+<Base
+  title={audience.seoTitle ?? audience.title}
+  description={audience.seoDescription ?? audience.standfirst}
+  breadcrumbs={[
+    { name: 'Training', url: '/training' },
+    { name: 'For universities', url: '/karate-for-universities' },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+  <AudienceEditorial audience={audience} surface={surface} siblings={AUDIENCES} />
+</Base>

@@ -1,0 +1,709 @@
+---
+// Session delivery, and the attendance register.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS SCREEN SHOWS TWO VALUES WHERE A MARK WAS CHANGED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// PART AV: attendance corrections are audited. `program_attendance` keeps the
+// value that was there before in `corrected_from_present` rather than
+// overwriting it, so the record can still answer "what did the coach actually
+// write down on the day?" — and a register that renders only the current value
+// throws that answer away at the last step. A corrected mark is therefore
+// printed as BOTH readings, with who changed it and when — except where the
+// earlier value was never kept, and there the page says that rather than
+// guessing which way the mark went.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IS COUNTED AND WHAT IS NOT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A mark exists or it does not. There is no third state stored, so a
+// participant with no row for a session is UNRECORDED, not absent, and this
+// page never turns the first into the second. The tallies are computed in SQL
+// over every mark; only the corrections are listed row by row, because a
+// programme of four hundred children across twenty-four sessions is nine
+// thousand marks and no administrator reads those on a screen.
+//
+// There is deliberately NO count of how many participants went unrecorded at a
+// given session, and no attendance rate. Both need a denominator — who was
+// expected in that room on that day — and the federation records no such thing.
+// The nearest available number is the roll as it stands NOW, and subtracting
+// marks from it produces a figure that is wrong in both directions: it counts a
+// child who enrolled after the session as missing from it, and it hides the
+// gap entirely for a cohort that has since shrunk. A wrong number on an
+// administrator's screen is worse than an absent one, so the roll is reported
+// once against the programme, in the present tense, and never arithmetically
+// combined with a past session's marks.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS IS NOT THE SHARED TABLE, AND WHY A MARK IS NOT A STATUS CHIP
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §97's one table is adopted everywhere there is a table. This is not one. A
+// session carries a correction trail — one line per corrected mark, each
+// naming a participant, both readings, who changed it and when — and that trail
+// is the reason this screen exists. A table can hold a session; it cannot hold
+// a session AND the variable-length trail beneath it without either dropping
+// the trail or making every row as tall as the longest one. The trail stays.
+//
+// The session's own status goes through <Status> like every other status in the
+// federation. The MARKS do not, and deliberately: present/absent is a NOT NULL
+// boolean on program_attendance, not a status enum, and the dictionary has
+// `absent` from the grading vocabulary — where it means a candidate did not sit
+// an examination and is terminal and red. Rendering a child's attendance mark
+// in that word's clothing would import a meaning nobody wrote. Marks are
+// printed as the words they are.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// visibleScopes() is applied as a WHERE clause on the PROGRAMME, which is what
+// carries the state, district and institution a session belongs to. Nothing is
+// filtered after the query. A dojo-scoped holder of 'attendance:read' matches
+// no clause at all and is told why rather than shown an empty list — an
+// institutional programme is not a dojo resource.
+//
+// One narrowing this page does NOT attempt: the PARENT role holds
+// 'attendance:read' and is meant to see one child and no other, but the
+// federation has no guardian-to-child relation in the schema, so there is
+// nothing to write that predicate against. No PARENT binding is issued anywhere
+// in this codebase today. If one is ever issued, that predicate must be built
+// before this page is opened to it — src/lib/rbac.ts says the narrowing belongs
+// where the query is built, and this is that place.
+
+import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import { and, asc, eq, inArray, isNotNull, or, sql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
+import * as ops from '@/db/operations.schema';
+import * as eng from '@/db/engagement.schema';
+import { persons, users } from '@/db/schema';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+const SESSION_STATUSES = ['scheduled', 'delivered', 'cancelled', 'rescheduled', 'no_show'] as const;
+
+const view = Astro.url.searchParams.get('view') || '';
+const statusFilter = (SESSION_STATUSES as readonly string[]).includes(view) ? view : '';
+const correctedOnly = view === 'corrected';
+
+// How much of the register one page will hold. Both are caps on a query, not on
+// the data: when either bites, the page says so rather than quietly showing a
+// partial register as if it were the whole one.
+const SESSION_LIMIT = 400;
+const CORRECTION_LIMIT = 300;
+
+/** The corrector is a user; their name lives on the person behind that user. */
+const corrector = alias(persons, 'correcting_person');
+
+let sessions: any[] = [];
+let corrections: any[] = [];
+const tallies = new Map<number, { recorded: number; present: number; absent: number; corrected: number }>();
+const rolls = new Map<number, { onRoll: number; departed: number }>();
+let sessionsTruncated = false;
+let correctionsTruncated = false;
+let scopeNote: string | null = null;
+// Three different absences, told apart (CONTENT-ARCHITECTURE §5.4): a
+// deployment with no system of record, a query that failed, and a register with
+// nothing in it. They were one string in one box; only the middle one is an
+// error, and only the last one is empty.
+let notConfigured = false;
+let readFailed = false;
+/** The driver's own words. Behind Details, never the headline. */
+let failureDetail: string | null = null;
+
+if (principal && canAnywhere(principal, 'attendance:read')) {
+  if (!isConfigured()) {
+    notConfigured = true;
+  } else {
+    try {
+      const scopes = visibleScopes(principal, 'attendance:read');
+      const where: any[] = [];
+      let queryable = scopes.kind !== 'none';
+
+      if (scopes.kind === 'none') {
+        // canAnywhere() passed, so the action is held — but no binding carrying
+        // it resolves to a scope (a scoped binding with no scopeId does this).
+        // Saying "no sessions match" here would blame the data for a defect in
+        // the binding, and the person reading needs to know which it is.
+        scopeNote =
+          'You hold attendance:read, but none of the role bindings that carry it resolves to a unit or an ' +
+          'institution, so there is no scope to search inside. No query was run. Whoever granted the role ' +
+          'needs to bind it to a scope before this page can show anything.';
+      }
+
+      if (scopes.kind === 'scoped') {
+        // The predicate goes on the programme, because that is the row that
+        // knows which unit and which client institution a session belongs to.
+        const clauses: any[] = [];
+        if (scopes.states.length) clauses.push(inArray(eng.trainingPrograms.stateUnitId, scopes.states));
+        if (scopes.districts.length) clauses.push(inArray(eng.trainingPrograms.districtUnitId, scopes.districts));
+        if (scopes.institutions.length) clauses.push(inArray(eng.trainingPrograms.institutionId, scopes.institutions));
+        if (clauses.length) {
+          where.push(or(...clauses));
+        } else {
+          queryable = false;
+          scopeNote =
+            'You hold attendance:read at dojo scope only. An institutional programme belongs to a client ' +
+            'institution and to a state or district unit, never to a dojo, so no session falls inside that ' +
+            'scope. This is not an empty register — it is a register you have no rows in.';
+        }
+      }
+
+      if (statusFilter) where.push(eq(ops.programSessions.status, statusFilter as any));
+
+      if (correctedOnly) {
+        // Filtered in SQL rather than by sifting the page's own rows, so the
+        // view means "every session with a corrected mark", not "every session
+        // with a corrected mark that happened to be inside the first 400".
+        where.push(sql`exists (
+          select 1 from ${ops.programAttendance}
+          where ${ops.programAttendance.sessionId} = ${ops.programSessions.id}
+            and (${ops.programAttendance.correctedAt} is not null
+                 or ${ops.programAttendance.correctedFromPresent} is not null)
+        )`);
+      }
+
+      if (queryable) {
+        sessions = await db()
+          .select({
+            id: ops.programSessions.id,
+            seq: ops.programSessions.seq,
+            title: ops.programSessions.title,
+            topic: ops.programSessions.topic,
+            startsAt: ops.programSessions.startsAt,
+            endsAt: ops.programSessions.endsAt,
+            status: ops.programSessions.status,
+            deliveredAt: ops.programSessions.deliveredAt,
+            cancelledReason: ops.programSessions.cancelledReason,
+            rescheduledToSessionId: ops.programSessions.rescheduledToSessionId,
+            notes: ops.programSessions.notes,
+            venueName: ops.venues.name,
+            coachName: persons.fullName,
+            programId: ops.programSessions.programId,
+            programCode: eng.trainingPrograms.code,
+            programTitle: eng.trainingPrograms.title,
+            programStatus: eng.trainingPrograms.status,
+            programMode: eng.trainingPrograms.mode,
+            institutionName: eng.institutions.name,
+          })
+          .from(ops.programSessions)
+          .innerJoin(eng.trainingPrograms, eq(eng.trainingPrograms.id, ops.programSessions.programId))
+          .leftJoin(eng.institutions, eq(eng.institutions.id, eng.trainingPrograms.institutionId))
+          .leftJoin(ops.venues, eq(ops.venues.id, ops.programSessions.venueId))
+          .leftJoin(persons, eq(persons.id, ops.programSessions.coachPersonId))
+          .where(where.length ? and(...where) : undefined)
+          // Delivery order, because that is the order a register is read in.
+          .orderBy(asc(eng.trainingPrograms.code), asc(ops.programSessions.seq))
+          .limit(SESSION_LIMIT + 1);
+
+        sessionsTruncated = sessions.length > SESSION_LIMIT;
+        if (sessionsTruncated) sessions = sessions.slice(0, SESSION_LIMIT);
+      }
+
+      const sessionIds = sessions.map((s) => s.id);
+      const programIds = [...new Set(sessions.map((s) => s.programId))];
+
+      if (sessionIds.length) {
+        const tallyRows = await db()
+          .select({
+            sessionId: ops.programAttendance.sessionId,
+            recorded: sql<number>`(count(*))::int`,
+            present: sql<number>`(count(*) filter (where ${ops.programAttendance.present}))::int`,
+            absent: sql<number>`(count(*) filter (where not ${ops.programAttendance.present}))::int`,
+            corrected: sql<number>`(count(*) filter (
+              where ${ops.programAttendance.correctedAt} is not null
+                 or ${ops.programAttendance.correctedFromPresent} is not null
+            ))::int`,
+          })
+          .from(ops.programAttendance)
+          .where(inArray(ops.programAttendance.sessionId, sessionIds))
+          .groupBy(ops.programAttendance.sessionId);
+
+        for (const t of tallyRows) {
+          tallies.set(t.sessionId as number, {
+            recorded: Number(t.recorded ?? 0),
+            present: Number(t.present ?? 0),
+            absent: Number(t.absent ?? 0),
+            corrected: Number(t.corrected ?? 0),
+          });
+        }
+
+        // A row is a correction if EITHER audit column is set. Keying only on
+        // correctedAt would hide a correction whose timestamp was never
+        // written, which is exactly the row an auditor most wants to see.
+        corrections = await db()
+          .select({
+            sessionId: ops.programAttendance.sessionId,
+            participantId: ops.programAttendance.participantId,
+            present: ops.programAttendance.present,
+            correctedFrom: ops.programAttendance.correctedFromPresent,
+            correctedAt: ops.programAttendance.correctedAt,
+            correctedByUserId: ops.programAttendance.correctedByUserId,
+            correctedByName: corrector.fullName,
+            note: ops.programAttendance.note,
+            recordedAt: ops.programAttendance.recordedAt,
+            displayName: eng.programParticipants.displayName,
+            personName: persons.fullName,
+          })
+          .from(ops.programAttendance)
+          .innerJoin(eng.programParticipants, eq(eng.programParticipants.id, ops.programAttendance.participantId))
+          .leftJoin(persons, eq(persons.id, eng.programParticipants.personId))
+          .leftJoin(users, eq(users.id, ops.programAttendance.correctedByUserId))
+          .leftJoin(corrector, eq(corrector.id, users.personId))
+          .where(and(
+            inArray(ops.programAttendance.sessionId, sessionIds),
+            or(
+              isNotNull(ops.programAttendance.correctedAt),
+              isNotNull(ops.programAttendance.correctedFromPresent),
+            ),
+          ))
+          .orderBy(sql`${ops.programAttendance.correctedAt} desc nulls last`)
+          .limit(CORRECTION_LIMIT + 1);
+
+        correctionsTruncated = corrections.length > CORRECTION_LIMIT;
+        if (correctionsTruncated) corrections = corrections.slice(0, CORRECTION_LIMIT);
+      }
+
+      if (programIds.length) {
+        const rollRows = await db()
+          .select({
+            programId: eng.programParticipants.programId,
+            onRoll: sql<number>`(count(*) filter (where ${eng.programParticipants.leftOn} is null))::int`,
+            departed: sql<number>`(count(*) filter (where ${eng.programParticipants.leftOn} is not null))::int`,
+          })
+          .from(eng.programParticipants)
+          .where(inArray(eng.programParticipants.programId, programIds))
+          .groupBy(eng.programParticipants.programId);
+
+        for (const r of rollRows) {
+          rolls.set(r.programId as number, {
+            onRoll: Number(r.onRoll ?? 0),
+            departed: Number(r.departed ?? 0),
+          });
+        }
+      }
+    } catch (err: any) {
+      readFailed = true;
+      failureDetail = String(err?.message ?? err);
+    }
+  }
+}
+
+// ─── Shaping for the template ───────────────────────────────────────────────
+
+const correctionsBySession = new Map<number, any[]>();
+for (const c of corrections) {
+  const list = correctionsBySession.get(c.sessionId as number) ?? [];
+  list.push(c);
+  correctionsBySession.set(c.sessionId as number, list);
+}
+
+const groups: any[] = [];
+const byProgram = new Map<number, any>();
+for (const s of sessions) {
+  let g = byProgram.get(s.programId);
+  if (!g) {
+    g = {
+      programId: s.programId,
+      code: s.programCode,
+      title: s.programTitle,
+      status: s.programStatus,
+      mode: s.programMode,
+      institution: s.institutionName,
+      sessions: [] as any[],
+    };
+    byProgram.set(s.programId, g);
+    groups.push(g);
+  }
+  g.sessions.push(s);
+}
+
+// Counts over what this view actually loaded. Every one is arithmetic on rows
+// that exist; there is no denominator here the federation has not supplied.
+const totals = {
+  programmes: groups.length,
+  sessions: sessions.length,
+  delivered: sessions.filter((s) => s.status === 'delivered').length,
+  marks: [...tallies.values()].reduce((a, t) => a + t.recorded, 0),
+  corrected: [...tallies.values()].reduce((a, t) => a + t.corrected, 0),
+};
+
+const label = (v: unknown) => String(v ?? '').replace(/_/g, ' ');
+
+/**
+ * Times are printed in IST and say so.
+ *
+ * The server's clock zone is not the federation's business, and a session at
+ * 16:30 in Ranchi rendered as 11:00 UTC is a wrong answer that looks like a
+ * right one.
+ */
+const when = (v: unknown) => {
+  if (!v) return null;
+  const d = new Date(v as string);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+    timeZone: 'Asia/Kolkata',
+  }) + ' IST';
+};
+
+/** present / absent. `present` is NOT NULL, so only the audit column can be absent. */
+const mark = (v: unknown) => (v === true ? 'present' : 'absent');
+
+const participantOf = (c: any) =>
+  c.personName || c.displayName || `Participant #${c.participantId}`;
+
+const correctorOf = (c: any) => {
+  if (c.correctedByName) return c.correctedByName;
+  // Deliberately not the login address: an institution coordinator holds
+  // 'attendance:read' and not 'person:read_pii', and an email is an identifier
+  // this screen does not need to do its job.
+  if (c.correctedByUserId != null) return `user #${c.correctedByUserId}`;
+  return 'an unrecorded account';
+};
+
+const VIEWS: [string, string][] = [
+  ['', 'All sessions'],
+  ['scheduled', 'Scheduled'],
+  ['delivered', 'Delivered'],
+  ['cancelled', 'Cancelled'],
+  ['rescheduled', 'Rescheduled'],
+  ['no_show', 'No show'],
+  ['corrected', 'Corrected marks'],
+];
+---
+
+<AdminShell
+  title="Attendance"
+  requires="attendance:read"
+  intro="Sessions by programme, and the register taken against each. Where a mark was corrected, the value the coach recorded is shown beside the value it was changed to — or, where the earlier value was not kept, that fact instead."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Attendance', url: h('/admin/attendance') },
+    ],
+    /* The seven views, as the shared tab strip. They were already real links
+       carrying aria-current, which is why this is the smallest change on the
+       page — what it gains is the strip's own sideways scroll on a phone (the
+       chips used to wrap into four rows above the register), a 44px target on
+       each, and one place that decides which view is current instead of a
+       comparison written out seven times.
+
+       Query-only hrefs: on admin.mmakf.in this page is served at /attendance
+       and rewritten to /admin/attendance internally, so a rebuilt pathname
+       would be rewritten twice.
+
+       No counts. Six of the seven would have to be counted with six more
+       queries, and a count nobody made is not put on a tab. */
+    tabs: VIEWS.map(([v, text]) => ({ label: text, href: v ? `?view=${v}` : '?' })),
+  }}
+>
+  {notConfigured ? (
+    /* Not ErrorState: nothing failed, and there is nothing to retry. */
+    <p class="note">
+      The federation database is not reachable from this deployment, so no
+      sessions and no attendance can be listed. Nothing has been lost — this
+      deployment simply has no DATABASE_URL, and the register lives in the
+      database.
+    </p>
+  ) : readFailed ? (
+    <ErrorState
+      title="The attendance register could not be read."
+      safe="Nothing has been changed. This was a read, so no mark was recorded, corrected or removed — including the corrections listed on this page, which are appended and never overwritten."
+      detail={failureDetail}
+    />
+  ) : scopeNote ? (
+    <p class="note">{scopeNote}</p>
+  ) : sessions.length === 0 ? (
+    <EmptyState
+      title={statusFilter || correctedOnly ? 'No session matches this view.' : 'No session has been recorded yet.'}
+      body="Sessions appear here when a programme is scheduled, and a mark appears against one as soon as a coach or an institution coordinator records it."
+      action={statusFilter || correctedOnly
+        ? { label: 'Show all sessions', href: '?' }
+        : { label: 'Back to operations', href: h('/admin') }}
+    >
+      {/* EmptyState's slot, for the qualification a reader needs before drawing
+          a conclusion from the absence. Two things this page must never let an
+          empty screen imply. */}
+      <p class="empty-more">
+        Two things worth knowing while this is empty. A participant with no mark
+        is unrecorded rather than absent, because the register stores no third
+        value. And the federation has published no standard for when a register
+        must be taken, so a delivered session without one is not late — it is
+        simply untaken, and somebody has to ask for it.
+      </p>
+    </EmptyState>
+  ) : (
+    <>
+      <dl class="stats">
+        <div><dt>Programmes</dt><dd>{totals.programmes}</dd></div>
+        <div><dt>Sessions</dt><dd>{totals.sessions}</dd></div>
+        <div><dt>Delivered</dt><dd>{totals.delivered}</dd></div>
+        <div><dt>Marks recorded</dt><dd>{totals.marks}</dd></div>
+        <div><dt>Marks corrected</dt><dd class={totals.corrected ? 'flag' : ''}>{totals.corrected}</dd></div>
+      </dl>
+
+      {sessionsTruncated && (
+        <p class="trunc" role="status">
+          More than {SESSION_LIMIT} sessions match. The first {SESSION_LIMIT} are
+          shown, in programme and session order; narrow the view by status to
+          reach the rest.
+        </p>
+      )}
+      {correctionsTruncated && (
+        <p class="trunc" role="status">
+          More than {CORRECTION_LIMIT} corrected marks fall inside this view. The
+          {' '}{CORRECTION_LIMIT} most recently corrected are listed against
+          their sessions; the per-session counts above and beside each session
+          remain complete.
+        </p>
+      )}
+
+      {groups.map((g) => (
+        <section class="prog" aria-labelledby={`prog-${g.programId}`}>
+          <header class="prog-h">
+            <h2 id={`prog-${g.programId}`}>{g.title}</h2>
+            <p class="prog-meta">
+              <code>{g.code}</code>
+              {g.institution && <> · {g.institution}</>}
+              {/* domain="program", which is what makes `paused` read as a
+                  decision to halt delivery rather than as a fault. */}
+              {g.status && <> · <Status value={g.status} domain="program" size="sm" bare /></>}
+              {g.mode && <> · {label(g.mode)}</>}
+              {rolls.has(g.programId) && (
+                <>
+                  {' '}· {rolls.get(g.programId)!.onRoll} on the roll
+                  {rolls.get(g.programId)!.departed > 0 && (
+                    <> ({rolls.get(g.programId)!.departed} since left)</>
+                  )}
+                </>
+              )}
+            </p>
+          </header>
+
+          <ul class="sess">
+            {g.sessions.map((s: any) => {
+              const t = tallies.get(s.id);
+              const corr = correctionsBySession.get(s.id) ?? [];
+              return (
+                <li class={`s-${s.status}`}>
+                  <div class="s-row">
+                    <div class="s-what">
+                      <p class="s-title">
+                        <span class="s-seq">{s.seq}</span>
+                        {s.title || `Session ${s.seq}`}
+                      </p>
+                      <p class="s-meta">
+                        {when(s.startsAt) ?? 'no start time recorded'}
+                        {s.topic && <> · {s.topic}</>}
+                        {s.venueName && <> · {s.venueName}</>}
+                        {s.coachName && <> · {s.coachName}</>}
+                      </p>
+                      {s.status === 'cancelled' && (
+                        <p class="s-why">
+                          {s.cancelledReason || 'Cancelled, and no reason was recorded against it.'}
+                        </p>
+                      )}
+                      {s.status === 'rescheduled' && s.rescheduledToSessionId && (
+                        <p class="s-why">Rescheduled to session #{s.rescheduledToSessionId}.</p>
+                      )}
+                      {s.notes && <p class="s-why">{s.notes}</p>}
+                    </div>
+
+                    <div class="s-side">
+                      {/* The one way a status is rendered anywhere in this
+                          codebase. It replaces a local pill that painted
+                          cancelled and no_show the same red — the dictionary
+                          keeps them apart, and says what each one means. */}
+                      <Status value={s.status} domain="session" />
+                      {t ? (
+                        <p class="reg">
+                          <strong>{t.present}</strong> present · <strong>{t.absent}</strong> absent
+                          <span class="muted"> · {t.recorded} marks</span>
+                        </p>
+                      ) : s.status === 'delivered' ? (
+                        <p class="reg none">Delivered, no register taken.</p>
+                      ) : (
+                        <p class="reg muted">No register.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  {corr.length > 0 && (
+                    <div class="corr">
+                      <p class="corr-h">
+                        {corr.length === 1
+                          ? 'One mark on this session was corrected'
+                          : `${corr.length} marks on this session were corrected`}
+                        {t && t.corrected > corr.length && (
+                          <span class="muted"> — {t.corrected} in total, {corr.length} listed</span>
+                        )}
+                      </p>
+                      <ul>
+                        {corr.map((c: any) => (
+                          <li>
+                            <span class="c-who">{participantOf(c)}</span>
+                            {c.correctedFrom == null ? (
+                              <span class="c-was-none">earlier value not kept</span>
+                            ) : (
+                              <span class="c-was">recorded {mark(c.correctedFrom)}</span>
+                            )}
+                            <span class="c-arrow" aria-hidden="true">→</span>
+                            <span class="c-now">changed to {mark(c.present)}</span>
+                            <span class="c-by">
+                              by {correctorOf(c)}
+                              {when(c.correctedAt)
+                                ? <>, {when(c.correctedAt)}</>
+                                : <>, at an unrecorded time</>}
+                            </span>
+                            {c.note && <span class="c-note">{c.note}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ))}
+
+      <p class="foot">
+        A mark is present or absent; there is no third value, so a participant
+        with no row for a session is unrecorded and is never counted as absent
+        here. That also means no session can say how many people went
+        unrecorded: the register does not record who was expected in the room,
+        and the roll as it stands today is not that number. Corrections are kept
+        rather than overwritten, which is why both readings appear above.
+        Per-participant marks are not listed on this page — only the tally and
+        the corrections — because a full cohort register runs to thousands of
+        rows.
+      </p>
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 62ch;
+  }
+  /* Inside EmptyState, which centres its own content to a reading measure. */
+  .empty-more {
+    margin: var(--space-4) 0 0;
+    font-size: var(--text-sm);
+    color: var(--muted);
+    line-height: var(--leading-normal);
+    max-width: 56ch;
+    text-align: left;
+  }
+  .trunc {
+    margin: 0 0 18px; font-size: .84rem; color: var(--muted);
+    line-height: 1.6; max-width: 68ch;
+  }
+
+  .stats { display: flex; flex-wrap: wrap; gap: 0 40px; margin: 0 0 28px; }
+  .stats > div { padding: 0 0 4px; }
+  .stats dt { font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .stats dd {
+    margin: 4px 0 0; font-family: var(--font-display); font-size: 1.8rem;
+    font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .stats .flag { color: var(--gold-2); }
+
+  .prog { margin: 0 0 34px; }
+  .prog-h { border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 4px; }
+  .prog-h h2 { font-family: var(--font-display); font-size: 1.12rem; margin: 0; line-height: 1.35; }
+  .prog-meta { margin: 5px 0 0; font-size: .8rem; color: var(--muted); line-height: 1.6; }
+
+  .sess { list-style: none; margin: 0; padding: 0; }
+  .sess > li {
+    padding: 14px 0 14px 14px;
+    border-bottom: 1px solid var(--border);
+    border-left: 2px solid transparent;
+  }
+  /* Colour carries no meaning on its own — the status pill says the word. */
+  .sess > li.s-delivered { border-left-color: var(--gold-dim); }
+  .sess > li.s-cancelled, .sess > li.s-no_show { border-left-color: var(--red); }
+
+  .s-row { display: flex; gap: 20px; justify-content: space-between; align-items: flex-start; }
+  .s-title { margin: 0; font-family: var(--font-display); font-size: 1rem; line-height: 1.4; }
+  .s-seq {
+    display: inline-block; min-width: 2.4ch; margin-right: 9px;
+    font-variant-numeric: tabular-nums; color: var(--muted); font-size: .85rem;
+  }
+  .s-meta { margin: 4px 0 0; font-size: .8rem; color: var(--muted); line-height: 1.6; }
+  .s-why { margin: 6px 0 0; font-size: .84rem; color: var(--muted); line-height: 1.6; max-width: 62ch; }
+
+  .s-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
+  .reg { margin: 0; font-size: .84rem; text-align: right; font-variant-numeric: tabular-nums; }
+  .reg strong { font-weight: 600; }
+  .reg.none { color: var(--gold-2); }
+  .muted { color: var(--muted); }
+
+  .corr {
+    margin: 12px 0 2px; padding: 12px 14px;
+    background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--radius); max-width: 78ch;
+  }
+  .corr-h {
+    margin: 0 0 8px; font-size: .74rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--gold-2);
+  }
+  .corr-h .muted { text-transform: none; letter-spacing: 0; }
+  .corr ul { list-style: none; margin: 0; padding: 0; }
+  .corr li {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+    padding: 6px 0; font-size: .85rem; line-height: 1.6;
+    border-top: 1px solid var(--border);
+  }
+  .corr li:first-child { border-top: 0; }
+  .c-who { font-family: var(--font-display); }
+  .c-was { color: var(--muted); text-decoration: line-through; }
+  /* Not struck through: there is no superseded value to strike, only its absence. */
+  .c-was-none { color: var(--muted); font-style: italic; }
+  .c-arrow { color: var(--muted); }
+  .c-now { color: var(--gold-2); }
+  .c-by { color: var(--muted); font-size: .8rem; }
+  .c-note { flex-basis: 100%; color: var(--muted); font-size: .8rem; }
+
+  .foot {
+    margin: 30px 0 0; padding-top: 18px; border-top: 1px solid var(--border);
+    font-size: .84rem; color: var(--muted); line-height: 1.7; max-width: 68ch;
+  }
+
+  code { font-family: var(--font-accent, monospace); font-size: .92em; }
+
+  /* ── Phone (PART AL) ──────────────────────────────────────────────────────
+     Nothing here is a wide table, so nothing needs recomposing into records —
+     the register is already a list. What does change is the session row, which
+     stops trying to hold its status and tally in a right-hand column at 360px
+     and stacks them under the session instead. */
+  @media (max-width: 900px) {
+    .stats { gap: 0 24px; }
+    .stats dd { font-size: 1.4rem; }
+    .s-row { flex-direction: column; gap: 8px; }
+    .s-side { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+    .reg { text-align: left; }
+    .corr { padding: 10px 12px; }
+    .corr li { gap: 2px 8px; }
+    .c-by { flex-basis: 100%; }
+  }
+</style>

@@ -56,10 +56,130 @@
   --font-accent:  'Cormorant Garamond', serif;
   --font-body:    'Inter', system-ui, -apple-system, sans-serif;
 
-  --radius: 2px;
-  --max-w:  1180px;
-  --shadow-1: 0 1px 3px rgba(26, 23, 19, 0.05);
+  /* ── Radius ──────────────────────────────────────────────────────────────
+     WAS a single 2px. Sharp corners read as institutional print, and they also
+     read as unfinished next to any modern application surface. A scale, so a
+     4px input and a 16px dialog are a decision rather than an accident.
+
+     --radius stays the DEFAULT name because 58 files already reference it; they
+     all soften together, which is the point of having had a token. */
+  --radius-xs:   4px;
+  --radius-sm:   6px;
+  --radius:      10px;
+  --radius-md:   12px;
+  --radius-lg:   16px;
+  --radius-xl:   24px;
+  --radius-pill: 999px;
+
+  /* ── Spacing (4px base) ──────────────────────────────────────────────────
+     Named by step, not by intent. --space-4 survives a component being reused
+     somewhere its intent no longer applies; --space-card-padding does not. */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+  --space-32: 128px;
+
+  /* ── Layout ─────────────────────────────────────────────────────────────── */
+  --max-w:        1180px;   /* editorial reading measure — public pages */
+  --max-w-wide:   1320px;   /* application surfaces, which need the room */
+  --max-w-prose:  68ch;     /* long-form text, capped by characters not pixels */
+  --gutter:       28px;
+  --gutter-sm:    20px;
+
+  /* Application shell. Referenced by the shell AND by every page that has to
+     offset itself against it, which is why they are tokens and not magic
+     numbers repeated in twenty style blocks. */
+  --shell-header-h: 60px;
+  --shell-sidebar-w: 248px;
+  --shell-sidebar-collapsed-w: 64px;
+
+  /* ── Type scale ─────────────────────────────────────────────────────────
+     Every step is a clamp, so the scale IS the responsive behaviour rather
+     than something each page re-derives with its own media queries. */
+  --text-xs:   0.75rem;
+  --text-sm:   0.82rem;
+  --text-base: 0.94rem;
+  --text-md:   1.02rem;
+  --text-lg:   1.15rem;
+  --text-xl:   clamp(1.25rem, 1.6vw, 1.45rem);
+  --text-2xl:  clamp(1.5rem,  2.2vw, 1.9rem);
+  --text-3xl:  clamp(1.9rem,  3.2vw, 2.5rem);
+  --text-4xl:  clamp(2.3rem,  4.4vw, 3.2rem);
+  --text-5xl:  clamp(2.8rem,  6vw,   4.4rem);
+
+  --leading-tight:  1.12;
+  --leading-snug:   1.32;
+  --leading-normal: 1.6;
+  --leading-relaxed: 1.78;
+
+  --tracking-tight: -0.015em;
+  --tracking-normal: 0;
+  --tracking-wide:  0.08em;
+  --tracking-caps:  0.22em;
+
+  /* ── Elevation ──────────────────────────────────────────────────────────
+     Warm-tinted rather than neutral black: a grey shadow on #F6F4EF paper
+     reads as dirt. --shadow-1/-2 keep their names for the files already on
+     them. */
+  --shadow-1: 0 1px 2px rgba(26, 23, 19, 0.05);
   --shadow-2: 0 8px 28px rgba(26, 23, 19, 0.09);
+  --shadow-sm: 0 1px 2px rgba(26, 23, 19, 0.05);
+  --shadow-md: 0 4px 12px rgba(26, 23, 19, 0.07);
+  --shadow-lg: 0 12px 32px rgba(26, 23, 19, 0.10);
+  --shadow-xl: 0 24px 60px rgba(26, 23, 19, 0.14);
+  --shadow-focus: 0 0 0 3px rgba(134, 103, 26, 0.22);
+
+  /* ── Motion (§73: motion must communicate state) ────────────────────────
+     Durations are deliberately short. A 400ms page transition is a quarter of
+     a second of nothing happening, every time, for ever. */
+  --dur-instant: 80ms;
+  --dur-fast:    140ms;
+  --dur-base:    200ms;
+  --dur-slow:    320ms;
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+
+  /* ── Layering ───────────────────────────────────────────────────────────
+     A named ladder, because "z-index: 99999" is what happens without one. */
+  --z-base:      0;
+  --z-sticky:    100;
+  --z-header:    200;
+  --z-dropdown:  300;
+  --z-drawer:    400;
+  --z-overlay:   500;
+  --z-modal:     600;
+  --z-palette:   700;   /* the command palette sits above every other surface */
+  --z-toast:     800;
+
+  /* ── Breakpoints ────────────────────────────────────────────────────────
+     Recorded for reference and for JS that must agree with the CSS. Custom
+     properties cannot be used in a media query, so these are documentation
+     with a machine-readable home rather than something @media can read. */
+  --bp-sm:  640px;
+  --bp-md:  900px;
+  --bp-lg:  1080px;
+  --bp-xl:  1320px;
+}
+
+/* §73 / §52: motion must never be mandatory. Honoured globally rather than
+   per-component, so a component author cannot forget. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* WCAG 2.4.11 Focus Not Obscured (Minimum): nav#mainNav is position:fixed and

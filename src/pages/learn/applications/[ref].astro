@@ -1,0 +1,210 @@
+---
+// The applicant's status page.
+//
+// Reached with the reference AND the private token issued when the application
+// was sent. Not reference plus contact email: references are sequence-allocated
+// and a school's contact address is usually printed on its own website, so both
+// halves of that pair are guessable and what they unlock is the school's own
+// submission.
+//
+// Shows only entries the federation marked visible. No routing, no lead score,
+// no internal notes, no owner. What a school reads here is what MMAKF has
+// chosen to tell it — which is why applicantStatus() in src/db/applications.ts
+// filters in SQL rather than this page filtering after the fact.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db } from '@/db';
+import { applicantStatus, isApplicationError } from '@/db/applications';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const ref = String(Astro.params.ref ?? '');
+const token = Astro.url.searchParams.get('k') ?? '';
+const justSent = Astro.url.searchParams.get('sent') === '1';
+
+let view: any = null;
+let failure: string | null = null;
+
+if (!isConfigured()) {
+  failure = 'The federation’s database is not reachable from this deployment, so this application cannot be looked up.';
+} else {
+  try {
+    view = await applicantStatus(db(), ref, token);
+  } catch (err) {
+    // Deliberately the same message for a wrong token and a reference that does
+    // not exist. Distinguishing them would turn this page into an oracle for
+    // which references are real.
+    failure = 'No application matches that link. Check the address, including the part after ?k=.';
+  }
+}
+
+const STATUS_WORDING: Record<string, string> = {
+  submitted: 'Received',
+  acknowledged: 'With the training office',
+  under_review: 'Under review',
+  information_requested: 'Waiting for information from you',
+  program_design: 'Programme being designed',
+  quoted: 'Quotation prepared',
+  proposed: 'Proposal sent',
+  approved: 'Approved',
+  contracted: 'Agreement in place',
+  declined: 'Not taken forward',
+  withdrawn: 'Withdrawn',
+  expired: 'Lapsed',
+  draft: 'Draft — not yet sent',
+};
+
+function when(v: unknown): string {
+  if (!v) return '';
+  const d = new Date(v as string);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+---
+
+<Base
+  title={`Application ${ref} — MMAKF`}
+  description="The status of an MMAKF training application."
+>
+  {/* A private page. Never indexed, never cached by an intermediary. */}
+  <meta name="robots" content="noindex, nofollow" slot="head" />
+
+  <div class="st">
+    <div class="container st-inner">
+      {failure ? (
+        <>
+          <p class="eyebrow">MMAKF training application</p>
+          <h1 class="display-2">We cannot find that application.</h1>
+          <p class="st-lede">{failure}</p>
+          <p class="st-lede">
+            If you have lost the link, write to
+            {' '}<a href="mailto:admin@mmakf.in">admin@mmakf.in</a> with the name of
+            your institution and MMAKF will resend it.
+          </p>
+          <a class="btn btn-ghost" href={h('/learn')}>Back to training</a>
+        </>
+      ) : (
+        <>
+          {justSent && (
+            <div class="st-sent" role="status">
+              <strong>Your application has been sent.</strong>
+              Keep this page — the address contains the key that opens it. It is
+              the only way back in.
+            </div>
+          )}
+
+          <p class="eyebrow">MMAKF training application</p>
+          <h1 class="display-2">{view.institutionName}</h1>
+
+          <dl class="st-facts">
+            <div>
+              <dt>Reference</dt>
+              <dd><code>{view.ref}</code></dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd><span class="pill"><span class="pill-dot"></span>{STATUS_WORDING[view.status] ?? view.status}</span></dd>
+            </div>
+            {view.submittedAt && (
+              <div>
+                <dt>Sent</dt>
+                <dd>{when(view.submittedAt)}</dd>
+              </div>
+            )}
+            {/* Rendered ONLY when the federation has actually undertaken a
+                response time. It has published none, so this row is normally
+                absent — rather than showing an invented date. */}
+            {view.respondBy && (
+              <div>
+                <dt>MMAKF has undertaken to respond by</dt>
+                <dd>{when(view.respondBy)}</dd>
+              </div>
+            )}
+          </dl>
+
+          <section class="st-timeline">
+            <h2 class="st-h2">Progress</h2>
+            {view.timeline.length === 0 ? (
+              <p class="st-lede">Nothing has been recorded against this application yet.</p>
+            ) : (
+              <ol class="tl">
+                {view.timeline.map((entry: any) => (
+                  <li>
+                    <span class="tl-dot" aria-hidden="true"></span>
+                    <div>
+                      <p class="tl-summary">{entry.summary}</p>
+                      <p class="tl-when">{when(entry.at)}</p>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+
+          <section class="st-help">
+            <h2 class="st-h2">Something to add?</h2>
+            <p class="st-lede">
+              Write to <a href="mailto:admin@mmakf.in">admin@mmakf.in</a> quoting
+              {' '}<code>{view.ref}</code>. It reaches the administrator handling
+              your application.
+            </p>
+          </section>
+        </>
+      )}
+    </div>
+  </div>
+</Base>
+
+<style>
+  .st { padding: 96px 0 80px; }
+  .st-inner { max-width: 44rem; }
+  .st-lede { color: var(--muted); line-height: 1.7; max-width: 58ch; margin: 14px 0; }
+  .st-h2 { font-family: var(--font-display); font-size: 1.15rem; margin: 0 0 14px; }
+  code {
+    font-family: var(--font-accent, monospace);
+    background: var(--bg-2); padding: 2px 7px; border-radius: 4px; font-size: .95em;
+  }
+
+  .st-sent {
+    padding: 18px 20px; margin-bottom: 28px;
+    border-left: 3px solid var(--gold); background: var(--card); line-height: 1.6;
+  }
+  .st-sent strong { display: block; margin-bottom: 4px; }
+
+  .st-facts { margin: 26px 0 0; display: grid; gap: 0; }
+  .st-facts > div {
+    display: grid; grid-template-columns: minmax(0, 18rem) minmax(0, 1fr);
+    gap: 4px 20px; padding: 13px 0; border-bottom: 1px solid var(--border);
+  }
+  .st-facts dt { color: var(--muted); font-size: .9rem; }
+  .st-facts dd { margin: 0; }
+
+  .st-timeline { margin-top: 48px; }
+  .tl { list-style: none; margin: 0; padding: 0; }
+  .tl li {
+    display: grid; grid-template-columns: 22px 1fr; gap: 0 14px;
+    padding: 0 0 22px; position: relative;
+  }
+  .tl li:not(:last-child)::before {
+    content: ''; position: absolute; left: 5px; top: 14px; bottom: 0;
+    width: 1px; background: var(--border);
+  }
+  .tl-dot {
+    width: 11px; height: 11px; border-radius: 50%;
+    background: var(--gold); margin-top: 5px; position: relative; z-index: 1;
+  }
+  .tl-summary { margin: 0; line-height: 1.6; }
+  .tl-when { margin: 3px 0 0; font-size: .84rem; color: var(--muted); }
+
+  .st-help { margin-top: 48px; padding-top: 26px; border-top: 1px solid var(--border); }
+
+  @media (max-width: 640px) {
+    .st { padding: 78px 0 60px; }
+    .st-facts > div { grid-template-columns: 1fr; gap: 2px; }
+    .st-facts dt { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
+  }
+</style>

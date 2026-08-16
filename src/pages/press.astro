@@ -3,6 +3,7 @@ import Base from '@/layouts/Base.astro';
 import Icon from '@/components/Icon.astro';
 import PageHero from '@/components/PageHero.astro';
 import { get } from '@/lib/storage';
+import { HEADLINE_GLOSS, hasDevanagari } from '@/lib/press-gloss';
 
 export const prerender = false;
 
@@ -33,24 +34,11 @@ const others = social.filter((a: any) => a.primary !== 'Yes');
 const fed = await get<any>('federation');
 const contactEmail: string = fed?.contact?.email || '';
 
-/**
- * English glosses of the PRINTED HEADLINES ONLY, keyed on the exact Hindi
- * string held in the store. A gloss renders only on an exact match, so an
- * edited or replaced headline loses its gloss rather than carrying a stale one.
- *
- * These translate the headline and nothing else. No clipping body is
- * transcribed on this page, and nothing is said about a clipping beyond the
- * summary the federation recorded with the scan.
+/*
+ * HEADLINE_GLOSS and hasDevanagari are imported from '@/lib/press-gloss'. They
+ * moved out of this file when /people/[slug] began showing the same clippings:
+ * one translation table, read by both surfaces, cannot disagree with itself.
  */
-const HEADLINE_GLOSS: Record<string, string> = {
-  'पतरातु में कराटे प्रशिक्षण सह बेल्ट ग्रेडिंग संपन्न':
-    'Karate training and belt grading concluded at Patratu',
-  'जूनियर टाइगर ली': 'Junior Tiger Lee',
-  'मार्शल आर्ट में प्रमोद ने बनाए हैं कई रिकॉर्ड':
-    'Pramod has set several records in martial arts',
-};
-
-const hasDevanagari = (s: string) => /[ऀ-ॿ]/.test(s || '');
 
 /** Platform to house icon. No brand marks are shipped, so these are indicative. */
 const platformIcon = (platform: string) => {

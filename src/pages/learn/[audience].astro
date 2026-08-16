@@ -1,0 +1,54 @@
+---
+// One page per audience on the learn surface.
+//
+// learn.mmakf.in/schools, /corporates, /universities, /government,
+// /communities, /individuals — and the same content at
+// www.mmakf.in/learn/schools, because the subdomains do not exist yet and a
+// page nobody can reach is a page nobody can check.
+
+import Base from '@/layouts/Base.astro';
+import AudienceEditorial from '@/components/AudienceEditorial.astro';
+import { AUDIENCES, audienceBySlug } from '@/data/audiences';
+import { canonicalFor, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const { audience: slug } = Astro.params;
+const audience = audienceBySlug(String(slug ?? ''));
+
+if (!audience) {
+  return new Response(null, { status: 404, statusText: 'Not found' });
+}
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+
+// Structured data for a service the federation actually offers. `Service` and
+// not `Product`: nothing here has a price, and a Product without an offer is
+// the kind of markup Google's guidelines call misleading.
+const schema = {
+  '@context': 'https://schema.org',
+  '@type': 'Service',
+  name: audience.title,
+  description: audience.standfirst,
+  serviceType: 'Martial arts training',
+  areaServed: { '@type': 'Country', name: 'India' },
+  provider: {
+    '@type': 'SportsOrganization',
+    name: 'Modern Martial Arts Karate-Do Federation of India',
+    url: 'https://www.mmakf.in',
+  },
+  url: canonicalFor(surface, `/learn/${audience.slug}`),
+};
+---
+
+<Base
+  title={`${audience.title} — MMAKF`}
+  description={audience.standfirst}
+  breadcrumbs={[
+    { name: 'Training', url: '/learn' },
+    { name: audience.navLabel, url: `/learn/${audience.slug}` },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+  <AudienceEditorial audience={audience} surface={surface} siblings={AUDIENCES} />
+</Base>

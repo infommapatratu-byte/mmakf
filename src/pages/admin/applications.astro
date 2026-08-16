@@ -1,0 +1,218 @@
+---
+// Institutional applications, as the training office works them.
+//
+// The whole point of the intake automation is that this screen is the FIRST
+// place an administrator touches an application — everything on it was derived
+// from what the school typed, and nothing was re-entered.
+//
+// The rows are scope-filtered in SQL by applicationQueue(); this page does not
+// filter after the fact. A state administrator sees their own state's
+// applications because the WHERE clause says so.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ADOPTING THE SHARED SYSTEM
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The heading block, the status pills, the table and the phone records were all
+// written here. All four are now the shared components: AdminShell's `header`
+// (§12), Status (§102), DataTable (§97, §54) and the states in
+// src/components/states. The QUERY IS UNCHANGED — same options, same scope
+// predicate, same 200-row ceiling — and so are the URL parameters, so a
+// bookmarked ?status=quoted still means what it meant.
+//
+// WHY THE STATUS FILTER MOVED FROM PILLS TO A SELECT. Twelve pills, ten of them
+// one enum value each, is a tab strip that hides the two views that are not
+// statuses at all. `?status=` is now DataTable's own select — same parameter,
+// same SQL — and the tab strip carries only the two orthogonal views.
+
+import AdminShell from '@/components/AdminShell.astro';
+import Table from '@/components/DataTable/Table.astro';
+import type { Column, Filter } from '@/components/DataTable/types';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere } from '@/lib/rbac';
+import { applicationQueue } from '@/db/applications';
+import { statusOf } from '@/lib/status';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+// The ten statuses this screen offers — and the ONLY values it will put into
+// the query.
+//
+// `draft` is absent, and the absence is load-bearing rather than tidy.
+// applicationQueue() drops its own `status <> 'draft'` guard the moment ANY
+// status is supplied, so `?status=draft` — one word typed into the address bar
+// — handed an administrator the half-filled wizards that src/db/applications.ts
+// calls "the applicant's unfinished business and not the federation's to read
+// until they are sent". Whitelisting here closes that without changing a query
+// that /admin/onboarding and src/db/onboarding.ts also call.
+//
+// It also keeps a mistyped status off Postgres: the column is an enum, so an
+// unrecognised value came back as a failed read and an error screen. An
+// unrecognised status is now simply no status filter.
+const STATUSES = [
+  'submitted', 'acknowledged', 'under_review', 'information_requested',
+  'program_design', 'quoted', 'proposed', 'approved', 'contracted', 'declined',
+];
+
+const requestedStatus = Astro.url.searchParams.get('status') || '';
+const filter = STATUSES.includes(requestedStatus) ? requestedStatus : '';
+const unassignedOnly = Astro.url.searchParams.get('unassigned') === '1';
+
+let rows: any[] = [];
+
+// Two different facts, and they were one variable. A deployment with no
+// DATABASE_URL has not FAILED at anything — it has no system of record here —
+// and rendering that as an error tells an administrator to retry something that
+// was never attempted. See the two branches in the template.
+const configured = isConfigured();
+let failure: string | null = null;
+
+if (principal && canAnywhere(principal, 'engagement:read')) {
+  if (configured) {
+    try {
+      rows = await applicationQueue(db(), principal, {
+        status: (filter || undefined) as any,
+        unassignedOnly,
+        limit: 200,
+      });
+    } catch (err: any) {
+      failure = String(err?.message ?? err);
+    }
+  }
+}
+
+const fmt = (v: unknown) => {
+  if (!v) return '—';
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+};
+
+// The same nine columns the hand-written table carried, in the same order.
+// `render` returns text; the status column is drawn by Status and by nothing
+// else, which is what makes `quoted` read identically here and on /admin/leads.
+const columns: Column[] = [
+  { key: 'ref', header: 'Reference' },
+  { key: 'institutionName', header: 'Institution', sortable: true },
+  { key: 'audience', header: 'Kind' },
+  // The applicant either sits in a federation unit or typed a state name. Both
+  // answer "where", so they share one column rather than leaving two mostly
+  // empty ones.
+  { key: 'city', header: 'Where', render: (r: any) => r.city ?? r.stateName ?? null },
+  { key: 'participantCount', header: 'People', numeric: true, sortable: true },
+  { key: 'status', header: 'Status', status: { domain: 'application' } },
+  {
+    key: 'ownerRole',
+    header: 'Owner',
+    render: (r: any) => (r.ownerRole ? String(r.ownerRole).replace(/_/g, ' ').toLowerCase() : 'Unassigned'),
+  },
+  {
+    key: 'leadScore',
+    header: 'Score',
+    numeric: true,
+    sortable: true,
+    initialDir: 'desc',
+    // It was a bare number beside a school's name, explained only in a code
+    // comment. scoreApplication() ranks the queue; it does not rate the school,
+    // and the difference matters to whoever reads this column.
+    hint: 'Triage order, not a judgement of the institution',
+  },
+  { key: 'submittedAt', header: 'Sent', sortable: true, initialDir: 'desc', render: (r: any) => fmt(r.submittedAt) },
+];
+
+// Same parameter, same SQL, different control. Labels come from the dictionary
+// so the option and the chip it selects are the same word.
+const filters: Filter[] = [
+  {
+    key: 'status',
+    label: 'Status',
+    type: 'select',
+    anyLabel: 'Any status',
+    options: STATUSES.map((s) => ({ value: s, label: statusOf(s, 'application').label })),
+  },
+];
+
+// An empty table says what emptied it. "No applications have been submitted
+// yet" under ?unassigned=1 would be false — DataTable knows about its own
+// filters and cannot know about this page's views, so the page supplies the
+// sentence and the way out (§104).
+const emptyTitle = unassignedOnly
+  ? 'Every application on this screen has an owner.'
+  : 'No applications have been submitted yet.';
+const emptyBody = unassignedOnly
+  ? undefined
+  : 'When a school, company or university applies through the training platform, it appears here with its institution record, its enquiry and its review task already created.';
+const emptyAction = unassignedOnly
+  ? { label: 'See every application', href: h('/admin/applications') }
+  : // Not a dead end, and not an invented one: an enquiry can exist with no
+    // application behind it, the register is one click away, and it needs the
+    // same engagement:read this page already required.
+    { label: 'Leads and enquiries', href: h('/admin/leads') };
+---
+
+<AdminShell
+  title="Applications"
+  requires="engagement:read"
+  intro="Institutions that have applied for a training programme. Every row here was created from one form submission — the institution, the enquiry and the review task with it."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Applications', url: h('/admin/applications') },
+    ],
+    /* Two views, not twelve. The ten statuses are a filter, not a view.
+
+       No action bar. §13 asks for one dominant action and there is no route in
+       the admin surface that acts on an institutional application: the status
+       moves through the applicant's own wizard and the quotation it produces.
+       An invented button here would be a dead end wearing the primary style. */
+    tabs: [
+      { label: 'All', href: h('/admin/applications') },
+      { label: 'Unassigned', href: `${h('/admin/applications')}?unassigned=1` },
+    ],
+  }}
+>
+  {!configured ? (
+    /* Deliberately neither EmptyState nor ErrorState. Nothing failed and the
+       register is not empty — this deployment simply has no database to hold
+       one, which is a fourth kind of absence and is what production renders
+       today. */
+    <p class="unconfigured">
+      The federation database is not reachable from this deployment, so no
+      applications can be listed. That is not an empty register and not a
+      failure: the applications live in the federation's database, and this
+      deployment has no connection to one.
+    </p>
+  ) : (
+    <Table
+      id="applications"
+      caption="Institutional applications"
+      columns={columns}
+      filters={filters}
+      rows={rows}
+      dataset="complete"
+      state={failure ? 'error' : 'ready'}
+      note="Read highest triage score first, then most recently sent, and capped at two hundred applications. Sorting a column below re-orders those; it does not fetch more."
+      emptyTitle={emptyTitle}
+      emptyBody={emptyBody}
+      emptyAction={emptyAction}
+      errorTitle="The applications could not be read."
+      errorSafe="Nothing has been changed. This was a read, so no application was moved, decided or withdrawn."
+      errorDetail={failure}
+    />
+  )}
+</AdminShell>
+
+<style>
+  .unconfigured {
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 60ch;
+  }
+</style>

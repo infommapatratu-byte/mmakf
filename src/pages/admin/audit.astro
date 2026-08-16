@@ -1,0 +1,516 @@
+---
+// The audit log (§49, §AV, §91).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS PAGE HAD TO EXIST
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// audit_events has been written to since migration 0000. Ranks awarded and
+// revoked, results finalised, certificates issued, quotations approved, coaches
+// suspended — all of it lands in that table with the actor, the old value, the
+// new value and the reason.
+//
+// Nothing read it. The federation had a complete record of its own decisions
+// and no way to look at it, which makes the record a liability rather than an
+// asset: it exists for exactly the moment somebody asks "who changed this, and
+// why?", and it could not answer.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// IT SHOWS A DIFF, NOT JSON
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §49's example is a sentence a person can read:
+//
+//     Administrator changed athlete status.
+//     Before: Active   After: Suspended
+//     Reason: Documentation issue
+//
+// oldValue and newValue are jsonb, and dumping them raw would be technically
+// complete and operationally useless — the reader has to diff two objects in
+// their head to find the one field that moved. So this page does the diff and
+// shows ONLY what changed, with the status dictionary rendering any field that
+// is a status.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// AND THAT IS WHY IT IS NOT THE SHARED TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §97 says one table, and DataTable is it — for anything that is a table. This
+// is not one. An audit entry is a SENTENCE with a supporting diff of variable
+// length: one row changes a status, the next rewrites a 200-character reason,
+// and columns make every row in the register as tall as the longest value in
+// it. The timeline below is kept deliberately.
+//
+// What this page DOES take from the system is everything that is not the list:
+// the §12 header, and the states — a failure is ErrorState, an empty register
+// is EmptyState with a way out, and "no database configured" is neither of
+// those and is said in its own words.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// audit_events carries no state, district or dojo column — an audit row is a
+// fact about the federation, not about a place. So there is nothing to filter
+// on, and `audit:read` is national by construction. That is consistent with the
+// grants: no scoped role holds it. A scoped administrator asking for this page
+// is refused by AdminShell rather than shown a filtered view that would be a
+// lie about completeness.
+
+import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { desc, eq, and, gte, lte, sql, type SQL } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const q = Astro.url.searchParams;
+const f = {
+  entityType: (q.get('entity') ?? '').trim(),
+  action: (q.get('action') ?? '').trim(),
+  actor: (q.get('actor') ?? '').trim(),
+  entityId: (q.get('id') ?? '').trim(),
+  from: (q.get('from') ?? '').trim(),
+  to: (q.get('to') ?? '').trim(),
+};
+
+/** Capped. An audit table grows without bound and this page must stay openable. */
+const LIMIT = 200;
+
+let rows: any[] = [];
+let total: number | null = null;
+let entityTypes: string[] = [];
+let actions: string[] = [];
+
+// ── Two absences, and they are not the same absence ─────────────────────────
+//
+// CONTENT-ARCHITECTURE §5.4 separates "not configured" from "could not be
+// read", and this page used to render both through one string in one box. They
+// need different words and different components: a deployment with no
+// DATABASE_URL has no system of record to read — nothing failed and retrying
+// changes nothing — while a query that threw is a FAILURE, which is what
+// ErrorState is for and what a Retry link belongs on.
+let notConfigured = false;
+let readFailed = false;
+/** The driver's own words, kept for the Details disclosure and never the headline. */
+let failureDetail: string | null = null;
+
+if (!isConfigured()) {
+  notConfigured = true;
+} else {
+  try {
+    const d = db();
+    const where: SQL[] = [];
+    if (f.entityType) where.push(eq(s.auditEvents.entityType, f.entityType));
+    if (f.action) where.push(eq(s.auditEvents.action, f.action as any));
+    if (f.entityId) where.push(eq(s.auditEvents.entityId, f.entityId));
+    if (f.actor) where.push(sql`lower(${s.auditEvents.actorLabel}) like ${'%' + f.actor.toLowerCase() + '%'}`);
+    // Dates are inclusive of the whole day the reader named. `to=2026-08-13`
+    // meaning "up to midnight on the 13th" would silently drop that day.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(f.from)) where.push(gte(s.auditEvents.at, new Date(f.from + 'T00:00:00Z')));
+    if (/^\d{4}-\d{2}-\d{2}$/.test(f.to)) where.push(lte(s.auditEvents.at, new Date(f.to + 'T23:59:59Z')));
+
+    const clause = where.length ? and(...where) : undefined;
+
+    rows = await d.select().from(s.auditEvents)
+      .where(clause as any)
+      .orderBy(desc(s.auditEvents.at), desc(s.auditEvents.id))
+      .limit(LIMIT);
+
+    const [{ n }] = await d.select({ n: sql<number>`count(*)::int` })
+      .from(s.auditEvents).where(clause as any);
+    total = n;
+
+    // The filter menus are built from what is ACTUALLY in the table rather than
+    // from the enum, so a reader is never offered a filter that returns nothing.
+    const et = await d.selectDistinct({ v: s.auditEvents.entityType }).from(s.auditEvents);
+    entityTypes = et.map((r: any) => r.v).filter(Boolean).sort();
+    const ac = await d.selectDistinct({ v: s.auditEvents.action }).from(s.auditEvents);
+    actions = ac.map((r: any) => r.v).filter(Boolean).sort();
+  } catch (err: any) {
+    readFailed = true;
+    failureDetail = String(err?.message ?? err);
+  }
+}
+
+// ─── Rendering a change a person can read ───────────────────────────────────
+
+/**
+ * Keys whose VALUE is never printed.
+ *
+ * An audit record captures whatever the writing code passed, and some of those
+ * payloads legitimately contain a token or a hash — a session record, a
+ * credential rotation. The audit log is one of the most widely-read internal
+ * surfaces in the system, so it redacts rather than trusting every caller to
+ * have been careful. The KEY is still shown, because "the token changed" is the
+ * fact worth auditing and the value never is.
+ */
+const REDACT = /pass|secret|token|hash|otp|salt|key$|credential|cvv|card/i;
+
+/** Fields that should render through the status dictionary rather than as text. */
+const STATUS_KEY = /^(status|standing|state|outcome|decision)$/i;
+
+interface Change { key: string; before: unknown; after: unknown; }
+
+/**
+ * The fields that actually moved.
+ *
+ * Compares the two payloads key by key. A field present in both and unchanged
+ * is dropped — the reader is looking for what changed, and showing sixteen
+ * unchanged fields to surface one that moved is how an audit log stops being
+ * read.
+ */
+function diff(oldV: unknown, newV: unknown): Change[] {
+  const a = (oldV && typeof oldV === 'object' ? oldV : {}) as Record<string, unknown>;
+  const b = (newV && typeof newV === 'object' ? newV : {}) as Record<string, unknown>;
+  const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
+  const out: Change[] = [];
+  for (const k of keys) {
+    const before = a[k];
+    const after = b[k];
+    if (JSON.stringify(before) === JSON.stringify(after)) continue;
+    out.push({ key: k, before, after });
+  }
+  return out;
+}
+
+function show(key: string, v: unknown): string {
+  if (REDACT.test(key)) return '••••••';
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  if (typeof v === 'object') {
+    const j = JSON.stringify(v);
+    return j.length > 120 ? j.slice(0, 117) + '…' : j;
+  }
+  return String(v);
+}
+
+/** `entityType` + action → the sentence at the top of a record. */
+function headline(r: any): string {
+  const who = r.actorLabel || 'The system';
+  const what = String(r.entityType ?? 'record').replace(/_/g, ' ');
+  const verb: Record<string, string> = {
+    create: 'created', update: 'changed', delete: 'deleted',
+    approve: 'approved', reject: 'rejected', revoke: 'revoked',
+    issue: 'issued', publish: 'published', login: 'signed in',
+  };
+  return `${who} ${verb[r.action] ?? String(r.action).replace(/_/g, ' ')} ${what}`;
+}
+
+function humanKey(k: string): string {
+  const v = k.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim();
+  return v.charAt(0).toUpperCase() + v.slice(1).toLowerCase();
+}
+
+const fmt = (d: Date | string | null) => {
+  if (!d) return '—';
+  const x = d instanceof Date ? d : new Date(d);
+  return Number.isNaN(x.getTime()) ? '—' : x.toLocaleString('en-GB', {
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata',
+  });
+};
+
+const filtered = Boolean(f.entityType || f.action || f.actor || f.entityId || f.from || f.to);
+---
+
+<AdminShell
+  title="Audit log"
+  requires="audit:read"
+  intro="Every consequential change the federation has made, with who made it, what it was before, and why."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Audit log', url: h('/admin/audit') },
+    ],
+    /* No tabs. Every other view of this page is a COMBINATION of six filters,
+       and a tab strip that offered two of them would imply the others were
+       secondary. There is also no action bar: nothing on this page writes
+       anything, and §13's one dominant action does not exist here to invent. */
+  }}
+>
+  {notConfigured ? (
+    /* Deliberately not ErrorState. Nothing failed: this deployment has no
+       database to hold an audit log, so there is nothing to retry and no
+       reassurance to give about what survived. */
+    <p class="au-unconfigured">
+      This deployment has no database configured, so there is no audit log to
+      read here. That is not an empty record and not a failure — the log lives in
+      the federation's database, and this deployment has no connection to one.
+    </p>
+  ) : readFailed ? (
+    <ErrorState
+      title="The audit log could not be read."
+      safe="Nothing has been changed. Reading the log writes nothing to it, and no account can alter a row that is already there."
+      detail={failureDetail}
+    />
+  ) : (
+    <>
+      <section class="au-note" aria-label="About this record">
+        <p>
+          {/* §49: "Audit logs must be immutable for authorized users." Stated,
+              because a reader deciding whether to rely on this needs to know —
+              and because there is no editing control anywhere for it to
+              contradict. */}
+          <strong>This record cannot be edited.</strong> Rows are appended and
+          never changed or removed, including by the accounts that can read them.
+          There is no control on this page or anywhere else in the system that
+          alters an audit row.
+        </p>
+        <p class="au-note-sub">
+          Times are shown in India Standard Time. Addresses are stored hashed and
+          are never displayed.
+        </p>
+      </section>
+
+      <form method="GET" class="au-filters">
+        <div class="au-f">
+          <label class="input-label" for="entity">Entity</label>
+          <select class="input" id="entity" name="entity">
+            <option value="">Any</option>
+            {entityTypes.map((t) => <option value={t} selected={f.entityType === t}>{humanKey(t)}</option>)}
+          </select>
+        </div>
+        <div class="au-f">
+          <label class="input-label" for="action">Action</label>
+          <select class="input" id="action" name="action">
+            <option value="">Any</option>
+            {actions.map((a) => <option value={a} selected={f.action === a}>{humanKey(a)}</option>)}
+          </select>
+        </div>
+        <div class="au-f">
+          <label class="input-label" for="actor">Who</label>
+          <input class="input" id="actor" name="actor" value={f.actor} placeholder="Name or account" />
+        </div>
+        <div class="au-f">
+          <label class="input-label" for="id">Entity reference</label>
+          <input class="input" id="id" name="id" value={f.entityId} placeholder="Exact id" />
+        </div>
+        <div class="au-f">
+          <label class="input-label" for="from">From</label>
+          <input class="input" id="from" name="from" type="date" value={f.from} />
+        </div>
+        <div class="au-f">
+          <label class="input-label" for="to">To</label>
+          <input class="input" id="to" name="to" type="date" value={f.to} />
+        </div>
+        <div class="au-f au-f-actions">
+          <button class="btn btn-primary" type="submit">Filter</button>
+          {/* Query-only, never a rebuilt path. On admin.mmakf.in this page is
+              served at /audit and the middleware rewrites it to /admin/audit
+              internally, so a link written as "/admin/audit" would be rewritten
+              a second time and land on nothing. */}
+          {filtered && <a class="btn btn-ghost" href="?">Clear</a>}
+        </div>
+      </form>
+
+      <p class="au-count" role="status">
+        {total === 0
+          ? (filtered ? 'No recorded change matches these filters.' : 'Nothing has been recorded yet.')
+          : total !== null && total > rows.length
+            ? `Showing the ${rows.length} most recent of ${total.toLocaleString('en-IN')} recorded changes. Narrow the dates to see further back.`
+            : `${rows.length.toLocaleString('en-IN')} recorded change${rows.length === 1 ? '' : 's'}.`}
+      </p>
+
+      {rows.length === 0 ? (
+        /* §104: an empty state carries its own way out. Which way out depends
+           on WHICH emptiness this is — a filter that matched nothing is undone
+           by clearing it, and a log with nothing in it yet cannot be. */
+        filtered ? (
+          <EmptyState
+            title="No recorded change matches these filters."
+            body="The log itself is not empty — these six filters are all applied together, and one of them is excluding the rest."
+            action={{ label: 'Clear filters', href: '?' }}
+          />
+        ) : (
+          <EmptyState
+            title="The federation has not recorded a change yet."
+            body="Entries appear here as soon as anybody awards a rank, finalises a result, issues a certificate or approves a quotation. Nothing has to be switched on for that to happen."
+            action={{ label: 'Back to operations', href: h('/admin') }}
+          />
+        )
+      ) : (
+        <ol class="au-list">
+          {rows.map((r) => {
+            const changes = diff(r.oldValue, r.newValue);
+            return (
+              <li class="au-item">
+                <div class="au-when">
+                  <time datetime={r.at instanceof Date ? r.at.toISOString() : String(r.at)}>{fmt(r.at)}</time>
+                </div>
+
+                <div class="au-body">
+                  <p class="au-head">{headline(r)}</p>
+
+                  <p class="au-meta">
+                    {r.entityId && <span class="au-ref">{r.entityType}&nbsp;{r.entityId}</span>}
+                    {r.actorRole && <span class="au-role">{humanKey(r.actorRole)}</span>}
+                    {r.authority && <span class="au-authority">under {r.authority}</span>}
+                  </p>
+
+                  {changes.length > 0 && (
+                    <dl class="au-changes">
+                      {changes.map((c) => (
+                        <div class="au-change">
+                          <dt>{humanKey(c.key)}</dt>
+                          <dd>
+                            {STATUS_KEY.test(c.key) && !REDACT.test(c.key) ? (
+                              <>
+                                {c.before !== undefined && c.before !== null
+                                  ? <Status value={String(c.before)} size="sm" withMeaning={false} />
+                                  : <span class="au-none">not set</span>}
+                                <span class="au-arrow" aria-label="changed to">→</span>
+                                {c.after !== undefined && c.after !== null
+                                  ? <Status value={String(c.after)} size="sm" withMeaning={false} />
+                                  : <span class="au-none">not set</span>}
+                              </>
+                            ) : (
+                              <>
+                                <span class="au-before">{show(c.key, c.before)}</span>
+                                <span class="au-arrow" aria-label="changed to">→</span>
+                                <span class="au-after">{show(c.key, c.after)}</span>
+                              </>
+                            )}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )}
+
+                  {r.reason && (
+                    <p class="au-reason"><span>Reason</span> {r.reason}</p>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .au-unconfigured { color: var(--muted); line-height: var(--leading-relaxed); max-width: 60ch; }
+
+  .au-note {
+    border-left: 2px solid var(--gold-dim);
+    padding: var(--space-3) 0 var(--space-3) var(--space-4);
+    margin-bottom: var(--space-8);
+    max-width: 72ch;
+  }
+  .au-note p { margin: 0; color: var(--off-white); line-height: var(--leading-relaxed); font-size: var(--text-base); }
+  .au-note-sub { margin-top: var(--space-2) !important; color: var(--muted); font-size: var(--text-sm); }
+
+  .au-filters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: var(--space-4);
+    align-items: end;
+    padding-bottom: var(--space-6);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: var(--space-5);
+  }
+  .au-f-actions { display: flex; gap: var(--space-2); }
+
+  .au-count { color: var(--muted); font-size: var(--text-sm); margin-bottom: var(--space-6); }
+
+  .au-list { list-style: none; margin: 0; padding: 0; }
+
+  /* A timeline rather than a table. An audit entry is a SENTENCE with a
+     supporting diff, and forcing "before" and "after" into fixed columns makes
+     every row as tall as its longest value and unreadable on a phone. */
+  .au-item {
+    display: grid;
+    grid-template-columns: 168px minmax(0, 1fr);
+    gap: var(--space-6);
+    padding: var(--space-5) 0;
+    border-top: 1px solid var(--border);
+  }
+  .au-item:last-child { border-bottom: 1px solid var(--border); }
+
+  .au-when {
+    color: var(--muted);
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+    padding-top: 1px;
+  }
+
+  .au-head {
+    margin: 0;
+    font-size: var(--text-base);
+    color: var(--white);
+    line-height: var(--leading-snug);
+  }
+
+  .au-meta {
+    margin: var(--space-2) 0 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4);
+    font-size: var(--text-xs);
+    color: var(--muted);
+  }
+  .au-ref { font-variant-numeric: tabular-nums; color: var(--off-white); }
+
+  .au-changes {
+    margin: var(--space-4) 0 0;
+    display: grid;
+    gap: var(--space-2);
+  }
+  .au-change {
+    display: grid;
+    grid-template-columns: 190px minmax(0, 1fr);
+    gap: var(--space-4);
+    align-items: baseline;
+    font-size: var(--text-sm);
+  }
+  .au-change dt { color: var(--muted); }
+  .au-change dd {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .au-before { color: var(--muted); text-decoration: line-through; text-decoration-thickness: 1px; }
+  .au-after { color: var(--white); }
+  .au-none { color: var(--muted); font-style: italic; }
+  .au-arrow { color: var(--gold-dim); flex: none; }
+
+  .au-reason {
+    margin: var(--space-3) 0 0;
+    font-size: var(--text-sm);
+    color: var(--off-white);
+    line-height: var(--leading-normal);
+  }
+  .au-reason span {
+    color: var(--muted);
+    margin-right: var(--space-2);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+  }
+
+  /* PART AL. Below this the two-column timeline becomes one column: the
+     timestamp moves above the sentence rather than squeezing into a 90px
+     gutter, and each change stacks its label above its values. */
+  @media (max-width: 820px) {
+    .au-item { grid-template-columns: 1fr; gap: var(--space-2); padding: var(--space-5) 0; }
+    .au-when { font-size: var(--text-xs); letter-spacing: var(--tracking-wide); }
+    .au-change { grid-template-columns: 1fr; gap: var(--space-1); }
+    .au-change dt { font-size: var(--text-xs); }
+  }
+  @media (max-width: 620px) {
+    .au-filters { grid-template-columns: 1fr 1fr; }
+    .au-f-actions { grid-column: 1 / -1; }
+  }
+</style>

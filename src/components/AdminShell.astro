@@ -1,0 +1,269 @@
+---
+// The admin surface's frame: identity, the module menu, and the refusal.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE MENU IS FILTERED, AND THAT IS NOT THE CONTROL
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// adminNavFor() hides modules the principal cannot reach, so a finance officer
+// does not see safeguarding and a training administrator does not see the
+// disciplinary register. That is a COURTESY — it stops people clicking into
+// refusals — and it is not what keeps them out. Every page repeats the check
+// itself, because a menu is markup and markup is not an authorisation system.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// A REFUSAL SAYS WHAT WAS NEEDED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// "Forbidden" sends an administrator to ask somebody who also does not know.
+// The refusal here names the action, which is the thing whoever grants roles
+// actually needs to hear.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHO PRINTS THE <h1>
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// This component always has. That was right while the shell was the only thing
+// that knew a page had a title, and it is wrong now that §12 asks every
+// authenticated page to open with a breadcrumb, a title, a description, its
+// metadata, its one primary action and its tabs — none of which the shell can
+// supply, because only the page knows them.
+//
+// So `header` hands that whole block to PageHeader, and THE SHELL THEN PRINTS
+// NO TITLE OF ITS OWN. It is one prop rather than a boolean for a reason: a
+// boolean would let a page switch the shell's heading off and then forget to
+// render a header, leaving a surface with no h1 at all and no test able to see
+// it. Here the two cannot come apart — either this component prints the h1 or
+// the component it renders in its place does, and there is no third path.
+//
+// The twenty-six pages that predate PageHeader pass nothing and are unchanged.
+
+import Base from '@/layouts/Base.astro';
+import PageHeader from '@/components/PageHeader.astro';
+import type { Props as PageHeaderProps } from '@/components/PageHeader.astro';
+import { identify } from '@/lib/session';
+import { canAnywhere, type Action, type Principal } from '@/lib/rbac';
+import { adminNavFor, href as surfaceHref, type Surface } from '@/lib/surface';
+import OperationsBar from '@/components/OperationsBar.astro';
+
+export interface Props {
+  /**
+   * The module. Always the document title; also the visible heading unless
+   * `header` supplies its own.
+   */
+  title: string;
+  /** The action this module needs. The page is refused without it. */
+  requires: Action;
+  intro?: string;
+  /**
+   * What this page is looking at, for the command palette contextual section.
+   *
+   * OPTIONAL WITH NO DEFAULT BEHAVIOUR CHANGE. Twenty-six pages render through
+   * this component and none of them was edited when the header arrived; a page
+   * that passes nothing gets the global palette, which is what it had before.
+   */
+  entity?: any;
+  /**
+   * §12's page header, rendered in place of the shell's own title block.
+   *
+   * `headingLevel` is not offered: this is the page's h1 and nothing else is.
+   * `title` defaults to the module title and `description` to `intro`, so a
+   * page adopting the header does not restate what it has already said.
+   *
+   * Counts and status chips go in the `meta` slot, which is forwarded through.
+   */
+  header?: Omit<PageHeaderProps, 'title' | 'headingLevel'> & { title?: string };
+}
+
+const { title, requires, intro, entity = null, header } = Astro.props;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal: Principal | null = identity?.principal ?? null;
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const permitted = !!principal && canAnywhere(principal, requires);
+const groups = principal ? adminNavFor((a) => canAnywhere(principal, a as Action)) : [];
+const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
+---
+
+<Base title={`${title} — MMAKF operations`} description="MMAKF federation operations.">
+  {/* §5. Rendered only to a signed-in caller: a search field and a product
+      switcher above a "sign in" panel would offer tools that cannot work, and
+      the palette would be an accelerator for an account that does not exist. */}
+  {identity && (
+    <OperationsBar
+      principal={principal}
+      surface={surface}
+      product="Operations"
+      entity={entity}
+      accountLabel={identity.label ?? null}
+    />
+  )}
+  <div class="ad">
+    <div class="container ad-grid">
+
+      <aside class="ad-side" aria-label="Operations modules">
+        <p class="ad-side-h">Operations</p>
+        {groups.length === 0 ? (
+          <p class="ad-side-empty">No modules are available to this account.</p>
+        ) : (
+          groups.map((g) => (
+            <nav class="ad-group" aria-label={g.label}>
+              <p class="ad-group-h">{g.label}</p>
+              <ul>
+                {g.modules.map((m) => (
+                  <li>
+                    <a
+                      href={h(m.href)}
+                      class={currentPath === m.href ? 'active' : ''}
+                      aria-current={currentPath === m.href ? 'page' : undefined}
+                    >{m.label}</a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          ))
+        )}
+      </aside>
+
+      <div class="ad-main">
+        {!identity ? (
+          <section class="ad-refuse">
+            <h1 class="display-2">Sign in.</h1>
+            <p class="ad-lede">
+              This is the federation's operations platform. It is not a public
+              surface and it is never indexed.
+            </p>
+            <a class="btn btn-primary" href={h('/admin')}>Go to sign in</a>
+          </section>
+        ) : !permitted ? (
+          <section class="ad-refuse">
+            <h1 class="display-2">Not your module.</h1>
+            <p class="ad-lede">
+              This page needs <code>{requires}</code>, which this account does
+              not hold in any scope.
+            </p>
+            <p class="ad-lede">
+              Signed in as <strong>{identity.principal.label}</strong>. If you
+              need it, that action is what to ask for — quoting it saves whoever
+              grants roles from guessing.
+            </p>
+          </section>
+        ) : (
+          <>
+            {header ? (
+              /* The meta slot is forwarded only when the page filled it.
+                 Forwarding unconditionally would make Astro.slots.has('meta')
+                 true inside PageHeader on every page, and it would draw an
+                 empty metadata row under every title. */
+              Astro.slots.has('meta') ? (
+                <PageHeader
+                  {...header}
+                  title={header.title ?? title}
+                  description={header.description ?? intro}
+                  headingLevel="h1"
+                >
+                  <slot name="meta" slot="meta" />
+                </PageHeader>
+              ) : (
+                <PageHeader
+                  {...header}
+                  title={header.title ?? title}
+                  description={header.description ?? intro}
+                  headingLevel="h1"
+                />
+              )
+            ) : (
+              <header class="ad-head">
+                <h1 class="display-2">{title}</h1>
+                {intro && <p class="ad-lede">{intro}</p>}
+              </header>
+            )}
+            <slot />
+          </>
+        )}
+      </div>
+    </div>
+  </div>
+</Base>
+
+<style>
+  .ad { padding: 92px 0 72px; }
+  .ad-grid {
+    display: grid;
+    grid-template-columns: 224px minmax(0, 1fr);
+    gap: 0 44px;
+    align-items: start;
+  }
+
+  .ad-side { position: sticky; top: 92px; }
+  .ad-side-h {
+    font-family: var(--font-display); font-size: .78rem;
+    letter-spacing: .18em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 18px;
+  }
+  .ad-side-empty { color: var(--muted); font-size: .88rem; line-height: 1.6; }
+  .ad-group { margin-bottom: 22px; }
+  .ad-group-h {
+    font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--gold-dim); margin: 0 0 7px;
+  }
+  .ad-group ul { list-style: none; margin: 0; padding: 0; }
+  .ad-group a {
+    display: block; padding: 6px 10px; margin-left: -10px;
+    border-radius: 6px; font-size: .89rem; text-decoration: none;
+    color: var(--muted); line-height: 1.4;
+  }
+  .ad-group a:hover { background: var(--bg-2); color: var(--off-white, inherit); }
+  .ad-group a.active {
+    background: var(--bg-2); color: var(--gold-2);
+    box-shadow: inset 2px 0 0 var(--gold);
+  }
+
+  .ad-head { margin-bottom: 26px; }
+
+  /* Where a page supplies its own PageHeader, the shell owns two things the
+     header cannot know from inside itself.
+
+     The first is where "stuck" is. PageHeader defaults to the 96px band
+     global.css reserves with scroll-padding-top; this shell parks its sidebar
+     at 92px because that is where its own chrome ends, and a header that stopped
+     four pixels lower than the column beside it would read as a misalignment
+     rather than as a decision.
+
+     The second is the gap beneath it. A header that reserved its own bottom
+     margin would reserve it wherever it was used, including where it is not the
+     top of a column — so the space belongs to whatever places it, which here is
+     this shell. :global() because the element is rendered by PageHeader and
+     carries PageHeader's scope, not this file's. */
+  .ad-main { --ph-sticky-top: 92px; }
+  .ad-main > :global(header[data-page-header]) { margin-bottom: var(--space-6); }
+  .ad-lede { color: var(--muted); line-height: 1.7; max-width: 62ch; margin: 12px 0 0; }
+  .ad-refuse { padding: 40px 0; }
+  .ad-refuse code {
+    font-family: var(--font-accent, monospace); background: var(--bg-2);
+    padding: 2px 7px; border-radius: 4px;
+  }
+
+  /* ── Phone ────────────────────────────────────────────────────────────────
+     PART AL: admin critical actions must work on mobile. The sidebar becomes a
+     horizontal scroller above the content rather than a 224px column squeezed
+     into a 360px screen — which would leave the workspace 100px wide. */
+  @media (max-width: 900px) {
+    .ad { padding: 76px 0 56px; }
+    .ad-grid { grid-template-columns: 1fr; gap: 24px; }
+    .ad-side {
+      position: static;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 14px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .ad-side-h { display: none; }
+    .ad-group { display: inline-block; margin: 0 20px 0 0; vertical-align: top; }
+    .ad-group ul { display: flex; gap: 4px; }
+    .ad-group a { white-space: nowrap; padding: 9px 12px; margin-left: 0; min-height: 44px; }
+    .ad-group a.active { box-shadow: inset 0 -2px 0 var(--gold); }
+  }
+</style>

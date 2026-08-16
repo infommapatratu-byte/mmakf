@@ -187,6 +187,60 @@ describe('content the federation has asked to be removed', () => {
     for (const y of years) expect(y).toBeLessThanOrEqual(new Date().getUTCFullYear());
   });
 
+  it('states one date for the conferral of "Junior Tiger Lee", not two', () => {
+    // THE BUG THIS CATCHES, which was live.
+    //
+    // The honours record and the biography both said 2021. The news item was
+    // dated Aug 2022 and its body read "The title was conferred on…" — so a
+    // visitor on /people saw 2021 and a visitor on the news page saw 2022, for
+    // the same event.
+    //
+    // The `date` on a news item is when it was REPORTED, which is right and
+    // consistent with every other item. The body simply had to say so. The
+    // federation has been angry about exactly this class of error before — a
+    // 2022 event published under a 2025 date — so it gets a guard rather than
+    // a correction and a hope.
+    const honour = (SEED.leadership as any[])
+      .flatMap((p) => p.honours ?? [])
+      .find((h: any) => /junior tiger lee/i.test(h.title));
+    expect(honour, 'the Junior Tiger Lee honour is no longer on record').toBeTruthy();
+    expect(honour.year).toBe('2021');
+
+    const bio = (SEED.leadership as any[]).find((p) => /pramod/i.test(p.name))?.bio ?? '';
+    const inBio = [...String(bio).matchAll(/Junior Tiger Lee\D{0,40}(\d{4})/gi)].map((m) => m[1]);
+    for (const y of inBio) {
+      expect(y, 'the biography dates the conferral differently from the honour').toBe(honour.year);
+    }
+
+    // Any news item about the conferral must name the year the honour records,
+    // so its own publication date cannot be mistaken for the event.
+    const item = (SEED.news as any[]).find((n) => /junior tiger lee/i.test(n.title));
+    if (item) {
+      expect(
+        String(item.body).includes(honour.year),
+        'the news item about the conferral never states the year it happened, so its ' +
+        'publication date reads as the date of the award'
+      ).toBe(true);
+    }
+  });
+
+  it('attributes the conferral to the master, and the corroboration to the publication', () => {
+    // Two different claims with two different bases, and they must not borrow
+    // each other's. WHO conferred the name is the federation's own statement;
+    // that the title exists at all is corroborated by a third-party compendium.
+    // Putting the master into the honour's `note` would attribute him to
+    // Shivangan Publication, which never mentioned him.
+    const shihan = (SEED.leadership as any[]).find((p) => /pramod/i.test(p.name));
+    expect(shihan?.master?.name).toBe('Grandmaster S N T Lee');
+    expect(shihan?.master?.source).toMatch(/federation/i);
+
+    const honour = (shihan?.honours ?? []).find((h: any) => /junior tiger lee/i.test(h.title));
+    expect(
+      /S N T Lee|master/i.test(String(honour?.note ?? '') + String(honour?.source ?? '')),
+      'the honour record names the master, which attributes him to the publication cited'
+    ).toBe(false);
+  });
+
   it('a gallery photograph declares whether the federation owns it', () => {
     for (const g of SEED.gallery as any[]) {
       expect(typeof g.own, `gallery "${g.title}" does not say whose photograph it is`).toBe('boolean');

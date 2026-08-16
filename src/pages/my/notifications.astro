@@ -1,0 +1,599 @@
+---
+// /my/notifications — the member's own inbox (§T, §47, §103).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// IT TAKES NO IDENTIFIER
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Like /my and /my/passport, this page accepts no personId, no userId and no
+// federation id — not in the path, not in the query string, not in the form
+// that marks a notice read. The recipient is resolved from the session inside
+// src/db/notifications-inbox.ts, so the request cannot express "show me
+// somebody else's inbox". A check made after such a question has been asked is
+// weaker than a shape that cannot ask it.
+//
+// The one thing the query string does carry is a VIEW — unread or all, and a
+// topic. Neither selects a person.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// §103 — WHAT HAPPENED, WHAT IT MEANS, WHAT I CAN DO
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Each notice renders those three from the stored row: the title, the body, and
+// the deep link. WHERE THE ROW CANNOT ANSWER THE THIRD, NOTHING IS INVENTED.
+// A notice with no link says so in one line and offers no button, because a
+// plausible-looking call to action pointing at a page the federation never
+// associated with this message is worse than an honest absence.
+//
+// The same applies to category and priority. The engine does not set `topic` or
+// `priority` on most rows today, so most notices show neither. Printing
+// "Normal priority" against a row where nobody recorded a priority would be
+// inventing a fact about the federation's own message.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THE DEEP LINK IS A BUTTON AND NOT AN ANCHOR (§47)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §47: "notification click must deep-link to the relevant entity". Opening a
+// notice should also mark it read — an inbox where reading something leaves it
+// unread is an inbox that never empties, and the unread count stops meaning
+// anything within a week.
+//
+// Marking read is a WRITE, and a plain link cannot write without JavaScript.
+// So the action is a form: it POSTs here, the row is marked read, and the
+// response is a 303 to the entity. The cost is that the destination cannot be
+// copied or middle-clicked; the benefit is that the count is true and the whole
+// thing works with scripting off. The redirect target is validated by
+// safeLink() before it is followed, so a stored absolute URL can never turn
+// this page into an open redirect on the federation's own domain.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// FIVE HONEST STATES BEFORE ANY NOTICE IS SHOWN
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//   no database configured  — what production renders today, and it says why
+//   not signed in           — an inbox belongs to a person
+//   a shared credential     — attributable to nobody, so it has no inbox
+//   no person record linked — explained, not crashed
+//   ok                      — the inbox itself
+
+import Base from '@/layouts/Base.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { rateLimit } from '@/lib/ratelimit';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { humanise } from '@/lib/status';
+import {
+  INBOX_LIMIT, inbox, inboxTopics, unreadCount, markRead, markAllRead, ownLink,
+  recipientFor, safeLink, type InboxItem,
+} from '@/db/notifications-inbox';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+
+type Gate = 'no_database' | 'signed_out' | 'shared_credential' | 'no_person' | 'ok';
+
+const q = Astro.url.searchParams;
+const view = q.get('view') === 'unread' ? 'unread' : 'all';
+const topicFilter = (q.get('topic') ?? '').trim() || null;
+
+/** Preserved across the POST so marking one notice read does not lose the view. */
+const viewQuery = () => {
+  const params = new URLSearchParams();
+  if (view === 'unread') params.set('view', 'unread');
+  if (topicFilter) params.set('topic', topicFilter);
+  const str = params.toString();
+  return str ? '?' + str : '';
+};
+
+// ─── Marking read (§T) ──────────────────────────────────────────────────────
+//
+// Three actions, all POST, all scoped to the caller by construction:
+//
+//   read      one notice, by its id
+//   read-all  everything currently unread
+//   open      one notice: mark it read, then 303 to its entity (§47)
+//
+// Post/redirect/get throughout, so a refresh after marking read does not
+// re-post it. The redirect keeps whatever view the reader was in, so marking
+// one notice read from the unread list does not throw them back to the top of
+// everything. A refusal is the one thing rendered in place rather than
+// redirected to, because a reader who is told nothing happened needs the reason
+// on the screen they are looking at.
+
+let actionError: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const action = String(form.get('action') ?? '');
+  const rawId = String(form.get('id') ?? '');
+
+  // Modest, and per client rather than per account: this is a write, and a
+  // write reachable from a page needs a ceiling even when the worst outcome is
+  // somebody marking their own notices read very quickly.
+  const rl = await rateLimit(Astro.request, 'notifications-read', 60, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    actionError = `Too many requests in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!configured) {
+    Astro.response.status = 503;
+    actionError = 'The federation database is not reachable from this deployment, so nothing could be marked read.';
+  } else if (!identity || identity.userId == null) {
+    // A shared credential lands here too, and correctly: it is attributable to
+    // no person, so there is no inbox for it to write to.
+    Astro.response.status = 401;
+    actionError = 'Your session has ended, or you are signed in with a shared credential. Nothing was changed.';
+  } else if (action === 'read-all') {
+    await markAllRead(db(), principal);
+    return Astro.redirect(h('/my/notifications') + viewQuery(), 303);
+  } else if (action === 'read' || action === 'open') {
+    const id = Number(rawId);
+    if (!Number.isInteger(id) || id <= 0) {
+      Astro.response.status = 400;
+      actionError = 'That is not a notice this page can act on. Nothing was changed.';
+    } else {
+      // markRead() filters on the caller's own personId in the WHERE clause, so
+      // an id belonging to somebody else matches no row and changes nothing.
+      // The count it returns is not shown: reporting "0 marked read" would tell
+      // a stranger whether that id exists.
+      await markRead(db(), principal, [id]);
+
+      if (action === 'open') {
+        // The destination is read back from the caller's OWN row rather than
+        // from the form, so the redirect target cannot be supplied by whoever
+        // submitted it. ownLink() returns null for an id that is not theirs and
+        // for a stored link that is not a path on this site; both fall back to
+        // this page rather than being followed.
+        const target = await ownLink(db(), principal, id);
+        return Astro.redirect(target ? h(target) : h('/my/notifications') + viewQuery(), 303);
+      }
+      return Astro.redirect(h('/my/notifications') + viewQuery(), 303);
+    }
+  } else {
+    Astro.response.status = 400;
+    actionError = 'Unknown action. Nothing was changed.';
+  }
+}
+
+// ─── Reading ────────────────────────────────────────────────────────────────
+
+let gate: Gate = 'ok';
+let items: InboxItem[] = [];
+let topics: string[] = [];
+let unread = 0;
+let loadError: string | null = null;
+
+if (!configured) {
+  gate = 'no_database';
+} else if (!identity) {
+  gate = 'signed_out';
+} else if (identity.userId == null) {
+  gate = 'shared_credential';
+} else {
+  try {
+    // Asked directly rather than inferred from an empty list: "your account is
+    // not linked to a member record" and "you have no notifications" are two
+    // different sentences, and only one of them tells the reader what to do.
+    const me = await recipientFor(db(), principal);
+    if (!me) {
+      gate = 'no_person';
+    } else {
+      items = await inbox(db(), principal, {
+        unreadOnly: view === 'unread',
+        topic: topicFilter,
+      });
+      topics = await inboxTopics(db(), principal);
+      unread = await unreadCount(db(), principal);
+    }
+  } catch (err: any) {
+    console.error('[my/notifications]', err);
+    loadError =
+      'Your notifications could not be read. The fault has been logged for the federation office; nothing has been changed.';
+  }
+}
+
+const fmt = (v: unknown): string => {
+  if (!v) return '';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? ''
+    : d.toLocaleString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata',
+      });
+};
+
+const iso = (v: unknown): string | undefined => {
+  if (!v) return undefined;
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+};
+
+const filtered = view === 'unread' || !!topicFilter;
+const capped = items.length >= INBOX_LIMIT;
+---
+
+<Base
+  title="My notifications — MMAKF"
+  description="Your MMAKF notifications: what the federation has recorded about you, and what you can do about it."
+>
+  <section>
+    <div class="container">
+
+      {gate === 'no_database' && (
+        <div class="card">
+          <div class="eyebrow">Notifications</div>
+          <h1 class="display-2" style="margin-top:14px">Not available on this deployment.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            Notices are rows in the federation’s database, written when something
+            happens on your record. No federation database is configured for this
+            deployment, so there is nothing to list. This is not an empty inbox
+            and nothing has failed.
+          </p>
+        </div>
+      )}
+
+      {gate === 'signed_out' && (
+        <div class="card">
+          <div class="eyebrow">Notifications</div>
+          <h1 class="display-2" style="margin-top:14px">Sign in to see your notifications.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            An inbox belongs to a person. This page shows the notices of whoever
+            is signed in and accepts no identifier — there is no way to ask it
+            for anybody else’s.
+          </p>
+          <p style="margin-top:18px"><a class="btn btn-primary" href={h('/my')}>Go to the member area</a></p>
+        </div>
+      )}
+
+      {gate === 'shared_credential' && (
+        <div class="card">
+          <div class="eyebrow">Notifications</div>
+          <h1 class="display-2" style="margin-top:14px">A shared credential has no inbox.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            You are signed in with a shared office credential. It is attributable
+            to no individual, so the federation has never addressed a notice to
+            it. Sign in with your own account to see yours.
+          </p>
+        </div>
+      )}
+
+      {gate === 'no_person' && (
+        <div class="card">
+          <div class="eyebrow">Notifications</div>
+          <h1 class="display-2" style="margin-top:14px">Your account is not linked to a member record.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            Notices are addressed to a person in the federation’s register, and
+            this account is not yet attached to one. The office makes the link —
+            write to <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a>
+            with your member ID.
+          </p>
+        </div>
+      )}
+
+      {gate === 'ok' && (
+        <>
+          <div class="nt-head">
+            <div class="eyebrow">Notifications</div>
+            <h1 class="display-2" style="margin-top:14px">
+              {unread > 0 ? `${unread} unread` : 'Your notifications'}
+            </h1>
+            <div class="rule"></div>
+            <p class="lead">
+              What the federation has recorded about you, newest first. Each
+              notice says what happened and what it means; where the record
+              carries a link to the thing itself, opening it from here marks it
+              read.
+            </p>
+          </div>
+
+          {actionError && (
+            <p class="nt-alert" role="alert">{actionError}</p>
+          )}
+
+          {loadError ? (
+            <p class="nt-alert" role="alert">{loadError}</p>
+          ) : (
+            <>
+              <div class="nt-bar">
+                <nav class="nt-views" aria-label="Filter notifications">
+                  <a
+                    href={h('/my/notifications') + (topicFilter ? `?topic=${encodeURIComponent(topicFilter)}` : '')}
+                    class={view === 'all' ? 'active' : ''}
+                    aria-current={view === 'all' ? 'page' : undefined}
+                  >All</a>
+                  <a
+                    href={h('/my/notifications') + `?view=unread${topicFilter ? `&topic=${encodeURIComponent(topicFilter)}` : ''}`}
+                    class={view === 'unread' ? 'active' : ''}
+                    aria-current={view === 'unread' ? 'page' : undefined}
+                  >Unread{unread > 0 ? ` (${unread})` : ''}</a>
+                </nav>
+
+                {/* The category menu is built from the reader's OWN notices, so
+                    it never offers a category that would return nothing — and
+                    never asserts that a category exists at all. */}
+                {topics.length > 0 && (
+                  <form method="GET" class="nt-topics">
+                    {view === 'unread' && <input type="hidden" name="view" value="unread" />}
+                    <label class="input-label" for="topic">Category</label>
+                    <select class="input" id="topic" name="topic">
+                      <option value="">Any category</option>
+                      {topics.map((t) => (
+                        <option value={t} selected={topicFilter === t}>{humanise(t)}</option>
+                      ))}
+                    </select>
+                    <button class="btn btn-ghost" type="submit">Apply</button>
+                  </form>
+                )}
+
+                {unread > 0 && (
+                  <form method="POST" class="nt-readall">
+                    <input type="hidden" name="action" value="read-all" />
+                    <button class="btn btn-ghost" type="submit">Mark all as read</button>
+                  </form>
+                )}
+              </div>
+
+              {items.length === 0 ? (
+                filtered ? (
+                  <EmptyState
+                    title={view === 'unread' ? 'Nothing is unread.' : 'No notice matches that category.'}
+                    body={view === 'unread'
+                      ? 'Everything the federation has sent you has been read.'
+                      : 'The category menu lists only categories your own notices carry, so this is a combination with nothing in it.'}
+                    action={{ label: 'Show every notice', href: h('/my/notifications') }}
+                  />
+                ) : (
+                  <EmptyState
+                    title="You have no notifications."
+                    body="A notice appears here when the federation records something about you — a grading result, a certificate, a competition entry, a membership due for renewal. Nothing has been recorded against your account yet."
+                    action={{ label: 'Back to my record', href: h('/my') }}
+                    secondary={{ label: 'My athlete passport', href: h('/my/passport') }}
+                  />
+                )
+              ) : (
+                <>
+                  <ol class="nt-list">
+                    {items.map((n) => {
+                      const link = safeLink(n.linkUrl);
+                      const isUnread = !n.readAt;
+                      return (
+                        <li class:list={['nt-item', isUnread && 'nt-unread']}>
+                          <div class="nt-when">
+                            <time datetime={iso(n.createdAt)}>{fmt(n.createdAt)}</time>
+                          </div>
+
+                          <div class="nt-body">
+                            <h2 class="nt-title">
+                              {isUnread && <span class="nt-dot" aria-hidden="true"></span>}
+                              {n.title}
+                              {isUnread && <span class="sr-only"> — unread</span>}
+                            </h2>
+
+                            {/* Category and priority are shown ONLY where the
+                                row carries them. A row with no topic gets no
+                                chip rather than a default one nobody recorded.
+
+                                Priority is plain text and NOT a Status chip: it
+                                is not a state the record is in, and putting it
+                                through the status dictionary would mint a tone
+                                for a word the dictionary has no opinion about.
+                                `normal` is not printed at all — a priority
+                                every row shares tells a reader nothing. */}
+                            {(n.topic || (n.priority && n.priority !== 'normal')) && (
+                              <p class="nt-meta">
+                                {n.topic && <span class="nt-topic">{humanise(n.topic)}</span>}
+                                {n.priority && n.priority !== 'normal' && (
+                                  <span class="nt-priority">{humanise(n.priority)} priority</span>
+                                )}
+                              </p>
+                            )}
+
+                            <p class="nt-text">{n.body}</p>
+
+                            <div class="nt-actions">
+                              {link ? (
+                                <form method="POST" class="nt-form">
+                                  <input type="hidden" name="action" value="open" />
+                                  <input type="hidden" name="id" value={String(n.id)} />
+                                  <button class="btn btn-gold" type="submit">
+                                    Open<span class="sr-only"> {n.title}</span>
+                                  </button>
+                                </form>
+                              ) : (
+                                <p class="nt-nolink">
+                                  This notice records no link, so there is
+                                  nothing to open from here.
+                                </p>
+                              )}
+
+                              {isUnread && (
+                                <form method="POST" class="nt-form">
+                                  <input type="hidden" name="action" value="read" />
+                                  <input type="hidden" name="id" value={String(n.id)} />
+                                  <button class="btn btn-ghost" type="submit">
+                                    Mark as read<span class="sr-only"> — {n.title}</span>
+                                  </button>
+                                </form>
+                              )}
+                            </div>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ol>
+
+                  {capped && (
+                    <p class="nt-note">
+                      The {INBOX_LIMIT} most recent notices are shown. Older ones
+                      are kept and are not listed here.
+                    </p>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .nt-head { max-width: 68ch; }
+
+  .nt-alert {
+    margin: 0 0 var(--space-6);
+    padding: var(--space-4) var(--space-5);
+    border-left: 3px solid var(--red);
+    background: var(--bg-2);
+    color: var(--off-white);
+    line-height: var(--leading-relaxed);
+    max-width: 68ch;
+  }
+
+  .nt-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: var(--space-4) var(--space-6);
+    padding: var(--space-6) 0 var(--space-5);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: var(--space-2);
+  }
+
+  .nt-views { display: flex; gap: var(--space-2); }
+  .nt-views a {
+    display: inline-block;
+    padding: 8px 14px;
+    min-height: 44px;
+    line-height: 28px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    text-decoration: none;
+    font-size: var(--text-sm);
+  }
+  .nt-views a:hover { color: var(--off-white); background: var(--bg-2); }
+  .nt-views a.active {
+    color: var(--gold-2);
+    border-color: var(--gold-dim);
+    background: var(--bg-2);
+  }
+
+  .nt-topics { display: flex; align-items: end; gap: var(--space-2); }
+  .nt-topics .input-label { display: block; margin-bottom: var(--space-1); }
+  .nt-readall { margin-left: auto; }
+
+  .nt-list { list-style: none; margin: 0; padding: 0; }
+
+  /* A timeline, not a table. A notice is a short piece of prose with an action
+     under it; columns would make every row as tall as its longest sentence and
+     would collapse badly on a phone. */
+  .nt-item {
+    display: grid;
+    grid-template-columns: 168px minmax(0, 1fr);
+    gap: var(--space-6);
+    padding: var(--space-5) 0;
+    border-top: 1px solid var(--border);
+  }
+  .nt-item:last-child { border-bottom: 1px solid var(--border); }
+
+  .nt-when {
+    color: var(--muted);
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+    padding-top: 2px;
+  }
+
+  .nt-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    line-height: var(--leading-snug);
+    color: var(--white);
+  }
+
+  /* Unread is carried by the dot AND by the sr-only word beside the title, so
+     it is never colour alone (WCAG 1.4.1). */
+  .nt-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--gold);
+    margin-right: var(--space-2);
+    vertical-align: middle;
+  }
+  .nt-unread .nt-body { border-left: 2px solid var(--gold-dim); padding-left: var(--space-4); margin-left: calc(var(--space-4) * -1); }
+
+  .nt-meta {
+    margin: var(--space-2) 0 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    font-size: var(--text-xs);
+  }
+  .nt-priority { color: var(--gold-2); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+  .nt-topic {
+    color: var(--muted);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+  }
+
+  .nt-text {
+    margin: var(--space-3) 0 0;
+    color: var(--off-white);
+    line-height: var(--leading-relaxed);
+    max-width: 68ch;
+  }
+
+  .nt-actions {
+    margin-top: var(--space-4);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .nt-form { margin: 0; }
+  .nt-nolink {
+    margin: 0;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    max-width: 60ch;
+  }
+
+  .nt-note {
+    margin: var(--space-6) 0 0;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    max-width: 60ch;
+  }
+
+  /* PART AL. The timestamp moves above the notice rather than being squeezed
+     into a gutter, and the controls stack. */
+  @media (max-width: 820px) {
+    .nt-item { grid-template-columns: 1fr; gap: var(--space-2); }
+    .nt-when { font-size: var(--text-xs); letter-spacing: var(--tracking-wide); }
+    .nt-unread .nt-body { margin-left: 0; }
+  }
+  @media (max-width: 620px) {
+    .nt-bar { gap: var(--space-4); }
+    .nt-readall { margin-left: 0; }
+    .nt-topics { flex-wrap: wrap; }
+  }
+</style>

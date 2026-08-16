@@ -1,0 +1,210 @@
+---
+// learn.mmakf.in — the national training and institutional engagement platform.
+//
+// NOT A GRID OF EIGHT RECTANGLES. The audiences are a numbered editorial index
+// — the shape a national body's directory takes — because eight identical
+// cards tell a school nothing about whether MMAKF has anything for a school,
+// and a crawler reads a list of headings and sentences rather than a grid of
+// two-word labels.
+
+import Base from '@/layouts/Base.astro';
+import { AUDIENCES, PROCESS_STEPS } from '@/data/audiences';
+import { href as surfaceHref, canonicalFor, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const schema = {
+  '@context': 'https://schema.org',
+  '@type': 'WebPage',
+  name: 'MMAKF National Training and Institutional Engagement',
+  description:
+    'Structured Shotokan karate, physical education, self-defence and sports training for schools, corporates, universities, government bodies, communities and individuals in India.',
+  url: canonicalFor(surface, '/learn'),
+  isPartOf: {
+    '@type': 'WebSite',
+    name: 'Modern Martial Arts Karate-Do Federation of India',
+    url: 'https://www.mmakf.in',
+  },
+};
+---
+
+<Base
+  title="MMAKF Training — for schools, corporates, universities and individuals"
+  description="MMAKF provides structured national-level Shotokan karate, physical education, self-defence and sports training for institutions and individuals across India."
+>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+
+  <header class="lrn-hero">
+    <div class="container">
+      <p class="eyebrow">Modern Martial Arts Karate-Do Federation of India</p>
+      <h1 class="display-1">
+        National training,<br />delivered where you are.
+      </h1>
+      <p class="lrn-standfirst">
+        MMAKF runs structured Shotokan karate, physical education, self-defence
+        and sports programmes for institutions and for individuals — on your
+        premises, at an affiliated centre, or online.
+      </p>
+      <div class="lrn-actions">
+        <a class="btn btn-primary" href={h('/learn/apply')}>Start an application</a>
+        <a class="btn btn-ghost" href={h('/learn/portal')}>Client portal</a>
+      </div>
+    </div>
+  </header>
+
+  <section class="lrn-index">
+    <div class="container">
+      <p class="eyebrow">Who MMAKF trains</p>
+      <ol class="aud-index">
+        {AUDIENCES.map((a, i) => (
+          <li>
+            <a href={h(`/learn/${a.slug}`)}>
+              <span class="ai-n" aria-hidden="true">{String(i + 1).padStart(2, '0')}</span>
+              <span class="ai-main">
+                <span class="ai-title">{a.title}</span>
+                <span class="ai-desc">{a.standfirst}</span>
+              </span>
+              <span class="ai-go" aria-hidden="true">→</span>
+            </a>
+          </li>
+        ))}
+        <li>
+          <a href={h('/learn/coaches')}>
+            <span class="ai-n" aria-hidden="true">{String(AUDIENCES.length + 1).padStart(2, '0')}</span>
+            <span class="ai-main">
+              <span class="ai-title">Coaches and instructors</span>
+              <span class="ai-desc">
+                Apply to teach for MMAKF, or manage the programmes and calendar
+                you already deliver.
+              </span>
+            </span>
+            <span class="ai-go" aria-hidden="true">→</span>
+          </a>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="lrn-process">
+    <div class="container">
+      <p class="eyebrow">How an institutional programme is built</p>
+      <h2 class="display-2">One application. The federation does the rest.</h2>
+      <p class="lrn-lede">
+        You fill in the requirements once. The institution record, the enquiry,
+        the responsible administrator and the review are created from it — no
+        part of what you type is re-entered by anybody at MMAKF.
+      </p>
+      <ol class="proc">
+        {PROCESS_STEPS.map((s) => (
+          <li class="proc-step">
+            <span class="proc-n" aria-hidden="true">{s.n}</span>
+            <div>
+              <h3 class="proc-title">{s.title}</h3>
+              <p class="proc-body">{s.body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </section>
+
+  <section class="lrn-fees">
+    <div class="container">
+      <p class="eyebrow">Fees</p>
+      <h2 class="display-2">One framework, not a price list.</h2>
+      <p class="lrn-lede">
+        MMAKF does not sell nine separately-priced monthly programmes. There is
+        one fee framework, and it is applied to a configuration — how many
+        people, how often, for how long, where, and what the programme includes.
+        A quotation itemises how the figure was reached, and the version you
+        approve is the one the agreement is written against.
+      </p>
+      <p class="lrn-note">
+        Where the federation has not published a rule covering your
+        configuration, you are told that a quotation is needed. You are never
+        shown an invented figure.
+      </p>
+      <a class="btn btn-ghost" href={h('/training/estimate')}>Estimate an individual fee</a>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .lrn-hero { padding: 104px 0 64px; border-bottom: 1px solid var(--border); }
+  .lrn-standfirst {
+    font-family: var(--font-display);
+    font-size: clamp(1.15rem, 2.3vw, 1.5rem);
+    line-height: 1.5; color: var(--muted);
+    max-width: 40ch; margin: 24px 0 0;
+  }
+  .lrn-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 34px; }
+
+  .lrn-index { padding: 80px 0; }
+  .aud-index { list-style: none; margin: 32px 0 0; padding: 0; counter-reset: none; }
+  .aud-index li { border-top: 1px solid var(--border); }
+  .aud-index li:last-child { border-bottom: 1px solid var(--border); }
+  .aud-index a {
+    display: grid;
+    grid-template-columns: 76px minmax(0, 1fr) 40px;
+    align-items: baseline;
+    gap: 0 24px;
+    padding: 26px 0;
+    text-decoration: none;
+    transition: background .18s ease;
+  }
+  .aud-index a:hover { background: var(--bg-2); }
+  .aud-index a:hover .ai-title { color: var(--gold-2); }
+  .ai-n {
+    font-family: var(--font-display); font-size: 1.5rem;
+    color: var(--gold-dim); font-variant-numeric: tabular-nums;
+  }
+  .ai-main { display: block; }
+  .ai-title {
+    display: block; font-family: var(--font-display);
+    font-size: clamp(1.25rem, 2.4vw, 1.7rem); line-height: 1.25;
+    transition: color .18s ease;
+  }
+  .ai-desc {
+    display: block; margin-top: 8px; color: var(--muted);
+    line-height: 1.6; max-width: 64ch;
+  }
+  .ai-go { color: var(--gold-2); font-size: 1.2rem; text-align: right; }
+
+  .lrn-process { background: var(--bg-2); padding: 88px 0; }
+  .lrn-lede { max-width: 58ch; margin: 16px 0 0; color: var(--muted); line-height: 1.7; }
+  .proc { list-style: none; margin: 40px 0 0; padding: 0; }
+  .proc-step {
+    display: grid; grid-template-columns: 54px minmax(0, 58ch);
+    gap: 0 24px; padding: 22px 0; border-top: 1px solid var(--border);
+  }
+  .proc-n {
+    font-family: var(--font-display); font-size: 1.5rem;
+    color: var(--gold-2); font-variant-numeric: tabular-nums;
+  }
+  .proc-title { margin: 0 0 6px; font-size: 1.05rem; }
+  .proc-body { margin: 0; color: var(--muted); line-height: 1.65; }
+
+  .lrn-fees { padding: 88px 0; }
+  .lrn-note {
+    margin: 24px 0 28px; padding: 18px 22px;
+    border-left: 2px solid var(--gold); background: var(--card);
+    color: var(--muted); max-width: 58ch; line-height: 1.65;
+  }
+
+  @media (max-width: 760px) {
+    .lrn-hero { padding: 76px 0 44px; }
+    .aud-index a { grid-template-columns: 1fr; gap: 0; padding: 22px 0; }
+    .ai-n {
+      font-size: .82rem; letter-spacing: .18em;
+      color: var(--gold-2); display: block; margin-bottom: 6px;
+    }
+    .ai-go { display: none; }
+    .proc-step { grid-template-columns: 1fr; gap: 0; }
+    .proc-n { font-size: 1.05rem; display: block; margin-bottom: 4px; }
+    .lrn-index, .lrn-process, .lrn-fees { padding: 60px 0; }
+    .lrn-actions .btn { flex: 1 1 100%; text-align: center; }
+  }
+</style>

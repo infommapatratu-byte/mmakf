@@ -485,12 +485,26 @@ describe('WCAG 1.3.1 — one main landmark per page', () => {
 });
 
 describe('WCAG 2.4.6 — every surface has a top-level heading', () => {
-  it('PageHero, which most pages use as their title, renders an h1', () => {
-    // Asserted first, because the per-page check below accepts PageHero as
-    // proof of an h1. If PageHero ever stops rendering one, that check would
-    // silently pass for twenty-five surfaces.
-    expect(read('src/components/PageHero.astro')).toMatch(/<h1\b/);
-  });
+  /**
+   * Components a page may delegate its <h1> to.
+   *
+   * Each is verified below to actually contain one. Without that, adding a name
+   * here would be a way to switch the check off for any page that imports it.
+   */
+  const HEADING_COMPONENTS = [
+    { tag: 'PageHero', file: 'src/components/PageHero.astro' },
+    { tag: 'AudienceEditorial', file: 'src/components/AudienceEditorial.astro' },
+    { tag: 'AdminShell', file: 'src/components/AdminShell.astro' },
+  ];
+
+  for (const c of HEADING_COMPONENTS) {
+    it(`${c.tag}, which pages delegate their title to, renders an h1`, () => {
+      // Asserted first, because the per-page check below accepts these
+      // components as proof of an h1. If one ever stops rendering one, that
+      // check would silently pass for every page that uses it.
+      expect(read(c.file)).toMatch(/<h1\b/);
+    });
+  }
 
   // A page whose highest heading is h2 gives a screen-reader user no title to
   // land on. /admin was the one surface with no h1 at all.
@@ -501,8 +515,22 @@ describe('WCAG 2.4.6 — every surface has a top-level heading', () => {
   for (const f of surfaces) {
     it(`${f} renders an h1`, () => {
       const src = read(f);
-      const hasHeading = /<h1[\s>]/i.test(src) || /<PageHero\b/.test(src);
-      expect(hasHeading, `${f} has no h1 and does not use PageHero`).toBe(true);
+      const delegated = HEADING_COMPONENTS.find((c) => new RegExp(`<${c.tag}\\b`).test(src));
+      const hasHeading = /<h1[\s>]/i.test(src) || !!delegated;
+      expect(
+        hasHeading,
+        `${f} has no h1 and renders none of ${HEADING_COMPONENTS.map((c) => c.tag).join(', ')}`
+      ).toBe(true);
+
+      // A page that BOTH writes its own h1 and delegates to a component that
+      // writes one ends up with two, which is the failure this check is
+      // ultimately about — a screen-reader user with two competing titles.
+      if (delegated) {
+        expect(
+          /<h1[\s>]/i.test(src),
+          `${f} renders <${delegated.tag}> (which already provides the h1) AND its own h1`
+        ).toBe(false);
+      }
     });
   }
 });

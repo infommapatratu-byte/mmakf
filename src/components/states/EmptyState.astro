@@ -1,0 +1,161 @@
+---
+// An empty state that cannot be a dead end (§56, §104).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY `action` IS REQUIRED IN THE TYPE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §104: no dead ends. The failure this prevents is not a missing button, it is
+// a reader stranded — "You have no registered athletes." and then nothing, on a
+// page whose only other controls are a filter that already returned nothing.
+// The reader's next move is the Back button, and the federation has lost them.
+//
+// So `action` is not optional. An empty state with no way forward does not
+// compile, which is the only enforcement that survives a hurried page written at
+// eleven at night. If genuinely nothing can be created from here, the way
+// forward is still real: back to the register, back to the dashboard, or the
+// page that explains why the list is empty. That is a legitimate action. "No
+// action" is not.
+//
+// There is no runtime throw to match the type. A missing prop is a programming
+// error, and crashing a live federation page over a missing link would punish
+// the reader for it instead of the author.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// EMPTY IS NOT AN ERROR, AND IT IS NOT A BLANK
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// CONTENT-ARCHITECTURE §5.4: an absence is named by its kind. "No records" (a
+// true empty register), "not yours to see" (a permission boundary), "could not
+// be read" (a failure) and "not configured" (no system of record here) are four
+// different sentences and are never substituted for each other. This component
+// is for the FIRST of those only. A permission boundary belongs in prose that
+// names the authority required; a failure belongs in ErrorState.
+//
+// Nothing here invents a sample row, a demo record or a greyed-out example. An
+// empty register is a true answer and is printed as one.
+//
+//   <EmptyState
+//     title="No competitions are open for entry."
+//     body="Entries appear here as soon as the federation opens them."
+//     action={{ label: 'See the calendar', href: '/competitions' }}
+//   />
+
+export interface EmptyAction {
+  label: string;
+  /**
+   * Where it goes. A real href, not a click handler: an empty state is often
+   * the only content on the page, so its one control must work with JavaScript
+   * off. If the way forward is a form submission, link to the page that carries
+   * the form.
+   */
+  href: string;
+}
+
+export interface Props {
+  /**
+   * What is absent, as a sentence. "No competitions are open for entry."
+   * Never "No data" — the reader knows which register they are looking at and
+   * deserves to be told in the same words.
+   */
+  title: string;
+  /** Why it is empty, or what will fill it. Optional; omit rather than pad. */
+  body?: string;
+  /** §104: the way forward. REQUIRED — see above. */
+  action: EmptyAction;
+  /** A second route, when there are genuinely two. */
+  secondary?: EmptyAction | null;
+  /** Sits inside a card or panel that already has a border and padding. */
+  compact?: boolean;
+  class?: string;
+}
+
+const {
+  title,
+  body,
+  action,
+  secondary = null,
+  compact = false,
+  class: className = '',
+} = Astro.props;
+---
+
+<div class:list={['es', compact && 'es-compact', className]}>
+  {/* Decorative, and deliberately not an icon of anything. An illustration of
+      an empty box is a joke the reader is not in the mood for when their
+      register is unexpectedly empty; a hairline rule is just punctuation. */}
+  <span class="es-rule" aria-hidden="true"></span>
+
+  <p class="es-title">{title}</p>
+  {body && <p class="es-body">{body}</p>}
+
+  {/* Additional guidance — the offline route, a caveat, a provenance line. */}
+  <slot />
+
+  <div class="es-actions">
+    <a class="btn btn-primary es-btn" href={action.href}>{action.label}</a>
+    {secondary && <a class="btn btn-ghost es-btn" href={secondary.href}>{secondary.label}</a>}
+  </div>
+</div>
+
+<style>
+  .es {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    padding: var(--space-12) var(--space-6);
+    text-align: center;
+    /* Held to a reading measure and centred, so the sentence does not run the
+       full width of an admin table it has replaced. */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .es-compact {
+    border: 0;
+    background: transparent;
+    padding: var(--space-8) var(--space-4);
+  }
+
+  .es-rule {
+    display: block;
+    width: var(--space-12);
+    height: 2px;
+    background: var(--gold-dim);
+    margin-bottom: var(--space-6);
+  }
+
+  .es-title {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    font-weight: 500;
+    line-height: var(--leading-snug);
+    color: var(--white);
+    max-width: 46ch;
+  }
+
+  .es-body {
+    margin-top: var(--space-3);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+    color: var(--off-white);
+    max-width: 56ch;
+  }
+
+  .es-actions {
+    margin-top: var(--space-8);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    justify-content: center;
+  }
+  /* The controls are links, so they carry the button's own touch target rather
+     than inheriting a paragraph's line box. */
+  .es-btn { min-height: 44px; }
+
+  @media (max-width: 640px) {
+    .es { padding: var(--space-10) var(--space-4); }
+    .es-actions { width: 100%; flex-direction: column; }
+    .es-btn { width: 100%; }
+  }
+</style>

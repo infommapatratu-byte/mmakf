@@ -25,6 +25,15 @@
 
 import { defineMiddleware } from 'astro:middleware';
 import { isSameOrigin, isJsonContentType } from '@/lib/origin';
+import { surfaceForHost, rewriteTarget, type Surface } from '@/lib/surface';
+
+declare global {
+  namespace App {
+    interface Locals {
+      surface: Surface;
+    }
+  }
+}
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -45,12 +54,36 @@ function deny(reason: string): Response {
 export const onRequest = defineMiddleware(async (context, next) => {
   const { request, url } = context;
 
-  if (!MUTATING.has(request.method)) return next();
+  // ── Which of the three surfaces was asked for ────────────────────────────
+  //
+  // Decided from the Host header and put on locals, so a page never has to
+  // parse the host itself. See src/lib/surface.ts for why the three hosts share
+  // one application rather than being three deployments.
+  const surface = surfaceForHost(url.host);
+  context.locals.surface = surface;
+
+  const target = rewriteTarget(surface, url.pathname);
+
+  // THE REWRITE HAPPENS LAST, AND ONLY THROUGH HERE.
+  //
+  // It is tempting to rewrite at the top of this function and return. Do not:
+  // whether Astro re-runs middleware for a rewritten route is a framework
+  // detail, and if it does not, an early return would carry every POST to
+  // learn.mmakf.in and admin.mmakf.in straight past the CSRF checks below.
+  // That is a silent hole that only opens on two of the three hosts, which is
+  // the hardest kind to notice.
+  //
+  // Deferring it means the checks run first, unconditionally, on every host.
+  // Re-entry is harmless either way because rewriteTarget() is idempotent — an
+  // already-prefixed path returns null.
+  const proceed = () => (target ? context.rewrite(target + url.search) : next());
+
+  if (!MUTATING.has(request.method)) return proceed();
 
   const path = url.pathname;
 
   if (SIGNATURE_AUTHENTICATED.some((p) => path === p || path.startsWith(`${p}/`))) {
-    return next();
+    return proceed();
   }
 
   if (!isSameOrigin(request.headers, url.host)) {
@@ -64,5 +97,5 @@ export const onRequest = defineMiddleware(async (context, next) => {
     }
   }
 
-  return next();
+  return proceed();
 });

@@ -32,3 +32,22 @@ backups/
 # agent scratch files
 *.tmp.mjs
 .tmp-*/
+.astro-test-smoke/
+.astro-test-routes/
+
+# Agent scratch pages.
+#
+# Components get built with a throwaway page to look at them in a browser, and
+# three of those reached the working tree during one run — /zz-cp-probe,
+# /zz-phtest, /zz-states-harness. Every one would have been a LIVE PUBLIC ROUTE:
+# they sit at the root of src/pages, so the SEO classifier reads them as public
+# and puts them in the sitemap.
+#
+# Ignored rather than policed, because deleting them by hand loses to whoever
+# creates the next one. tests/layout-guards.test.ts additionally fails if any
+# survive, so a harness cannot ship even from a working tree that has one.
+src/pages/zz-*
+src/pages/*probe*
+src/pages/*harness*
+src/pages/*scratch*
+src/pages/*sandbox*

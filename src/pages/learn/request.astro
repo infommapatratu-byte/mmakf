@@ -1,0 +1,185 @@
+---
+// "Request training" — one of the federation's primary actions.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THIS WAS A 404, AND IT IS THE SECOND OF ITS KIND
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// /learn/request has been in PUBLIC_ACTIONS since the navigation was rebuilt,
+// and no file answered it. Like /learn/coaches before it, it resolved to
+// /learn/[audience] — where `request` is not an audience slug — and returned
+// 404 to anyone who followed it.
+//
+// tests/navigation.test.ts passed both, because `resolves()` matches a path
+// against the routes on disk and /learn/[audience] is a route that COULD
+// answer. That check is worth keeping and it is not sufficient. The systematic
+// fix is in tests/routes-live.test.ts, which now derives its list FROM the
+// navigation definitions and fetches every one of them — so a link that only
+// resolves through a dynamic route is caught by the request, not by reasoning.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY IT IS NOT THE SAME PAGE AS /learn
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// /learn is discovery: it explains what MMAKF does for each audience, at
+// length, and it is what a search engine and an undecided reader should meet.
+//
+// This is the other half. Somebody who already knows what they want should not
+// have to read six standfirsts to find the form. One question, then straight
+// into the wizard with the audience already chosen.
+
+import Base from '@/layouts/Base.astro';
+import { AUDIENCES } from '@/data/audiences';
+import { href as surfaceHref, canonicalFor, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+// One entry per audience, plus the two routes that are not an institution
+// applying: someone who wants to teach, and someone who has not decided.
+const ROUTES = [
+  ...AUDIENCES.map((a) => ({
+    label: a.navLabel,
+    line: a.standfirst,
+    href: a.kind === 'individual'
+      ? '/training/estimate'
+      : `/learn/apply?audience=${a.kind}`,
+    // Individuals get the estimator first: it either returns the applicable
+    // fee or says a quotation is needed, which is a shorter path than a
+    // twenty-step institutional form they do not need.
+    cta: a.kind === 'individual' ? 'Check the fee' : 'Start an application',
+  })),
+  {
+    label: 'To teach for MMAKF',
+    line: 'Apply as a coach or instructor. Applications are screened, interviewed and technically reviewed.',
+    href: '/learn/coaches',
+    cta: 'Apply to teach',
+  },
+];
+
+const schema = {
+  '@context': 'https://schema.org',
+  '@type': 'WebPage',
+  name: 'Request training from MMAKF',
+  description:
+    'Request Shotokan karate, physical education, self-defence or sports training from the Modern Martial Arts Karate-Do Federation of India.',
+  url: canonicalFor(surface, '/learn/request'),
+};
+---
+
+<Base
+  title="Request training — MMAKF"
+  description="Request Shotokan karate, physical education, self-defence or sports training from MMAKF for your school, company, university, government body, community organisation — or for yourself."
+>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+
+  <div class="req">
+    <div class="container req-inner">
+      <p class="eyebrow">Training and engagement</p>
+      <h1 class="display-1">Who is the training for?</h1>
+      <p class="req-lede">
+        Choose one and MMAKF will take it from there. If you would rather read
+        about what the federation does for your kind of institution first,
+        <a href={h('/learn')}>start here instead</a>.
+      </p>
+
+      <ul class="req-list">
+        {ROUTES.map((r, i) => (
+          <li>
+            <a href={h(r.href)}>
+              <span class="r-n" aria-hidden="true">{String(i + 1).padStart(2, '0')}</span>
+              <span class="r-main">
+                <span class="r-label">{r.label}</span>
+                <span class="r-line">{r.line}</span>
+              </span>
+              <span class="r-cta">{r.cta} <span aria-hidden="true">→</span></span>
+            </a>
+          </li>
+        ))}
+      </ul>
+
+      <section class="req-note">
+        <h2 class="req-h2">What happens to what you send</h2>
+        <p>
+          It is stored against a reference and reaches the training office
+          directly — nobody at MMAKF re-types it into a second system. You are
+          given a link that shows where your request has actually got to.
+        </p>
+        <p>
+          {/* The one thing this page must never do is invent a commitment. */}
+          MMAKF has not published a standard response time, so this page does
+          not state one. The status page shows what has happened rather than
+          promising when it will.
+        </p>
+        <p>
+          The form saves as you go. You can stop at any point and return with
+          the link you are given.
+        </p>
+      </section>
+
+      <section class="req-note">
+        <h2 class="req-h2">If you would rather not use a form</h2>
+        <p>
+          Write to <a href="mailto:admin@mmakf.in">admin@mmakf.in</a> with the
+          name of your institution, roughly how many people, and where you are.
+          That is enough for the training office to come back to you.
+        </p>
+      </section>
+    </div>
+  </div>
+</Base>
+
+<style>
+  .req { padding: 96px 0 88px; }
+  .req-inner { max-width: 54rem; }
+  .req-lede { color: var(--muted); line-height: 1.75; max-width: 54ch; margin: 20px 0 40px; }
+
+  .req-list { list-style: none; margin: 0; padding: 0; }
+  .req-list li { border-top: 1px solid var(--border); }
+  .req-list li:last-child { border-bottom: 1px solid var(--border); }
+  .req-list a {
+    display: grid;
+    grid-template-columns: 62px minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: 0 22px;
+    padding: 24px 0;
+    text-decoration: none;
+    transition: background .18s ease;
+  }
+  .req-list a:hover { background: var(--bg-2); }
+  .req-list a:hover .r-label { color: var(--gold-2); }
+  .r-n {
+    font-family: var(--font-display); font-size: 1.3rem;
+    color: var(--gold-dim); font-variant-numeric: tabular-nums;
+  }
+  .r-main { display: block; }
+  .r-label {
+    display: block; font-family: var(--font-display);
+    font-size: clamp(1.15rem, 2.2vw, 1.5rem); line-height: 1.3;
+    transition: color .18s ease;
+  }
+  .r-line {
+    display: block; margin-top: 7px; color: var(--muted);
+    line-height: 1.6; max-width: 60ch; font-size: .93rem;
+  }
+  .r-cta {
+    color: var(--gold-2); font-size: .84rem; white-space: nowrap;
+    letter-spacing: .02em;
+  }
+
+  .req-note { margin-top: 52px; max-width: 58ch; }
+  .req-h2 { font-family: var(--font-display); font-size: 1.1rem; margin: 0 0 12px; }
+  .req-note p { color: var(--muted); line-height: 1.75; margin: 0 0 12px; }
+
+  @media (max-width: 700px) {
+    .req { padding: 76px 0 64px; }
+    .req-list a { grid-template-columns: 1fr; gap: 0; padding: 20px 0; }
+    .r-n {
+      font-size: .78rem; letter-spacing: .18em; color: var(--gold-2);
+      display: block; margin-bottom: 6px;
+    }
+    .r-cta { display: block; margin-top: 10px; }
+  }
+</style>

@@ -1,60 +1,86 @@
 ---
-// THE NATIONAL COMMAND CENTRE — Q-18.
+// THE ROLE COMMAND CENTRE — §41, §42, §114 (was: the national command centre).
 //
-// One screen that answers two questions for the federation office: what does
-// the register currently say, and what work is outstanding.
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT CHANGED, AND WHY
+// ─────────────────────────────────────────────────────────────────────────────
 //
-// WHAT THIS PAGE IS NOT: it is not a summary, an estimate, a projection or a
-// roll-up of anything cached. Every figure below is a COUNT OF ROWS produced by
-// src/db/analytics.ts, and every one carries the table and the WHERE clause
-// that produced it — printed on the page under "How this was counted", so a
-// reader who doubts a total can reconstruct it against the database.
+// This page used to open with the national register: people, units, gradings,
+// entries. That is what the federation HAS. §42 asks a different question —
+// what does the person who just signed in have to DO — and §41 says the answer
+// is not the same for everybody. A finance officer and a coach manager were
+// shown one identical wall of figures, most of which neither could act on.
 //
-// THREE RULES THAT OUTRANK THE LAYOUT:
+// So the page now opens with WHAT NEEDS YOUR ATTENTION, derived from the
+// caller's own actions, and the register follows underneath for the credentials
+// that may read it. The sections are not chosen by role name: a role is a bundle
+// of actions, and hard-coding "if COACH_MANAGER" would leave every future role
+// invisible. src/lib/attention.ts asks visibleScopes() what this credential can
+// reach and returns only those registers — so a role that does not exist yet
+// gets the right dashboard on the day somebody grants it.
 //
-//  1. ZERO IS SHOWN AS ZERO. An empty federation shows zeros, and that is the
-//     honest answer on day one. Nothing here hides an empty state.
-//  2. A FIGURE THAT WAS NOT PRODUCED IS NOT A ZERO. analytics.ts withholds a
-//     figure when the caller may not read the rows behind it, and every such
-//     withholding is rendered with its reason instead of a number.
-//  3. NO DATABASE, NO PAGE. When DATABASE_URL is unset there are no rows to
-//     count, so this page says so and renders nothing else. A grid of zeros
-//     drawn against a database that does not exist would be a fabricated
-//     measurement, which is the one defect this project treats as unforgivable.
+// ─────────────────────────────────────────────────────────────────────────────
+// THE RULES THAT OUTRANK THE LAYOUT
+// ─────────────────────────────────────────────────────────────────────────────
 //
-// The DATA QUALITY panel is deliberately placed above the totals. A count of
-// 4,900 members means nothing if 3,000 of them have no date of birth, so the
-// federation is told how trustworthy its own numbers are before it is told what
-// they are.
+//  1. EVERY TILE IS A COUNT OF ROWS, with the table and the filter printed under
+//     it. Nothing is estimated, projected, rounded or carried over.
+//  2. A FIGURE THAT WAS NOT PRODUCED IS NOT A ZERO. Withheld figures render as
+//     withholdings with their reason.
+//  3. EVERY TILE LINKS to where the work is done. A number nobody can click is
+//     a number nobody can act on.
+//  4. NO DATABASE, NO FIGURES. With DATABASE_URL unset there is nothing to
+//     count, and this page says so instead of drawing a grid of zeros against a
+//     register that does not exist. That is the state production is in today,
+//     so it is written to be read, not to be apologised for.
+//  5. THE EIGHT QUESTIONS ARE ANSWERED OR REFUSED BY NAME. §114 lists what the
+//     federation executive asks. Two of them the register genuinely cannot
+//     answer; both are printed with the reason rather than dropped, because a
+//     question quietly missing from a dashboard reads exactly like a question
+//     answered zero.
+//
+// WHAT IS NOT HERE: anything narrowed to one state or dojo. That is the scoped
+// dashboard's job, and it re-authorises the unit it was asked for. This page
+// shows the caller's whole reach.
 
-import Base from '@/layouts/Base.astro';
+import AdminShell from '@/components/AdminShell.astro';
+import PageHeader from '@/components/PageHeader.astro';
 import StatCard from '@/components/StatCard.astro';
-import DataTable from '@/components/DataTable.astro';
+import Status from '@/components/Status.astro';
+import Table from '@/components/DataTable/Table.astro';
+import type { Column } from '@/components/DataTable/types';
 import { identify } from '@/lib/session';
-import { ForbiddenError } from '@/lib/rbac';
+import { can, canAnywhere, ForbiddenError } from '@/lib/rbac';
 import { isConfigured, db } from '@/db';
 import {
-  nationalDashboard,
-  dataQuality,
-  type Dashboard,
-  type DataQualityReport,
-  type Source,
+  nationalDashboard, dataQuality,
+  type Dashboard, type DataQualityReport, type Source,
 } from '@/db/analytics';
 import { pendingApprovals, type PendingApprovalQueue } from '@/lib/approvals';
 import { expiringLicences } from '@/db/officials';
 import { QUEUES, queueSummary, type QueueName } from '@/lib/queue';
+import {
+  attention, changedToday, upcomingCompetitions, UNANSWERABLE,
+  type AttentionReport, type DatedFigure,
+} from '@/lib/attention';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
 
 export const prerender = false;
 
-// identify() is the only way this page learns who is asking (§75). A user
-// cookie that no longer resolves returns null rather than falling back to a
-// shared credential, so a revoked account lands on the sign-in prompt.
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+// identify() is the only way this page learns who is asking (§75). AdminShell
+// gates the page on 'content:read' — the same action that gates this module in
+// the operations menu, so the menu and the page agree about who may open it.
 const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
 const configured = isConfigured();
+const permitted = !!principal && canAnywhere(principal, 'content:read');
 
 // ─── Panel state ────────────────────────────────────────────────────────────
 //
-// Each module call can end three ways and the page has to distinguish them: it
+// Each module call ends three ways and the page must distinguish them: it
 // worked, the caller is not allowed, or it failed. Collapsing the last two into
 // an empty table would report "no records" for rows that exist and are merely
 // out of reach — a lie the reader has no way to detect.
@@ -64,7 +90,7 @@ type Panel<T> =
   | { state: 'denied'; value: null; message: string }
   | { state: 'error'; value: null; message: string };
 
-/** Error classes whose messages were written to be read by a human. */
+/** Error classes whose messages were written to be read by a person. */
 const SPEAKING_ERRORS = new Set([
   'AnalyticsError', 'OfficialsError', 'ApprovalError', 'QueueError', 'CompetitionError',
 ]);
@@ -79,9 +105,8 @@ async function attempt<T>(what: string, fn: () => Promise<T>): Promise<Panel<T>>
         value: null,
         message:
           `Reading ${what} requires the "${err.action}" authority in the scope it covers, and this ` +
-          'credential does not hold it there. A scoped binding is not a narrower version of this ' +
-          'answer — it is a different one. Records may well exist here; they are simply not yours ' +
-          'to read.',
+          'credential does not hold it there. A scoped binding is not a narrower version of this answer — ' +
+          'it is a different one. Records may well exist here; they are simply not yours to read.',
       };
     }
     if (err && SPEAKING_ERRORS.has(String(err.name)) && typeof err.message === 'string') {
@@ -99,34 +124,45 @@ async function attempt<T>(what: string, fn: () => Promise<T>): Promise<Panel<T>>
   }
 }
 
+let work: AttentionReport | null = null;
+let changed: DatedFigure | null = null;
+let upcoming: DatedFigure | null = null;
 let national: Panel<Dashboard> | null = null;
 let quality: Panel<DataQualityReport> | null = null;
 let approvals: Panel<PendingApprovalQueue> | null = null;
 let licences: Panel<Array<Record<string, unknown>>> | null = null;
 let queues: Array<{ name: QueueName; label: string; open: number | null; total: number | null; error: string | null }> = [];
+/** Queues this credential may not decide on, named rather than silently dropped. */
+let queuesRefused: Array<{ label: string; action: string }> = [];
 
-if (identity && configured) {
-  const principal = identity.principal;
-  const conn = db();
+if (permitted && principal) {
+  // The three editorial queues are Redis-backed and independent of the
+  // register, so they are read whether or not a database is configured. "Open
+  // work" is not open work until every source of it is on one screen.
+  //
+  // AUTHORISED PER QUEUE, WITH THE SAME CHECK /admin/queue MAKES. The page gate
+  // above is 'content:read', which every role but two holds — it says who may
+  // open the command centre, not who may see the editorial backlog. Each queue
+  // declares its own action in src/lib/queue.ts and /admin/queue asks
+  // can(principal, meta.action, {}) before it reads a single summary; asking
+  // anything weaker here would report the federation's membership-application
+  // and unit-submission counts to an athlete, a parent or a client
+  // institution's administrator — callers the queue itself refuses. A summary
+  // is a disclosure: the count of what is waiting is the fact being protected.
+  const readable = (Object.keys(QUEUES) as QueueName[]).filter((name) =>
+    can(principal, QUEUES[name].action, {})
+  );
+  queuesRefused = (Object.keys(QUEUES) as QueueName[])
+    .filter((name) => !readable.includes(name))
+    .map((name) => ({ label: QUEUES[name].label, action: QUEUES[name].action }));
 
-  national = await attempt('the national dashboard', () => nationalDashboard(conn, principal));
-  quality = await attempt('the data-quality report', () => dataQuality(conn, principal, { kind: 'national' }));
-  approvals = await attempt('the two-person approval queue', () => pendingApprovals(conn, principal, { limit: 50 }));
-  // expiringLicences() gates on `user:read` held ANYWHERE and applies no scope
-  // filter of its own, so it is a national list by construction. That is why it
-  // appears here and not on the scoped dashboard.
-  licences = await attempt('expiring officials’ licences', () => expiringLicences(conn, principal, 90));
-
-  // The three editorial queues are Redis-backed and independent of the register
-  // above. They are shown because "open work" is not open work until every
-  // source of it is on one screen.
   queues = await Promise.all(
-    (Object.keys(QUEUES) as QueueName[]).map(async (name) => {
+    readable.map(async (name) => {
       const meta = QUEUES[name];
       try {
         const summary = await queueSummary(name);
         const total = Object.values(summary).reduce((n, v) => n + (v || 0), 0);
-        const closed = (meta.terminal as readonly string[]).reduce((n, s) => n + (summary[s] ?? 0), 0);
+        const closed = (meta.terminal as readonly string[]).reduce((n, st) => n + (summary[st] ?? 0), 0);
         return { name, label: meta.label, open: total - closed, total, error: null };
       } catch (err) {
         console.error(`[admin/command] queue ${name} failed`, err);
@@ -136,10 +172,29 @@ if (identity && configured) {
   );
 }
 
-// ─── Reading a figure out of the dashboard ──────────────────────────────────
+if (permitted && principal && configured) {
+  const conn = db();
+
+  // The attention engine is the first thing read, because it is the first thing
+  // rendered. It refuses per register rather than throwing: a caller with no
+  // finance authority still gets their coach pipeline.
+  work = await attention(conn, principal, { link: h });
+  changed = await changedToday(conn, principal, h);
+  upcoming = await upcomingCompetitions(conn, principal, { link: h });
+
+  national = await attempt('the national register', () => nationalDashboard(conn, principal));
+  quality = await attempt('the data-quality report', () => dataQuality(conn, principal, { kind: 'national' }));
+  approvals = await attempt('the two-person approval queue', () => pendingApprovals(conn, principal, { limit: 50 }));
+  // expiringLicences() gates on 'user:read' held ANYWHERE and applies no scope
+  // filter of its own, so it is a national list by construction. That is why it
+  // appears here and not on the scoped dashboard.
+  licences = await attempt('expiring officials’ licences', () => expiringLicences(conn, principal, 90));
+}
+
+// ─── Reading a figure out of the register ───────────────────────────────────
 //
 // `counts` carries what was measured and `withheld` carries what was not, with
-// the reason. This joins the two so a missing key can never silently render as
+// the reason. This joins the two, so a missing key can never silently render as
 // a zero.
 
 interface Figure {
@@ -149,9 +204,7 @@ interface Figure {
 }
 
 function figure(d: Dashboard | null, key: string): Figure {
-  if (!d) {
-    return { value: null, unavailable: 'The dashboard was not produced for this request.', source: null };
-  }
+  if (!d) return { value: null, unavailable: 'The register was not read for this request.', source: null };
   const withheld = d.withheld.find((w) => w.key === key);
   if (withheld) return { value: null, unavailable: withheld.detail, source: null };
   if (!(key in d.counts)) {
@@ -166,38 +219,135 @@ function figure(d: Dashboard | null, key: string): Figure {
 
 const dash = national?.state === 'ready' ? national.value : null;
 
-/** A grouped breakdown, rendered as rows rather than as an unlabelled chart. */
-function statusRows(counts: Record<string, number>): Array<Record<string, unknown>> {
-  return Object.entries(counts)
-    .map(([status, count]) => ({ status, count }))
-    .sort((a, b) => Number(b.count) - Number(a.count) || String(a.status).localeCompare(String(b.status)));
+/**
+ * Registers with work waiting first, then measured zeros, then refusals.
+ *
+ * Ordering by size is the only ordering that serves §42: the reader wants the
+ * thing that is waiting, not the register that happens to be declared first.
+ * Ties keep declaration order, so the page does not reshuffle between reloads.
+ */
+const registers = work
+  ? [...work.registers].sort((a, b) => {
+      const av = a.total == null ? -1 : a.total;
+      const bv = b.total == null ? -1 : b.total;
+      return bv - av;
+    })
+  : [];
+
+const waitingTotal = registers.every((r) => r.total != null)
+  ? registers.reduce((n, r) => n + (r.total ?? 0), 0)
+  : null;
+
+/** One row per actionable status, across every register in reach. */
+const workRows = registers.flatMap((r) =>
+  r.items.map((i) => ({
+    register: r.label,
+    status: i.status,
+    domain: i.domain,
+    waiting: i.count,
+    href: i.href,
+    hrefLabel: i.hrefFiltered ? 'Open this list' : 'Open the register',
+    provenance: i.source
+      ? `${i.source.table} — ${i.source.filter}`
+      : (i.unavailable ?? 'No figure and no reason was recorded. Report this.'),
+  }))
+);
+
+const workColumns: Column[] = [
+  { key: 'register', header: 'Register', primary: true, sortable: true },
+  {
+    key: 'status',
+    header: 'Status',
+    // Status.astro is the only place a database value becomes a word a person
+    // reads (§102). The domain travels per row because this table spans eleven
+    // registers and `active` does not mean the same thing in all of them.
+    component: Status,
+    componentProps: (row) => ({ value: row.status, domain: row.domain, size: 'sm' }),
+  },
+  {
+    key: 'waiting', header: 'Waiting', numeric: true, sortable: true, initialDir: 'desc',
+    render: (row) => (row.waiting == null ? '—' : String(row.waiting)),
+  },
+  {
+    key: 'hrefLabel', header: 'Where it is worked',
+    href: (row) => (row.href as string) ?? null,
+  },
+  {
+    key: 'provenance', header: 'How this was counted, or why it was not',
+    hint: 'The table and the WHERE clause, so a reader who doubts a figure can rebuild it.',
+  },
+];
+
+// ─── §114: the federation executive's eight questions ───────────────────────
+//
+// Written out in full and answered one by one, INCLUDING the two that cannot be
+// answered. The status column reports what happened for THIS credential, not
+// what the page can do in principle — "shown" and "withheld" are different
+// facts and a reader is entitled to know which they are looking at.
+
+function answered(f: { count: number | null } | Figure | null): string {
+  if (!f) return 'Needs the register';
+  const v = 'count' in f ? f.count : f.value;
+  return v == null ? 'Withheld from you' : 'Shown above';
 }
 
-const dojoStatusRows = dash ? statusRows(dash.dojosByStatus) : [];
-const eventStatusRows = dash ? statusRows(dash.eventsByStatus) : [];
+const membershipsRegister = registers.find((r) => r.key === 'memberships') ?? null;
+const paymentsRegister = registers.find((r) => r.key === 'payments') ?? null;
 
-/**
- * Events whose results are still open.
- *
- * Read out of the zero-filled `eventsByStatus` breakdown rather than counted
- * again here, so the headline and the table below it can never disagree. The
- * key's PRESENCE is tested rather than defaulted with `?? 0`: analytics.ts
- * zero-fills every value the enum permits, so a missing key would mean the
- * breakdown was not produced — and answering that with a 0 is exactly the
- * invented measurement this page exists to avoid.
- */
-const eventsWithheld = dash?.withheld.find((w) => w.key === 'eventsByStatus') ?? null;
-const resultsPending: Figure = !dash
-  ? { value: null, unavailable: 'The dashboard was not produced for this request.', source: null }
-  : eventsWithheld
-    ? { value: null, unavailable: eventsWithheld.detail, source: null }
-    : 'results_pending' in dash.eventsByStatus
-      ? { value: dash.eventsByStatus['results_pending'], unavailable: null, source: dash.sources.eventsByStatus ?? null }
-      : {
-          value: null,
-          source: null,
-          unavailable: 'The event-status breakdown carried no results_pending bucket, so this figure was not measured.',
-        };
+const questionRows = [
+  {
+    question: 'How many athletes are registered?',
+    where: 'The register — membership',
+    state: configured ? answered(figure(dash, 'athletes')) : 'Needs the register',
+  },
+  {
+    question: 'Which states are active?',
+    where: 'The register — units',
+    state: configured ? answered(figure(dash, 'stateUnitsActive')) : 'Needs the register',
+  },
+  {
+    question: 'Which competitions are upcoming?',
+    where: 'Attention — competitions',
+    state: configured ? answered(upcoming) : 'Needs the register',
+  },
+  {
+    question: 'Which registrations are pending?',
+    where: 'Attention — memberships',
+    state: configured
+      ? (membershipsRegister ? (membershipsRegister.total == null ? 'Withheld from you' : 'Shown above') : 'Not yours to read')
+      : 'Needs the register',
+  },
+  {
+    question: 'Which payments failed?',
+    where: 'Attention — payments',
+    state: configured
+      ? (paymentsRegister ? (paymentsRegister.total == null ? 'Withheld from you' : 'Shown above') : 'Not yours to read')
+      : 'Needs the register',
+  },
+  {
+    question: 'Which certificates are pending?',
+    where: 'Not answerable — see below',
+    state: 'Refused, with the reason',
+  },
+  {
+    question: 'Which dojos need approval?',
+    where: 'Not answerable — see below',
+    state: 'Refused, with the reason',
+  },
+  {
+    question: 'What changed today?',
+    where: 'Attention — audit',
+    state: configured ? answered(changed) : 'Needs the register',
+  },
+];
+
+const questionColumns: Column[] = [
+  { key: 'question', header: 'The question (§114)', primary: true },
+  { key: 'where', header: 'Where this page answers it' },
+  { key: 'state', header: 'For your credential, on this load' },
+];
+
+// ─── The rest of the page ───────────────────────────────────────────────────
 
 const qualityRows =
   quality?.state === 'ready'
@@ -210,8 +360,16 @@ const qualityRows =
       }))
     : [];
 
-// The gaps that are actually biting, ordered by size. A zero is still listed in
-// the table above — this only decides which get a card.
+const qualityColumns: Column[] = [
+  { key: 'check', header: 'What is missing, and why it matters', primary: true },
+  { key: 'count', header: 'Rows with the gap', numeric: true, sortable: true, initialDir: 'desc' },
+  { key: 'total', header: 'Rows examined', numeric: true },
+  { key: 'table', header: 'Table' },
+  { key: 'filter', header: 'Filter' },
+];
+
+// The gaps actually biting, largest first. A zero is still listed in the table;
+// this only decides which get a card.
 const topGaps =
   quality?.state === 'ready'
     ? [...quality.value.items].sort((a, b) => b.count - a.count).slice(0, 4)
@@ -221,7 +379,6 @@ const approvalRows =
   approvals?.state === 'ready'
     ? approvals.value.items.map((i) => ({
         request: i.label,
-        action: i.action,
         requires: i.requires,
         requestedBy: i.requester.label,
         requestedAt: i.requestedAt.slice(0, 16).replace('T', ' '),
@@ -230,25 +387,98 @@ const approvalRows =
       }))
     : [];
 
+const approvalColumns: Column[] = [
+  { key: 'request', header: 'Request', primary: true },
+  { key: 'requires', header: 'Authority required' },
+  { key: 'requestedBy', header: 'Raised by' },
+  { key: 'requestedAt', header: 'Raised at', sortable: true, initialDir: 'desc' },
+  { key: 'agreed', header: 'Agreed' },
+  { key: 'expires', header: 'Expires' },
+];
+
 const licenceRows =
   licences?.state === 'ready'
     ? licences.value.map((r: any) => ({
+        standing: r.lapsed ? 'Lapsed' : 'Expiring',
         registry: r.registry,
         person: r.fullName,
         federationId: r.federationId,
         level: r.level,
         expiresOn: r.expiresOn,
         daysRemaining: r.daysRemaining,
-        standing: r.lapsed ? 'LAPSED' : 'Expiring',
       }))
     : [];
+
+const licenceColumns: Column[] = [
+  { key: 'standing', header: 'Standing', primary: true },
+  { key: 'registry', header: 'Registry' },
+  { key: 'person', header: 'Person' },
+  { key: 'federationId', header: 'Federation ID' },
+  { key: 'level', header: 'Level' },
+  { key: 'expiresOn', header: 'Expires on', sortable: true },
+  { key: 'daysRemaining', header: 'Days', numeric: true, sortable: true },
+];
 
 const lapsedCount =
   licences?.state === 'ready' ? licences.value.filter((r: any) => r.lapsed).length : null;
 
-const queueOpenTotal = queues.length && queues.every((q) => q.open != null)
-  ? queues.reduce((n, q) => n + (q.open ?? 0), 0)
-  : null;
+// A total only where one can honestly be offered. Three things must be told
+// apart and only one of them is a number: every queue read (a total), a queue
+// that failed (no total, because a partial sum presented as a total understates
+// the work), and a queue this credential may not decide on (no total, because
+// the missing part is not missing by accident).
+const queueTotalRefusal =
+  queuesRefused.length > 0
+    ? 'No total is offered because it would be incomplete: ' +
+      queuesRefused.map((q) => `${q.label} needs "${q.action}"`).join(', ') +
+      ', which this credential does not hold. Only the queues below are in your reach.'
+    : queues.length === 0
+      ? 'No editorial queue is declared in src/lib/queue.ts.'
+      : !queues.every((q) => q.open != null)
+        ? 'At least one editorial queue could not be read, so no total is offered — a partial sum presented as a total would understate the work outstanding.'
+        : null;
+
+const queueOpenTotal =
+  queueTotalRefusal == null ? queues.reduce((n, q) => n + (q.open ?? 0), 0) : null;
+
+const queueColumns: Column[] = [
+  { key: 'label', header: 'Queue', primary: true },
+  { key: 'open', header: 'Awaiting a decision', numeric: true },
+  { key: 'total', header: 'In the store', numeric: true },
+  { key: 'error', header: 'Note' },
+];
+
+/** A grouped breakdown, rendered as rows rather than as an unlabelled chart. */
+function statusRows(counts: Record<string, number>, domain: string) {
+  return Object.entries(counts)
+    .map(([status, count]) => ({ status, count, domain }))
+    .sort((a, b) => Number(b.count) - Number(a.count) || String(a.status).localeCompare(String(b.status)));
+}
+
+const dojoStatusRows = dash ? statusRows(dash.dojosByStatus, 'unit') : [];
+const eventStatusRows = dash ? statusRows(dash.eventsByStatus, 'event') : [];
+
+const breakdownColumns = (noun: string): Column[] => [
+  {
+    key: 'status', header: 'Status', primary: true,
+    component: Status,
+    componentProps: (row) => ({ value: row.status, domain: row.domain, size: 'sm' }),
+  },
+  { key: 'count', header: noun, numeric: true, sortable: true, initialDir: 'desc' },
+];
+
+const withheldRows = [
+  ...(dash?.withheld ?? []).map((w) => ({ key: w.key, reason: w.reason, detail: w.detail })),
+  ...(quality?.state === 'ready'
+    ? quality.value.withheld.map((w) => ({ key: `dataQuality.${w.key}`, reason: w.reason, detail: w.detail }))
+    : []),
+];
+
+const withheldColumns: Column[] = [
+  { key: 'key', header: 'Figure', primary: true },
+  { key: 'reason', header: 'Reason' },
+  { key: 'detail', header: 'Detail' },
+];
 
 const signedInAs = identity
   ? identity.shared
@@ -256,634 +486,670 @@ const signedInAs = identity
     : `${identity.principal.label} — personal account #${identity.userId}`
   : '';
 
-const NAV = [
-  { href: '#open-work', label: 'Open work' },
-  { href: '#data-quality', label: 'Data quality' },
-  { href: '#membership', label: 'Membership' },
-  { href: '#units', label: 'Units' },
-  { href: '#grading', label: 'Grading & certificates' },
-  { href: '#competition', label: 'Competition' },
-  { href: '#academy', label: 'Academy' },
-  { href: '#casework', label: 'Casework' },
-  { href: '#health', label: 'System health' },
-];
+const NUM = new Intl.NumberFormat('en-IN');
 ---
 
-<Base title="MMAKF Admin — National Command Centre" showNav={false} showFooter={false}>
-  {!identity ? (
-    <section style="min-height:90vh;display:flex;align-items:center;justify-content:center;padding:64px 24px">
-      <div style="width:100%;max-width:420px">
-        <div style="text-align:center;margin-bottom:36px">
-          <div style="font-family:var(--font-display);font-size:1.8rem;font-weight:700;letter-spacing:.06em">MMAKF</div>
-          <div style="font-family:var(--font-display);font-size:.7rem;letter-spacing:.22em;text-transform:uppercase;color:var(--gold);margin-top:6px">National Command Centre</div>
-        </div>
-        <form id="loginForm" class="card" style="padding:32px">
-          <h1 class="card-title" style="font-size:1.2rem;margin-bottom:24px">Sign in</h1>
+<AdminShell
+  title="Command centre"
+  requires="content:read"
+  intro="What is waiting on you, then what the federation register says. Every figure is a count of rows with the table and the filter printed beneath it — nothing is estimated, projected or carried over, and a figure this credential may not read is shown as a withholding with its reason, never as a zero."
+>
+  <p class="who">Signed in as {signedInAs}</p>
 
-          <label class="input-label" for="login-email">Email address</label>
-          <input class="input" type="email" id="login-email" name="email" autocomplete="username"
-                 autocapitalize="off" autocorrect="off" spellcheck="false" autofocus
-                 placeholder="you@mmakf.in" />
-
-          <label class="input-label" for="login-password" style="margin-top:14px">Password</label>
-          <input class="input" type="password" id="login-password" name="password"
-                 autocomplete="current-password" required />
-
-          <div id="loginErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
-          <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;justify-content:center;min-height:44px">Sign in</button>
-
-          <p style="margin-top:20px;font-size:.75rem;color:var(--muted);text-align:center;line-height:1.6">
-            Authorised personnel only. Every figure on this screen is read under the authority of the
-            credential you sign in with.
-          </p>
-        </form>
-      </div>
-    </section>
-  ) : (
-    <div class="admin-wrap">
-      <aside class="admin-side">
-        <div class="admin-brand">
-          <div class="admin-brand-1">MMAKF</div>
-          <div class="admin-brand-2">Command Centre</div>
-        </div>
-        <nav class="admin-nav" aria-label="Sections">
-          {configured && NAV.map((n) => (<a href={n.href}>{n.label}</a>))}
-          <a href="/admin/dashboard" style="margin-top:12px">Scoped dashboard →</a>
-          <a href="/admin/report">Annual report →</a>
-          <a href="/admin/membership">Renewals desk →</a>
-          <a href="/admin/queue">Approval queue →</a>
-          <a href="/admin">Content admin →</a>
-        </nav>
-        <div style="padding:16px;border-top:1px solid var(--border)">
-          <button class="btn btn-ghost" style="width:100%;justify-content:center;min-height:44px" id="logoutBtn">Logout</button>
-          <a href="/" target="_blank" rel="noopener" class="btn-link" style="display:flex;align-items:center;justify-content:center;min-height:44px;margin-top:6px">View Site →</a>
-        </div>
-      </aside>
-
-      <!-- WCAG 1.3.1: Base.astro already renders the page's main landmark.
-           A second one nested inside it is invalid and ambiguous. -->
-      <div class="admin-main">
-        <header class="admin-panel" style="padding-top:0">
-          <h1 class="admin-h">National command centre</h1>
-          <p class="admin-sub">
-            Every number on this page is a count of rows in the federation register, produced by
-            <code>src/db/analytics.ts</code>, with the table and the filter that produced it printed
-            beneath it. Nothing is estimated, projected, rounded or carried over. A figure this
-            credential may not read is shown as a withholding with its reason, never as a zero.
-          </p>
-          <p class="q-signed">Signed in as {signedInAs}</p>
-        </header>
-
-        {!configured ? (
-          <section class="admin-panel">
-            <h2 class="admin-h">The federation database is not configured</h2>
-            <div class="q-warn" role="alert" style="margin-top:18px">
-              <strong>There is nothing to count.</strong>
-              <p style="margin-top:10px">
-                <code>DATABASE_URL</code> is not set for this deployment, so the register that every
-                figure on this page is counted from does not exist here. The command centre renders
-                no figures at all rather than a grid of zeros: a zero drawn against an absent
-                database is indistinguishable from a real measurement of an empty federation, and
-                the difference matters more than the layout.
-              </p>
-              <p style="margin-top:10px">
-                Set <code>DATABASE_URL</code>, run the migrations, and reload. The provisioning
-                runbook is <code>docs/FEDERATION-ARCHITECTURE.md §10.1</code>; live status is at
-                <a href="/api/health" style="color:var(--red-2);text-decoration:underline">/api/health</a>.
-              </p>
-            </div>
-            <p class="admin-sub" style="margin-top:18px">
-              The Redis-backed editorial queues do not depend on the register and are still workable
-              at <a href="/admin/queue" style="color:var(--gold-2)">the approval queue</a>.
-            </p>
-          </section>
-        ) : national && national.state !== 'ready' ? (
-          <section class="admin-panel">
-            <h2 class="admin-h">This view is not open to your credential</h2>
-            <p class="admin-sub" role="alert" style="margin-top:12px">{national.message}</p>
-            <p class="admin-sub" style="margin-top:14px">
-              The national totals require a national binding — that is the check that stops a state
-              administrator reading the federation's figures. Your own scope is on the
-              <a href="/admin/dashboard" style="color:var(--gold-2)"> scoped dashboard</a>, which
-              shows the same measurements narrowed to the units you hold authority over.
-            </p>
-          </section>
-        ) : (
-          <>
-            {/* ── OPEN WORK ─────────────────────────────────────────────── */}
-            <section id="open-work" class="admin-panel">
-              <h2 class="admin-h">Open work</h2>
-              <p class="admin-sub">
-                What the federation currently owes a decision on. Each figure is counted where the
-                work actually lives, not aggregated into a single invented "tasks" number.
-              </p>
-
-              <div class="cmd-grid" style="margin-top:22px">
-                <StatCard
-                  label="Approvals awaiting a second person"
-                  value={approvals?.state === 'ready' ? approvals.value.items.length : null}
-                  unavailable={approvals && approvals.state !== 'ready' ? approvals.message : null}
-                  tone="attention"
-                  href="/admin/queue"
-                  hrefLabel="Approval queue"
-                  note={approvals?.state === 'ready' ? approvals.value.note : null}
-                />
-                <StatCard
-                  label="Queue items awaiting a decision"
-                  value={queueOpenTotal}
-                  unavailable={queueOpenTotal == null ? 'At least one editorial queue could not be read, so no total is offered — a partial sum presented as a total would understate the work outstanding.' : null}
-                  tone="attention"
-                  href="/admin/queue"
-                  hrefLabel="Work the queues"
-                  note="Membership applications, event entries and unit submissions, held in the editorial store rather than the register."
-                />
-                <StatCard
-                  label="Officials' licences lapsed or lapsing within 90 days"
-                  value={licences?.state === 'ready' ? licences.value.length : null}
-                  unavailable={licences && licences.state !== 'ready' ? licences.message : null}
-                  tone="attention"
-                  note={lapsedCount != null ? `${lapsedCount} of these have already lapsed. A lapsed official still appearing on an appointment list is how an invalid act happens.` : null}
-                />
-                <StatCard
-                  label="Events awaiting final results"
-                  value={resultsPending.value}
-                  unavailable={resultsPending.unavailable}
-                  source={resultsPending.source}
-                  tone="attention"
-                  note="Counted as competition_events whose status is results_pending. An event whose results are still open cannot feed a ranking."
-                />
-              </div>
-
-              <div class="cmd-tables">
-                <DataTable
-                  caption="Editorial queues"
-                  columns={[
-                    { key: 'label', label: 'Queue', min: '200px' },
-                    { key: 'open', label: 'Awaiting a decision', numeric: true },
-                    { key: 'total', label: 'In the register', numeric: true },
-                    { key: 'error', label: 'Note', min: '160px' },
-                  ]}
-                  rows={queues.map((q) => ({ label: q.label, open: q.open, total: q.total, error: q.error }))}
-                  emptyMessage="No queues are declared in src/lib/queue.ts."
-                  note="Held in the editorial store (Redis), not in the federation register — which is why these counts carry no table-and-filter provenance."
-                />
-
-                <DataTable
-                  caption="Approvals awaiting a second person"
-                  state={approvals?.state ?? 'error'}
-                  errorMessage={approvals?.state === 'error' ? approvals.message : null}
-                  deniedMessage={approvals?.state === 'denied' ? approvals.message : null}
-                  columns={[
-                    { key: 'request', label: 'Request', min: '220px' },
-                    { key: 'requires', label: 'Authority required' },
-                    { key: 'requestedBy', label: 'Raised by', min: '140px' },
-                    { key: 'requestedAt', label: 'Raised at' },
-                    { key: 'agreed', label: 'Agreed' },
-                    { key: 'expires', label: 'Expires', min: '180px' },
-                  ]}
-                  rows={approvalRows}
-                  emptyMessage="No request is waiting on you. Requests you raised yourself are excluded by design — two-person control needs two people."
-                  incompleteMessage={approvals?.state === 'ready' && !approvals.value.complete ? approvals.value.note : null}
-                />
-
-                <DataTable
-                  caption="Officials' licences lapsed or lapsing within 90 days"
-                  state={licences?.state ?? 'error'}
-                  errorMessage={licences?.state === 'error' ? licences.message : null}
-                  deniedMessage={licences?.state === 'denied' ? licences.message : null}
-                  columns={[
-                    { key: 'standing', label: 'Standing' },
-                    { key: 'registry', label: 'Registry' },
-                    { key: 'person', label: 'Person', min: '180px' },
-                    { key: 'federationId', label: 'Federation ID', min: '140px' },
-                    { key: 'level', label: 'Level' },
-                    { key: 'expiresOn', label: 'Expires on' },
-                    { key: 'daysRemaining', label: 'Days', numeric: true },
-                  ]}
-                  rows={licenceRows}
-                  emptyMessage="No instructor, examiner or official licence lapses within the next 90 days."
-                  note="Already-lapsed licences are listed first and deliberately included: those are the dangerous ones. This list is national — officials.expiringLicences() applies no unit filter."
-                  source={{ table: 'instructor_quals, examiner_quals, official_quals', column: 'expires_on', filter: "status = 'active' and expires_on <= today + 90 days" }}
-                />
-              </div>
-            </section>
-
-            {/* ── DATA QUALITY ──────────────────────────────────────────── */}
-            <section id="data-quality" class="admin-panel">
-              <h2 class="admin-h">Data quality — how trustworthy are these numbers?</h2>
-              <p class="admin-sub">
-                The most valuable panel on this page, and the reason it sits above the totals rather
-                than below them. Everything further down tells the federation what the register says;
-                this tells it how much of the register is missing. A membership count means nothing
-                if the people counted have no date of birth, because every age-gated figure derived
-                from them is guesswork.
-                <br />
-                No percentage is offered. A percentage is a float, and this codebase does not put
-                floats in front of federation decisions — each check reports the gap and the
-                population it was measured against, so the reader can judge proportion themselves.
-              </p>
-
-              {topGaps.length > 0 && (
-                <div class="cmd-grid" style="margin-top:22px">
-                  {topGaps.map((g) => (
-                    <StatCard
-                      label={g.key.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase())}
-                      value={g.count}
-                      outOf={g.total}
-                      tone="attention"
-                      note={g.description}
-                      source={g.source}
-                    />
-                  ))}
-                </div>
-              )}
-
-              <div class="cmd-tables">
-                <DataTable
-                  caption="Every data-quality check, national scope"
-                  state={quality?.state ?? 'error'}
-                  errorMessage={quality?.state === 'error' ? quality.message : null}
-                  deniedMessage={quality?.state === 'denied' ? quality.message : null}
-                  columns={[
-                    { key: 'check', label: 'What is missing, and why it matters', min: '340px' },
-                    { key: 'count', label: 'Rows with the gap', numeric: true },
-                    { key: 'total', label: 'Rows examined', numeric: true },
-                    { key: 'table', label: 'Table', min: '150px' },
-                    { key: 'filter', label: 'Filter', min: '260px' },
-                  ]}
-                  rows={qualityRows}
-                  emptyMessage="analytics.dataQuality() returned no checks for this scope."
-                />
-              </div>
-
-              {quality?.state === 'ready' && quality.value.withheld.length > 0 && (
-                <div class="cmd-tables">
-                  <DataTable
-                    caption="Checks that could not be run at this scope"
-                    columns={[
-                      { key: 'key', label: 'Check', min: '220px' },
-                      { key: 'reason', label: 'Reason' },
-                      { key: 'detail', label: 'Detail', min: '320px' },
-                    ]}
-                    rows={quality.value.withheld.map((w) => ({ key: w.key, reason: w.reason, detail: w.detail }))}
-                  />
-                </div>
-              )}
-            </section>
-
-            {/* ── MEMBERSHIP ────────────────────────────────────────────── */}
-            <section id="membership" class="admin-panel">
-              <h2 class="admin-h">Membership</h2>
-              <p class="admin-sub">People on the register, and the credentials they currently hold.</p>
-              <div class="cmd-grid" style="margin-top:22px">
-                <StatCard label="People on the register" {...figure(dash, 'people')} />
-                <StatCard label="People with status active" {...figure(dash, 'peopleActive')} />
-                <StatCard label="People holding an active membership" {...figure(dash, 'membersActive')} />
-                <StatCard label="Athletes" {...figure(dash, 'athletes')} />
-                <StatCard label="Instructors with a current licence" {...figure(dash, 'instructors')} />
-                <StatCard label="Examiners with a current licence" {...figure(dash, 'examiners')} />
-                <StatCard label="Officials with a current licence" {...figure(dash, 'officials')} />
-              </div>
-            </section>
-
-            {/* ── UNITS ─────────────────────────────────────────────────── */}
-            <section id="units" class="admin-panel">
-              <h2 class="admin-h">Units and dojos</h2>
-              <div class="cmd-grid" style="margin-top:22px">
-                <StatCard label="State units" {...figure(dash, 'stateUnits')} />
-                <StatCard label="State units active" {...figure(dash, 'stateUnitsActive')} />
-                <StatCard label="District units" {...figure(dash, 'districtUnits')} />
-                <StatCard label="District units active" {...figure(dash, 'districtUnitsActive')} />
-                <StatCard label="Dojos" {...figure(dash, 'dojos')} />
-              </div>
-
-              <div class="cmd-tables">
-                <DataTable
-                  caption="Dojos by status"
-                  columns={[
-                    { key: 'status', label: 'Status', min: '160px' },
-                    { key: 'count', label: 'Dojos', numeric: true },
-                  ]}
-                  rows={dojoStatusRows}
-                  emptyMessage="No dojo status breakdown was produced for the national scope."
-                  note="Every status the schema permits is listed, including those nobody currently holds — an explicit 0 is a measurement, a missing row is a gap the reader would fill in for themselves."
-                  source={dash?.sources.dojosByStatus ?? null}
-                />
-              </div>
-            </section>
-
-            {/* ── GRADING ───────────────────────────────────────────────── */}
-            <section id="grading" class="admin-panel">
-              <h2 class="admin-h">Grading and certificates</h2>
-              <div class="cmd-grid" style="margin-top:22px">
-                <StatCard label="Grading events recorded" {...figure(dash, 'gradingEvents')} />
-                <StatCard label="Gradings with results locked" {...figure(dash, 'gradingsHeld')} note="Locked is the only status that evidences a completed examination whose results can no longer change." />
-                <StatCard label="Grading candidates" {...figure(dash, 'gradingCandidates')} />
-                <StatCard label="Candidates passed" {...figure(dash, 'gradingCandidatesPassed')} />
-                <StatCard label="Certificates" {...figure(dash, 'certificates')} />
-                <StatCard label="Certificates in issue" {...figure(dash, 'certificatesInIssue')} />
-                <StatCard label="Certificates revoked" {...figure(dash, 'certificatesRevoked')} tone="attention" />
-              </div>
-            </section>
-
-            {/* ── COMPETITION ───────────────────────────────────────────── */}
-            <section id="competition" class="admin-panel">
-              <h2 class="admin-h">Competition</h2>
-              <div class="cmd-grid" style="margin-top:22px">
-                <StatCard label="Competition events" {...figure(dash, 'competitionEvents')} />
-                <StatCard label="Entries" {...figure(dash, 'entries')} />
-                <StatCard label="Entries confirmed" {...figure(dash, 'entriesConfirmed')} />
-                <StatCard label="Matches" {...figure(dash, 'matches')} />
-                <StatCard label="Matches completed" {...figure(dash, 'matchesCompleted')} />
-                <StatCard label="Results final" {...figure(dash, 'resultsFinal')} />
-              </div>
-
-              <div class="cmd-tables">
-                <DataTable
-                  caption="Events by status"
-                  columns={[
-                    { key: 'status', label: 'Status', min: '190px' },
-                    { key: 'count', label: 'Events', numeric: true },
-                  ]}
-                  rows={eventStatusRows}
-                  emptyMessage="No event status breakdown was produced for the national scope."
-                  note="The whole event lifecycle, zero-filled. Rows are not drawn as a chart: with an empty register a chart would be an empty axis, which reads as a measurement rather than as an absence."
-                  source={dash?.sources.eventsByStatus ?? null}
-                />
-              </div>
-            </section>
-
-            {/* ── ACADEMY ───────────────────────────────────────────────── */}
-            <section id="academy" class="admin-panel">
-              <h2 class="admin-h">Academy</h2>
-              <div class="cmd-grid" style="margin-top:22px">
-                <StatCard label="Courses" {...figure(dash, 'courses')} />
-                <StatCard label="Courses published" {...figure(dash, 'coursesPublished')} />
-                <StatCard label="Enrolments" {...figure(dash, 'enrolments')} />
-                <StatCard label="Enrolments active" {...figure(dash, 'enrolmentsActive')} />
-                <StatCard label="Enrolments completed" {...figure(dash, 'enrolmentsCompleted')} />
-              </div>
-            </section>
-
-            {/* ── CASEWORK ──────────────────────────────────────────────── */}
-            <section id="casework" class="admin-panel">
-              <h2 class="admin-h">Casework and member support</h2>
-              <p class="admin-sub">
-                Counted as cases with <strong>no recorded ending</strong>, not as "open cases". MMAKF
-                has not defined which statuses close a case — the enum has decided, appealed and
-                appeal-heard between the start and closed — and publishing one of the answers under
-                the heading "open" would be reporting a rule nobody set as though it were a
-                measurement. Each figure is separately gated: a count of cases in one small dojo can
-                identify the individual as surely as the file does.
-              </p>
-              <div class="cmd-grid" style="margin-top:22px">
-                <StatCard label="Disciplinary cases with no recorded ending" {...figure(dash, 'casesNotClosed.disciplinary')} tone="attention" />
-                <StatCard label="Safeguarding cases with no recorded ending" {...figure(dash, 'casesNotClosed.safeguarding')} tone="attention" />
-                <StatCard label="Support tickets not resolved or closed" {...figure(dash, 'supportTicketsNotClosed')} tone="attention" />
-              </div>
-
-              {dash && dash.withheld.length > 0 && (
-                <div class="cmd-tables">
-                  <DataTable
-                    caption="Figures withheld from this credential"
-                    columns={[
-                      { key: 'key', label: 'Figure', min: '220px' },
-                      { key: 'reason', label: 'Reason' },
-                      { key: 'detail', label: 'Detail', min: '320px' },
-                    ]}
-                    rows={dash.withheld.map((w) => ({ key: w.key, reason: w.reason, detail: w.detail }))}
-                    note="Withheld is not zero. These rows exist in the register; this credential may not count them."
-                  />
-                </div>
-              )}
-            </section>
-
-            {/* ── SYSTEM HEALTH ─────────────────────────────────────────── */}
-            <section id="health" class="admin-panel">
-              <h2 class="admin-h">System health</h2>
-              <p class="admin-sub">
-                Probed live from <a href="/api/health" style="color:var(--gold-2)">/api/health</a> when
-                this page opens. Until it answers the table below says so rather than showing a
-                stale or assumed value.
-              </p>
-              <div class="cmd-tables">
-                <DataTable
-                  id="health-table"
-                  caption="Live health probe"
-                  state="loading"
-                  loadingRows={3}
-                  columns={[
-                    { key: 'component', label: 'Component', min: '200px' },
-                    { key: 'status', label: 'Reported status', min: '160px' },
-                    { key: 'meaning', label: 'What that means', min: '300px' },
-                  ]}
-                />
-                <noscript>
-                  <p class="dt-state dt-incomplete">
-                    The live probe needs JavaScript. Open
-                    <a href="/api/health" style="color:var(--gold-2)"> /api/health</a> directly for
-                    the same answer — it is a plain JSON response.
-                  </p>
-                </noscript>
-              </div>
-              <p class="admin-sub" style="margin-top:16px">
-                Generated at {dash ? dash.generatedAt : ''}{dash ? `, credentials judged as at ${dash.asAt}.` : ''}
-              </p>
-            </section>
-          </>
+  {/* ── WHAT NEEDS YOUR ATTENTION ─────────────────────────────────────────
+      First, because §42 asks what the reader must DO before it asks what the
+      federation has. The sections are derived from this credential's actions,
+      so nothing appears here that its holder would be refused on arrival. */}
+  {/* aria-label rather than aria-labelledby: PageHeader's `id` lands on the
+      header element, which also carries the description and the chips, so
+      pointing at it would name this section with three sentences. */}
+  <section id="attention" class="panel" aria-label="What needs your attention">
+    <PageHeader
+      title="What needs your attention"
+      headingLevel="h2"
+      sticky={false}
+      description="Which statuses count as waiting is decided once, by the federation status dictionary, and read here — not re-decided per tile. Every tile links to the list that produced it."
+      primary={{ label: 'Work the approval queue', href: h('/admin/queue') }}
+      secondary={[
+        { label: 'Scoped dashboard', href: h('/admin/dashboard') },
+        { label: 'Annual report', href: h('/admin/report') },
+        { label: 'Audit log', href: h('/admin/audit') },
+      ]}
+    >
+      <Fragment slot="meta">
+        {waitingTotal != null && registers.length > 0 && (
+          <span class="meta-chip">{NUM.format(waitingTotal)} waiting in {registers.length} registers</span>
         )}
+      </Fragment>
+    </PageHeader>
+
+    {!configured ? (
+      <div class="warn" role="alert">
+        <p>
+          <strong>There is nothing to count.</strong> <code>DATABASE_URL</code> is not set for this
+          deployment, so the register these figures are counted from does not exist here. No figures
+          are drawn at all: a zero against an absent database cannot be told apart from a real
+          measurement of an empty federation, and that difference matters more than having something
+          on the screen.
+        </p>
+        <p>
+          The editorial queues below do not depend on the register and are workable now. Live status
+          is at <a href="/api/health">/api/health</a>; the provisioning runbook is
+          <code>docs/FEDERATION-ARCHITECTURE.md §10.1</code>.
+        </p>
       </div>
+    ) : registers.length === 0 ? (
+      <p class="note">
+        Your account holds none of the actions that carry work — engagement, bookings, coaches,
+        membership, certificates, competition, dojos, support, tasks, quotes or finance. That is a
+        statement about your bindings, not about the federation: the work may well exist and is not
+        yours to see. Ask a federation administrator for the action you need, by name.
+      </p>
+    ) : (
+      <Fragment>
+        <div class="grid">
+          {registers.map((r) => (
+            <StatCard
+              label={`${r.label} needing attention`}
+              value={r.total}
+              unavailable={r.unavailable}
+              tone="attention"
+              href={r.href}
+              hrefLabel={r.filterable ? `Open ${r.label.toLowerCase()}` : 'Open the register'}
+              note={[r.scopeCaveat, r.total === 0 ? `Nothing is waiting. ${r.populatedBy}` : null].filter(Boolean).join(' ') || null}
+            />
+          ))}
+          <StatCard
+            label={upcoming?.label ?? 'Competitions dated today or later'}
+            value={upcoming?.count ?? null}
+            unavailable={upcoming?.unavailable ?? 'The competition calendar was not read for this request.'}
+            source={upcoming?.source ?? null}
+            href={upcoming?.href ?? null}
+            hrefLabel="Open the calendar"
+            note={upcoming?.count === 0 ? `No event is dated today or later. ${upcoming.populatedBy}` : null}
+          />
+          <StatCard
+            label={changed?.label ?? 'Decisions recorded today'}
+            value={changed?.count ?? null}
+            unavailable={changed?.unavailable ?? 'The audit table was not read for this request.'}
+            source={changed?.source ?? null}
+            href={changed?.href ?? null}
+            hrefLabel="Open today in the audit log"
+            note={changed?.count === 0 ? `Nothing has been recorded since midnight UTC. ${changed.populatedBy}` : null}
+          />
+        </div>
+
+        <Table
+          id="attention-detail"
+          caption="Every actionable status in reach, with where it is worked"
+          columns={workColumns}
+          rows={workRows}
+          paramPrefix="w"
+          pageSize={false}
+          savedViews={false}
+          note="A status appears here because the federation status dictionary marks it as waiting on somebody. Drafts are never counted: an unfinished application is the applicant's business until they send it."
+          emptyTitle="No register in reach carries an actionable status."
+          emptyBody="Every register your credential can read uses a status vocabulary in which nothing is currently defined as waiting on a person."
+          emptyAction={{ label: 'Open the approval queue', href: h('/admin/queue') }}
+        />
+
+        {work && work.outOfReach.length > 0 && (
+          <p class="note">
+            Not shown, because your credential holds no authority over them:
+            {' '}{work.outOfReach.map((r) => `${r.label} (${r.action})`).join(', ')}. Work may well be
+            waiting there. Quoting the action is what whoever grants roles needs to hear.
+          </p>
+        )}
+      </Fragment>
+    )}
+  </section>
+
+  {/* ── THE EIGHT QUESTIONS ───────────────────────────────────────────────── */}
+  <section id="questions" class="panel" aria-labelledby="questions-h">
+    <h2 class="sec-h" id="questions-h">The eight questions this page was built to answer</h2>
+    <p class="sec-p">
+      §114 names them exactly. They are printed in full, including the two the register cannot
+      answer — a question quietly missing from a dashboard reads exactly like a question answered
+      zero, and the federation is entitled to know the difference.
+    </p>
+
+    <Table
+      id="questions"
+      caption="§114 questions, and what this page did with each"
+      columns={questionColumns}
+      rows={questionRows}
+      paramPrefix="q"
+      pageSize={false}
+      savedViews={false}
+    />
+
+    <div class="refusals">
+      {UNANSWERABLE.map((u) => (
+        <div class="refusal">
+          <h3 class="refusal-h">{u.question}</h3>
+          <p class="refusal-p">{u.why}</p>
+        </div>
+      ))}
     </div>
+  </section>
+
+  {/* ── OPEN WORK ─────────────────────────────────────────────────────────── */}
+  <section id="open-work" class="panel" aria-labelledby="open-work-h">
+    <h2 class="sec-h" id="open-work-h">Open work held outside the registers</h2>
+    <p class="sec-p">
+      Two-person approvals, the Redis-backed editorial queues and lapsing officials' licences. These
+      are counted where the work actually lives rather than aggregated into a single invented
+      "tasks" number.
+    </p>
+
+    <div class="grid">
+      <StatCard
+        label="Approvals awaiting a second person"
+        value={approvals?.state === 'ready' ? approvals.value.items.length : null}
+        unavailable={
+          !configured
+            ? 'Approval requests live in the register, which is not configured on this deployment.'
+            : approvals && approvals.state !== 'ready' ? approvals.message : null
+        }
+        tone="attention"
+        href={h('/admin/queue')}
+        hrefLabel="Approval queue"
+        note={approvals?.state === 'ready' ? approvals.value.note : null}
+      />
+      <StatCard
+        label="Queue items awaiting a decision"
+        value={queueOpenTotal}
+        unavailable={queueTotalRefusal}
+        tone="attention"
+        href={h('/admin/queue')}
+        hrefLabel="Work the queues"
+        note="Held in the editorial store rather than the register, and counted only for the queues this credential may decide on. This is where a unit submission awaiting a decision is actually worked."
+      />
+      <StatCard
+        label="Officials' licences lapsed or lapsing within 90 days"
+        value={licences?.state === 'ready' ? licences.value.length : null}
+        unavailable={
+          !configured
+            ? 'Licences live in the register, which is not configured on this deployment.'
+            : licences && licences.state !== 'ready' ? licences.message : null
+        }
+        tone="attention"
+        note={lapsedCount != null
+          ? `${NUM.format(lapsedCount)} of these have already lapsed. A lapsed official still appearing on an appointment list is how an invalid act happens.`
+          : null}
+      />
+    </div>
+
+    <Table
+      id="queues"
+      caption="Editorial queues"
+      columns={queueColumns}
+      rows={queues.map((q) => ({ label: q.label, open: q.open, total: q.total, error: q.error }))}
+      paramPrefix="e"
+      pageSize={false}
+      savedViews={false}
+      note="Held in the editorial store (Redis), not in the federation register — which is why these counts carry no table-and-filter provenance. A queue appears here only where this credential holds the authority to decide on it, the same check /admin/queue makes before it reads a single summary."
+      emptyTitle={queuesRefused.length > 0
+        ? 'No editorial queue is open to your credential.'
+        : 'No queues are declared.'}
+      emptyBody={queuesRefused.length > 0
+        ? `Deciding on ${queuesRefused.map((q) => q.label.toLowerCase()).join(', ')} needs ${queuesRefused.map((q) => `"${q.action}"`).join(', ')}. Work is very likely waiting in them; the backlog is simply not yours to read. Quoting the action by name is what whoever grants roles needs to hear.`
+        : 'src/lib/queue.ts declares the queues this federation runs, and it currently declares none.'}
+      emptyAction={{ label: 'Open the approval queue', href: h('/admin/queue') }}
+    />
+
+    {queues.length > 0 && queuesRefused.length > 0 && (
+      <p class="note">
+        Not listed above, because deciding on them is outside your authority:
+        {' '}{queuesRefused.map((q) => `${q.label} (${q.action})`).join(', ')}. Neither the count nor
+        the items are read for a credential that could not act on them.
+      </p>
+    )}
+
+    {configured && (
+      <Fragment>
+        <Table
+          id="approvals"
+          caption="Approvals awaiting a second person"
+          columns={approvalColumns}
+          rows={approvalRows}
+          state={approvals?.state === 'ready' ? 'ready' : approvals?.state === 'denied' ? 'denied' : 'error'}
+          deniedMessage={approvals?.state === 'denied' ? approvals.message : null}
+          errorDetail={approvals?.state === 'error' ? approvals.message : null}
+          paramPrefix="a"
+          pageSize={false}
+          savedViews={false}
+          note={approvals?.state === 'ready' && !approvals.value.complete ? approvals.value.note : null}
+          emptyTitle="No request is waiting on you."
+          emptyBody="Requests you raised yourself are excluded by design — two-person control needs two people."
+          emptyAction={{ label: 'Open the approval queue', href: h('/admin/queue') }}
+        />
+
+        <Table
+          id="licences"
+          caption="Officials' licences lapsed or lapsing within 90 days"
+          columns={licenceColumns}
+          rows={licenceRows}
+          state={licences?.state === 'ready' ? 'ready' : licences?.state === 'denied' ? 'denied' : 'error'}
+          deniedMessage={licences?.state === 'denied' ? licences.message : null}
+          errorDetail={licences?.state === 'error' ? licences.message : null}
+          paramPrefix="l"
+          pageSize={false}
+          savedViews={false}
+          note="Counted from instructor_quals, examiner_quals and official_quals where status = 'active' and expires_on <= today + 90 days. Already-lapsed licences are included deliberately: those are the dangerous ones. The list is national — officials.expiringLicences() applies no unit filter."
+          emptyTitle="No instructor, examiner or official licence lapses within the next 90 days."
+          emptyBody="Licences appear here as their expiry date approaches. Nothing is overdue: MMAKF has set no service standard, so no date on this page escalates on its own."
+          emptyAction={{ label: 'Scoped dashboard', href: h('/admin/dashboard') }}
+        />
+      </Fragment>
+    )}
+  </section>
+
+  {configured && (
+    <Fragment>
+      {/* ── DATA QUALITY ──────────────────────────────────────────────────
+          Above the totals on purpose. Everything below tells the federation
+          what the register says; this tells it how much of the register is
+          missing. A membership count means nothing if the people counted have
+          no date of birth, because every age-gated figure from them is
+          guesswork. */}
+      <section id="data-quality" class="panel" aria-labelledby="quality-h">
+        <h2 class="sec-h" id="quality-h">Data quality — how trustworthy are these numbers?</h2>
+        <p class="sec-p">
+          No percentage is offered. A percentage is a float, and this codebase does not put floats in
+          front of federation decisions — each check reports the gap and the population it was
+          measured against, so the reader judges the proportion themselves.
+        </p>
+
+        {topGaps.length > 0 && (
+          <div class="grid">
+            {topGaps.map((g) => (
+              <StatCard
+                label={g.description}
+                value={g.count}
+                outOf={g.total}
+                tone="attention"
+                source={g.source}
+              />
+            ))}
+          </div>
+        )}
+
+        <Table
+          id="quality"
+          caption="Every data-quality check, national scope"
+          columns={qualityColumns}
+          rows={qualityRows}
+          state={quality?.state === 'ready' ? 'ready' : quality?.state === 'denied' ? 'denied' : 'error'}
+          deniedMessage={quality?.state === 'denied' ? quality.message : null}
+          errorDetail={quality?.state === 'error' ? quality.message : null}
+          paramPrefix="dq"
+          pageSize={false}
+          savedViews={false}
+          emptyTitle="No data-quality check could be run."
+          emptyBody="analytics.dataQuality() returned no checks for the national scope."
+          emptyAction={{ label: 'Scoped dashboard', href: h('/admin/dashboard') }}
+        />
+      </section>
+
+      {/* ── THE REGISTER ──────────────────────────────────────────────────── */}
+      {national && national.state !== 'ready' ? (
+        <section class="panel" aria-labelledby="register-denied-h">
+          <h2 class="sec-h" id="register-denied-h">The national register is not open to your credential</h2>
+          <p class="sec-p" role="alert">{national.message}</p>
+          <p class="sec-p">
+            The national totals require a national binding — that is the check that stops a state
+            administrator reading the federation's figures. Your own scope is on the
+            {' '}<a href={h('/admin/dashboard')}>scoped dashboard</a>, which shows the same
+            measurements narrowed to the units you hold authority over. Everything above this point
+            is still yours: your work does not depend on the national register.
+          </p>
+        </section>
+      ) : dash ? (
+        <Fragment>
+          <section id="membership" class="panel" aria-labelledby="membership-h">
+            <h2 class="sec-h" id="membership-h">Membership</h2>
+            <p class="sec-p">
+              People on the register and the credentials they hold as at {dash.asAt}. A licence
+              counts as current only when its status says so and its dates agree.
+            </p>
+            <div class="grid">
+              <StatCard label="People on the register" {...figure(dash, 'people')} />
+              <StatCard label="People with status active" {...figure(dash, 'peopleActive')} />
+              <StatCard label="People holding an active membership" {...figure(dash, 'membersActive')} href={h('/admin/membership')} hrefLabel="Renewals desk" />
+              <StatCard label="Athletes" {...figure(dash, 'athletes')} />
+              <StatCard label="Instructors with a current licence" {...figure(dash, 'instructors')} />
+              <StatCard label="Examiners with a current licence" {...figure(dash, 'examiners')} />
+              <StatCard label="Officials with a current licence" {...figure(dash, 'officials')} />
+            </div>
+          </section>
+
+          <section id="units" class="panel" aria-labelledby="units-h">
+            <h2 class="sec-h" id="units-h">Units and dojos</h2>
+            <div class="grid">
+              <StatCard label="State units" {...figure(dash, 'stateUnits')} />
+              <StatCard label="State units active" {...figure(dash, 'stateUnitsActive')} href={h('/admin/dashboard')} hrefLabel="Open a state" />
+              <StatCard label="District units" {...figure(dash, 'districtUnits')} />
+              <StatCard label="District units active" {...figure(dash, 'districtUnitsActive')} />
+              <StatCard label="Dojos" {...figure(dash, 'dojos')} href={h('/admin/governance')} hrefLabel="Governance" />
+            </div>
+
+            <Table
+              id="dojo-status"
+              caption="Dojos by status"
+              columns={breakdownColumns('Dojos')}
+              rows={dojoStatusRows}
+              paramPrefix="ds"
+              pageSize={false}
+              savedViews={false}
+              note="Every status the schema permits is listed, including those nobody currently holds — an explicit 0 is a measurement, a missing row is a gap the reader fills in for themselves."
+              emptyTitle="No dojo status breakdown was produced."
+              emptyBody="analytics.ts returned no grouped count for the national scope."
+              emptyAction={{ label: 'Governance', href: h('/admin/governance') }}
+            />
+          </section>
+
+          <section id="grading" class="panel" aria-labelledby="grading-h">
+            <h2 class="sec-h" id="grading-h">Grading and certificates</h2>
+            <div class="grid">
+              <StatCard label="Grading events recorded" {...figure(dash, 'gradingEvents')} href={h('/admin/grading')} hrefLabel="Grading" />
+              <StatCard label="Gradings with results locked" {...figure(dash, 'gradingsHeld')} note="Locked is the only status that evidences a completed examination whose results can no longer change." />
+              <StatCard label="Grading candidates" {...figure(dash, 'gradingCandidates')} />
+              <StatCard label="Candidates passed" {...figure(dash, 'gradingCandidatesPassed')} />
+              <StatCard label="Certificates" {...figure(dash, 'certificates')} />
+              <StatCard label="Certificates in issue" {...figure(dash, 'certificatesInIssue')} />
+              <StatCard label="Certificates revoked" {...figure(dash, 'certificatesRevoked')} tone="attention" />
+            </div>
+          </section>
+
+          <section id="competition" class="panel" aria-labelledby="competition-h">
+            <h2 class="sec-h" id="competition-h">Competition</h2>
+            <div class="grid">
+              <StatCard label="Competition events" {...figure(dash, 'competitionEvents')} href={h('/admin/competition')} hrefLabel="Competitions" />
+              <StatCard label="Entries" {...figure(dash, 'entries')} />
+              <StatCard label="Entries confirmed" {...figure(dash, 'entriesConfirmed')} />
+              <StatCard label="Matches" {...figure(dash, 'matches')} />
+              <StatCard label="Matches completed" {...figure(dash, 'matchesCompleted')} />
+              <StatCard label="Results final" {...figure(dash, 'resultsFinal')} />
+            </div>
+
+            <Table
+              id="event-status"
+              caption="Events by status"
+              columns={breakdownColumns('Events')}
+              rows={eventStatusRows}
+              paramPrefix="es"
+              pageSize={false}
+              savedViews={false}
+              note="The whole event lifecycle, zero-filled. Not drawn as a chart: with an empty calendar a chart is an empty axis, which reads as a measurement rather than as an absence."
+              emptyTitle="No event status breakdown was produced."
+              emptyBody="analytics.ts returned no grouped count for the national scope."
+              emptyAction={{ label: 'Competitions', href: h('/admin/competition') }}
+            />
+          </section>
+
+          <section id="academy" class="panel" aria-labelledby="academy-h">
+            <h2 class="sec-h" id="academy-h">Academy</h2>
+            <div class="grid">
+              <StatCard label="Courses" {...figure(dash, 'courses')} />
+              <StatCard label="Courses published" {...figure(dash, 'coursesPublished')} />
+              <StatCard label="Enrolments" {...figure(dash, 'enrolments')} />
+              <StatCard label="Enrolments active" {...figure(dash, 'enrolmentsActive')} />
+              <StatCard label="Enrolments completed" {...figure(dash, 'enrolmentsCompleted')} />
+            </div>
+          </section>
+
+          <section id="casework" class="panel" aria-labelledby="casework-h">
+            <h2 class="sec-h" id="casework-h">Casework and member support</h2>
+            <p class="sec-p">
+              Counted as cases with <strong>no recorded ending</strong>, not as "open cases". MMAKF
+              has not defined which statuses close a case — the enum has decided, appealed and
+              appeal-heard between the start and closed — and publishing one of the possible answers
+              under the heading "open" would report a rule nobody set as though it were a
+              measurement. Each figure is separately gated: a count of cases in one small dojo
+              identifies the individual as surely as the file does.
+            </p>
+            <div class="grid">
+              <StatCard label="Disciplinary cases with no recorded ending" {...figure(dash, 'casesNotClosed.disciplinary')} tone="attention" href={h('/admin/cases')} hrefLabel="Cases" />
+              <StatCard label="Safeguarding cases with no recorded ending" {...figure(dash, 'casesNotClosed.safeguarding')} tone="attention" href={h('/admin/cases')} hrefLabel="Cases" />
+              <StatCard label="Support tickets not resolved or closed" {...figure(dash, 'supportTicketsNotClosed')} tone="attention" href={h('/admin/support')} hrefLabel="Support desk" />
+            </div>
+          </section>
+
+          <section id="withheld" class="panel" aria-labelledby="withheld-h">
+            <h2 class="sec-h" id="withheld-h">Withheld, and not narrowable</h2>
+            <p class="sec-p">
+              Two different facts, both of which the reader is entitled to.
+              <strong> Not authorised</strong> means the rows exist and this credential may not count
+              them. <strong>Not scopable</strong> means no column can narrow the figure to this
+              level at all. Neither is a zero, and neither is shown as one.
+            </p>
+            <Table
+              id="withheld"
+              caption="Figures not shown above, with the reason"
+              columns={withheldColumns}
+              rows={withheldRows}
+              paramPrefix="wh"
+              pageSize={false}
+              savedViews={false}
+              emptyTitle="Nothing was withheld."
+              emptyBody="Every figure this page offers was produced for your credential at the national scope."
+              emptyAction={{ label: 'Scoped dashboard', href: h('/admin/dashboard') }}
+            />
+            <p class="sec-p">
+              Register generated at {dash.generatedAt}, credentials judged as at {dash.asAt}.
+            </p>
+          </section>
+        </Fragment>
+      ) : null}
+    </Fragment>
   )}
-</Base>
 
-<script>
-  // Sign-in — only present when the caller is unauthenticated.
-  const loginForm = document.getElementById('loginForm');
-  if (loginForm instanceof HTMLFormElement) {
-    const loginErr = document.getElementById('loginErr');
-    loginForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      if (loginErr) loginErr.style.display = 'none';
-      const btn = loginForm.querySelector('button[type=submit]');
-      const fd = new FormData(loginForm);
-      const email = String(fd.get('email') || '').trim();
-      const password = String(fd.get('password') || '');
-      if (btn instanceof HTMLButtonElement) { btn.disabled = true; btn.textContent = 'Signing in…'; }
+  {/* ── SYSTEM HEALTH ─────────────────────────────────────────────────────
+      Probed live when the page opens. Until it answers, each line says it has
+      not been probed rather than showing a stale or assumed value. Rendered as
+      a description list rather than a table because there is one value per
+      component and nothing to sort. */}
+  <section id="health" class="panel" aria-labelledby="health-h">
+    <h2 class="sec-h" id="health-h">System health</h2>
+    <p class="sec-p">
+      Read from <a href="/api/health">/api/health</a> in the browser, so it reports the state of the
+      server that answered you rather than the state at build time.
+    </p>
 
-      const r = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(email ? { email, password } : { password }),
-      }).catch(() => null);
+    <dl class="health" id="health-list" aria-live="polite">
+      <div class="health-row">
+        <dt>Editorial store (Redis)</dt>
+        <dd data-k="redis">Not probed yet.</dd>
+      </div>
+      <div class="health-row">
+        <dt>Federation register (Postgres)</dt>
+        <dd data-k="database">Not probed yet.</dd>
+      </div>
+      <div class="health-row">
+        <dt>Deployed commit</dt>
+        <dd data-k="version">Not probed yet.</dd>
+      </div>
+    </dl>
 
-      if (btn instanceof HTMLButtonElement) { btn.disabled = false; btn.textContent = 'Sign in'; }
-      if (r && r.ok) { location.reload(); return; }
+    <p class="warn" id="health-err" role="alert" hidden></p>
 
-      let message = 'Sign-in failed. Check your details and try again.';
-      if (r) {
-        const body = await r.json().catch(() => null);
-        if (body && body.error) message = String(body.error);
-        else if (r.status === 429) message = 'Too many attempts. Wait a minute and try again.';
-      } else {
-        message = 'Could not reach the server. Check your connection.';
-      }
-      if (loginErr) { loginErr.textContent = message; loginErr.style.display = 'block'; }
-      const pw = loginForm.querySelector('input[name=password]');
-      if (pw instanceof HTMLInputElement) pw.select();
-    });
+    <noscript>
+      <p class="note">
+        The live probe needs JavaScript. Open <a href="/api/health">/api/health</a> directly for the
+        same answer — it is a plain JSON response.
+      </p>
+    </noscript>
+  </section>
+</AdminShell>
+
+<style>
+  .who {
+    font-size: var(--text-xs);
+    letter-spacing: 0.04em;
+    color: var(--off-white);
+    overflow-wrap: anywhere;
+    margin: 0 0 var(--space-6);
   }
 
-  document.getElementById('logoutBtn')?.addEventListener('click', async () => {
-    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => null);
-    location.reload();
-  });
+  .panel {
+    padding: var(--space-8) 0;
+    border-top: 1px solid var(--border);
+    scroll-margin-top: var(--space-16);
+    min-width: 0;
+  }
+  .panel:first-of-type { border-top: 0; padding-top: 0; }
 
+  .sec-h {
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    font-weight: 600;
+    letter-spacing: var(--tracking-normal);
+    margin: 0;
+  }
+  .sec-p {
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-relaxed);
+    max-width: 74ch;
+    margin: var(--space-3) 0 0;
+  }
+  .sec-p + .sec-p { margin-top: var(--space-3); }
+
+  .note {
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-relaxed);
+    max-width: 74ch;
+    margin: var(--space-5) 0 0;
+  }
+
+  /* auto-fit keeps a phone at one column without a media query and a laptop at
+     four; minmax(0, 1fr) is what stops a long unbroken value widening a track
+     and pushing the page sideways (WCAG 1.4.10). */
+  .grid {
+    display: grid;
+    gap: var(--space-4);
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+    align-items: stretch;
+    margin: var(--space-6) 0;
+  }
+
+  .warn {
+    margin: var(--space-5) 0 0;
+    background: rgba(142, 18, 18, 0.05);
+    border: 1px solid var(--red-3);
+    border-left: 3px solid var(--red);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    color: var(--off-white);
+  }
+  .warn strong { color: var(--red-2); }
+  .warn p { margin: 0; }
+  .warn p + p { margin-top: var(--space-3); }
+  .warn code, .sec-p code, .note code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.86em;
+    overflow-wrap: anywhere;
+  }
+
+  .refusals {
+    display: grid;
+    gap: var(--space-4);
+    margin-top: var(--space-6);
+  }
+  .refusal {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold-dim);
+    border-radius: var(--radius);
+    background: var(--card);
+    padding: var(--space-4) var(--space-5);
+  }
+  .refusal-h {
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    font-weight: 600;
+    margin: 0;
+  }
+  .refusal-p {
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-relaxed);
+    margin: var(--space-2) 0 0;
+    max-width: 74ch;
+  }
+
+  .health {
+    margin: var(--space-5) 0 0;
+    display: grid;
+    gap: var(--space-2);
+  }
+  .health-row {
+    display: grid;
+    grid-template-columns: minmax(0, 20rem) minmax(0, 1fr);
+    gap: var(--space-3);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
+  }
+  @media (max-width: 700px) {
+    .health-row { grid-template-columns: 1fr; gap: var(--space-1); }
+  }
+  .health dt { font-size: var(--text-sm); color: var(--white); }
+  .health dd {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--muted);
+    line-height: var(--leading-normal);
+    overflow-wrap: anywhere;
+  }
+</style>
+
+<script>
   // ─── Live health probe ────────────────────────────────────────────────────
   //
-  // The table renders in its loading state on the server and is filled here.
-  // If the probe fails it is switched to the error state with the reason — it
-  // is never left showing skeleton rows, and never quietly filled with "ok".
-  const healthFigure = document.getElementById('health-table');
-  if (healthFigure) {
-    const table = healthFigure.querySelector('table');
-    const tbody = healthFigure.querySelector('tbody');
-    const loadingNote = healthFigure.querySelector('.dt-loading');
+  // Each line starts as "Not probed yet." and is replaced by what the endpoint
+  // actually said. On failure the reason is announced and the lines are left
+  // saying they were not probed — never quietly filled with "ok".
+  const list = document.getElementById('health-list');
+  const err = document.getElementById('health-err');
 
+  if (list) {
     const MEANING = {
-      'redis:true': 'The editorial store is reachable. News, pages and the approval queues are durable.',
-      'redis:false': 'The editorial store is NOT reachable. Anything saved through the content admin may be held in this server’s memory only and lost on restart.',
-      'database:ok': 'The federation register is reachable. Every figure on this page was counted from it.',
-      'database:error': 'DATABASE_URL is set but the register did not answer. The figures on this page may be from a connection that has since failed — reload before acting on them.',
-      'database:not_configured': 'No federation register is configured for this deployment. This is a real state, not a failure.',
+      'redis:true': 'Reachable. News, pages and the approval queues are durable.',
+      'redis:false':
+        'NOT reachable. Anything saved through the content admin may be held in this server’s memory only and lost on restart.',
+      'database:ok': 'Reachable. Every register figure on this page was counted from it.',
+      'database:error':
+        'DATABASE_URL is set and the register did not answer. Figures on this page may be from a connection that has since failed — reload before acting on them.',
+      'database:not_configured':
+        'No federation register is configured for this deployment. This is a real state, not a failure.',
     };
 
-    const cell = (text, cls) => {
-      const td = document.createElement('td');
-      td.textContent = text;
-      if (cls) td.className = cls;
-      return td;
-    };
-
-    const fail = (why) => {
-      const scroll = healthFigure.querySelector('.dt-scroll');
-      if (scroll instanceof HTMLElement) scroll.hidden = true;
-      if (loadingNote instanceof HTMLElement) {
-        loadingNote.className = 'dt-state dt-error';
-        loadingNote.setAttribute('role', 'alert');
-        loadingNote.textContent = why;
-      }
+    const put = (key, text) => {
+      const cell = list.querySelector('dd[data-k="' + key + '"]');
+      if (cell instanceof HTMLElement) cell.textContent = text;
     };
 
     fetch('/api/health', { headers: { Accept: 'application/json' } })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
       .then((body) => {
-        if (!tbody || !(table instanceof HTMLTableElement)) return;
-        const rows = [
-          ['Editorial store (Redis)', String(body.redis), MEANING['redis:' + String(body.redis)] || 'The probe returned a value this page does not recognise.'],
-          ['Federation register (Postgres)', String(body.database), MEANING['database:' + String(body.database)] || 'The probe returned a value this page does not recognise.'],
-          ['Deployed commit', String(body.version || 'unknown'), 'The build serving this page.'],
-        ];
-        tbody.replaceChildren(...rows.map((r) => {
-          const tr = document.createElement('tr');
-          tr.append(cell(r[0]), cell(r[1]), cell(r[2]));
-          return tr;
-        }));
-        table.setAttribute('aria-busy', 'false');
-        if (loadingNote instanceof HTMLElement) loadingNote.remove();
+        const redis = String(body.redis);
+        const database = String(body.database);
+        const unknown = 'The probe returned a value this page does not recognise: ';
+        put('redis', MEANING['redis:' + redis] || unknown + redis);
+        put('database', MEANING['database:' + database] || unknown + database);
+        put('version', String(body.version || 'unknown') + ' — the build serving this page.');
       })
-      .catch((err) => {
-        fail('The health probe could not be read (' + (err && err.message ? err.message : 'no response') +
-             '). No status is shown rather than one that was assumed. Open /api/health directly.');
+      .catch((e) => {
+        if (err instanceof HTMLElement) {
+          err.textContent =
+            'The health probe could not be read (' +
+            (e && e.message ? e.message : 'no response') +
+            '). No status is shown rather than one that was assumed. Open /api/health directly.';
+          err.hidden = false;
+        }
       });
   }
 </script>
-
-{/* Top level, not inside an expression: Astro only extracts and bundles a
-    <style> tag that sits in the template proper. The admin chrome classes are
-    duplicated from admin/queue.astro deliberately — src/pages/admin/index.astro
-    is not this surface's to edit, and a shared stylesheet would be. */}
-<style is:global>
-  body { background: var(--bg); }
-  .admin-wrap { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
-  /* WCAG 1.4.10: a grid item defaults to min-width:auto, so it cannot shrink
-     below its content and the whole console scrolled sideways at 320px
-     (measured 461px on /admin/approvals). */
-  .admin-wrap > * { min-width: 0; }
-  @media (max-width: 800px) { .admin-wrap { grid-template-columns: 1fr; } }
-
-  .admin-side {
-    background: var(--bg-2);
-    border-right: 1px solid var(--border);
-    padding: 24px 0;
-    display: flex; flex-direction: column;
-    position: sticky; top: 0; align-self: start;
-    height: 100vh;
-  }
-  @media (max-width: 800px) { .admin-side { position: static; height: auto; } }
-  .admin-brand { padding: 0 24px 24px; border-bottom: 1px solid var(--border); }
-  .admin-brand-1 { font-family: var(--font-display); font-size: 1.4rem; font-weight: 700; letter-spacing: 0.06em; }
-  .admin-brand-2 { font-family: var(--font-display); font-size: 0.66rem; letter-spacing: 0.22em; text-transform: uppercase; color: var(--gold); margin-top: 4px; }
-  .admin-nav { flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; }
-  .admin-nav a {
-    padding: 12px 14px;
-    min-height: 44px;
-    display: flex; align-items: center;
-    font-family: var(--font-display);
-    font-size: 0.78rem;
-    letter-spacing: 0.08em;
-    color: var(--off-white);
-    border-radius: var(--radius);
-    transition: all 0.18s;
-  }
-  .admin-nav a:hover, .admin-nav a.active { background: var(--card); color: var(--gold); }
-
-  .admin-main { padding: 32px 36px 64px; max-width: 1180px; min-width: 0; }
-  @media (max-width: 600px) { .admin-main { padding: 24px 18px 48px; } }
-
-  .admin-panel { padding: 36px 0; border-bottom: 1px solid var(--border); scroll-margin-top: 20px; min-width: 0; }
-  .admin-panel:first-of-type { padding-top: 0; }
-  .admin-h { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; letter-spacing: 0.02em; }
-  .admin-sub { color: var(--muted); font-size: 0.88rem; margin-top: 6px; line-height: 1.7; }
-  .admin-sub code, .q-warn code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.82em;
-    overflow-wrap: anywhere;
-  }
-
-  .q-signed {
-    margin-top: 14px;
-    font-size: 0.76rem;
-    letter-spacing: 0.04em;
-    color: var(--off-white);
-    overflow-wrap: anywhere;
-  }
-  .q-warn {
-    margin-top: 16px;
-    background: rgba(142, 18, 18, 0.05);
-    border: 1px solid var(--red-3);
-    border-left: 3px solid var(--red);
-    border-radius: var(--radius);
-    padding: 14px 16px;
-    font-size: 0.85rem;
-    line-height: 1.65;
-    color: var(--off-white);
-  }
-  .q-warn strong { color: var(--red-2); }
-
-  /* Figures. auto-fit keeps a phone at one column without a media query and a
-     laptop at four, and `minmax(0, 1fr)` is what stops a long unbroken value
-     widening a track and pushing the page sideways. */
-  .cmd-grid {
-    display: grid;
-    gap: 14px;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
-    align-items: stretch;
-  }
-  .cmd-tables {
-    margin-top: 26px;
-    display: grid;
-    gap: 30px;
-    min-width: 0;
-  }
-</style>

@@ -1,0 +1,254 @@
+---
+// A confirmation with a reference and a next move (§58).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY A TICK IS NOT A CONFIRMATION
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// §58: state what happened, give the identifier, offer the next action. A green
+// tick and the word "Success" satisfies none of the three. The reader who has
+// just submitted a grading entry wants to know WHAT was recorded, under WHAT
+// number they can chase it, and whether they are now finished or half way
+// through something.
+//
+// The identifier matters most on a federation surface. When somebody rings the
+// office about an entry made three weeks ago, the reference is the difference
+// between a two-minute answer and a search through a register. It is rendered
+// large, selectable, and with a copy control — and it is NEVER invented here:
+// the caller passes the value the system of record actually issued, or passes
+// nothing at all.
+//
+// `next` is required for the same reason `action` is required on EmptyState
+// (§104). A confirmation page with no way onward is where sessions end: the
+// reader has succeeded at the thing and is now stranded on a page that
+// congratulates them.
+//
+//   <SuccessState
+//     title="Your entry has been submitted."
+//     body="The federation will confirm eligibility before the draw is made."
+//     reference={{ label: 'Entry reference', value: entry.reference }}
+//     next={{ label: 'Back to my entries', href: '/my/entries' }}
+//   />
+
+export interface SuccessAction {
+  label: string;
+  /** A real href — a confirmation must survive JavaScript being off. */
+  href: string;
+}
+
+export interface Props {
+  /**
+   * What happened, in the past tense and in the reader's terms.
+   * "Your entry has been submitted." Not "Success", not "Done".
+   */
+  title: string;
+  /**
+   * What follows from it, and what has NOT happened yet. §5.1 of
+   * CONTENT-ARCHITECTURE: state the fact, then state its limit — "submitted" is
+   * not "accepted", and a reader who conflates them will not chase it.
+   */
+  body?: string;
+  /**
+   * The identifier the system of record issued. Optional, because not every
+   * successful action mints one — but if one exists, showing it is not
+   * optional.
+   */
+  reference?: { label: string; value: string } | null;
+  /** §58: the next action. REQUIRED. */
+  next: SuccessAction;
+  /** A second route, when there genuinely is one. */
+  secondary?: SuccessAction | null;
+  /**
+   * Announce on render. Left on by default — this component usually replaces
+   * the form the reader just submitted, and the swap is the change that needs
+   * announcing. role="status" and not role="alert": nothing is wrong.
+   */
+  announce?: boolean;
+  class?: string;
+}
+
+const {
+  title,
+  body,
+  reference = null,
+  next,
+  secondary = null,
+  announce = true,
+  class: className = '',
+} = Astro.props;
+---
+
+<div class:list={['ok', className]}>
+  {/* The live region is the confirmation and its reference — the two things
+      worth reading out when this replaces the form. It is NOT the whole card.
+      role="status" carries an implicit aria-atomic="true", so any change
+      anywhere inside re-reads the entire region: with the card as the region,
+      pressing Copy announced the whole confirmation again, then the copy
+      outcome, then the whole confirmation a third time when the button label
+      reset four seconds later. The controls and the copy confirmation
+      therefore sit outside it. */}
+  <div
+    class="ok-say"
+    role={announce ? 'status' : undefined}
+    aria-live={announce ? 'polite' : undefined}
+  >
+    <p class="ok-title">{title}</p>
+    {body && <p class="ok-body">{body}</p>}
+
+    {reference && (
+      <div class="ok-ref">
+        <span class="ok-ref-label">{reference.label}</span>
+        <div class="ok-ref-row">
+          <code class="ok-ref-value">{reference.value}</code>
+          {/* JS-only, and legitimately so — the value is selectable text without
+              it. Hidden until a script confirms a clipboard exists.
+
+              The button sits inside the announced region because that is where
+              it belongs on screen, so its accessible name is fixed and only the
+              aria-hidden face changes. A mutating label here would re-read the
+              reference every four seconds. */}
+          <button
+            type="button"
+            class="ok-copy"
+            data-ok-copy={reference.value}
+            aria-label="Copy the reference"
+            hidden
+          ><span data-ok-copy-label aria-hidden="true">Copy</span></button>
+        </div>
+      </div>
+    )}
+  </div>
+
+  {/* What to keep, where a receipt goes, the offline route. */}
+  <slot />
+
+  <div class="ok-actions">
+    <a class="btn btn-primary ok-btn" href={next.href}>{next.label}</a>
+    {secondary && <a class="btn btn-ghost ok-btn" href={secondary.href}>{secondary.label}</a>}
+  </div>
+
+  {reference && <span class="sr-only" role="status" data-ok-copied></span>}
+</div>
+
+<script>
+  const buttons = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('[data-ok-copy]')
+  );
+
+  if (buttons.length > 0 && navigator.clipboard) {
+    for (const btn of buttons) {
+      btn.hidden = false;
+      // Rewrite the face, never btn.textContent: that would delete the span and
+      // leave the button with a changing accessible name inside a live region.
+      const face = btn.querySelector<HTMLElement>('[data-ok-copy-label]') ?? btn;
+      let reset: ReturnType<typeof window.setTimeout> | undefined;
+
+      btn.addEventListener('click', async () => {
+        const value = btn.getAttribute('data-ok-copy') ?? '';
+        const live = btn.closest('.ok')?.querySelector<HTMLElement>('[data-ok-copied]');
+        try {
+          await navigator.clipboard.writeText(value);
+          face.textContent = 'Copied';
+          if (live) live.textContent = 'Reference copied to the clipboard.';
+        } catch {
+          face.textContent = 'Copy failed';
+          if (live) live.textContent = 'The reference could not be copied. Select it to copy it by hand.';
+        }
+        if (reset) clearTimeout(reset);
+        reset = window.setTimeout(() => { face.textContent = 'Copy'; }, 4000);
+      });
+    }
+  }
+</script>
+
+<style>
+  .ok {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold);
+    border-radius: var(--radius);
+    background: var(--card);
+    padding: var(--space-6);
+  }
+
+  .ok-title {
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    font-weight: 500;
+    line-height: var(--leading-snug);
+    color: var(--white);
+    max-width: 52ch;
+  }
+
+  .ok-body {
+    margin-top: var(--space-3);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+    color: var(--off-white);
+    max-width: 62ch;
+  }
+
+  /* The reference is given a panel of its own. It is the one thing on this
+     screen the reader may have to read out over a telephone. */
+  .ok-ref {
+    margin-top: var(--space-6);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card-2);
+    padding: var(--space-4);
+  }
+  .ok-ref-label {
+    display: block;
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: var(--space-2);
+  }
+  .ok-ref-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .ok-ref-value {
+    font-family: ui-monospace, 'SFMono-Regular', 'Consolas', monospace;
+    /* Tabular figures so a reference read aloud digit by digit does not shift
+       under the eye, and letter-spacing so 0 and O are distinguishable. */
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.04em;
+    font-size: var(--text-md);
+    color: var(--white);
+    overflow-wrap: anywhere;
+  }
+
+  .ok-copy {
+    background: transparent;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-xs);
+    color: var(--off-white);
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    padding: var(--space-1) var(--space-3);
+    min-height: var(--space-8);
+    transition: border-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out);
+  }
+  .ok-copy:hover { border-color: var(--gold-dim); color: var(--gold-2); }
+
+  .ok-actions {
+    margin-top: var(--space-6);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+  .ok-btn { min-height: 44px; }
+
+  @media (max-width: 640px) {
+    .ok { padding: var(--space-5) var(--space-4); }
+    .ok-actions { flex-direction: column; }
+    .ok-btn { width: 100%; }
+  }
+</style>

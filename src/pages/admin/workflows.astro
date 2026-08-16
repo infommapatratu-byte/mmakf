@@ -1,0 +1,888 @@
+---
+// What the system does on the federation's behalf.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS PAGE EXISTS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// src/lib/workflow.ts names three problems that only appear in production, and
+// the third is the one this page answers: "nobody can answer what did the
+// system do on our behalf without reading TypeScript." The automations are
+// stored as data precisely so that they can be read by somebody who does not.
+// So this screen renders the stored JSON in words — the trigger, the ordered
+// actions, the conditions on them — and then the runs those definitions
+// produced, step by step, whether each step worked or not.
+//
+// It renders nothing it cannot read out of the database or out of the action
+// registry. There is no seeded example automation and no illustrative run: an
+// invented run would be a record of something the federation never did.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A workflow definition and its runs carry no state, district, dojo or
+// institution. They are the federation's own machinery, and scopeContains() in
+// rbac.ts is explicit that a resource with no place in the hierarchy is
+// reachable only from a national binding. The predicate below is therefore
+// `true` for a national holder of workflow:read and `false` for anybody
+// narrower — and it is applied in SQL, so a scoped administrator's query
+// returns no rows because the WHERE clause says so, not because this page
+// filtered an array afterwards.
+
+import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import Table from '@/components/DataTable/Table.astro';
+import type { Column } from '@/components/DataTable/types';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import { ACTIONS, STANDARD_WORKFLOWS } from '@/db/automations';
+import * as o from '@/db/operations.schema';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+
+/** The most recent runs, newest first — the usual question is "what just happened". */
+const RUN_LIMIT = 60;
+
+/**
+ * The run asked for, if the number could be a run id at all.
+ *
+ * `workflow_runs.id` is a 32-bit integer, so `?run=1.5` or `?run=99999999999`
+ * is not a run that happens not to exist — it is a value the driver refuses,
+ * and an unguarded parse would put a raw database error where the whole page
+ * should be. Anything that is not a plain positive integer inside int4 is
+ * therefore treated as no selection at all.
+ */
+const runParam = Astro.url.searchParams.get('run');
+const parsedRunId = runParam === null || runParam.trim() === '' ? NaN : Number(runParam);
+const selectedRunId =
+  Number.isInteger(parsedRunId) && parsedRunId > 0 && parsedRunId <= 2147483647
+    ? parsedRunId
+    : null;
+
+let definitions: any[] = [];
+let runs: any[] = [];
+let counts: Array<{ status: string; n: number }> = [];
+let selectedRun: any = null;
+let selectedSteps: any[] = [];
+// A deployment with no database and a query that threw are different facts and
+// get different components (CONTENT-ARCHITECTURE §5.4). Only the second is a
+// failure; only the second has anything to retry.
+let notConfigured = false;
+let readFailed = false;
+/** The driver's own words. Behind Details, never the headline. */
+let failureDetail: string | null = null;
+let outOfScope = false;
+
+if (principal && canAnywhere(principal, 'workflow:read')) {
+  const scope = visibleScopes(principal, 'workflow:read');
+  outOfScope = scope.kind !== 'all';
+  const scopeFilter = scope.kind === 'all' ? sql`true` : sql`false`;
+
+  if (!isConfigured()) {
+    notConfigured = true;
+  } else {
+    try {
+      definitions = await db()
+        .select()
+        .from(o.workflowDefinitions)
+        .where(scopeFilter)
+        // Newest version of each code first: only the highest active version
+        // fires, so that is the one an administrator is reading about.
+        .orderBy(asc(o.workflowDefinitions.code), desc(o.workflowDefinitions.version));
+
+      // Counted in SQL over every run, not over the sixty fetched below — a
+      // total taken from a truncated list is a wrong number stated confidently.
+      counts = await db()
+        .select({ status: o.workflowRuns.status, n: sql<number>`count(*)::int` })
+        .from(o.workflowRuns)
+        .where(scopeFilter)
+        .groupBy(o.workflowRuns.status);
+
+      runs = await db()
+        .select()
+        .from(o.workflowRuns)
+        .where(scopeFilter)
+        .orderBy(desc(o.workflowRuns.createdAt))
+        .limit(RUN_LIMIT);
+
+      if (selectedRunId) {
+        const found = await db()
+          .select()
+          .from(o.workflowRuns)
+          .where(and(eq(o.workflowRuns.id, selectedRunId), scopeFilter))
+          .limit(1);
+        selectedRun = found[0] ?? null;
+
+        if (selectedRun) {
+          // A re-run inserts fresh rows for the steps it re-attempts, so one
+          // seq can appear more than once. Ordered by seq then id, which is the
+          // order the attempts actually happened in.
+          selectedSteps = await db()
+            .select()
+            .from(o.workflowSteps)
+            .where(eq(o.workflowSteps.runId, selectedRun.id))
+            .orderBy(asc(o.workflowSteps.seq), asc(o.workflowSteps.id));
+        }
+      }
+    } catch (err: any) {
+      readFailed = true;
+      failureDetail = String(err?.message ?? err);
+    }
+  }
+}
+
+// ─── Reading the stored JSON ────────────────────────────────────────────────
+
+/**
+ * What each registered action does, in a sentence.
+ *
+ * Taken from the handlers in src/db/automations.ts. If a handler's behaviour
+ * changes, this text is wrong and misleads the person deciding whether to
+ * re-run something — so it describes the code and nothing else.
+ */
+const ACTION_TEXT: Record<string, string> = {
+  record_timeline:
+    'Adds an entry to the application timeline. The applicant reads it only where the step sets visibleToApplicant.',
+  create_task:
+    'Creates a piece of work for a person or a role. Keyed on the run and the step, so a re-run adopts the task it already made rather than making a second one.',
+  send_message:
+    'Queues a message. MMAKF has no mail provider configured, so the row is written with status queued and is sent the day one exists.',
+  notify_role:
+    'Notifies whoever currently holds a role. A role with nobody in it produces no notifications, and records that it produced none.',
+  record_event:
+    'Appends to the federation event feed. A replay is recognised and does not append a second event.',
+  set_application_status:
+    'Moves an application to a new status without a human decision.',
+  recommend_coaches:
+    'Shortlists eligible coaches for a programme. It recommends only — a manager confirms, and the engine never appoints anybody.',
+};
+
+const isRegistered = (action: string) =>
+  Object.prototype.hasOwnProperty.call(ACTIONS, action);
+
+const isRef = (v: unknown) =>
+  !!v && typeof v === 'object' && !Array.isArray(v) && typeof (v as any).from === 'string';
+
+/** A parameter value in words. `{ from: 'x' }` is a reference, not a literal. */
+function describe(v: unknown): string {
+  if (v === null || v === undefined) return 'nothing';
+  if (Array.isArray(v)) return v.map(describe).join(', ');
+  if (typeof v === 'object') {
+    if (isRef(v)) return `from ${(v as any).from}`;
+    const parts = Object.entries(v as Record<string, unknown>).map(
+      ([k, x]) => `${k}: ${describe(x)}`
+    );
+    return parts.length ? parts.join('; ') : 'nothing';
+  }
+  if (typeof v === 'boolean') return v ? 'yes' : 'no';
+  return String(v);
+}
+
+/**
+ * A condition in words.
+ *
+ * The operator list mirrors OPS in src/lib/workflow.ts. Anything falling
+ * through to the default is an operator the engine does not know, and the
+ * engine THROWS on one rather than treating it as false — so the step fails
+ * every time and the wording here says so.
+ */
+function conditionText(cond: unknown): string {
+  if (cond === undefined || cond === null) return '';
+  if (typeof cond !== 'object') return `malformed condition (${typeof cond}) — this step fails`;
+
+  const c = cond as Record<string, unknown>;
+  if (Array.isArray(c.all)) return c.all.map(conditionText).join(', and ');
+  if (Array.isArray(c.any)) return c.any.map(conditionText).join(', or ');
+  if (c.not !== undefined) return `it is not the case that ${conditionText(c.not)}`;
+
+  const path = typeof c.path === 'string' ? c.path : '(no path given)';
+  const op = typeof c.op === 'string' ? c.op : '(no operator given)';
+  const val = describe(c.value);
+
+  switch (op) {
+    case 'present': return `${path} was given`;
+    case 'absent':  return `${path} was not given`;
+    case 'truthy':  return `${path} is true`;
+    case 'falsy':   return `${path} is not true`;
+    case 'eq':      return `${path} is ${val}`;
+    case 'ne':      return `${path} is not ${val}`;
+    case 'in':      return `${path} is one of ${val}`;
+    case 'nin':     return `${path} is none of ${val}`;
+    case 'gt':      return `${path} is more than ${val}`;
+    case 'gte':     return `${path} is at least ${val}`;
+    case 'lt':      return `${path} is less than ${val}`;
+    case 'lte':     return `${path} is at most ${val}`;
+    default:
+      return `${path} ${op} ${val} — the engine does not recognise "${op}", so this step fails every time it is reached`;
+  }
+}
+
+interface ReadableStep {
+  seq: number;
+  action: string;
+  registered: boolean;
+  when: string;
+  optional: boolean;
+  params: Array<[string, unknown]>;
+}
+
+/** The steps of a stored definition, or null where the JSON has none. */
+function stepsOf(definition: unknown): ReadableStep[] | null {
+  const steps = (definition as any)?.steps;
+  if (!Array.isArray(steps)) return null;
+  return steps.map((s: any, i: number) => ({
+    seq: i,
+    action: String(s?.action ?? '(no action named)'),
+    registered: isRegistered(String(s?.action ?? '')),
+    when: s?.when === undefined ? '' : conditionText(s.when),
+    optional: s?.optional === true,
+    params: Object.entries((s?.params ?? {}) as Record<string, unknown>),
+  }));
+}
+
+/** The engine's own default when a definition states no maxAttempts. */
+const attemptsOf = (definition: unknown) => Number((definition as any)?.maxAttempts ?? 3);
+
+// One block per automation: the highest version, plus the versions it replaced.
+// Superseded rows are kept deliberately — a run that failed under v1 is retried
+// under v1 — so they are listed rather than rendered in full.
+//
+// The active versions are collected separately because the block shows the
+// HIGHEST version and dispatch() runs the highest ACTIVE one. Those are the
+// same row after installWorkflow(), which deactivates every earlier version of
+// a code before inserting the new one — but they need not be if a row was
+// switched off by hand, and saying "that trigger starts nothing" when an older
+// version is still active would be a false statement about the machinery.
+const byCode = new Map<string, { current: any; superseded: number[]; activeVersions: number[] }>();
+for (const d of definitions) {
+  const entry = byCode.get(d.code);
+  if (!entry) {
+    byCode.set(d.code, { current: d, superseded: [], activeVersions: d.active ? [d.version] : [] });
+  } else {
+    entry.superseded.push(d.version);
+    if (d.active) entry.activeVersions.push(d.version);
+  }
+}
+const automations = [...byCode.values()];
+
+const installedCodes = new Set(definitions.map((d) => d.code));
+const notInstalled = STANDARD_WORKFLOWS.filter((w) => !installedCodes.has(w.code));
+
+// ─── Runs ───────────────────────────────────────────────────────────────────
+
+const RUN_STATUSES = [
+  'succeeded', 'partially_failed', 'failed', 'running', 'pending', 'skipped',
+] as const;
+
+const countOf = (s: string) => counts.find((c) => c.status === s)?.n ?? 0;
+const totalRuns = counts.reduce((a, c) => a + Number(c.n), 0);
+const anyPartial = runs.some((r) => r.status === 'partially_failed');
+
+const label = (s: unknown) => String(s ?? '').replace(/_/g, ' ');
+
+const fmtWhen = (v: unknown) => {
+  if (!v) return '—';
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleString('en-IN', {
+        day: 'numeric', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      });
+};
+
+/**
+ * What happens next to a run that did not finish.
+ *
+ * Reads the same three conditions sweepRetries() reads: a status it retries at
+ * all, attempts remaining, and a next-attempt time that is either absent or
+ * past.
+ */
+function retryText(r: any): string {
+  if (r.status !== 'failed' && r.status !== 'partially_failed') return '';
+  if (Number(r.attempt ?? 0) >= Number(r.maxAttempts ?? 0)) {
+    return 'no attempts left';
+  }
+  if (!r.nextAttemptAt) return 'due at the next sweep';
+  return `from ${fmtWhen(r.nextAttemptAt)}`;
+}
+
+/** The step outcomes the engine writes, each said plainly. */
+const STEP_TEXT: Record<string, string> = {
+  succeeded: 'succeeded',
+  failed: 'failed',
+  failed_optional: 'failed, and the run carried on — the step is marked optional',
+  skipped: 'skipped, because its condition did not hold',
+  blocked: 'not attempted, because an earlier step had already failed',
+};
+const stepText = (s: string) => STEP_TEXT[s] ?? label(s);
+
+// ─── The runs, as rows for the one shared table (§97) ───────────────────────
+//
+// A hand-written table and a hand-written copy of the same rows as cards for a
+// phone lived here. DataTable does both from one declaration, which is the
+// whole argument for having it: the two copies could not disagree about a value
+// once there is only one.
+//
+// The row objects are FLAT and hold only what the columns declare. That is not
+// tidiness — a free-text search in this table reads the declared columns, so a
+// row carrying the whole workflow_runs record would put its context payload and
+// its error text inside the reach of a filter box.
+
+const runRows = runs.map((r) => {
+  const startedAt = r.startedAt ?? r.createdAt;
+  const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
+  return {
+    id: r.id,
+    automation: `${r.workflowCode} v${r.workflowVersion}`,
+    trigger: r.trigger,
+    subject: r.subjectKind ? `${label(r.subjectKind)} #${r.subjectId ?? '—'}` : null,
+    status: r.status,
+    attempts: `${r.attempt} of ${r.maxAttempts}`,
+    retry: retryText(r) || null,
+    started: fmtWhen(startedAt),
+    // Sorted on the instant, printed as the words. Sorting the printed form
+    // would order "1 Apr" before "1 Mar" because A comes before M.
+    // Number.isFinite guards a null or unparseable timestamp into a null, which
+    // the table's comparator sinks to the bottom in both directions rather than
+    // floating to the top of a descending sort as if it were the newest run.
+    startedMs: Number.isFinite(startedMs) ? startedMs : null,
+  };
+});
+
+const runColumns: Column[] = [
+  {
+    key: 'id',
+    header: 'Run',
+    render: (r) => `#${r.id}`,
+    href: (r) => `${h('/admin/workflows')}?run=${r.id}`,
+    sortable: true,
+    numeric: true,
+    // numeric for the ordering and the tabular figures, start-aligned because
+    // it is a reference rather than a quantity — nobody adds up run numbers.
+    align: 'start',
+    primary: true,
+  },
+  { key: 'automation', header: 'Automation', sortable: true, primary: true },
+  { key: 'trigger', header: 'Trigger', sortable: true },
+  { key: 'subject', header: 'Subject' },
+  // The one status on this page, and the reason the workflow domain exists in
+  // the dictionary: `pending` and `failed` carry the payment meaning by default.
+  { key: 'status', header: 'Outcome', status: { domain: 'workflow' }, sortable: true, primary: true },
+  { key: 'attempts', header: 'Attempts' },
+  { key: 'retry', header: 'Retry' },
+  {
+    key: 'startedMs',
+    header: 'Started',
+    render: (r) => r.started as string,
+    sortable: true,
+    numeric: true,
+    align: 'start',
+    initialDir: 'desc',
+  },
+];
+---
+
+<AdminShell
+  title="Automations"
+  requires="workflow:read"
+  intro="What the system does on the federation's behalf. Each automation is a stored definition — a trigger and an ordered list of actions — and every execution is recorded step by step, whether it worked or not."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin') },
+      { name: 'Automations', url: h('/admin/workflows') },
+    ],
+    /* No tabs: this page has one view, and a strip offering "Definitions" and
+       "Runs" would be navigation invented to fill a slot — both are on screen
+       already, and the reader needs them together to answer why a run did what
+       it did. No action bar either: nothing here installs, re-runs or switches
+       off an automation, and a header is not the place to imply otherwise. */
+  }}
+>
+  {notConfigured ? (
+    /* Not ErrorState. Nothing failed and nothing is queued: without a database
+       the engine cannot run at all, so there is no failure to retry. */
+    <p class="note">
+      The federation database is not reachable from this deployment, so this
+      page cannot say which automations are installed or what they have done.
+      Without a database the engine cannot run at all: nothing is recorded and
+      nothing is queued for retry.
+    </p>
+  ) : readFailed ? (
+    <ErrorState
+      title="The automation register could not be read."
+      safe="Nothing has been changed, and nothing was run. This page only reads: it does not start an automation, re-run one or clear a retry, so whatever the engine had queued is still queued."
+      detail={failureDetail}
+    />
+  ) : outOfScope ? (
+    <p class="note">
+      Automations belong to the federation as a whole. A definition and its runs
+      carry no state, district or dojo, so there are no rows inside a scoped
+      administrator's reach — this account holds <code>workflow:read</code>, but
+      not at national scope, and the query returns nothing for the same reason a
+      state administrator cannot read national records.
+    </p>
+  ) : (
+    <>
+      {/* ── The definitions ───────────────────────────────────────────────── */}
+      <section class="block" aria-labelledby="defs-h">
+        <h2 class="sec-h" id="defs-h">Installed automations</h2>
+
+        {automations.length === 0 ? (
+          <EmptyState
+            title="No automation is installed in this database."
+            body="Nothing runs on the federation's behalf: when a school applies, when somebody applies to teach, or when a programme is approved, every acknowledgement, task and notification is created by hand."
+            action={{ label: 'Back to operations', href: h('/admin') }}
+          >
+            {notInstalled.length > 0 && (
+              <p class="empty-more">
+                The code defines {notInstalled.length} standard automation
+                {notInstalled.length === 1 ? '' : 's'} that no row here matches —
+                {' '}{notInstalled.map((w) => w.code).join(', ')} — and
+                installStandardAutomations() is what puts them in place.
+              </p>
+            )}
+          </EmptyState>
+        ) : (
+          <>
+            {notInstalled.length > 0 && (
+              <p class="note thin">
+                Defined in the code and not installed here:
+                {' '}{notInstalled.map((w) => w.code).join(', ')}. Their triggers
+                fire and nothing happens, which is not an error — dispatch()
+                treats a trigger with no definition as a legitimate absence.
+              </p>
+            )}
+
+            {automations.map(({ current: d, superseded, activeVersions }) => {
+              const steps = stepsOf(d.definition);
+              return (
+                <article class={d.active ? 'auto' : 'auto off'}>
+                  <header class="a-head">
+                    <div>
+                      <h3 class="a-title">{d.title}</h3>
+                      <p class="a-meta">
+                        <code>{d.code}</code> · version {d.version} ·
+                        {' '}up to {attemptsOf(d.definition)} attempts
+                      </p>
+                    </div>
+                    {/* `workflow_definitions.active` is a boolean, and the two
+                        sides of it are rendered through the dictionary like any
+                        other state — domain "automation", where `inactive`
+                        reads "Switched off" and says plainly that the trigger
+                        starts nothing. The local pill this replaces used a
+                        dashed border to carry that, which is a difference
+                        nobody can name. */}
+                    <Status value={d.active ? 'active' : 'inactive'} domain="automation" />
+                  </header>
+
+                  {d.description && <p class="a-desc">{d.description}</p>}
+
+                  <p class="a-trigger">
+                    Runs when <code>{d.trigger}</code> happens.
+                    {!d.active && (
+                      activeVersions.length === 0
+                        ? <> No version of this automation is active, so that trigger currently starts nothing.</>
+                        : <> This version is not active. Version {Math.max(...activeVersions)} is, and that is the one the trigger starts.</>
+                    )}
+                  </p>
+
+                  {steps === null ? (
+                    <p class="a-broken" role="alert">
+                      This definition has no steps array. dispatch() performs
+                      nothing and reports the trigger as failed — and it writes
+                      no run row at all, so the failure shows here and nowhere in
+                      the runs below.
+                    </p>
+                  ) : (
+                    <ol class="steps">
+                      {steps.map((s) => (
+                        <li>
+                          <p class="s-action">
+                            <code>{s.action}</code>
+                            {s.optional && <span class="tag">optional</span>}
+                            {!s.registered && <span class="tag tag-bad">no handler registered</span>}
+                          </p>
+                          <p class="s-what">
+                            {s.registered
+                              ? (ACTION_TEXT[s.action] ?? 'Registered in the action registry; no description is recorded on this page for it.')
+                              : s.optional
+                                ? 'No handler is registered for this action, so the engine fails the step rather than skipping it. Because the step is optional the run carries on and the later steps still run — but nothing this step was written to do ever happens.'
+                                : 'No handler is registered for this action, so the engine fails the step rather than skipping it. Every step after it is recorded as blocked.'}
+                          </p>
+                          {s.when && <p class="s-when">Only when {s.when}.</p>}
+                          {s.optional && (
+                            <p class="s-when">
+                              If it fails the run carries on — the failure is still recorded.
+                            </p>
+                          )}
+                          {s.params.length > 0 && (
+                            <dl class="s-params">
+                              {s.params.map(([k, v]) => (
+                                <div>
+                                  <dt>{k}</dt>
+                                  <dd class={isRef(v) ? 'ref' : ''}>{describe(v)}</dd>
+                                </div>
+                              ))}
+                            </dl>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+
+                  {superseded.length > 0 && (
+                    <p class="a-old">
+                      Replaced version{superseded.length === 1 ? '' : 's'}
+                      {' '}{superseded.map((v) => `v${v}`).join(', ')} are still on
+                      record. A run that failed under an older version is retried
+                      in that version's shape, not this one.
+                    </p>
+                  )}
+                </article>
+              );
+            })}
+          </>
+        )}
+      </section>
+
+      {/* ── One run in detail ─────────────────────────────────────────────── */}
+      {selectedRunId !== null && (
+        <section class="block" aria-labelledby="run-h">
+          <h2 class="sec-h" id="run-h">Run {selectedRunId}</h2>
+
+          {!selectedRun ? (
+            <p class="note">
+              No run with that number is readable from this account.
+            </p>
+          ) : (
+            <>
+              <div class={`run-card run-${selectedRun.status}`}>
+                <p class="r-top">
+                  <code>{selectedRun.workflowCode}</code> v{selectedRun.workflowVersion}
+                  <Status value={selectedRun.status} domain="workflow" />
+                </p>
+                <dl class="r-facts">
+                  <div><dt>Trigger</dt><dd><code>{selectedRun.trigger}</code></dd></div>
+                  <div>
+                    <dt>Subject</dt>
+                    <dd>
+                      {selectedRun.subjectKind
+                        ? <>{label(selectedRun.subjectKind)} #{selectedRun.subjectId ?? '—'}</>
+                        : <span class="muted">none recorded</span>}
+                    </dd>
+                  </div>
+                  <div><dt>Attempts</dt><dd>{selectedRun.attempt} of {selectedRun.maxAttempts}</dd></div>
+                  <div><dt>Started</dt><dd>{fmtWhen(selectedRun.startedAt)}</dd></div>
+                  <div><dt>Finished</dt><dd>{fmtWhen(selectedRun.finishedAt)}</dd></div>
+                  {retryText(selectedRun) && (
+                    <div><dt>Retry</dt><dd>{retryText(selectedRun)}</dd></div>
+                  )}
+                  {/* The key the unique index enforces. It is what an operator
+                      quotes when asking why a second run never happened. */}
+                  <div><dt>Idempotency key</dt><dd><code>{selectedRun.idempotencyKey}</code></dd></div>
+                </dl>
+
+                {selectedRun.status === 'partially_failed' && (
+                  <p class="partial-warn" role="status">
+                    Partially failed means some effects already happened. A record
+                    may exist, a task may be in somebody's queue, a message may be
+                    queued for sending. Read the steps below before re-running:
+                    the retry resumes from the first step that has not yet
+                    succeeded, so anything already done is not done twice — but if
+                    you finish the remaining work by hand instead, the run stays
+                    in the retry queue until its attempts are exhausted.
+                  </p>
+                )}
+
+                {selectedRun.error && (
+                  <p class="r-error"><span class="e-label">Error</span> {selectedRun.error}</p>
+                )}
+              </div>
+
+              {selectedSteps.length === 0 ? (
+                <p class="note">
+                  No step has been recorded for this run. Either it was claimed
+                  and has not reached its first action yet, or it was skipped
+                  before any step ran — a duplicate of a run that had already
+                  succeeded, one still held by another worker, or one out of
+                  attempts.
+                </p>
+              ) : (
+                <ol class="run-steps">
+                  {selectedSteps.map((s) => (
+                    <li class={`sr sr-${s.status}`}>
+                      <p class="s-action">
+                        <span class="s-seq">{s.seq + 1}</span>
+                        <code>{s.action}</code>
+                        <span class="s-attempt">attempt {s.attempt}</span>
+                      </p>
+                      <p class="s-outcome">{stepText(String(s.status))}</p>
+                      {s.error && <p class="s-error">{s.error}</p>}
+                      <p class="s-times">
+                        {s.finishedAt ? fmtWhen(s.finishedAt) : <span class="muted">no finish time recorded</span>}
+                      </p>
+                    </li>
+                  ))}
+                </ol>
+              )}
+
+              <p class="back"><a href={h('/admin/workflows')}>Back to every run</a></p>
+            </>
+          )}
+        </section>
+      )}
+
+      {/* ── The runs ──────────────────────────────────────────────────────── */}
+      <section class="block" aria-labelledby="runs-h">
+        <h2 class="sec-h" id="runs-h">Runs</h2>
+
+        {totalRuns > 0 && (
+          <dl class="stats">
+            {RUN_STATUSES.map((s) => (
+              <div>
+                <dt>{label(s)}</dt>
+                <dd class={(s === 'failed' || s === 'partially_failed') && countOf(s) > 0 ? 'warn' : ''}>
+                  {countOf(s)}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
+
+        {anyPartial && (
+          <p class="note partial-note" role="status">
+            Some of these runs are <strong>partially failed</strong>, which is not
+            a softer word for failed. It means some effects already happened — a
+            record created, a task raised, a message queued — and the rest did
+            not. That is what to know before deciding whether to let the retry
+            finish the job or to complete the remaining steps by hand.
+          </p>
+        )}
+
+        {/* §97's one table. It orders, pages and — below 760px — turns each run
+            into a record, all of it on the server, so every one of those still
+            works with JavaScript switched off. The hand-written table and the
+            hand-written phone cards that used to sit here rendered the same
+            eight values twice and could drift apart; now they cannot.
+
+            `total` is not passed and does not need to be: the dataset is
+            complete, so the table counts what it holds. What it holds is the
+            tail of the register, which is what the note says out loud. */}
+        <Table
+          id="workflow-runs"
+          caption="Workflow runs"
+          columns={runColumns}
+          rows={runRows}
+          defaultSort={{ key: 'startedMs', dir: 'desc' }}
+          note={runs.length > 0
+            ? `The ${runs.length === RUN_LIMIT ? `${RUN_LIMIT} most recent` : String(runs.length)} run${runs.length === 1 ? '' : 's'}. Ordering and paging here move within those; the counts above are over every run the federation has recorded.`
+            : null}
+          emptyTitle="No automation has run."
+          emptyBody="Runs are created by events rather than by a clock: an institutional application submitted, a coaching application submitted, a programme approved. Nothing is scheduled, so an empty list means no such event has reached the engine — not that a job is late."
+          emptyAction={{ label: 'Back to operations', href: h('/admin') }}
+        />
+
+        {runs.length > 0 && (
+          <>
+            <p class="foot">
+              A retry does not happen at the minute shown. The sweep runs once a
+              day with the rest of the reconciliation, takes the runs whose time
+              has passed and whose attempts are not exhausted, oldest first — and
+              at most fifty in one pass, so a long backlog clears over several
+              days rather than at once. It re-reads the definition row for the
+              run's own code and version: a correction made in place is picked
+              up, and a correction installed as a new version is not, because the
+              run is retried in the shape it ran under.
+            </p>
+          </>
+        )}
+      </section>
+
+      {/* ── What the six outcomes mean ────────────────────────────────────── */}
+      <section class="block" aria-labelledby="legend-h">
+        <h2 class="sec-h" id="legend-h">What an outcome means</h2>
+        <dl class="legend">
+          <div>
+            <dt>pending</dt>
+            <dd>Created and not yet claimed by a worker.</dd>
+          </div>
+          <div>
+            <dt>running</dt>
+            <dd>Claimed and executing. A second worker cannot pick it up while it is here.</dd>
+          </div>
+          <div>
+            <dt>succeeded</dt>
+            <dd>
+              No required step failed. A step marked optional may have failed and
+              the run still reads as succeeded — the engine carries on past one —
+              so the steps are worth reading before assuming every effect
+              happened.
+            </dd>
+          </div>
+          <div class="lg-part">
+            <dt>partially failed</dt>
+            <dd>
+              Some effects already happened and the rest did not. This is the
+              state that needs a decision: a record may exist, a task may be in a
+              queue, a message may be waiting to send. A retry resumes at the
+              first step that has not yet succeeded, so nothing already done is
+              repeated.
+            </dd>
+          </div>
+          <div>
+            <dt>failed</dt>
+            <dd>
+              A required step failed and none had succeeded before it, so nothing
+              the automation intended took effect. It is not always the first
+              step: an earlier one may have been skipped by its own condition.
+            </dd>
+          </div>
+          <div>
+            <dt>skipped</dt>
+            <dd>
+              Nothing ran, because the same idempotency key had already succeeded,
+              was still in progress, or had used its attempts. This is the
+              duplicate-submission case working as intended.
+            </dd>
+          </div>
+        </dl>
+      </section>
+    </>
+  )}
+</AdminShell>
+
+<style>
+  /* global.css gives every <section> 108px of padding and a top rule, which is
+     the public site's rhythm and wrong inside the admin shell. */
+  .block { margin: 0 0 40px; padding: 0; border-top: 0; }
+  .sec-h {
+    font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 14px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  }
+
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
+  }
+  .note.thin { padding: 12px 18px; font-size: .88rem; margin: 0 0 20px; }
+  .partial-note { border-left-color: var(--red); margin: 0 0 20px; }
+  .foot { color: var(--muted); font-size: .84rem; line-height: 1.7; max-width: 66ch; margin: 16px 0 0; }
+
+  /* ── Definitions ───────────────────────────────────────────────────────── */
+  .auto { padding: 0 0 22px; margin: 0 0 22px; border-bottom: 1px solid var(--border); }
+  .auto:last-of-type { border-bottom: 0; }
+  .auto.off { opacity: .78; }
+  .a-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+  .a-title { font-family: var(--font-display); font-size: 1.08rem; margin: 0; }
+  .a-meta { margin: 4px 0 0; font-size: .8rem; color: var(--muted); }
+  .a-desc { margin: 10px 0 0; color: var(--muted); line-height: 1.7; max-width: 66ch; }
+  .a-trigger { margin: 8px 0 0; font-size: .88rem; color: var(--muted); }
+  .a-old { margin: 12px 0 0; font-size: .82rem; color: var(--muted); line-height: 1.6; max-width: 62ch; }
+  .a-broken {
+    margin: 12px 0 0; padding: 10px 14px; border-left: 3px solid var(--red);
+    background: var(--card-2); font-size: .88rem; line-height: 1.6;
+  }
+  /* Extra guidance inside EmptyState, which centres its own content. */
+  .empty-more {
+    margin: var(--space-4) 0 0;
+    font-size: var(--text-sm);
+    color: var(--muted);
+    line-height: var(--leading-normal);
+    max-width: 56ch;
+    text-align: left;
+  }
+
+  .steps { margin: 14px 0 0; padding: 0 0 0 22px; }
+  .steps li { margin: 0 0 16px; padding: 0 0 0 6px; }
+  .s-action { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .s-what { margin: 4px 0 0; font-size: .88rem; color: var(--muted); line-height: 1.65; max-width: 66ch; }
+  .s-when { margin: 4px 0 0; font-size: .84rem; color: var(--gold-2); }
+  .tag {
+    font-size: .68rem; letter-spacing: .1em; text-transform: uppercase;
+    padding: 2px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted);
+  }
+  .tag-bad { border-color: var(--red); color: var(--red); }
+
+  .s-params { margin: 8px 0 0; display: grid; gap: 3px; }
+  .s-params > div { display: grid; grid-template-columns: 16ch 1fr; gap: 12px; font-size: .82rem; }
+  .s-params dt { color: var(--muted); }
+  .s-params dd { margin: 0; }
+  .s-params dd.ref { color: var(--gold-2); }
+
+  /* ── One run ───────────────────────────────────────────────────────────── */
+  .run-card {
+    padding: 18px 20px; background: var(--card); border: 1px solid var(--border);
+    border-left: 3px solid var(--border-2); border-radius: var(--radius);
+  }
+  .run-partially_failed { border-left-color: var(--red); }
+  .run-failed { border-left-color: var(--red); }
+  .run-succeeded { border-left-color: var(--gold); }
+  .r-top { margin: 0 0 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-family: var(--font-display); }
+  .r-facts { margin: 0; display: grid; gap: 4px; }
+  .r-facts > div { display: grid; grid-template-columns: 18ch 1fr; gap: 12px; font-size: .86rem; }
+  .r-facts dt { color: var(--muted); }
+  .r-facts dd { margin: 0; word-break: break-word; }
+  .r-error { margin: 14px 0 0; font-size: .86rem; line-height: 1.6; color: var(--red); word-break: break-word; }
+  .e-label { font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; margin-right: 8px; }
+  .partial-warn {
+    margin: 14px 0 0; padding: 12px 16px; border-left: 3px solid var(--red);
+    background: var(--card-2); font-size: .88rem; line-height: 1.7; max-width: 66ch;
+  }
+
+  .run-steps { margin: 18px 0 0; padding: 0; list-style: none; }
+  .sr { padding: 12px 0 12px 14px; border-bottom: 1px solid var(--border); border-left: 2px solid transparent; }
+  .sr-failed, .sr-failed_optional { border-left-color: var(--red); }
+  .sr-blocked { border-left-color: var(--border-2); }
+  .s-seq {
+    display: inline-block; min-width: 22px; font-family: var(--font-display);
+    color: var(--muted); font-variant-numeric: tabular-nums;
+  }
+  .s-attempt { font-size: .74rem; color: var(--muted); }
+  .s-outcome { margin: 4px 0 0 28px; font-size: .88rem; }
+  .s-error { margin: 6px 0 0 28px; font-size: .84rem; color: var(--red); line-height: 1.6; word-break: break-word; }
+  .s-times { margin: 4px 0 0 28px; font-size: .76rem; color: var(--muted); }
+  .back { margin: 18px 0 0; font-size: .86rem; }
+
+  /* ── Runs ──────────────────────────────────────────────────────────────── */
+  .stats { display: flex; flex-wrap: wrap; gap: 0 34px; margin: 0 0 22px; }
+  .stats dt { font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .stats dd {
+    margin: 4px 0 0; font-family: var(--font-display); font-size: 1.6rem;
+    font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .stats .warn { color: var(--red); }
+
+  .muted { color: var(--muted); }
+  code { font-family: var(--font-accent, monospace); font-size: .9em; }
+
+  .legend { margin: 0; display: grid; gap: 10px; max-width: 74ch; }
+  .legend > div { display: grid; grid-template-columns: 16ch 1fr; gap: 16px; }
+  .legend dt { font-family: var(--font-display); font-size: .9rem; }
+  .legend dd { margin: 0; color: var(--muted); font-size: .88rem; line-height: 1.7; }
+  .legend .lg-part dt { color: var(--red); }
+
+  /* ── Phone ──────────────────────────────────────────────────────────────
+     The runs no longer need a rule here. DataTable turns each row into a
+     record below 760px on its own (§54, PART AL), which is exactly the copy of
+     this page's phone layout that this file used to maintain by hand. */
+  @media (max-width: 900px) {
+    .a-head { flex-direction: column; gap: 8px; }
+    .s-params > div, .r-facts > div, .legend > div { grid-template-columns: 1fr; gap: 0; }
+    .s-params dt, .r-facts dt, .legend dt { font-size: .78rem; }
+    .stats { gap: 0 22px; }
+    .stats dd { font-size: 1.3rem; }
+  }
+</style>

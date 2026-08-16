@@ -1,0 +1,482 @@
+---
+// The twenty-step institutional application.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// IT WORKS WITH JAVASCRIPT SWITCHED OFF
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// One step per page load, posting back to itself, with the draft held in the
+// database rather than in a client-side store. A twenty-step form that lives in
+// browser memory loses everything to a dropped connection, a closed tab or a
+// phone that decides to reclaim the page — and this form is aimed at school
+// principals on Indian mobile networks, where all three happen.
+//
+// So there is no framework, no client state and no hydration. The consequence
+// is that a step transition is a round trip, which is slower than a local one
+// and infinitely faster than filling the form in twice.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// POST-REDIRECT-GET
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Every successful POST answers with a 303 to the next step. Without it, a
+// refresh or a Back button re-submits the step, and on the final step that is a
+// second application from the same school.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE STEPS ARE NOT DEFINED HERE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// WIZARD_STEPS in src/db/applications.ts is the only definition. This page
+// renders it and the server validates against it, so the form cannot accept
+// something the server will reject — which the applicant would experience as
+// the form losing their work.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db } from '@/db';
+import { WIZARD_STEPS, TOTAL_STEPS, validateSubmission, type WizardStep } from '@/db/applications';
+import { submitApplicationRequest, statusFor } from '@/pages/api/learn/application';
+import { AUDIENCES } from '@/data/audiences';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+import * as o from '@/db/operations.schema';
+import { and, eq } from 'drizzle-orm';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const url = Astro.url;
+
+let ref = url.searchParams.get('ref');
+let accessToken = url.searchParams.get('k');
+let step = Math.min(Math.max(Number(url.searchParams.get('step')) || 1, 1), TOTAL_STEPS);
+
+let saved: Record<string, unknown> = {};
+let problems: Array<{ field: string; message: string; step: number }> = [];
+let banner: { kind: 'error' | 'notice'; text: string } | null = null;
+
+/** Load the draft this applicant is resuming, if any. */
+async function loadDraft(r: string, k: string): Promise<Record<string, unknown> | null> {
+  if (!isConfigured()) return null;
+  const rows = await db().select().from(o.institutionApplications)
+    .where(and(
+      eq(o.institutionApplications.ref, r),
+      eq(o.institutionApplications.accessToken, k)
+    )).limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  if (row.status !== 'draft') return null;
+  return (row.payload ?? {}) as Record<string, unknown>;
+}
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  ref = (form.get('ref') as string) || ref;
+  accessToken = (form.get('k') as string) || accessToken;
+  const submittedStep = Math.min(Math.max(Number(form.get('step')) || 1, 1), TOTAL_STEPS);
+  const intent = String(form.get('intent') || 'next');
+
+  // Merge onto the stored draft rather than replacing it. The form only carries
+  // this step's fields, so posting it as the whole payload would erase every
+  // answer given on the nineteen other steps.
+  const existing = ref && accessToken ? await loadDraft(ref, accessToken) : null;
+  const merged: Record<string, unknown> = { ...(existing ?? {}) };
+
+  const stepDef = WIZARD_STEPS.find((s) => s.step === submittedStep);
+  for (const field of stepDef?.fields ?? []) {
+    if (field.kind === 'multiselect') {
+      merged[field.name] = form.getAll(field.name).map(String).filter(Boolean);
+    } else if (field.kind === 'boolean') {
+      // An unchecked box sends nothing at all, so absence means false — but
+      // only for a box that was actually on this page. That is why this loop
+      // walks the step definition rather than the submitted keys.
+      merged[field.name] = form.get(field.name) != null;
+    } else {
+      const v = form.get(field.name);
+      if (v != null) merged[field.name] = String(v);
+    }
+  }
+  // Carried on the first step only; it seeds the institution type from the
+  // audience page the applicant arrived from.
+  const audienceHint = form.get('audience');
+  if (audienceHint && !merged.institutionType) merged.institutionType = String(audienceHint);
+
+  const outcome = await submitApplicationRequest(Astro.request, {
+    intent: intent === 'submit' ? 'submit' : 'draft',
+    payload: merged,
+    ref,
+    accessToken,
+    stepReached: submittedStep,
+    landingPath: url.pathname,
+  });
+
+  if (outcome.kind === 'draft_saved') {
+    const next = intent === 'back'
+      ? Math.max(1, submittedStep - 1)
+      : Math.min(TOTAL_STEPS, submittedStep + 1);
+    return Astro.redirect(
+      `${h('/learn/apply')}?ref=${encodeURIComponent(outcome.ref)}&k=${encodeURIComponent(outcome.accessToken)}&step=${next}`,
+      303
+    );
+  }
+
+  if (outcome.kind === 'submitted') {
+    return Astro.redirect(h(outcome.statusHref) + '&sent=1', 303);
+  }
+
+  // Anything else: stay on the step and say what happened.
+  saved = merged;
+  step = submittedStep;
+  if (outcome.kind === 'invalid') {
+    problems = outcome.problems;
+    // Send them to the earliest step that has a problem, so they are not asked
+    // to hunt through twenty pages for the one that is wrong.
+    const earliest = problems.reduce((min, p) => Math.min(min, p.step), TOTAL_STEPS);
+    if (Number.isFinite(earliest) && earliest < step) step = earliest;
+    banner = { kind: 'error', text: outcome.message };
+  } else {
+    banner = { kind: 'error', text: outcome.message };
+  }
+} else if (ref && accessToken) {
+  const existing = await loadDraft(ref, accessToken);
+  if (existing) {
+    saved = existing;
+  } else {
+    banner = {
+      kind: 'notice',
+      text: 'That link does not match a draft that is still open. It may already have been sent to MMAKF. Starting a new application below.',
+    };
+    ref = null;
+    accessToken = null;
+    step = 1;
+  }
+}
+
+// An audience carried in from /learn/schools etc.
+const audienceParam = url.searchParams.get('audience');
+if (audienceParam && !saved.institutionType) {
+  const known = AUDIENCES.find((a) => a.kind === audienceParam);
+  if (known) saved.institutionType = known.kind;
+}
+
+const current: WizardStep = WIZARD_STEPS.find((s) => s.step === step) ?? WIZARD_STEPS[0];
+const problemFor = (name: string) => problems.find((p) => p.field === name)?.message ?? null;
+const isReview = current.key === 'review';
+const isSubmit = current.key === 'submit';
+const outstanding = isSubmit || isReview ? validateSubmission(saved) : [];
+
+const pct = Math.round((step / TOTAL_STEPS) * 100);
+const answered = WIZARD_STEPS.flatMap((s) => s.fields)
+  .filter((f) => {
+    const v = saved[f.name];
+    return v !== undefined && v !== null && String(v).trim() !== '' && !(Array.isArray(v) && v.length === 0);
+  });
+
+function displayValue(name: string): string {
+  const v = saved[name];
+  if (v === undefined || v === null || v === '') return '—';
+  if (Array.isArray(v)) return v.length ? v.join(', ') : '—';
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  return String(v);
+}
+---
+
+<Base
+  title={`Apply — step ${step} of ${TOTAL_STEPS} — MMAKF`}
+  description="Apply for an MMAKF training programme for your school, company, university, government body or community organisation."
+>
+  <div class="wiz">
+    <div class="container wiz-inner">
+
+      <header class="wiz-head">
+        <p class="eyebrow">MMAKF training application</p>
+        <div class="wiz-progress" role="group" aria-label={`Step ${step} of ${TOTAL_STEPS}`}>
+          <div class="wiz-bar"><span style={`width:${pct}%`}></span></div>
+          <p class="wiz-count">
+            Step <strong>{step}</strong> of {TOTAL_STEPS}
+            {ref && <> · reference <code>{ref}</code></>}
+          </p>
+        </div>
+        {ref && (
+          <p class="wiz-saved">
+            Saved. You can close this and come back to it —
+            {' '}<a href={`${h('/learn/apply')}?ref=${encodeURIComponent(ref)}&k=${encodeURIComponent(accessToken ?? '')}&step=${step}`}>keep this link</a>.
+          </p>
+        )}
+      </header>
+
+      {banner && (
+        <div class={`wiz-banner wiz-banner-${banner.kind}`} role={banner.kind === 'error' ? 'alert' : 'status'}>
+          {banner.text}
+        </div>
+      )}
+
+      {!isConfigured() && (
+        <div class="wiz-banner wiz-banner-error" role="alert">
+          Applications cannot be received at the moment: the federation's database is
+          not reachable from this deployment. Nothing you enter here will be stored.
+          Please write to <a href="mailto:admin@mmakf.in">admin@mmakf.in</a>.
+        </div>
+      )}
+
+      <form method="POST" class="wiz-form" novalidate>
+        <input type="hidden" name="step" value={step} />
+        {ref && <input type="hidden" name="ref" value={ref} />}
+        {accessToken && <input type="hidden" name="k" value={accessToken} />}
+        {audienceParam && <input type="hidden" name="audience" value={audienceParam} />}
+
+        <h1 class="display-2 wiz-title">{current.title}</h1>
+        {current.intro && <p class="wiz-intro">{current.intro}</p>}
+
+        {isReview && (
+          <section class="wiz-review">
+            <p class="wiz-intro">
+              Check what you have entered. Use the step links to change anything.
+            </p>
+            {WIZARD_STEPS.filter((s) => s.fields.length > 0).map((s) => (
+              <div class="rev-block">
+                <h2 class="rev-h">
+                  <span class="rev-n">{String(s.step).padStart(2, '0')}</span>
+                  {s.title}
+                  <a class="rev-edit" href={`${h('/learn/apply')}?ref=${encodeURIComponent(ref ?? '')}&k=${encodeURIComponent(accessToken ?? '')}&step=${s.step}`}>Change</a>
+                </h2>
+                <dl class="rev-dl">
+                  {s.fields.map((f) => (
+                    <div class="rev-row">
+                      <dt>{f.label}</dt>
+                      <dd class={displayValue(f.name) === '—' ? 'rev-empty' : ''}>{displayValue(f.name)}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            ))}
+          </section>
+        )}
+
+        {isSubmit && (
+          <section class="wiz-submit">
+            {outstanding.length > 0 ? (
+              <div class="wiz-banner wiz-banner-error" role="alert">
+                <p><strong>{outstanding.length} answer{outstanding.length === 1 ? '' : 's'} still needed.</strong></p>
+                <ul>
+                  {outstanding.map((p) => (
+                    <li>
+                      <a href={`${h('/learn/apply')}?ref=${encodeURIComponent(ref ?? '')}&k=${encodeURIComponent(accessToken ?? '')}&step=${p.step}`}>
+                        {p.message}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <>
+                <p class="wiz-intro">
+                  {answered.length} answer{answered.length === 1 ? '' : 's'} recorded. Sending this
+                  creates your application at MMAKF and gives you a reference and
+                  a page showing its progress.
+                </p>
+                <p class="wiz-note">
+                  MMAKF has not published a standard response time, so nothing here
+                  promises one. Your status page shows where the application has
+                  actually got to.
+                </p>
+              </>
+            )}
+          </section>
+        )}
+
+        {current.fields.length > 0 && (
+          <div class="wiz-fields">
+            {current.fields.map((f) => {
+              const err = problemFor(f.name);
+              const value = saved[f.name];
+              const id = `f-${f.name}`;
+              return (
+                <div class={`wiz-field ${err ? 'has-error' : ''}`}>
+                  <label class="input-label" for={id}>
+                    {f.label}
+                    {f.required && <span class="req" aria-hidden="true"> *</span>}
+                    {f.required && <span class="sr-only"> (required)</span>}
+                  </label>
+                  {f.help && <p class="wiz-help" id={`${id}-help`}>{f.help}</p>}
+
+                  {f.kind === 'textarea' && (
+                    <textarea class="input" id={id} name={f.name} rows="5"
+                      aria-describedby={f.help ? `${id}-help` : undefined}
+                      aria-invalid={err ? 'true' : undefined}>{value ? String(value) : ''}</textarea>
+                  )}
+
+                  {f.kind === 'select' && (
+                    <select class="input" id={id} name={f.name}
+                      aria-describedby={f.help ? `${id}-help` : undefined}
+                      aria-invalid={err ? 'true' : undefined}>
+                      <option value="">Choose…</option>
+                      {(f.options ?? []).map((opt) => (
+                        <option value={opt.value} selected={String(value) === opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  )}
+
+                  {f.kind === 'multiselect' && (
+                    <fieldset class="wiz-checks">
+                      <legend class="sr-only">{f.label}</legend>
+                      {(f.options ?? []).map((opt) => {
+                        const arr = Array.isArray(value) ? value.map(String) : [];
+                        return (
+                          <label class="wiz-check">
+                            <input type="checkbox" name={f.name} value={opt.value} checked={arr.includes(opt.value)} />
+                            <span>{opt.label}</span>
+                          </label>
+                        );
+                      })}
+                    </fieldset>
+                  )}
+
+                  {f.kind === 'boolean' && (
+                    <label class="wiz-check wiz-check-single">
+                      <input type="checkbox" id={id} name={f.name} checked={value === true || value === 'true'} />
+                      <span>Yes</span>
+                    </label>
+                  )}
+
+                  {['text', 'number', 'email', 'tel', 'date'].includes(f.kind) && (
+                    <input
+                      class="input" id={id} name={f.name}
+                      type={f.kind === 'number' ? 'number' : f.kind}
+                      value={value != null ? String(value) : ''}
+                      min={f.min} max={f.max}
+                      inputmode={f.kind === 'number' ? 'numeric' : f.kind === 'tel' ? 'tel' : undefined}
+                      autocomplete={
+                        f.name === 'contactEmail' ? 'email'
+                        : f.name === 'contactPhone' ? 'tel'
+                        : f.name === 'contactName' ? 'name'
+                        : f.name === 'city' ? 'address-level2'
+                        : f.name === 'postcode' ? 'postal-code'
+                        : undefined
+                      }
+                      aria-describedby={f.help ? `${id}-help` : undefined}
+                      aria-invalid={err ? 'true' : undefined}
+                    />
+                  )}
+
+                  {err && <p class="wiz-error" role="alert">{err}</p>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div class="wiz-nav">
+          {step > 1 && (
+            <button class="btn btn-ghost" type="submit" name="intent" value="back">Back</button>
+          )}
+          {isSubmit ? (
+            <button class="btn btn-primary" type="submit" name="intent" value="submit" disabled={outstanding.length > 0}>
+              Send to MMAKF
+            </button>
+          ) : (
+            <button class="btn btn-primary" type="submit" name="intent" value="next">
+              {step === TOTAL_STEPS - 1 ? 'Review and send' : 'Save and continue'}
+            </button>
+          )}
+        </div>
+      </form>
+
+      <p class="wiz-foot">
+        Difficulty with this form? Write to <a href="mailto:admin@mmakf.in">admin@mmakf.in</a>
+        {' '}quoting {ref ? <code>{ref}</code> : 'the name of your institution'}.
+      </p>
+    </div>
+  </div>
+</Base>
+
+<style>
+  .wiz { padding: 92px 0 80px; }
+  .wiz-inner { max-width: 46rem; }
+
+  .wiz-head { margin-bottom: 28px; }
+  .wiz-progress { margin-top: 14px; }
+  .wiz-bar {
+    height: 3px; background: var(--border); border-radius: 2px; overflow: hidden;
+  }
+  .wiz-bar span {
+    display: block; height: 100%; background: var(--gold);
+    transition: width .3s ease;
+  }
+  .wiz-count { margin: 10px 0 0; font-size: .84rem; color: var(--muted); }
+  .wiz-count code, .wiz-foot code {
+    font-family: var(--font-accent, monospace); font-size: .95em;
+    background: var(--bg-2); padding: 1px 6px; border-radius: 4px;
+  }
+  .wiz-saved { margin: 8px 0 0; font-size: .82rem; color: var(--muted); }
+
+  .wiz-banner {
+    margin: 20px 0; padding: 16px 18px; border-radius: var(--radius);
+    border-left: 3px solid var(--gold); background: var(--card); line-height: 1.6;
+  }
+  .wiz-banner-error { border-left-color: var(--red); }
+  .wiz-banner ul { margin: 10px 0 0; padding-left: 18px; }
+  .wiz-banner li { margin: 4px 0; }
+
+  .wiz-title { margin: 26px 0 0; }
+  .wiz-intro { margin: 12px 0 0; color: var(--muted); line-height: 1.65; max-width: 56ch; }
+  .wiz-note {
+    margin: 16px 0 0; padding: 14px 18px; border-left: 2px solid var(--gold);
+    background: var(--bg-2); color: var(--muted); line-height: 1.6; font-size: .9rem;
+  }
+
+  .wiz-fields { margin-top: 30px; display: flex; flex-direction: column; gap: 24px; }
+  .wiz-field.has-error .input { border-color: var(--red); }
+  .wiz-help { margin: 4px 0 8px; font-size: .84rem; color: var(--muted); line-height: 1.55; }
+  .wiz-error { margin: 8px 0 0; font-size: .86rem; color: var(--red); }
+  .req { color: var(--red); }
+
+  .wiz-checks { border: 0; padding: 0; margin: 6px 0 0; display: flex; flex-wrap: wrap; gap: 10px; }
+  .wiz-check {
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 11px 15px; border: 1px solid var(--control-border);
+    border-radius: var(--radius); cursor: pointer; line-height: 1.3;
+    /* 44px minimum target — this form is used on phones more than anywhere. */
+    min-height: 44px;
+  }
+  .wiz-check:hover { border-color: var(--gold); }
+  .wiz-check input { width: 17px; height: 17px; accent-color: var(--gold-2); }
+  .wiz-check-single { margin-top: 6px; }
+
+  .wiz-review { margin-top: 26px; }
+  .rev-block { margin-top: 26px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .rev-h {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    font-size: 1rem; margin: 0 0 10px;
+  }
+  .rev-n { color: var(--gold-dim); font-variant-numeric: tabular-nums; }
+  .rev-edit { margin-left: auto; font-size: .84rem; }
+  .rev-dl { margin: 0; }
+  .rev-row {
+    display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+    gap: 4px 18px; padding: 7px 0; border-bottom: 1px solid var(--border);
+  }
+  .rev-row dt { color: var(--muted); font-size: .88rem; }
+  .rev-row dd { margin: 0; }
+  .rev-empty { color: var(--muted-2, var(--muted)); }
+
+  .wiz-nav {
+    display: flex; gap: 12px; margin-top: 34px;
+    padding-top: 24px; border-top: 1px solid var(--border);
+  }
+  .wiz-nav .btn-primary { margin-left: auto; }
+  .wiz-nav .btn[disabled] { opacity: .5; cursor: not-allowed; }
+
+  .wiz-foot { margin-top: 32px; font-size: .86rem; color: var(--muted); }
+
+  @media (max-width: 640px) {
+    .wiz { padding: 76px 0 60px; }
+    /* Stacked, not squeezed: a two-column definition list at 360px gives each
+       side about fifteen characters. */
+    .rev-row { grid-template-columns: 1fr; gap: 2px; }
+    .rev-row dt { font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; }
+    .wiz-nav { flex-direction: column-reverse; }
+    .wiz-nav .btn { width: 100%; text-align: center; margin-left: 0; }
+    .wiz-check { flex: 1 1 100%; }
+  }
+</style>
