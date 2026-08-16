@@ -4,6 +4,7 @@
 // The test is what stops it coming back.
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { isSameOrigin, isTrustedHost, isJsonContentType } from '../src/lib/origin';
 import { inScope, scopeList, scopeProblem, scopeLabel, type UnitScope } from '../src/lib/unit-scope';
 import { PRIVATE_KEYS, PUBLIC_KEYS, KEYS } from '../src/data/seed';
@@ -233,5 +234,33 @@ describe('a POST that crossed the apex-to-www redirect', () => {
     }
     expect(isTrustedHost('mmakf.in.evil.example')).toBe(false);
     expect(isTrustedHost('notmmakf.in')).toBe(false);
+  });
+});
+
+// ── The subdomains that resolved, returned 200, and served the wrong site ──
+describe('the surface is decided from the host the visitor typed', () => {
+  it('reads x-forwarded-host, because behind a proxy url.host is not it', () => {
+    // THE LIVE BUG. learn.mmakf.in and admin.mmakf.in each resolved and
+    // returned 200 — and served the PUBLIC HOMEPAGE. Behind Vercel's proxy
+    // `url.host` is the internal invocation host, so surfaceForHost() saw a
+    // name on no list and fell back to 'public'. The surface router had never
+    // run in production, and nothing failed loudly enough to say so.
+    const src = readFileSync('src/middleware.ts', 'utf8');
+    expect(src, 'the surface is still decided from url.host alone')
+      .toMatch(/x-forwarded-host/);
+    // And the fallback stays, so a direct request with no proxy still works.
+    expect(src).toMatch(/x-forwarded-host'\)\s*\|\|\s*url\.host/);
+  });
+
+  it('does NOT use the forwarded host for the CSRF comparison', () => {
+    // The header is forgeable by anything speaking directly to the origin.
+    // Deciding "is this same-origin?" from a value the caller supplies would
+    // answer the question with the attacker's own input.
+    const src = readFileSync('src/middleware.ts', 'utf8');
+    const csrfLine = src.split('\n').find((l) => l.includes('isSameOrigin('));
+    expect(csrfLine, 'no isSameOrigin call found — has the check been removed?').toBeTruthy();
+    expect(csrfLine, 'the CSRF check is using the forgeable forwarded host')
+      .not.toMatch(/publicHost/);
+    expect(csrfLine).toMatch(/url\.host/);
   });
 });

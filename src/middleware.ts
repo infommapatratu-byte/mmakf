@@ -59,7 +59,24 @@ export const onRequest = defineMiddleware(async (context, next) => {
   // Decided from the Host header and put on locals, so a page never has to
   // parse the host itself. See src/lib/surface.ts for why the three hosts share
   // one application rather than being three deployments.
-  const surface = surfaceForHost(url.host);
+  // THE HOST THE VISITOR TYPED, NOT THE ONE THE FUNCTION WAS INVOKED ON.
+  //
+  // A LIVE BUG. learn.mmakf.in and admin.mmakf.in resolved, returned 200, and
+  // served the PUBLIC HOMEPAGE — because behind Vercel's proxy `url.host` is
+  // the internal invocation host, so surfaceForHost() saw something that was on
+  // no list and fell back to 'public' for every request on every subdomain. The
+  // surface router had never actually run in production.
+  //
+  // `x-forwarded-host` is set by the edge and is the public name.
+  //
+  // IT IS USED FOR ROUTING ONLY, NEVER FOR THE CSRF COMPARISON BELOW. The
+  // header is forgeable by anything speaking directly to the origin, and
+  // deciding "is this request same-origin?" from a value the caller supplies
+  // would answer the question with the attacker's own input. Choosing which
+  // navigation to render from it is harmless: the worst a forged value achieves
+  // is the wrong menu, and every page re-checks its own authority regardless.
+  const publicHost = request.headers.get('x-forwarded-host') || url.host;
+  const surface = surfaceForHost(publicHost);
   context.locals.surface = surface;
 
   const target = rewriteTarget(surface, url.pathname);
