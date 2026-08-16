@@ -14,19 +14,50 @@ HTTP request. Nothing is marked BUILT because a page or a table exists.
 
 ## Numbers
 
-Verified on 14 August 2026 by running the commands, not by reading a previous
-version of this file. The counts move as work lands — this table was found
-stale once already, quoting a figure taken before two test files were added —
-so re-run the commands before citing a number from it.
+Re-counted on 16 August 2026 by running the commands, not by reading a previous
+version of this file.
+
+**This table has now been found stale twice.** The second time, an independent
+audit re-counted and found it claiming 73 test files against 77 actual, along
+with eight other stale or silent entries. That is worth recording rather than
+quietly correcting, because it is the specific failure this document exists to
+prevent: a status file that is wrong is worse than no status file, since it is
+believed.
+
+Every figure below came from one of these, run just now:
+
+```
+ls tests/*.test.ts | wc -l          79 files
+npx vitest run                      2,670 passing
+ls drizzle/*.sql | wc -l            12 migrations
+grep -c 'CREATE TABLE' drizzle/*    144 tables
+find src/pages -type f | wc -l      130 route files
+```
+
+Re-run them before citing a number from here.
+
+## PRODUCTION STATE, WHICH IS NOT THE SAME AS THIS REPOSITORY
+
+| | |
+|---|---|
+| Production commit | `eee2319`, verified from `/api/health` on all three hosts |
+| `www.mmakf.in` | serves the public federation ✅ |
+| `learn.mmakf.in` | serves the training platform ✅ (served the public homepage until 16 Aug) |
+| `admin.mmakf.in` | serves the operations console ✅ (same) |
+| Database | **`not_configured`** — the runtime receives no `DATABASE_URL` |
+| Migrations in production | **NONE APPLIED.** No table exists in the production database. |
+
+The gap between the two tables above is the honest state of this project: the
+repository is well ahead of what is running.
 
 | | |
 |---|---|
 | Database tables | **144** (117 before this session) |
-| Migrations | 12, all applied through the production runner in CI |
-| Tests | **2,468** across **73** files, all passing (`npx vitest run`) |
-| Route files under `src/pages` | 123 |
+| Migrations | 12 files. **Applied to the test database in CI. NOT applied to production** — see below. |
+| Tests | **2,670** across **79** files, all passing (`npx vitest run`) |
+| Route files under `src/pages` | 130 |
 | Admin surfaces | 27 |
-| Statuses in the federation dictionary | **166**, across 8 tones |
+| Statuses in the federation dictionary | **170**, across 8 tones |
 | `npx astro build` | succeeds |
 | Live 404s from links the site publishes | **0** (was 2) |
 
