@@ -259,7 +259,7 @@ const failureColumns: Column[] = [
               reinforces it. */}
           {transports.map((t) => (
             <div class="nd-t">
-              <dt>{humanise(t.channel)}</dt>
+              <dt>{channelLabel(t.channel)}</dt>
               <dd>
                 <span class:list={['nd-mark', t.configured ? 'nd-on' : 'nd-off']}>
                   {t.configured ? 'Configured' : 'Not configured'}
@@ -307,7 +307,7 @@ const failureColumns: Column[] = [
                   {b.rows.map((r) => (
                     <li>
                       <Status value={r.status} domain="notification" size="sm" />
-                      <span class="nd-channel">{humanise(String(r.channel ?? ''))}</span>
+                      <span class="nd-channel">{channelLabel(r.channel)}</span>
                       <span class="nd-n">{r.n.toLocaleString('en-IN')}</span>
                     </li>
                   ))}
@@ -320,7 +320,7 @@ const failureColumns: Column[] = [
             <p class="nd-oldest">
               The oldest message still waiting was queued on <strong>{oldest}</strong>.
               {unconfiguredChannels.length > 0 && (
-                <> That is the figure to watch: {unconfiguredChannels.map((c) => humanise(c)).join(', ')} {unconfiguredChannels.length === 1 ? 'has' : 'have'} no
+                <> That is the figure to watch: {unconfiguredChannels.map((c) => channelLabel(c)).join(', ')} {unconfiguredChannels.length === 1 ? 'has' : 'have'} no
                 provider configured, so anything queued for {unconfiguredChannels.length === 1 ? 'it' : 'them'} waits rather than sending.</>
               )}
             </p>
