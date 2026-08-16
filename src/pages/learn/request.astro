@@ -44,12 +44,17 @@ const ROUTES = [
     label: a.navLabel,
     line: a.standfirst,
     href: a.kind === 'individual'
-      ? '/training/estimate'
+      ? '/start/individual'
       : `/learn/apply?audience=${a.kind}`,
-    // Individuals get the estimator first: it either returns the applicable
-    // fee or says a quotation is needed, which is a shorter path than a
-    // twenty-step institutional form they do not need.
-    cta: a.kind === 'individual' ? 'Check the fee' : 'Start an application',
+    // WAS '/training/estimate'. The estimator computes a fee and records
+    // nothing, and because MMAKF has published no fee rules it can only ever
+    // answer "this needs a quotation" — so somebody who came here to ask for
+    // training was handed a calculator and then left with nowhere to ask. The
+    // individual intake is the equivalent of the twenty-step institutional
+    // form: shorter, because an individual is asked far less, and it ends in a
+    // record rather than a figure. The estimator is still linked from
+    // /training for people who only want the number.
+    cta: a.kind === 'individual' ? 'Start an enquiry' : 'Start an application',
   })),
   {
     label: 'To teach for MMAKF',

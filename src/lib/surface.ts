@@ -225,6 +225,14 @@ export const PUBLIC_NAV: NavItem[] = [
   {
     href: '/training', label: 'Training', primary: true,
     children: [
+      // /start is the first question of the intake — the page that decides
+      // which process runs and hands the visitor to it. It was built and then
+      // reachable from nowhere: no menu, no call to action, no page linked it,
+      // and the only file that named it was the sitemap section list. A front
+      // door with no handle on it is the same finding as the dead-end form it
+      // replaced, so it is listed first, above the pages that describe the
+      // training rather than begin it.
+      { href: '/start', label: 'Begin an engagement' },
       { href: '/training', label: 'Training and engagement' },
       { href: '/karate-for-schools', label: 'For schools' },
       { href: '/karate-for-corporates', label: 'For corporates' },

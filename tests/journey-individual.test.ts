@@ -18,13 +18,15 @@
 // deliberate act somebody takes later, through identifyLead().
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// AND WHERE IT STOPS
+// AND HOW IT IS REACHED
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// The second half of this file asserts the boundary. The engine below is real
-// and works; the public enquiry form on ten pages does not reach it. That gap
-// is asserted here rather than implied, so it cannot be forgotten and cannot be
-// closed silently.
+// The second half of this file used to assert a boundary: the engine was real
+// and nothing on the website reached it. /start/individual closed that gap, so
+// the second half is now the positive assertion the old one asked for — the
+// page, the handler, the intake, the workflow, the task, the acknowledgement,
+// the event and the audit row, checked as a chain rather than as an import
+// graph. The import graph is what let the old test pass while being wrong.
 //
 // Every name, address and figure is a TEST FIXTURE on the reserved .example
 // domain. No MMAKF fee, standard or member is invented.
@@ -44,7 +46,7 @@ import {
   captureLead, submitTrainingRequest, identifyLead, leadDetail, leadPipeline,
   normalisePhone, isEngagementError, AUDIENCES,
 } from '../src/db/engagement';
-import { installStandardAutomations } from '../src/db/automations';
+import { installStandardAutomations, submitIndividualEnquiryWithAutomation } from '../src/db/automations';
 import { systemIntakeContext, WIZARD_STEPS } from '../src/db/applications';
 import type { Principal } from '../src/lib/rbac';
 
@@ -264,68 +266,173 @@ describe('the same person coming back is the same conversation', () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// WHERE THE INDIVIDUAL CHAIN STOPS
+// THE FRONT DOOR, AND WHAT IT SETS OFF
 // ════════════════════════════════════════════════════════════════════════════
+//
+// This block used to assert the opposite of everything below it. It was written
+// when the engine above worked and nothing on the website reached it, and it
+// said so deliberately — "when an individual intake is wired, this test fails
+// and has to be rewritten as the positive assertion."
+//
+// It did not fail, because it tested the wrong thing: it looked for a DIRECT
+// import of captureLead() under src/pages, and the intake reaches it one hop
+// further away, through submitIndividualEnquiry() in src/db/applications.ts.
+// So the suite went on asserting that the individual had no front door for as
+// long as the front door existed. These are the positive assertions it asked
+// for, and they are made against the chain rather than against an import graph.
 
-describe('what the individual path does NOT do', () => {
-  it('runs no workflow and creates no task — no automation is triggered by a lead', async () => {
-    // There is no INDIVIDUAL_ENQUIRY trigger. captureLead() is a service call
-    // and nothing dispatches from it, so an individual enquiry reaches an
-    // administrator only if somebody opens the lead pipeline and looks.
+describe('the individual intake runs the whole chain', () => {
+  // A SECOND enquiry, from a different person, submitted the way the page
+  // submits it. The fixture above stays a bare captureLead() call, because the
+  // first block is about what those two service functions do on their own.
+  let wired: Awaited<ReturnType<typeof submitIndividualEnquiryWithAutomation>>;
+
+  beforeAll(async () => {
+    wired = await submitIndividualEnquiryWithAutomation(db, {
+      answers: {
+        participantIs: 'child',
+        ageBand: '7-9',
+        guardianRelationship: 'parent',
+        guardianConfirmed: true,
+        experience: 'none',
+        objectives: ['shotokan', 'childrens'],
+        mode: 'at_dojo',
+        city: 'Ramgarh',
+        stateName: 'Jharkhand',
+        preferredArea: 'Near the station',
+        sessionsPerWeek: '2',
+        contactName: 'Sunita Devi',
+        contactEmail: 'sunita.devi@example.com',
+        contactPhone: '+91 98765 00123',
+      },
+      formNonce: 'fixture-nonce-0001',
+      leadSource: 'direct',
+      landingPath: '/start/individual',
+    });
+  });
+
+  it('records the enquiry and returns the reference the page shows', () => {
+    expect(wired.ref).toMatch(/^MMAKF-REQ-\d{4}-\d{6}$/);
+    expect(wired.alreadyRecorded).toBe(false);
+    expect(wired.involvesMinor).toBe(true);
+    expect(wired.leadId).toBeTruthy();
+  });
+
+  it('STILL creates no institution and no person — the rule this file guards', async () => {
+    // The whole point of wiring the front door was to reach captureLead(), not
+    // to start manufacturing organisations. Re-asserted after the automation
+    // because an automation is exactly where such a row would appear.
+    expect(await db.select().from(e.institutions)).toEqual([]);
+
+    // Asserted on THIS lead rather than on an empty persons table: a test
+    // further up promotes the first enquirer through identifyLead(), which is
+    // the deliberate act that is allowed to create a person. A bare
+    // `persons === []` here would be asserting that the deliberate act had not
+    // happened, which is a different claim and not this one.
+    const [row] = await db.select().from(e.leads).where(eq(e.leads.id, wired.leadId!));
+    expect(row.personId).toBeNull();
+    expect(row.institutionId).toBeNull();
+  });
+
+  it('runs the workflow and puts the reply in somebody’s queue', async () => {
     const runs = await db.select().from(o.workflowRuns);
-    expect(runs).toEqual([]);
+    expect(runs.length).toBeGreaterThan(0);
 
     const tasks = await db.select().from(o.tasks);
-    expect(tasks).toEqual([]);
+    const answering = tasks.filter((t: any) => t.subjectKind === 'training_request');
+    expect(answering.length).toBeGreaterThan(0);
+
+    // NULL, because MMAKF has published no turnaround. If a due date ever
+    // appears here it was invented, and the federation would then report itself
+    // as late against a standard it never set.
+    expect(answering[0].dueAt).toBeNull();
   });
 
-  it('queues no acknowledgement to the person who enquired', async () => {
-    // The school path acknowledges. This one does not — the individual is told
-    // nothing by the system, and only a human reply reaches them.
+  it('queues the acknowledgement to the adult who enquired', async () => {
     const msgs = await db.select().from(g.notifications);
-    expect(msgs).toEqual([]);
+    expect(msgs.length).toBeGreaterThan(0);
   });
 
-  it('publishes no domain event', async () => {
+  it('publishes the domain event', async () => {
     const events = await db.select().from(g.domainEvents);
-    expect(events).toEqual([]);
+    expect(events.some((ev: any) => ev.eventType === 'TRAINING_ENQUIRY_SUBMITTED')).toBe(true);
   });
 
-  it('WRITES NO AUDIT ROW for the lead it created', async () => {
-    // A real gap, asserted so it is a fact rather than an assumption.
-    //
-    // resolveInstitution() writes an audit row when it creates an institution;
-    // captureLead() and submitTrainingRequest() write none. The lead's own
-    // activity trail records that the enquiry happened, but audit_events — the
-    // table the federation reads when it asks "who created this record and on
-    // whose authority?" — has nothing about this person at all.
+  it('carries nothing about the child in the event payload', async () => {
+    // An event about a nine-year-old must not itself be a fact about a
+    // nine-year-old. The feed carries the request identifier and no answers.
+    const events = await db.select().from(g.domainEvents);
+    const ev = events.find((x: any) => x.eventType === 'TRAINING_ENQUIRY_SUBMITTED')!;
+    const payload = JSON.stringify(ev.payload ?? {});
+    expect(payload).not.toMatch(/Sunita|7-9|sunita\.devi/);
+  });
+
+  it('WRITES THE AUDIT ROW — the gap this block used to assert', async () => {
+    // captureLead() and submitTrainingRequest() still write none of their own.
+    // submitIndividualEnquiry() writes it, which is why the intake had to be a
+    // sibling in src/db/applications.ts rather than two service calls made from
+    // a page.
+    // `entityId` is TEXT on audit_events — the table records identifiers from
+    // tables whose keys are not all integers — so the comparison is made as a
+    // string. Comparing it as a number finds nothing and passes an emptiness
+    // assertion, which is how a test like this quietly stops testing.
     const rows = await db.select().from(s.auditEvents);
-    const aboutLeads = rows.filter((r: any) =>
-      r.entityType === 'lead' || r.entityType === 'training_request');
-    expect(aboutLeads).toEqual([]);
+    const aboutRequest = rows.filter((r: any) =>
+      r.entityType === 'training_request' && r.entityId === String(wired.requestId));
+    expect(aboutRequest.length).toBe(1);
 
-    // The activity trail is what exists instead, and it is not attributable:
-    // the row records what happened, not who was acting.
-    const acts = await db.select().from(e.leadActivities)
-      .where(and(eq(e.leadActivities.leadId, lead.leadId), eq(e.leadActivities.kind, 'enquiry')));
-    expect(acts.length).toBeGreaterThan(0);
-    expect(acts[0].byUserId).toBeNull();
+    // The summary, not the answers. An audit row is read by more people than
+    // the record it describes.
+    const value = JSON.stringify(aboutRequest[0].newValue ?? {});
+    expect(value).not.toMatch(/sunita\.devi|98765 00123/);
   });
 
-  it('NO PUBLIC SURFACE REACHES captureLead() — the individual has no front door', () => {
-    // The boundary the federation raised, pinned as an assertion rather than
-    // described in a comment.
-    //
-    // The engine above works. Nothing on the website reaches it for a person:
-    // the retired /api/enroll answers 410 and touches no database, the CTA on
-    // the public pages carries no form at all, and /training/individual is
-    // editorial. An individual who wants to train can read, and can write to an
-    // address. The system records nothing.
-    //
-    // When an individual intake is wired — through captureLead() or a sibling
-    // of submitApplication(), never a parallel implementation — this test fails
-    // and has to be rewritten as the positive assertion. That is the point of
-    // writing it down.
+  it('a resent form folds onto the same enquiry and dispatches nothing twice', async () => {
+    const before = await db.select().from(g.notifications);
+
+    const again = await submitIndividualEnquiryWithAutomation(db, {
+      answers: {
+        participantIs: 'child', ageBand: '7-9',
+        guardianRelationship: 'parent', guardianConfirmed: true,
+        experience: 'none', objectives: ['shotokan'], mode: 'at_dojo',
+        city: 'Ramgarh', stateName: 'Jharkhand', preferredArea: 'Near the station',
+        sessionsPerWeek: '2',
+        contactName: 'Sunita Devi', contactEmail: 'sunita.devi@example.com',
+      },
+      formNonce: 'fixture-nonce-0001',
+      leadSource: 'direct',
+    });
+
+    expect(again.alreadyRecorded).toBe(true);
+    expect(again.ref).toBe(wired.ref);
+    expect(again.automation).toEqual([]);
+
+    // Nobody is acknowledged a second time for pressing Send twice.
+    const after = await db.select().from(g.notifications);
+    expect(after.length).toBe(before.length);
+  });
+
+  it('THE PAGE IS THE FRONT DOOR, and it is server-rendered', () => {
+    // Asserted against the page rather than an import graph, because the import
+    // graph is what let the previous version of this test be wrong.
+    const page = readFileSync('src/pages/start/individual.astro', 'utf8');
+
+    // It reaches the one handler, which reaches the one intake.
+    expect(page).toMatch(/submitIndividualRequest/);
+
+    // Progressive enhancement: a real POST form, and no client state machine.
+    expect(page).toMatch(/<form[^>]*method="POST"/);
+    expect(/<script/.test(page), 'the intake has grown a client-side script').toBe(false);
+
+    // And the handler it calls is the one that runs the automation.
+    const handler = readFileSync('src/pages/api/start/individual.ts', 'utf8');
+    expect(handler).toMatch(/submitIndividualEnquiryWithAutomation/);
+  });
+
+  it('no surface imports captureLead() directly — rule 74 still holds', () => {
+    // The successor to the old assertion, narrowed to what it can actually
+    // prove. A page reaching captureLead() DIRECTLY would be the second intake;
+    // reaching it through src/db/applications.ts is the first one.
     const files: string[] = [];
     const walk = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -337,15 +444,9 @@ describe('what the individual path does NOT do', () => {
     walk('src/pages');
     walk('src/components');
 
-    // Tested by IMPORT rather than by a bare mention of the name: two files
-    // discuss captureLead() in a comment explaining why they do not call it, and
-    // a test that cannot tell a comment from a call is a test that fails for the
-    // wrong reason and gets deleted.
-    const callers = files.filter((f) => {
-      const src = readFileSync(f, 'utf8');
-      return /import\s*\{[^}]*\bcaptureLead\b[^}]*\}\s*from/.test(src);
-    });
-    expect(callers, 'a surface now captures individual leads — rewrite this test').toEqual([]);
+    const callers = files.filter((f) =>
+      /import\s*\{[^}]*\bcaptureLead\b[^}]*\}\s*from/.test(readFileSync(f, 'utf8')));
+    expect(callers, 'a surface is capturing leads outside the intake').toEqual([]);
   });
 
   it('the retired enquiry endpoint stores nothing, rather than storing it somewhere useless', () => {
@@ -378,8 +479,11 @@ describe('what the individual path does NOT do', () => {
     const type = identity.fields.find((f) => f.name === 'institutionType')!;
     expect(type.options!.some((opt) => opt.value === 'individual')).toBe(false);
 
-    // 'individual' is a real audience in the engine — it is the intake that has
-    // no route to it, not the data model.
+    // 'individual' is a real audience in the engine, and it now has its own
+    // route — /start/individual, asserted above. This test survives because the
+    // wizard must never become the answer for a person: the day somebody points
+    // an individual at /learn/apply, the federation gets an institution row per
+    // enquirer, which is the thing this file exists to prevent.
     expect(AUDIENCES).toContain('individual');
   });
 });

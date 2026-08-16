@@ -1,0 +1,700 @@
+---
+// The individual and parent intake — the page a person actually reaches.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS FILE EXISTS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// /start has offered "Individual" and "Parent or guardian" for some time, and
+// both hand the visitor to /start/individual. There was no such route. The
+// engine underneath it was complete — INDIVIDUAL_STEPS, validateIndividual()
+// and submitIndividualEnquiry() in src/db/applications.ts, the automation in
+// src/db/automations.ts, the endpoint at /api/start/individual — and a person
+// could reach none of it, because the only public door was a link to a 404.
+//
+// The JSON endpoint is not that door and cannot be. The middleware requires
+// `application/json` on every /api/ path (src/middleware.ts), which is exactly
+// what a plain HTML form cannot send. A form posting to /api/start/individual
+// is refused with 403 before it reaches the handler. So the door is this page,
+// posting to itself, and it calls submitIndividualRequest() — the same function
+// the endpoint calls — rather than repeating the rate limit or the validation.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// IT WORKS WITH JAVASCRIPT SWITCHED OFF
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// One question per page load, posting back to itself. There is no client state
+// and no hydration; this page ships no script at all. The branching — a child
+// is never offered "Adults" as an age, a beginner is never asked what belt they
+// hold — is decided by the `when` predicates on INDIVIDUAL_STEPS, on the
+// server, which is why the validator can never ask for an answer the form never
+// requested.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHERE THE ANSWERS LIVE, AND WHY THERE IS NO REDIRECT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The institutional wizard saves a draft row after every step and answers each
+// POST with a 303, which is the right trade for twenty screens. This path
+// deliberately stores NOTHING until the enquirer presses send (see the note at
+// the head of the individual section in src/db/applications.ts: a half-finished
+// enquiry about a child is not a record the federation should be holding), so
+// the answers travel in the form as hidden fields and there is nothing on the
+// server to redirect to.
+//
+// The cost is that a refresh re-posts. That is what `formNonce` is for: it is
+// generated once, carried from the first question to the last, and stored on
+// the training request — so a re-post folds onto the enquiry that already
+// exists and the enquirer sees the same reference again rather than the
+// federation holding two enquiries from one person.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// "CHANGE" IS A BUTTON AND NOT A LINK
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Because the answers are in the form. A link would navigate away from them and
+// the enquirer would arrive at the question they wanted to change with every
+// other answer gone.
+
+import Base from '@/layouts/Base.astro';
+import crypto from 'node:crypto';
+import { isConfigured, db } from '@/db';
+import {
+  INDIVIDUAL_STEPS, individualStep, relevantIndividualSteps, relevantFields,
+  optionsOf, stepAfter, pruneIndividual, validateIndividual, summariseIndividual,
+  individualFeePreview,
+  type IndividualAnswers, type IndividualStep, type IndividualField,
+  type IndividualProblem, type IndividualFeePreview,
+} from '@/db/applications';
+import { submitIndividualRequest } from '@/pages/api/start/individual';
+import { formatINR } from '@/lib/training-fee-state';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const FED_EMAIL = 'admin@mmakf.in';
+
+let answers: IndividualAnswers = {};
+let stepKey: string | null = null;
+let nonce = '';
+let problems: IndividualProblem[] = [];
+let banner: { kind: 'error' | 'notice'; text: string } | null = null;
+/** Set only once the enquiry is on file. */
+let recorded: { ref: string; summary: string; alreadyRecorded: boolean; followUpPending: boolean } | null = null;
+
+/**
+ * Read the answers the form carried, then the answers this step just gave.
+ *
+ * Carried answers are named `a.<field>` so they cannot collide with the step's
+ * own controls, and a repeated name rebuilds a multi-answer question. The
+ * step's own fields are read from the STEP DEFINITION rather than from the
+ * submitted keys, because an unticked box and an emptied checklist both send
+ * nothing at all — and absence has to mean "no" for a question that was asked
+ * and mean nothing for a question that was not.
+ */
+function readCarried(form: FormData): IndividualAnswers {
+  const out: IndividualAnswers = {};
+  for (const [key, raw] of form.entries()) {
+    if (!key.startsWith('a.')) continue;
+    const name = key.slice(2);
+    const value = String(raw);
+    if (value === '') continue;
+    const prev = out[name];
+    if (prev === undefined) out[name] = value;
+    else if (Array.isArray(prev)) prev.push(value);
+    else out[name] = [prev as string, value];
+  }
+  return out;
+}
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  nonce = String(form.get('nonce') || '');
+  const submittedKey = String(form.get('stepKey') || '');
+  const intent = String(form.get('intent') || 'next');
+
+  const merged = readCarried(form);
+  const submitted = INDIVIDUAL_STEPS.find((s) => s.key === submittedKey);
+  for (const field of submitted ? relevantFields(submitted, merged) : []) {
+    if (field.kind === 'multiselect') {
+      merged[field.name] = form.getAll(field.name).map(String).filter(Boolean);
+    } else if (field.kind === 'boolean') {
+      merged[field.name] = form.get(field.name) != null;
+    } else {
+      const v = form.get(field.name);
+      if (v != null) merged[field.name] = String(v);
+    }
+  }
+
+  // Drop answers to questions this enquirer is no longer being asked, so
+  // somebody who switches from a centre to online does not leave a locality
+  // behind for an administrator to read as "online, near a landmark".
+  answers = pruneIndividual(merged);
+
+  if (!nonce) {
+    // Only reachable if the hidden field was stripped. Recovering silently
+    // would mean a re-post could not be recognised as one.
+    nonce = crypto.randomUUID();
+  }
+
+  if (intent === 'send') {
+    const outcome = await submitIndividualRequest(Astro.request, {
+      answers,
+      formNonce: nonce,
+      landingPath: Astro.url.pathname,
+    });
+
+    if (outcome.kind === 'recorded') {
+      recorded = {
+        ref: outcome.ref,
+        summary: outcome.summary,
+        alreadyRecorded: outcome.alreadyRecorded,
+        followUpPending: outcome.followUpPending,
+      };
+      stepKey = 'review';
+    } else if (outcome.kind === 'invalid') {
+      problems = outcome.problems;
+      banner = { kind: 'error', text: outcome.message };
+      // Send them to the earliest question that has a problem rather than
+      // leaving them on the review page hunting for it.
+      const order = relevantIndividualSteps(answers).map((s) => s.key);
+      const first = problems
+        .map((p) => order.indexOf(p.stepKey))
+        .filter((i) => i >= 0)
+        .sort((a, b) => a - b)[0];
+      stepKey = first === undefined ? 'review' : order[first];
+    } else {
+      banner = { kind: 'error', text: outcome.message };
+      stepKey = 'review';
+    }
+  } else if (intent === 'back') {
+    stepKey = stepAfter(answers, submittedKey, -1) ?? INDIVIDUAL_STEPS[0].key;
+  } else if (intent.startsWith('goto:')) {
+    stepKey = intent.slice(5);
+  } else {
+    // Validate only what this question asked. Every problem on the step is
+    // shown at once — one at a time is how a form gets abandoned.
+    problems = validateIndividual(answers).filter((p) => p.stepKey === submittedKey);
+    if (problems.length) {
+      stepKey = submittedKey;
+      banner = { kind: 'error', text: `${problems.length} answer${problems.length === 1 ? '' : 's'} needs attention before you can go on.` };
+    } else {
+      stepKey = stepAfter(answers, submittedKey, 1) ?? 'review';
+    }
+  }
+} else {
+  // A fresh start. The identifier is minted here and carried from now on.
+  nonce = crypto.randomUUID();
+  stepKey = INDIVIDUAL_STEPS[0].key;
+}
+
+const steps = relevantIndividualSteps(answers);
+const current: IndividualStep = individualStep(answers, stepKey);
+const fields: IndividualField[] = relevantFields(current, answers);
+const position = Math.max(1, steps.findIndex((s) => s.key === current.key) + 1);
+const total = steps.length;
+const isReview = current.key === 'review';
+const isFirst = position === 1;
+const pct = Math.round((position / total) * 100);
+
+const problemFor = (name: string) => problems.find((p) => p.field === name)?.message ?? null;
+
+/**
+ * Everything outstanding, once the enquirer reaches the last page.
+ *
+ * The send button is disabled while this is non-empty — but the server
+ * validates again inside submitIndividualEnquiry() regardless, because a
+ * disabled button is a courtesy and not a control.
+ */
+const outstanding: IndividualProblem[] = isReview && !recorded ? validateIndividual(answers) : [];
+
+/**
+ * What the federation would charge, if it has said.
+ *
+ * Asked only on the last page, only when there is a database, and NEVER
+ * computed here — every figure comes back from computeFee() against a published
+ * framework. MMAKF has published no fee rules, so today this returns the
+ * federation's own sentence about needing a quotation, and that sentence is
+ * what is printed.
+ */
+let fee: IndividualFeePreview | null = null;
+if (isReview) {
+  if (!isConfigured()) {
+    // THE PATH THAT RENDERS TODAY. Production has no DATABASE_URL, so the fee
+    // framework cannot be read at all — and a review page that then says
+    // NOTHING about cost leaves somebody to assume a price they were never
+    // quoted. It says what is true instead: no figure can be shown, and the
+    // enquiry is a request for a quotation either way.
+    fee = {
+      kind: 'unavailable',
+      message:
+        'No figure can be shown here: the federation’s fee framework cannot be read from this ' +
+        'deployment. Your enquiry is a request for a quotation, and the quotation is what carries ' +
+        'the amount.',
+    };
+  } else {
+    try {
+      fee = await individualFeePreview(db(), answers);
+    } catch {
+      // A fee preview is not worth failing the page over; the enquiry is the
+      // point and the quotation is the answer either way.
+      fee = {
+        kind: 'unavailable',
+        message:
+          'The fee framework could not be read just now, so no figure is shown. Your enquiry is a ' +
+          'request for a quotation either way.',
+      };
+    }
+  }
+}
+
+/** The answers, as hidden fields, minus the ones this page is asking about. */
+const onThisPage = new Set(fields.map((f) => f.name));
+const carried: Array<{ name: string; value: string }> = [];
+for (const [key, value] of Object.entries(answers)) {
+  if (onThisPage.has(key)) continue;
+  if (Array.isArray(value)) {
+    for (const item of value) carried.push({ name: `a.${key}`, value: String(item) });
+  } else if (value === true) {
+    carried.push({ name: `a.${key}`, value: 'true' });
+  } else if (value !== undefined && value !== null && String(value) !== '') {
+    carried.push({ name: `a.${key}`, value: String(value) });
+  }
+}
+
+/** One answer, in the words the enquirer chose it by. */
+function shown(field: IndividualField, a: IndividualAnswers): string {
+  const value = a[field.name];
+  if (value === undefined || value === null || value === '') return 'Not answered';
+  if (field.kind === 'boolean') return value === true || value === 'true' ? 'Confirmed' : 'Not confirmed';
+  const options = optionsOf(field, a);
+  const label = (v: string) => options.find((o) => o.value === v)?.label ?? v;
+  if (Array.isArray(value)) return value.length ? value.map((v) => label(String(v))).join(', ') : 'Not answered';
+  return label(String(value));
+}
+
+const summary = summariseIndividual(answers);
+
+function money(currency: string, minor: number): string {
+  return currency === 'INR' ? formatINR(minor) : `${currency} ${(minor / 100).toFixed(2)}`;
+}
+---
+
+<Base
+  title="Training for yourself or your child — MMAKF"
+  description="Ask MMAKF about karate training for yourself or for a child: where it runs, what it covers and what it would cost."
+  breadcrumbs={[{ name: 'Start', url: '/start' }]}
+>
+  <div class="ind">
+    <div class="container ind-inner">
+
+      <header class="ind-head">
+        <p class="eyebrow">MMAKF training enquiry</p>
+        {!recorded && (
+          <div class="ind-progress" role="group" aria-label={`Question ${position} of ${total}`}>
+            <div class="ind-bar"><span style={`width:${pct}%`}></span></div>
+            <p class="ind-count">
+              Question <strong>{position}</strong> of {total}
+            </p>
+            <p class="ind-note-small">
+              The number changes as you answer: MMAKF asks only what your earlier
+              answers make relevant.
+            </p>
+          </div>
+        )}
+      </header>
+
+      {banner && (
+        <div class={`ind-banner ind-banner-${banner.kind}`} role={banner.kind === 'error' ? 'alert' : 'status'}>
+          {banner.text}
+        </div>
+      )}
+
+      {!isConfigured() && !recorded && (
+        <div class="ind-banner ind-banner-error" role="alert">
+          MMAKF cannot receive enquiries at the moment: the federation&#8217;s database is
+          not reachable from this deployment. Nothing you enter here will be stored.
+          Please write to <a href={`mailto:${FED_EMAIL}`}>{FED_EMAIL}</a> with what you
+          are looking for.
+        </div>
+      )}
+
+      {recorded ? (
+        <section class="ind-done">
+          <h1 class="display-2 ind-title">MMAKF has your enquiry</h1>
+          <p class="ind-intro">
+            Your reference is <code>{recorded.ref}</code>. Quote it if you write to the
+            federation about this enquiry.
+          </p>
+          {recorded.alreadyRecorded && (
+            <p class="ind-note" role="status">
+              This is the enquiry you already sent, not a second one. Sending the same
+              form twice does not create two records.
+            </p>
+          )}
+          {summary.length > 0 && (
+            <>
+              <h2 class="ind-h2">What MMAKF understood</h2>
+              <p class="ind-summary">{summary.join(' · ')}</p>
+            </>
+          )}
+          <p class="ind-note">
+            MMAKF has not published a standard response time, so nothing here promises
+            one. The enquiry is in the training office queue.
+          </p>
+          {recorded.followUpPending && (
+            <p class="ind-note" role="status">
+              The acknowledgement could not be queued on this attempt. Your enquiry is on
+              file and the federation will retry it; nothing you did needs repeating.
+            </p>
+          )}
+          <p class="ind-foot">
+            Something to add? Write to <a href={`mailto:${FED_EMAIL}`}>{FED_EMAIL}</a>
+            {' '}quoting <code>{recorded.ref}</code>.
+          </p>
+        </section>
+      ) : (
+        <form method="POST" class="ind-form" novalidate>
+          <input type="hidden" name="stepKey" value={current.key} />
+          <input type="hidden" name="nonce" value={nonce} />
+          {carried.map((c) => <input type="hidden" name={c.name} value={c.value} />)}
+
+          <h1 class="display-2 ind-title">{current.title}</h1>
+          {current.intro && <p class="ind-intro">{current.intro}</p>}
+
+          {!isReview && summary.length > 0 && (
+            /*
+             * What has been understood SO FAR, on every question and not only on
+             * the review.
+             *
+             * This is what turns a form into a configuration: the enquirer reads
+             * their own answers back as a sentence and can see, three questions
+             * in, that the system has understood "Child, 7 to 9, Ranchi" rather
+             * than finding out at the end that it had not. It is rendered by the
+             * server on each page load, so it is as true with JavaScript off as
+             * with it on.
+             *
+             * It states only what was answered. An unanswered question adds
+             * nothing, rather than a default that would read as an answer.
+             */
+            <section class="ind-sofar" aria-labelledby="ind-sofar-h">
+              <h2 class="ind-sofar-h" id="ind-sofar-h">So far, MMAKF has understood</h2>
+              <p class="ind-summary">{summary.join(' · ')}</p>
+            </section>
+          )}
+
+          {isReview && (
+            <section class="ind-review">
+              {summary.length > 0 && (
+                <p class="ind-summary">{summary.join(' · ')}</p>
+              )}
+              <p class="ind-intro">
+                This is what would be sent. Change anything that is not right.
+              </p>
+
+              {steps.filter((s) => s.fields.length > 0).map((s) => (
+                <div class="rev-block">
+                  <h2 class="rev-h">
+                    {s.title}
+                    <button class="rev-edit" type="submit" name="intent" value={`goto:${s.key}`}>
+                      Change<span class="sr-only"> — {s.title}</span>
+                    </button>
+                  </h2>
+                  <dl class="rev-dl">
+                    {relevantFields(s, answers).map((f) => (
+                      <div class="rev-row">
+                        <dt>{f.label}</dt>
+                        <dd>{shown(f, answers)}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              ))}
+
+              {fee && (
+                <div class="ind-fee">
+                  <h2 class="ind-h2">Cost</h2>
+                  {fee.kind === 'estimate' ? (
+                    <>
+                      <p class="ind-fee-total">{money(fee.currency, fee.totalMinor)}</p>
+                      <dl class="rev-dl">
+                        {fee.lines.map((l) => (
+                          <div class="rev-row">
+                            <dt>{l.label}{l.because && <span class="rev-because"> — {l.because}</span>}</dt>
+                            <dd>{money(fee.currency, l.amountMinor)}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                      <p class="ind-note">{fee.message}</p>
+                    </>
+                  ) : (
+                    <p class="ind-note">{fee.message}</p>
+                  )}
+                </div>
+              )}
+
+              {outstanding.length > 0 && (
+                <div class="ind-banner ind-banner-error" role="alert">
+                  <p><strong>{outstanding.length} answer{outstanding.length === 1 ? '' : 's'} still needed.</strong></p>
+                  <ul>
+                    {outstanding.map((p) => (
+                      <li>
+                        <button class="ind-jump" type="submit" name="intent" value={`goto:${p.stepKey}`}>
+                          {p.message}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <p class="ind-note">
+                MMAKF has not published a standard response time, so nothing here promises
+                one. Sending this records your enquiry and puts it in the training office
+                queue with a reference you can quote.
+              </p>
+            </section>
+          )}
+
+          {fields.length > 0 && (
+            <div class="ind-fields">
+              {fields.map((f) => {
+                const err = problemFor(f.name);
+                const value = answers[f.name];
+                const id = `f-${f.name}`;
+                const options = optionsOf(f, answers);
+                const describedBy = [f.help ? `${id}-help` : null, err ? `${id}-error` : null]
+                  .filter(Boolean).join(' ') || undefined;
+                return (
+                  <div class={`ind-field ${err ? 'has-error' : ''}`}>
+                    {f.kind === 'multiselect' || f.kind === 'boolean' ? null : (
+                      <label class="input-label" for={id}>
+                        {f.label}
+                        {f.required && <span class="req" aria-hidden="true"> *</span>}
+                        {f.required && <span class="sr-only"> (required)</span>}
+                      </label>
+                    )}
+                    {f.help && f.kind !== 'multiselect' && f.kind !== 'boolean' && (
+                      <p class="ind-help" id={`${id}-help`}>{f.help}</p>
+                    )}
+
+                    {f.kind === 'textarea' && (
+                      <textarea class="input" id={id} name={f.name} rows="5"
+                        aria-describedby={describedBy}
+                        aria-invalid={err ? 'true' : undefined}>{value ? String(value) : ''}</textarea>
+                    )}
+
+                    {f.kind === 'select' && (
+                      <select class="input" id={id} name={f.name}
+                        aria-describedby={describedBy}
+                        aria-invalid={err ? 'true' : undefined}>
+                        <option value="">Choose&#8230;</option>
+                        {options.map((opt) => (
+                          <option value={opt.value} selected={String(value) === opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    )}
+
+                    {f.kind === 'multiselect' && (
+                      <fieldset class="ind-checks" aria-describedby={describedBy}>
+                        <legend class="input-label ind-legend">
+                          {f.label}
+                          {f.required && <span class="req" aria-hidden="true"> *</span>}
+                          {f.required && <span class="sr-only"> (required)</span>}
+                        </legend>
+                        {f.help && <p class="ind-help" id={`${id}-help`}>{f.help}</p>}
+                        <div class="ind-checks-row">
+                          {options.map((opt) => {
+                            const arr = Array.isArray(value) ? value.map(String) : value ? [String(value)] : [];
+                            return (
+                              <label class="ind-check">
+                                <input type="checkbox" name={f.name} value={opt.value} checked={arr.includes(opt.value)} />
+                                <span>{opt.label}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </fieldset>
+                    )}
+
+                    {f.kind === 'boolean' && (
+                      <>
+                        <label class="ind-check ind-check-single" for={id}>
+                          <input type="checkbox" id={id} name={f.name}
+                            aria-describedby={describedBy}
+                            aria-invalid={err ? 'true' : undefined}
+                            checked={value === true || value === 'true'} />
+                          <span>
+                            {f.label}
+                            {f.required && <span class="sr-only"> (required)</span>}
+                          </span>
+                        </label>
+                        {f.help && <p class="ind-help" id={`${id}-help`}>{f.help}</p>}
+                      </>
+                    )}
+
+                    {['text', 'email', 'tel'].includes(f.kind) && (
+                      <input
+                        class="input" id={id} name={f.name} type={f.kind}
+                        value={value != null ? String(value) : ''}
+                        inputmode={f.kind === 'tel' ? 'tel' : undefined}
+                        autocomplete={f.autocomplete}
+                        aria-describedby={describedBy}
+                        aria-invalid={err ? 'true' : undefined}
+                      />
+                    )}
+
+                    {err && <p class="ind-error" id={`${id}-error`} role="alert">{err}</p>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div class="ind-nav">
+            {!isFirst && (
+              <button class="btn btn-ghost" type="submit" name="intent" value="back">Back</button>
+            )}
+            {isReview ? (
+              <button class="btn btn-primary" type="submit" name="intent" value="send" disabled={outstanding.length > 0}>
+                Send to MMAKF
+              </button>
+            ) : (
+              <button class="btn btn-primary" type="submit" name="intent" value="next">Continue</button>
+            )}
+          </div>
+        </form>
+      )}
+
+      {!recorded && (
+        <p class="ind-foot">
+          Arranging training for a school, a company or an organisation instead?
+          {' '}<a href={h('/learn/apply')}>Use the institutional application</a>.
+          Difficulty with this form? Write to <a href={`mailto:${FED_EMAIL}`}>{FED_EMAIL}</a>.
+        </p>
+      )}
+    </div>
+  </div>
+</Base>
+
+<style>
+  .ind { padding: 92px 0 80px; }
+  .ind-inner { max-width: 46rem; }
+
+  .ind-head { margin-bottom: 28px; }
+  .ind-progress { margin-top: 14px; }
+  .ind-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .ind-bar span { display: block; height: 100%; background: var(--gold); transition: width .3s ease; }
+  .ind-count { margin: 10px 0 0; font-size: .84rem; color: var(--muted); }
+  .ind-note-small { margin: 4px 0 0; font-size: .8rem; color: var(--muted); }
+
+  .ind-banner {
+    margin: 20px 0; padding: 16px 18px; border-radius: var(--radius);
+    border-left: 3px solid var(--gold); background: var(--card); line-height: 1.6;
+  }
+  .ind-banner-error { border-left-color: var(--red); }
+  .ind-banner ul { margin: 10px 0 0; padding-left: 18px; }
+  .ind-banner li { margin: 4px 0; }
+
+  .ind-title { margin: 26px 0 0; }
+  .ind-h2 { margin: 28px 0 8px; font-size: 1.05rem; }
+  .ind-intro { margin: 12px 0 0; color: var(--muted); line-height: 1.65; max-width: 56ch; }
+  .ind-summary {
+    margin: 16px 0 0; padding: 14px 18px; border-left: 2px solid var(--gold);
+    background: var(--bg-2); line-height: 1.6;
+  }
+  .ind-sofar { margin-top: 20px; }
+  .ind-sofar-h {
+    margin: 0; font-size: .74rem; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .ind-sofar .ind-summary { margin-top: 8px; }
+  .ind-note {
+    margin: 16px 0 0; padding: 14px 18px; border-left: 2px solid var(--gold);
+    background: var(--bg-2); color: var(--muted); line-height: 1.6; font-size: .9rem;
+  }
+  .ind-note code, .ind-intro code, .ind-foot code {
+    font-family: var(--font-accent, monospace); font-size: .95em;
+    background: var(--bg-2); padding: 1px 6px; border-radius: 4px;
+  }
+
+  .ind-fields { margin-top: 30px; display: flex; flex-direction: column; gap: 24px; }
+  .ind-field.has-error .input { border-color: var(--red); }
+  .ind-help { margin: 4px 0 8px; font-size: .84rem; color: var(--muted); line-height: 1.55; }
+  .ind-error { margin: 8px 0 0; font-size: .86rem; color: var(--red); }
+  .req { color: var(--red); }
+
+  .ind-checks { border: 0; padding: 0; margin: 0; }
+  .ind-legend { padding: 0; }
+  .ind-checks-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+  .ind-check {
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 11px 15px; border: 1px solid var(--control-border);
+    border-radius: var(--radius); cursor: pointer; line-height: 1.3;
+    /* 44px minimum target — this form is used on phones more than anywhere. */
+    min-height: 44px;
+  }
+  .ind-check:hover { border-color: var(--gold); }
+  .ind-check input { width: 17px; height: 17px; accent-color: var(--gold-2); }
+  .ind-check-single { margin-top: 6px; max-width: 100%; }
+
+  .ind-review { margin-top: 26px; }
+  .rev-block { margin-top: 26px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .rev-h {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    font-size: 1rem; margin: 0 0 10px;
+  }
+  .rev-dl { margin: 0; }
+  .rev-row {
+    display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+    gap: 4px 18px; padding: 7px 0; border-bottom: 1px solid var(--border);
+  }
+  .rev-row dt { color: var(--muted); font-size: .88rem; }
+  .rev-row dd { margin: 0; }
+  .rev-because { font-style: italic; }
+
+  /* Buttons that read as links. They are buttons because the answers live in
+     the form and a link would navigate away from them.
+
+     --gold, NOT --gold-dim. src/styles/global.css says of --gold-dim that it
+     "stays decorative and must never carry text or identify a control on its
+     own" — it is 45% alpha and lands near 1.9:1 on this ground. These two are
+     the least decorative controls on the page: "Change" is the only way back
+     to an answer from the review, and .ind-jump is the only way to reach an
+     unanswered question while the send button is disabled. --gold is 5.29:1 on
+     --card and 4.81:1 on --bg. */
+  .rev-edit, .ind-jump {
+    margin-left: auto; background: none; border: 0; padding: 4px 2px;
+    font: inherit; font-size: .84rem; color: var(--gold);
+    text-decoration: underline; cursor: pointer;
+  }
+  .ind-jump { margin-left: 0; text-align: left; font-size: inherit; }
+  .rev-edit:hover, .ind-jump:hover { color: var(--gold-3); }
+
+  .ind-fee { margin-top: 30px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .ind-fee-total { margin: 0; font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+
+  .ind-nav {
+    display: flex; gap: 12px; margin-top: 34px;
+    padding-top: 24px; border-top: 1px solid var(--border);
+  }
+  .ind-nav .btn-primary { margin-left: auto; }
+  .ind-nav .btn[disabled] { opacity: .5; cursor: not-allowed; }
+
+  .ind-done { margin-top: 10px; }
+  .ind-foot { margin-top: 32px; font-size: .86rem; color: var(--muted); }
+
+  @media (max-width: 640px) {
+    .ind { padding: 76px 0 60px; }
+    /* Stacked, not squeezed: two columns at 360px gives each side about
+       fifteen characters. */
+    .rev-row { grid-template-columns: 1fr; gap: 2px; }
+    .rev-row dt { font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; }
+    .ind-nav { flex-direction: column-reverse; }
+    .ind-nav .btn { width: 100%; text-align: center; margin-left: 0; }
+    .ind-check { flex: 1 1 100%; }
+  }
+</style>

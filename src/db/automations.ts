@@ -39,8 +39,9 @@ import { render as renderTemplate } from '@/lib/email-templates';
 import { publish as publishDomainEvent } from '@/lib/domain-events';
 import { createTask, upsertTaskTemplate, escalateOverdueTasks } from './tasks';
 import {
-  submitApplication, systemIntakeContext,
+  submitApplication, systemIntakeContext, submitIndividualEnquiry,
   type SubmitInput, type SubmitResult,
+  type IndividualSubmitInput, type IndividualSubmitResult,
 } from './applications';
 import { applyAsCoach, recommendCoaches, type CoachApplyInput } from './coaches';
 import { isUniqueViolation } from './pgerror';
@@ -228,6 +229,35 @@ export const ACTIONS: ActionRegistry = {
   },
 
   /**
+   * Append to a LEAD's history.
+   *
+   * The individual path has no application row and therefore no application
+   * timeline; a lead's activity trail is where its history lives, and this is
+   * the action that writes to it.
+   *
+   * NOT idempotent by a constraint, unlike its siblings — lead_activities has
+   * no unique key to hang one on, and inventing one would mean a migration for
+   * a table whose whole purpose is to accept repeated entries. A replayed step
+   * therefore writes a second identical activity line. That is stated here
+   * rather than implied, because it is the one action in this registry where
+   * "safe to re-run" means "harmless", not "deduplicated": a repeated line in a
+   * history is noise, where a repeated task or message is work nobody asked for.
+   */
+  async record_lead_activity(ctx, params) {
+    const leadId = Number(resolve(ctx, params.leadId ?? { from: 'leadId' }));
+    if (!Number.isFinite(leadId)) throw new Error('record_lead_activity needs a leadId.');
+
+    const [row] = await ctx.db.insert(e.leadActivities).values({
+      leadId,
+      at: ctx.now,
+      kind: str(params, 'kind'),
+      summary: str(params, 'summary'),
+      detail: (params.detail ?? null) as any,
+    }).returning();
+    return { leadActivityId: row.id };
+  },
+
+  /**
    * Append to the federation's event feed.
    *
    * `correlationId` is the step key, so publish() recognises a replay and
@@ -323,6 +353,19 @@ export const STANDARD_TASK_TEMPLATES = [
     escalateToRole: 'TRAINING_DIRECTOR',
   },
   {
+    code: 'ANSWER_TRAINING_ENQUIRY',
+    title: 'Answer a training enquiry',
+    description:
+      'Somebody asked about training for themselves or for a child. Tell them what runs near them and what it would cost.',
+    defaultRole: 'TRAINING_OPERATIONS',
+    defaultPriority: 'normal' as const,
+    // NULL, as everywhere else. The federation has published no turnaround, and
+    // a number invented here becomes a deadline it reports itself as missing.
+    dueInHours: null,
+    escalateAfterHours: null,
+    escalateToRole: 'TRAINING_DIRECTOR',
+  },
+  {
     code: 'ANSWER_SUPPORT_TICKET',
     title: 'Answer a support ticket',
     description: 'Reply to the person who raised it.',
@@ -413,6 +456,81 @@ export const STANDARD_WORKFLOWS: Array<{
             body: 'An institution has applied for a training programme and is waiting for review.',
             linkUrl: { from: 'adminUrl' },
             topic: 'institution',
+          },
+          optional: true,
+        },
+      ],
+    },
+  },
+
+  {
+    code: 'INDIVIDUAL_ENQUIRY_INTAKE',
+    title: 'When a person asks about training',
+    trigger: 'TRAINING_ENQUIRY_SUBMITTED',
+    description:
+      'Records the event, writes the acknowledgement onto the lead, puts the reply in the training office queue and tells the enquirer their enquiry arrived.',
+    spec: {
+      maxAttempts: 4,
+      steps: [
+        {
+          action: 'record_event',
+          params: {
+            eventType: 'TRAINING_ENQUIRY_SUBMITTED',
+            entityType: 'training_request',
+            entityId: { from: 'requestId' },
+            // Empty on purpose. The feed carries the identifier of the request
+            // and nothing about the participant — an event about a nine-year-old
+            // must not itself be a fact about a nine-year-old.
+            payload: {},
+          },
+        },
+        {
+          action: 'record_lead_activity',
+          params: {
+            leadId: { from: 'leadId' },
+            kind: 'note',
+            summary: 'MMAKF has the enquiry. It is in the training office queue for a reply.',
+          },
+        },
+        {
+          action: 'create_task',
+          params: {
+            templateCode: 'ANSWER_TRAINING_ENQUIRY',
+            subjectKind: 'training_request',
+            subjectId: { from: 'requestId' },
+            assignedRole: { from: 'ownerRole' },
+            assignedUserId: { from: 'ownerUserId' },
+          },
+        },
+        {
+          action: 'send_message',
+          // Only where an address was given. An enquiry left with a telephone
+          // number alone is answered by somebody dialling it, and that is not a
+          // broken automation.
+          when: { path: 'contactEmail', op: 'present' },
+          params: {
+            template: 'training_enquiry_received',
+            to: { from: 'contactEmail' },
+            toName: { from: 'contactName' },
+            values: {
+              contactName: { from: 'contactName' },
+              ref: { from: 'ref' },
+              summary: { from: 'summary' },
+            },
+          },
+        },
+        {
+          action: 'notify_role',
+          // The training office, named literally, because notify_role resolves a
+          // ROLE to its current holders and takes no reference. Where a routing
+          // rule named somebody more specific, that person holds the TASK — this
+          // is the queue being told there is something in it.
+          params: {
+            role: 'TRAINING_OPERATIONS',
+            title: 'New training enquiry',
+            body: 'Somebody has asked MMAKF about training and is waiting for a reply.',
+            linkUrl: { from: 'adminUrl' },
+            topic: 'training',
           },
           optional: true,
         },
@@ -595,6 +713,72 @@ export async function submitApplicationWithAutomation(
       detail: { error: String(err?.message ?? err) } as any,
       visibleToApplicant: false,
     });
+  }
+
+  return { ...result, automation };
+}
+
+/**
+ * Record an individual's training enquiry AND run the automation.
+ *
+ * The one function the /start/individual endpoint calls, for the same reason
+ * its institutional sibling exists: so a surface cannot store the enquiry and
+ * forget the half that puts it in front of a human. Without the second half the
+ * enquiry sits in the lead pipeline waiting for somebody to think of looking,
+ * which is the federation's original complaint in a different table.
+ *
+ * The automation's outcome is RETURNED, never thrown. A person whose enquiry
+ * was recorded must see their reference even if the acknowledgement could not
+ * be queued; the run is recorded as failed and the retry sweep finishes it.
+ *
+ * A REPLAY DISPATCHES NOTHING. `alreadyRecorded` means the same form was sent
+ * twice — the workflow ran the first time, and running it again would produce a
+ * second acknowledgement to somebody who has already had one.
+ */
+export async function submitIndividualEnquiryWithAutomation(
+  db: DB, input: IndividualSubmitInput
+): Promise<IndividualSubmitResult & { automation: RunOutcome[] }> {
+  const result = await submitIndividualEnquiry(db, input);
+  const now = input.now ?? new Date();
+
+  if (result.alreadyRecorded) return { ...result, automation: [] };
+
+  let automation: RunOutcome[] = [];
+  try {
+    automation = await dispatch(db, {
+      trigger: 'TRAINING_ENQUIRY_SUBMITTED',
+      idempotencyKey: `training-enquiry:${result.requestId}`,
+      subjectKind: 'training_request',
+      subjectId: result.requestId,
+      context: {
+        requestId: result.requestId,
+        leadId: result.leadId,
+        ref: result.ref,
+        summary: result.summary,
+        involvesMinor: result.involvesMinor,
+        ownerRole: result.routing.targetRole,
+        ownerUserId: result.routing.targetUserId,
+        // Read from the answers rather than from the stored request, because
+        // the request deliberately holds no contact details — those live on the
+        // lead, which is the record of who is asking.
+        contactEmail: (input.answers?.contactEmail as string) ?? null,
+        contactName: (input.answers?.contactName as string) ?? null,
+        adminUrl: `${PUBLIC_ORIGIN}/admin/leads?lead=${result.leadId ?? ''}`,
+      },
+      actor: systemIntakeContext(),
+      now,
+    });
+  } catch (err: any) {
+    // The engine itself failed, not a step within it. The enquiry is recorded
+    // and the person has their reference; this is written onto the lead rather
+    // than raised, so an administrator opening the lead can see it happened.
+    if (result.leadId) {
+      await db.insert(e.leadActivities).values({
+        leadId: result.leadId, at: now, kind: 'note',
+        summary: 'The follow-up automation could not start for this enquiry.',
+        detail: { error: String(err?.message ?? err) } as any,
+      });
+    }
   }
 
   return { ...result, automation };

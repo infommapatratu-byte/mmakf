@@ -393,8 +393,27 @@ export const ENTITIES: Record<EntityKind, EntityDescriptor> = {
     lifecycle: 'application',
     requires: 'engagement:read',
     listPath: '/admin/applications',
-    // The applicant's own tracker, keyed by the reference they were given.
-    detailPath: (ref) => (ref.identifier ? `/learn/applications/${encodeURIComponent(ref.identifier)}` : null),
+    // The federation's own view of the case, keyed by the primary key.
+    //
+    // This used to be the applicant's tracker, /learn/applications/{ref}, taken
+    // at a time when the operations surface had no page for one application.
+    // That address opens ONLY with the private key issued to the school, so
+    // every staff surface offering it — search, the palette, an entity chip —
+    // was offering a link that answers "we cannot find that application", and
+    // the only way to make it work would be to hand staff the applicant's key.
+    // `requires: 'engagement:read'` above already keeps this off public
+    // surfaces.
+    //
+    // `id` is typed `string | number` because callers hold it either way, so it
+    // is checked rather than trusted: the route parameter is a serial primary
+    // key, and /admin/applications/{id} answers "not available" for anything
+    // that is not a positive integer. Withholding the link is the honest
+    // outcome — offering one that is certain to refuse is worse than offering
+    // none, because the reader blames their permissions.
+    detailPath: (ref) => {
+      const id = Number(ref.id);
+      return Number.isInteger(id) && id > 0 ? `/admin/applications/${id}` : null;
+    },
     actions: [
       quickViewAction('engagement:read', '/admin/applications'),
       moduleAction('Go to Applications', 'engagement:read', '/admin/applications'),

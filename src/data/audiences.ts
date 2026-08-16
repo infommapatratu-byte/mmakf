@@ -305,7 +305,12 @@ export const AUDIENCES: Audience[] = [
     title: 'Training as an individual',
     standfirst:
       'Train at an affiliated centre, at the headquarters dojo, or online — on the graded Shotokan syllabus or in self-defence alone.',
-    action: { href: '/training/individual', label: 'Find training' },
+    // WAS '/training/individual' — the page this action is rendered ON. The
+    // primary call to action of the individual editorial linked to itself, so
+    // the one audience with no institutional wizard behind it had no door at
+    // all. It now opens the individual intake, which is the thing that records
+    // an enquiry.
+    action: { href: '/start/individual', label: 'Start your enquiry' },
     sections: [
       {
         heading: 'Where to train',

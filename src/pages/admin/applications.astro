@@ -99,7 +99,12 @@ const fmt = (v: unknown) => {
 // `render` returns text; the status column is drawn by Status and by nothing
 // else, which is what makes `quoted` read identically here and on /admin/leads.
 const columns: Column[] = [
-  { key: 'ref', header: 'Reference' },
+  // The way into the case. The register listed applications and offered no
+  // route to any one of them, so the timeline the applicant could already read
+  // on /learn/applications/{ref} had no counterpart on this side — and the
+  // address src/db/automations.ts emails to administrators,
+  // /admin/applications/{id}, was a 404.
+  { key: 'ref', header: 'Reference', href: (r: any) => (r.id ? h(`/admin/applications/${r.id}`) : null) },
   { key: 'institutionName', header: 'Institution', sortable: true },
   { key: 'audience', header: 'Kind' },
   // The applicant either sits in a federation unit or typed a state name. Both

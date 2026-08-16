@@ -163,12 +163,20 @@ const infraRows: Array<{ label: string; value: string | null }> = infra ? [
 ].filter((r) => r.value !== null) : [];
 
 const pageTitle = app ? app.institutionName : 'Application';
+
+// What the command palette is looking at.
+//
+// `application` is the palette's own EntityKind (src/lib/commands.ts).
+// `institution_application` is the tasks table's subject_kind, which is a
+// different vocabulary for the same noun — passing that one costs this page
+// every contextual command without any error to say so.
+const paletteEntity = app ? { kind: 'application' as const, id: app.id, label: app.ref } : null;
 ---
 
 <AdminShell
   title={pageTitle}
   requires="engagement:read"
-  entity={app ? { kind: 'institution_application', id: app.id, label: app.ref } : null}
+  entity={paletteEntity}
   header={{
     breadcrumbs: [
       { name: 'Operations', url: h('/admin') },

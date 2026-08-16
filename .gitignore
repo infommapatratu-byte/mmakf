@@ -51,3 +51,13 @@ src/pages/*probe*
 src/pages/*harness*
 src/pages/*scratch*
 src/pages/*sandbox*
+
+# Verification harness artefacts.
+#
+# A separate clean build is made into .verify-dist/ with its own config and
+# cache, so a verification run cannot be answered by the working build. None of
+# it is source, and .verify-dist/ alone is several thousand files.
+.verify-dist/
+.verify-cache/
+astro.config.verify.mjs
+.astro-smoke/

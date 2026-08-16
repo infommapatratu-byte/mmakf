@@ -20,7 +20,7 @@ import * as g from '../src/db/governance.schema';
 import {
   WIZARD_STEPS, TOTAL_STEPS, validateSubmission, scoreApplication,
   routeApplication, submitApplication, saveDraft, reviewApplication,
-  applicantStatus, applicationDetail, applicationQueue,
+  applicantStatus, applicationDetail, applicationQueue, assignApplication, draftPayload,
   systemIntakePrincipal, isApplicationError,
 } from '../src/db/applications';
 import {
@@ -448,6 +448,145 @@ describe('review', () => {
     expect(JSON.stringify(view)).not.toMatch(/Chased twice/);
     const detail = await applicationDetail(db, national, r.applicationId);
     expect(JSON.stringify(detail)).toMatch(/Chased twice/);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// The applicant's key is the only thing between one school's submission and
+// anybody who can count: refs are sequence-allocated, so MMAKF-APP-2026-000002
+// is always one keystroke away from MMAKF-APP-2026-000001.
+describe('the applicant’s access token', () => {
+  it('does not open another application when the reference is changed', async () => {
+    const mine = await submitApplication(db, { payload: payload({ institutionName: 'Token Holder School' }) });
+    const theirs = await submitApplication(db, { payload: payload({ institutionName: 'Other Institution' }) });
+
+    // The whole attack, in one line: keep my key, put their reference in the
+    // address bar.
+    await expect(applicantStatus(db, theirs.ref, mine.accessToken)).rejects.toThrow();
+    await expect(applicantStatus(db, mine.ref, theirs.accessToken)).rejects.toThrow();
+
+    // And each still opens its own.
+    expect((await applicantStatus(db, mine.ref, mine.accessToken)).institutionName)
+      .toBe('Token Holder School');
+    expect((await applicantStatus(db, theirs.ref, theirs.accessToken)).institutionName)
+      .toBe('Other Institution');
+  });
+
+  it('refuses a key that is right except for one character', async () => {
+    const r = await submitApplication(db, { payload: payload({ institutionName: 'Near Miss School' }) });
+    const last = r.accessToken.slice(-1);
+    const nearMiss = r.accessToken.slice(0, -1) + (last === 'A' ? 'B' : 'A');
+    expect(nearMiss).not.toBe(r.accessToken);
+    expect(nearMiss.length).toBe(r.accessToken.length);
+    await expect(applicantStatus(db, r.ref, nearMiss)).rejects.toThrow();
+  });
+
+  it('refuses an empty, missing or absurd key', async () => {
+    const r = await submitApplication(db, { payload: payload({ institutionName: 'Empty Key School' }) });
+    await expect(applicantStatus(db, r.ref, '')).rejects.toThrow();
+    await expect(applicantStatus(db, r.ref, null as any)).rejects.toThrow();
+    await expect(applicantStatus(db, r.ref, undefined as any)).rejects.toThrow();
+    // Unequal lengths must be refused, not thrown over: timingSafeEqual raises
+    // on mismatched buffers, which is why both sides are hashed first.
+    await expect(applicantStatus(db, r.ref, 'x')).rejects.toThrow(/No application/);
+    await expect(applicantStatus(db, r.ref, 'x'.repeat(5000))).rejects.toThrow(/No application/);
+  });
+
+  it('answers an unknown reference exactly as it answers a wrong key', async () => {
+    const r = await submitApplication(db, { payload: payload({ institutionName: 'Oracle Test School' }) });
+    const wrongKey = await applicantStatus(db, r.ref, 'not-the-key').catch((err) => err);
+    const noSuchRef = await applicantStatus(db, 'MMAKF-APP-1900-000000', r.accessToken).catch((err) => err);
+    // Same code and same sentence. Anything else tells a caller which
+    // references exist.
+    expect(wrongKey.code).toBe(noSuchRef.code);
+    expect(wrongKey.message).toBe(noSuchRef.message);
+  });
+
+  it('is long enough that guessing is not a strategy', async () => {
+    const r = await submitApplication(db, { payload: payload({ institutionName: 'Entropy School' }) });
+    // 32 random bytes, base64url. Under 40 characters would mean somebody had
+    // shortened it.
+    expect(r.accessToken.length).toBeGreaterThanOrEqual(40);
+    expect(r.accessToken).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(r.accessToken).not.toContain(r.ref);
+  });
+
+  it('will not reopen a sent application as a draft', async () => {
+    const draft = await saveDraft(db, { payload: payload({ institutionName: 'Reopen Test School' }), stepReached: 4 });
+    expect(await draftPayload(db, draft.ref, draft.accessToken!)).toBeTruthy();
+
+    await submitApplication(db, {
+      payload: payload({ institutionName: 'Reopen Test School' }),
+      ref: draft.ref, accessToken: draft.accessToken!,
+    });
+
+    // The wizard must not be able to reopen and overwrite what MMAKF is
+    // already reviewing.
+    expect(await draftPayload(db, draft.ref, draft.accessToken!)).toBeNull();
+    expect(await draftPayload(db, draft.ref, 'wrong')).toBeNull();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Two views of one case. They are allowed to show different SETS of entries —
+// that is what visible_to_applicant is for — and nothing else.
+describe('the applicant’s timeline and the administrator’s are one case', () => {
+  it('shows the applicant a subset of the administrator’s entries, in the same order and the same words', async () => {
+    const r = await submitApplication(db, { payload: payload({ institutionName: 'Two Halves School' }) });
+    await reviewApplication(db, ctx, r.applicationId, {
+      status: 'acknowledged', note: 'Spoke to the principal. Wants a September start.',
+    });
+    await reviewApplication(db, ctx, r.applicationId, { status: 'under_review' });
+    await reviewApplication(db, ctx, r.applicationId, { status: 'program_design' });
+
+    const applicant = await applicantStatus(db, r.ref, r.accessToken);
+    const admin = await applicationDetail(db, national, r.applicationId);
+
+    const adminVisible = admin.events
+      .filter((e: any) => e.visibleToApplicant === true)
+      .map((e: any) => `${e.kind}|${e.summary}`);
+    const applicantSeen = applicant.timeline.map((e: any) => `${e.kind}|${e.summary}`);
+
+    // Identical, element for element. Not "the same length", not "the same
+    // set" — the same sequence, because a case read in two orders is two
+    // accounts of it.
+    expect(applicantSeen).toEqual(adminVisible);
+
+    // The administrator sees strictly more, and the extra is the internal work.
+    expect(admin.events.length).toBeGreaterThan(applicant.timeline.length);
+    const adminKinds = admin.events.map((e: any) => e.kind);
+    expect(adminKinds).toContain('routed');
+    expect(adminKinds).toContain('note');
+    expect(applicantSeen.join(' ')).not.toMatch(/September start/);
+  });
+
+  it('orders events the same way on both sides when they share a timestamp', async () => {
+    // Submission writes several events inside one call, all carrying the same
+    // `now`. `at` alone leaves the tie to the database; `at, id` does not.
+    const r = await submitApplication(db, { payload: payload({ institutionName: 'Same Instant School' }) });
+    const admin = await applicationDetail(db, national, r.applicationId);
+    const ids = admin.events.map((e: any) => e.id);
+    expect(ids).toEqual([...ids].sort((a: number, b: number) => a - b));
+  });
+
+  it('reports the last thing the applicant was actually told, not the last thing that happened', async () => {
+    const r = await submitApplication(db, { payload: payload({ institutionName: 'Last Update School' }) });
+    const before = await applicantStatus(db, r.ref, r.accessToken);
+    expect(before.lastUpdateAt).toBeTruthy();
+
+    // An internal-only note moves nothing the school can see.
+    await assignApplication(db, ctx, r.applicationId, { role: 'TRAINING_OPERATIONS' });
+    const after = await applicantStatus(db, r.ref, r.accessToken);
+    expect(new Date(after.lastUpdateAt as any).getTime())
+      .toBe(new Date(before.lastUpdateAt as any).getTime());
+  });
+
+  it('promises no date, because the federation has published no service standard', async () => {
+    const r = await submitApplication(db, { payload: payload({ institutionName: 'No Promise School' }) });
+    const view = await applicantStatus(db, r.ref, r.accessToken);
+    expect(view.respondBy).toBeNull();
+    // Nothing in what the school reads names a turnaround.
+    expect(JSON.stringify(view)).not.toMatch(/within \d+|\d+ hours|\d+ working days|by \d{1,2}\//i);
   });
 });
 

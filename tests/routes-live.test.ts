@@ -98,6 +98,15 @@ const OK_ROUTES = [
   '/learn/apply?audience=school',
   '/learn/applications/MMAKF-APP-2026-000001',
 
+  // ── The router page, and the door two of its eleven options open ──
+  //
+  // /start offered "Individual" and "Parent or guardian" — both pointing at
+  // /start/individual — for as long as it was live, and there was no such
+  // route. Nothing derived from a menu covers it, because /start declares its
+  // destinations in its own frontmatter rather than in src/lib/surface.ts.
+  '/start',
+  '/start/individual',
+
   // ── SEO landings ──
   '/karate-for-schools',
   '/karate-for-corporates',

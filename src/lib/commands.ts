@@ -318,9 +318,17 @@ const BASE_COMMANDS: Command[] = [
     context: ['lead'], href: '/admin/leads?lead=:id', requires: 'engagement:read',
     keywords: 'crm enquiry pipeline opportunity' },
 
+  // The OPERATIONAL address, not the applicant's tracker.
+  //
+  // This pointed at /learn/applications/:id, which is the school's own status
+  // page — and that page opens only with the private key issued to the school,
+  // which no administrator holds and none should. The command therefore led an
+  // administrator to "we cannot find that application" about an application
+  // sitting in front of them. It also passed the primary key where that route
+  // expects the reference.
   { id: 'ctx.application.open', label: 'Open this application', section: 'contextual',
-    context: ['application'], href: '/learn/applications/:id',
-    keywords: 'reference institution school progress' },
+    context: ['application'], href: '/admin/applications/:id', requires: 'engagement:read',
+    keywords: 'reference institution school progress timeline history' },
   { id: 'ctx.application.queue', label: 'Application queue', section: 'contextual',
     context: ['application'], href: '/admin/applications', requires: 'engagement:read',
     keywords: 'intake institutions submissions' },

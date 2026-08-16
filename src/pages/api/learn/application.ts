@@ -86,7 +86,7 @@ export function statusFor(outcome: ApplicationOutcome): number {
  * was served on — but they are recorded as claims, and nothing is decided by
  * them.
  */
-function attribution(request: Request, body: Record<string, unknown>) {
+export function attribution(request: Request, body: Record<string, unknown>) {
   const referer = request.headers.get('referer');
   const utm: Record<string, string> = {};
   const raw = (body.utm ?? {}) as Record<string, unknown>;
@@ -102,7 +102,7 @@ function attribution(request: Request, body: Record<string, unknown>) {
 }
 
 /** Which lead source a referrer implies. Unknown rather than guessed. */
-function leadSourceFrom(referer: string | null): 'organic_search' | 'social' | 'youtube' | 'referral' | 'direct' | 'unknown' {
+export function leadSourceFrom(referer: string | null): 'organic_search' | 'social' | 'youtube' | 'referral' | 'direct' | 'unknown' {
   if (!referer) return 'direct';
   let host = '';
   try { host = new URL(referer).hostname.toLowerCase(); } catch { return 'unknown'; }

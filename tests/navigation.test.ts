@@ -287,3 +287,36 @@ describe('the navigation is federation-first, not dojo-first', () => {
     expect(PUBLIC_ACTIONS[0].label.toLowerCase()).toBe('register');
   });
 });
+
+// ── The router page ─────────────────────────────────────────────────────────
+
+/**
+ * /start is a page of eleven links and nothing else.
+ *
+ * It was shipped offering "Individual" and "Parent or guardian", both pointing
+ * at /start/individual, and no such route existed. Neither the navigation check
+ * above nor tests/routes-live.test.ts covered it, because the destinations are
+ * declared in the page's own OPTIONS array rather than in src/lib/surface.ts —
+ * so a menu the whole intake depends on was the one menu nothing checked.
+ *
+ * This reads the destinations out of the page. A regex is a blunt instrument
+ * and a deliberate one: parsing the module would run the page's imports, and a
+ * guard that only works when the whole application imports cleanly is a guard
+ * that gets deleted the first time it fails for an unrelated reason.
+ */
+describe('every route offered by /start exists', () => {
+  const source = readFileSync('src/pages/start.astro', 'utf8');
+  const destinations = [...source.matchAll(/^\s*to:\s*'([^']+)'/gm)].map((m) => m[1]);
+
+  it('finds the destinations at all, so a rewrite of the page cannot empty this test', () => {
+    // Eleven audiences are offered. The number is not asserted — the point is
+    // that the list was read, not how long it is.
+    expect(destinations.length).toBeGreaterThan(0);
+  });
+
+  for (const to of [...new Set(destinations)]) {
+    it(`/start → ${to}`, () => {
+      expect(resolves(to), `/start offers ${to} and no route answers it`).toBe(true);
+    });
+  }
+});

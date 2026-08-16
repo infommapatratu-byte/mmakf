@@ -36,7 +36,6 @@ import Base from '@/layouts/Base.astro';
 import { isConfigured, db } from '@/db';
 import { WIZARD_STEPS, TOTAL_STEPS, validateSubmission, draftPayload, type WizardStep } from '@/db/applications';
 import { submitApplicationRequest, statusFor } from '@/pages/api/learn/application';
-import { AUDIENCES } from '@/data/audiences';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 
 export const prerender = false;
@@ -159,21 +158,24 @@ if (Astro.request.method === 'POST') {
 // asked the same question a second time, which is exactly the kind of seam the
 // federation objected to.
 //
-// Neither vocabulary is trusted. The value is used only if the step-one field
-// actually lists it, so an `audience` parameter someone types by hand cannot
-// put an institution type into the draft that the form could never produce.
+// Neither vocabulary is trusted, and there is ONE check rather than one per
+// vocabulary. The value is used only if step one actually lists it, so an
+// `audience` parameter someone types by hand cannot put an institution type
+// into the draft that the form could never produce.
+//
+// The earlier version trusted an AUDIENCES `kind` without that check, and one
+// of those kinds is `individual` — which step one does not offer, because an
+// individual is not an institution. /training/estimate links here with it. The
+// draft was seeded with a value no option matched, so the select rendered with
+// nothing chosen anyway; the only thing the shortcut bought was a comment that
+// described a check the code skipped. An audience with no institution type
+// seeds nothing, and step one asks the question.
 const audienceParam = url.searchParams.get('audience');
-if (audienceParam && !saved.institutionType) {
-  const known = AUDIENCES.find((a) => a.kind === audienceParam);
-  if (known) {
-    saved.institutionType = known.kind;
-  } else {
-    const typeField = WIZARD_STEPS.find((s) => s.step === 1)
-      ?.fields.find((f) => f.name === 'institutionType');
-    if ((typeField?.options ?? []).some((o) => o.value === audienceParam)) {
-      saved.institutionType = audienceParam;
-    }
-  }
+const institutionTypeOptions =
+  WIZARD_STEPS.find((s) => s.step === 1)?.fields.find((f) => f.name === 'institutionType')?.options ?? [];
+if (audienceParam && !saved.institutionType
+    && institutionTypeOptions.some((o) => o.value === audienceParam)) {
+  saved.institutionType = audienceParam;
 }
 
 const current: WizardStep = WIZARD_STEPS.find((s) => s.step === step) ?? WIZARD_STEPS[0];

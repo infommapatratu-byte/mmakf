@@ -10,7 +10,10 @@ export const prerender = false;
 const data = await getAll();
 const fed = data.federation;
 const stats = data.stats;
-const programs = data.programs;   // feeds the EnrollCTA program select
+const programs = data.programs;   // passed to EnrollCTA, which ignores it: the
+                                  // programme select it fed is gone, and what
+                                  // somebody wants is now asked inside the
+                                  // engine at /learn/apply where it is stored.
 const events = upcomingEvents(data.events);
 const news = data.news;
 const achievements = data.achievements;
