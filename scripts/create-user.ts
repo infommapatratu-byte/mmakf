@@ -46,6 +46,7 @@
 
 import postgres from 'postgres';
 import crypto from 'node:crypto';
+import { tlsFor, tlsHint } from './db-tls.mjs';
 import { hashPassword } from '../src/lib/password.ts';
 import { ROLES } from '../src/lib/rbac.ts';
 
@@ -100,7 +101,10 @@ if (scopeType !== 'national' && !Number.isInteger(scopeId)) {
 // generated rather than chosen so it is not a variation on a known password.
 const password = crypto.randomBytes(20).toString('base64url');
 
-const sql = postgres(url, { max: 1, prepare: false, connect_timeout: 15 });
+// Writes a password hash, so the connection must be encrypted AND the peer
+// verified — see scripts/db-tls.mjs. This ran with no `ssl` option, which
+// postgres.js reads as plaintext.
+const sql = postgres(url, { max: 1, prepare: false, connect_timeout: 15, ...tlsFor(url) });
 
 try {
   // A read then a write, so two operators running this at the same second could

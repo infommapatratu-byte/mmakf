@@ -22,6 +22,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import postgres from 'postgres';
+import { tlsFor, tlsHint } from './db-tls.mjs';
 
 const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
 if (!url) {
@@ -36,10 +37,16 @@ const mode =
 const fileArg = args[args.indexOf(`--${mode}`) + 1];
 
 const schema = process.env.DATABASE_SCHEMA || 'public';
+// This reads the ENTIRE register into a file — every verified phone number,
+// every child's address, every safeguarding note. It ran without an `ssl`
+// option, and postgres.js ships `ssl: false`, so the whole thing crossed the
+// network in the clear. tlsFor() is the same policy the application uses; see
+// scripts/db-tls.mjs.
 const sql = postgres(url, {
   max: 1, prepare: false, connect_timeout: 30, idle_timeout: 20,
   connection: { search_path: schema },
   onnotice: () => {},
+  ...tlsFor(url),
 });
 
 function describeTarget(u) {

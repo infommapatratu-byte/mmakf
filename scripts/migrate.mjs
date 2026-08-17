@@ -31,6 +31,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import postgres from 'postgres';
+import { tlsFor, tlsHint } from './db-tls.mjs';
 
 const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
 if (!url) {
@@ -69,49 +70,12 @@ if (schema !== 'public') {
   process.exit(1);
 }
 
-// ── TLS, ON THE SAME TERMS AS THE APPLICATION ───────────────────────────────
-//
-// This passed no `ssl` option at all for a long time, and postgres.js ships
-// `ssl: false` — so omitting it was a decision to send every migration in
-// drizzle/ across the open internet IN PLAINTEXT: every table name, every
-// constraint, and every row seeded along the way. It hid perfectly, because it
-// works. A pooler accepts an unencrypted session without complaint, and nothing
-// in this script's output ever said how the bytes travelled.
-//
-// The rules below are src/db/index.ts's rules, deliberately duplicated rather
-// than reinvented — two different answers to "is this connection verified" is
-// exactly how one of them quietly stops being true. (Not imported: that file is
-// TypeScript and this runner is plain node, on purpose, so it needs no build.)
-//
-//   1. A remote host gets TLS with the certificate actually verified.
-//   2. An sslmode the operator wrote into the URL WINS. postgres.js resolves an
-//      `ssl` option ahead of the query string, so setting ours unconditionally
-//      would override somebody who deliberately asked for verify-full.
-//   3. Loopback is exempt — scripts/dev-db.mjs serves PGlite over the wire
-//      protocol on 127.0.0.1 and cannot negotiate TLS at all.
-//
-// DATABASE_CA_CERT supplies a provider's PRIVATE root, in PEM. Supabase's
-// pooler chains to `Supabase Root 2021 CA`, which no Node trust store carries,
-// so without it rule 1 fails closed with SELF_SIGNED_CERT_IN_CHAIN — correctly.
-// The answer is to supply the root, never to stop verifying.
-function tlsFor(u) {
-  if (/[?&]sslmode=/i.test(u)) return {};
-
-  const ca = process.env.DATABASE_CA_CERT?.trim();
-  const verified = ca ? { rejectUnauthorized: true, ca } : { rejectUnauthorized: true };
-
-  let host = '';
-  try {
-    host = new URL(u).hostname.toLowerCase();
-  } catch {
-    return { ssl: verified }; // Fail closed, as the app does.
-  }
-
-  const bare = host.replace(/^\[|\]$/g, '');
-  const loopback = bare === '127.0.0.1' || bare === 'localhost' || bare === '::1';
-  return loopback ? { ssl: false } : { ssl: verified };
-}
-
+// TLS on the same terms as the application, from the one definition in
+// scripts/db-tls.mjs. This runner passed no `ssl` option at all for a long time,
+// and postgres.js ships `ssl: false` — so omitting it was a decision to send
+// every migration in drizzle/ across the open internet IN PLAINTEXT. It hid
+// perfectly, because it works: a pooler accepts an unencrypted session without
+// complaint, and nothing in this output ever said how the bytes travelled.
 const sql = postgres(url, {
   max: 1,
   prepare: false,
@@ -278,18 +242,10 @@ try {
 } catch (err) {
   console.error(`\n${err.message}`);
 
-  // A certificate failure reads nothing like what it is. Said plainly, once, so
-  // the next operator does not go re-checking a password that was never at
-  // fault — the handshake dies before authentication is even attempted.
-  if (err.code === 'SELF_SIGNED_CERT_IN_CHAIN' || err.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE') {
-    console.error(
-      '\nThat is a TLS verification failure, not a credentials failure. The server\n' +
-      'presented a certificate chaining to a root this Node does not trust, so the\n' +
-      'connection fails before authentication. Re-checking the password finds nothing.\n\n' +
-      "Set DATABASE_CA_CERT to the provider's CA in PEM and re-run — for Supabase that\n" +
-      'is the "Download certificate" link under Settings -> Database.'
-    );
-  }
+  // A certificate failure reads nothing like what it is, so the next operator
+  // does not go re-checking a password that was never at fault.
+  const hint = tlsHint(err);
+  if (hint) console.error(hint);
 
   exitCode = 1;
 } finally {

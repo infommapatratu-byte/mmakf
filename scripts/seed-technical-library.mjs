@@ -127,10 +127,30 @@ const { drizzle } = await import('drizzle-orm/postgres-js');
 const { sql: raw } = await import('drizzle-orm');
 const schema = await import('../src/db/schema.ts');
 
-// Same settings the application uses, so a URL that works here works there —
-// notably prepare:false, which is what keeps this working through a
-// transaction-mode pooler.
-const client = postgres(url, { max: 1, prepare: false, connect_timeout: 15, idle_timeout: 20 });
+// ── TLS ────────────────────────────────────────────────────────────────────
+//
+// THIS SCRIPT USED TO PASS NO `ssl` OPTION, and the comment below it claimed it
+// used "the same settings the application uses". It did not. postgres.js ships
+// `ssl: false`, so omitting the option was a decision to open this connection
+// IN PLAINTEXT across the open internet — and to send the whole seeded library
+// along it. It hides perfectly, because it works: a pooler accepts an
+// unencrypted session without complaint and nothing here ever said how the
+// bytes travelled.
+//
+// The rules live in scripts/db-tls.mjs — ONE definition, shared by every runner
+// in this directory. They were briefly copied into each file, which is not three
+// times the safety but three places for one copy to quietly stop matching.
+const { tlsFor } = await import('./db-tls.mjs');
+
+// prepare:false is what keeps this working through a transaction-mode pooler,
+// which is the same reason src/db/index.ts sets it.
+const client = postgres(url, {
+  max: 1,
+  prepare: false,
+  connect_timeout: 15,
+  idle_timeout: 20,
+  ...tlsFor(url),
+});
 const db = drizzle(client, { schema });
 
 async function count(table) {
