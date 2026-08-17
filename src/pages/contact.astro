@@ -45,6 +45,7 @@ const fed = await get('federation');
 
 const address = fed?.contact?.address ?? '';
 const hours = fed?.contact?.hours ?? '';
+const hoursSunday = fed?.contact?.hoursSunday ?? '';
 const email = fed?.contact?.email ?? '';
 const emailSecondary = fed?.contact?.emailSecondary ?? '';
 
@@ -72,6 +73,15 @@ const cards: ContactCard[] = [
     body: 'When the headquarters is staffed. Correspondence is by email.',
   },
   {
+    // SEPARATE FROM OFFICE HOURS ON PURPOSE. Sunday is a training day at the
+    // hombu; it is not a claim that the office answers correspondence on it.
+    // The card drops out entirely when the field is empty — see the
+    // .filter((c) => c.value) below.
+    eyebrow: 'Sunday class timings',
+    value: hoursSunday,
+    body: 'When the headquarters dojo trains on a Sunday. The timings move with the season.',
+  },
+  {
     eyebrow: 'Email — Federation',
     mailto: email,
     value: email,
@@ -93,7 +103,7 @@ const cards: ContactCard[] = [
   <PageHero
     eyebrow="Contact"
     title={`Reach the <em>federation</em>.`}
-    lead={[address, hours].filter(Boolean).join('. ')}
+    lead={[address, hours, hoursSunday].filter(Boolean).join('. ')}
   />
 
   {/* ═══════ CONTACT CARDS + MAP ═══════ */}

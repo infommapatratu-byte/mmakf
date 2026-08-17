@@ -10,7 +10,12 @@ import { razorpay } from './razorpay';
 import { manualUpi } from './manual-upi';
 
 export * from './provider';
+// The test/live guard. Exported here so an admin surface never has to reach
+// past the registry into a specific adapter to ask which mode is in force.
+export * from './mode';
 export { razorpay, manualUpi };
+export { razorpayCapability, razorpayHealthCheck } from './razorpay';
+export type { RazorpayCapability, RazorpayHealthCheck } from './razorpay';
 export { upiDeepLink } from './manual-upi';
 
 /** Every provider, in preference order. */
@@ -18,6 +23,17 @@ const PROVIDERS: PaymentProvider[] = [razorpay, manualUpi];
 
 export function providerById(id: string): PaymentProvider | null {
   return PROVIDERS.find((p) => p.id === id) ?? null;
+}
+
+/**
+ * Whether a provider's credentials are present — which is NOT the same as being
+ * usable, and must never be substituted for isConfigured() when choosing one.
+ *
+ * A provider that does not draw the distinction answers both with
+ * isConfigured(), and for such a provider the two genuinely are one question.
+ */
+export function providerHasCredentials(provider: PaymentProvider): boolean {
+  return provider.hasCredentials ? provider.hasCredentials() : provider.isConfigured();
 }
 
 /** Providers that actually have credentials right now. */

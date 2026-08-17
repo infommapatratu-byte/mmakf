@@ -1,0 +1,668 @@
+---
+// /admin/policy — the Policy Centre.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// THE ONE THING THIS SCREEN MUST NEVER BE MISREAD AS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Two registers sit on this page and they are NOT the same register.
+//
+//   SOURCE MATERIAL is what somebody else published — Karate Academy Bharat's
+//   dojo code, the WKF's gi specification, NADA's rules. Recording it asserts
+//   nothing. It is evidence.
+//
+//   MMAKF INSTRUMENTS are the federation's own rules. They bind members.
+//
+// The failure has a victim and it is specific: an administrator reads "Be in
+// Uniform (GI) appropriately" in a register headed "Policy", does not register
+// whose rule it is, and tells a member they have breached federation policy.
+// Nobody lied. The screen simply did not make whose rule it was unmissable.
+//
+// So the two are drawn as two sections with two headings, every source row
+// carries its ORGANISATION and its URL in the primary columns, and no source
+// row is ever rendered with a state that could be mistaken for "in force".
+// A provision's standing — not adopted, under review, adopted, rejected,
+// flagged — is the first column of the source register, not a footnote.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHY THERE IS NO "ADOPT" BUTTON HERE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Because adoption is not a state of the row. It is the consequence of an
+// instrument version that cites the provision being APPROVED and PUBLISHED, and
+// src/db/policy.ts refuses to set `adopted` by any other route. A button that
+// flipped a dropdown would make the whole traceability guarantee decorative:
+// the register would say MMAKF adopted something, and nobody could say under
+// which instrument, approved by whom, effective from when.
+//
+// What this page offers instead are the three standings that genuinely ARE a
+// judgement about the evidence — cited, rejected, flagged as not adoptable —
+// each of which the module requires a reason for where a reason is owed.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTHORITY
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 'policy:read' to look. 'source:write' to change a provision's standing. Those
+// are the actions src/db/policy.ts actually asserts, and this page is gated on
+// the same ones — a screen offering a control the module will refuse is worse
+// than one that does not offer it. Approval and publication are deliberately
+// NOT driven from here: they are 'policy:approve' and 'policy:publish', they
+// require a named person and a date, and they belong on the governance workflow
+// rather than behind a button on a register.
+
+import AdminShell from '@/components/AdminShell.astro';
+import Status from '@/components/Status.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  listSourceProvisions, listInstruments, markSourceProvision,
+  ruleInForceOn, today, isPolicyError,
+} from '@/db/policy';
+import * as s from '@/db/schema';
+import { desc } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/policy');
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const configured = isConfigured();
+
+const mayRead = Boolean(principal) && canAnywhere(principal, 'policy:read');
+const mayMarkSource = Boolean(principal) && canAnywhere(principal, 'source:write');
+
+/**
+ * The three standings an administrator may set from this screen.
+ *
+ * `adopted` is absent and that absence is the point — see the header note.
+ * `under_review` is absent too: it is what adoptSourceProvision() sets when a
+ * clause cites the provision, and setting it by hand would claim a draft
+ * instrument exists when none does.
+ */
+const STANDINGS = [
+  {
+    name: 'cited',
+    label: 'Cite',
+    status: 'cited' as const,
+    help: 'Referred to by MMAKF material without being adopted. The rule stays the Academy’s.',
+  },
+  {
+    name: 'reject',
+    label: 'Reject',
+    status: 'rejected' as const,
+    help: 'MMAKF has decided not to adopt it. Needs a reason — an unexplained rejection cannot be told from material somebody found inconvenient.',
+  },
+  {
+    name: 'flag',
+    label: 'Flag as not adoptable',
+    status: 'flagged_not_adoptable' as const,
+    help: 'Recorded, and must never become federation policy. Needs a reason. The engine refuses to carry a flagged provision into any instrument.',
+  },
+  {
+    name: 'reset',
+    label: 'Return to not adopted',
+    status: 'not_adopted' as const,
+    help: 'The neutral standing every provision starts in.',
+  },
+];
+
+// ─── The act ────────────────────────────────────────────────────────────────
+//
+// Posts to this page, not to /api/. src/middleware.ts requires application/json
+// on /api/ paths and a form with JavaScript off cannot send one; CSRF is
+// already handled, because the middleware refuses a mutating request that is
+// not same-origin before any of this runs.
+
+const DONE_MESSAGES: Record<string, string> = {
+  cited: 'The provision is recorded as cited. It is not MMAKF policy.',
+  rejected: 'The provision is recorded as rejected, with the reason beside it. It stays in the register.',
+  flagged_not_adoptable: 'The provision is flagged. Any attempt to carry it into an MMAKF instrument will now be refused.',
+  not_adopted: 'The provision is back to the neutral standing.',
+};
+
+let error: string | null = null;
+let postedReason = '';
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const actName = get('action');
+  postedReason = get('reason');
+
+  const act = STANDINGS.find((a) => a.name === actName) ?? null;
+  const rl = await rateLimit(Astro.request, 'policy-source-standing', 40, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so there is no register to change.';
+  } else if (!mayMarkSource) {
+    // Re-checked against the session on every act. The rendered page is not
+    // evidence of authority: it may be minutes old, and may not be where the
+    // request came from at all.
+    Astro.response.status = 403;
+    error = 'Changing a source provision’s standing requires source:write, which this account does not hold in any scope.';
+  } else if (!act) {
+    Astro.response.status = 400;
+    error = 'That is not one of the standings a source provision can hold from this screen.';
+  } else {
+    const ref = get('ref');
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: postedReason || null,
+    };
+    try {
+      if (!ref) throw new Error('no provision named');
+      await markSourceProvision(db(), ctx, ref, act.status, postedReason || null);
+      return Astro.redirect(`${SELF}?done=${act.status}`, 303);
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = `The policy store refused this: it requires ${err.action}, which this account does not hold. Nothing was changed.`;
+      } else if (isPolicyError(err)) {
+        // The store's refusals are already written for a person — the
+        // reason-required message in particular says what to do instead.
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[admin/policy] standing change failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was changed. The register refused the write, and the fault is in the server log with the detail this page deliberately does not print.';
+      }
+    }
+  }
+}
+
+// ─── The read ───────────────────────────────────────────────────────────────
+
+const ON = today();
+
+let sourceRows: any[] = [];
+let instrumentRows: any[] = [];
+let ruleRows: Array<{ rule: any; inForce: any }> = [];
+let determinations: any[] = [];
+let readError: string | null = null;
+
+if (mayRead && configured) {
+  try {
+    instrumentRows = await listInstruments(db(), principal!);
+    // Source material is a different authority from federation policy. An
+    // account holding policy:read but not source:read sees the instruments and
+    // is told, in the section itself, why the evidence half is empty.
+    if (canAnywhere(principal, 'source:read')) {
+      sourceRows = await listSourceProvisions(db(), principal!);
+    }
+    const rules = await db().select().from(s.policyRules).orderBy(s.policyRules.code);
+    for (const r of rules) ruleRows.push({ rule: r, inForce: await ruleInForceOn(db(), r.code, ON) });
+    determinations = await db().select().from(s.policyDeterminations)
+      .orderBy(desc(s.policyDeterminations.determinedOn), desc(s.policyDeterminations.id))
+      .limit(25);
+  } catch (err: any) {
+    if (err instanceof ForbiddenError) {
+      readError = `Reading the policy register requires ${err.action}, which this account does not hold.`;
+    } else {
+      console.error('[admin/policy] register read failed', err);
+      readError = 'The policy register could not be read.';
+    }
+  }
+}
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done ? DONE_MESSAGES[done] ?? null : null;
+
+// ── Counts, each of which is a measured figure and not an estimate ──────────
+
+const adopted = sourceRows.filter((r) => r.provision.adoptionStatus === 'adopted').length;
+const flagged = sourceRows.filter((r) => r.provision.adoptionStatus === 'flagged_not_adoptable').length;
+const inForceRules = ruleRows.filter((r) => r.inForce.status === 'in_force').length;
+const governedByNothing = ruleRows.filter((r) => r.inForce.status !== 'in_force').length;
+const publishedInstruments = instrumentRows.filter(
+  (r) => r.version && ['published', 'effective'].includes(r.version.state)
+).length;
+
+const LAYER_WORDS: Record<string, string> = {
+  academy_source: 'Karate Academy — academy policy',
+  external_reference: 'External body — their rule',
+  mmakf_regulation: 'MMAKF regulation',
+};
+
+const STANDING_WORDS: Record<string, string> = {
+  not_adopted: 'Not adopted',
+  under_review: 'Cited in a draft',
+  cited: 'Cited, not adopted',
+  adopted: 'Adopted by MMAKF',
+  rejected: 'Rejected',
+  flagged_not_adoptable: 'Flagged — not adoptable',
+};
+
+const IN_FORCE_WORDS: Record<string, string> = {
+  in_force: 'In force today',
+  not_approved: 'Covers today, NOT approved — decides nothing',
+  no_version: 'No version in force — governed by nothing',
+  unknown_rule: 'Unknown rule',
+};
+
+function day(v: string | null | undefined): string {
+  if (!v) return '—';
+  const d = new Date(v);
+  return Number.isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+}
+
+const headerDescription =
+  'Two registers, never mixed: what other organisations publish, and what MMAKF has adopted. ' +
+  'A rule binds a member only when an approved instrument version says so and the date falls inside its effective window.';
+---
+
+<AdminShell
+  title="Policy Centre"
+  requires="policy:read"
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin/dashboard') },
+      { name: 'Governance', url: h('/admin/governance') },
+      { name: 'Policy Centre', url: h('/admin/policy') },
+    ],
+    title: 'Policy Centre — source material, instruments and rules',
+    description: headerDescription,
+    secondary: [
+      { label: 'Governance', href: h('/admin/governance') },
+      { label: 'Public register', href: h('/regulations') },
+    ],
+  }}
+>
+  <Fragment slot="meta">
+    <span class="meta-chip meta-whose">Source ≠ MMAKF policy</span>
+    {sourceRows.length > 0 && (
+      <span class="meta-chip">{adopted} of {sourceRows.length} source provisions adopted</span>
+    )}
+    {flagged > 0 && <span class="meta-chip">{flagged} flagged as not adoptable</span>}
+    {ruleRows.length > 0 && (
+      <span class="meta-chip">{inForceRules} of {ruleRows.length} rules in force</span>
+    )}
+  </Fragment>
+
+  {/* ── Whose rule is whose, before anything else on the page ─────────────── */}
+  <aside class="whose" aria-labelledby="whose-h">
+    <h2 id="whose-h" class="whose-h">Two registers. They are not the same register.</h2>
+    <p>
+      <strong>Source material</strong> is what another organisation published — Karate Academy
+      Bharat, the World Karate Federation, NADA. Recording it asserts nothing about MMAKF.
+      It is evidence, and the federation is not bound by it.
+    </p>
+    <p>
+      <strong>MMAKF instruments</strong> are the federation&rsquo;s own rules. One binds a member
+      only when a version of it has been approved by a named person, published, and the date in
+      question falls inside its effective window. Everything short of that decides nothing —
+      and the engine returns that as its own answer rather than as a refusal.
+    </p>
+    <p class="whose-note">
+      A provision becomes <em>adopted</em> only when an instrument version citing it is published.
+      There is no button on this page that does it, because there is no honest way for a button to.
+    </p>
+  </aside>
+
+  {doneMessage && <p class="done" role="status">{doneMessage}</p>}
+  {error && <p class="failed" role="alert">{error}</p>}
+
+  {!configured && (
+    <EmptyState
+      title="No federation database on this deployment"
+      body="The policy register lives in Postgres. Without DATABASE_URL there is nothing to read, and this page will not invent a register to fill the space."
+    />
+  )}
+
+  {readError && <ErrorState title="The register could not be read" body={readError} />}
+
+  {/* ═══════ MMAKF'S OWN INSTRUMENTS ═══════ */}
+  {configured && !readError && (
+    <section class="reg" aria-labelledby="inst-h">
+      <h2 id="inst-h" class="reg-h">MMAKF instruments</h2>
+      <p class="reg-lead">
+        The federation&rsquo;s own regulations, policies, codes, guidelines and circulars, with the
+        state of the current version of each. {publishedInstruments} of {instrumentRows.length} have
+        a published version.
+      </p>
+
+      {instrumentRows.length === 0 ? (
+        <EmptyState
+          title="MMAKF has adopted no instruments yet"
+          body="That is the honest state of the register, and it is what docs/governance/MMAKF-REGULATORY-GAP-ANALYSIS.md lists thirty-four of. Nothing is seeded here: a plausible specimen regulation is indistinguishable six months later from one somebody actually approved."
+        />
+      ) : (
+        <div class="tbl-scroll" tabindex="0" role="region" aria-label="MMAKF instruments">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th scope="col">Code</th>
+                <th scope="col">Instrument</th>
+                <th scope="col">Type</th>
+                <th scope="col">Current version</th>
+                <th scope="col">State</th>
+                <th scope="col">Effective from</th>
+                <th scope="col">Approved</th>
+              </tr>
+            </thead>
+            <tbody>
+              {instrumentRows.map((r) => (
+                <tr>
+                  <td class="mono">{r.instrument.code}</td>
+                  <td>{r.instrument.title}</td>
+                  <td>{r.instrument.instrumentType}</td>
+                  <td class="mono">{r.version?.version ?? '—'}</td>
+                  <td>
+                    {r.version
+                      ? <Status value={r.version.state} />
+                      : <span class="none">no version drafted</span>}
+                  </td>
+                  <td>{day(r.version?.effectiveFrom)}</td>
+                  <td>
+                    {/* An approval with no name on it is the artefact this
+                        whole subsystem exists to make impossible, so an absent
+                        approver is printed as an absence rather than blank. */}
+                    {r.version?.approvedOn
+                      ? day(r.version.approvedOn)
+                      : <span class="none">not approved</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )}
+
+  {/* ═══════ RULES, AND WHAT GOVERNS THEM TODAY ═══════ */}
+  {configured && !readError && (
+    <section class="reg" aria-labelledby="rules-h">
+      <h2 id="rules-h" class="reg-h">Rules, resolved for {day(ON)}</h2>
+      <p class="reg-lead">
+        Each rule is resolved by date, not by status. A rule with no version in force decides
+        nothing, and a workflow that depends on it is governed by nothing — which is stated here
+        rather than left for somebody to discover from a refusal.
+        {governedByNothing > 0 && (
+          <> <strong>{governedByNothing} of {ruleRows.length} are not in force today.</strong></>
+        )}
+      </p>
+
+      {ruleRows.length === 0 ? (
+        <EmptyState
+          title="No rules are defined"
+          body="Eligibility conditions currently live wherever they were written. Moving one here makes changing it a governance act with a name and a date attached, which is the whole purpose of the engine."
+        />
+      ) : (
+        <div class="tbl-scroll" tabindex="0" role="region" aria-label="Rules and what is in force">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th scope="col">Rule</th>
+                <th scope="col">Decides</th>
+                <th scope="col">Version in force</th>
+                <th scope="col">Window</th>
+                <th scope="col">Standing today</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ruleRows.map(({ rule, inForce }) => (
+                <tr class={inForce.status === 'in_force' ? '' : 'row-quiet'}>
+                  <td>
+                    <span class="mono">{rule.code}</span>
+                    <span class="sub">{rule.title}</span>
+                  </td>
+                  <td>{rule.subjectKind}</td>
+                  <td class="mono">{inForce.version?.version ?? '—'}</td>
+                  <td>
+                    {inForce.version?.effectiveFrom
+                      ? <>{day(inForce.version.effectiveFrom)} → {inForce.version.effectiveTo ? day(inForce.version.effectiveTo) : 'open'}</>
+                      : <span class="none">never dated</span>}
+                  </td>
+                  <td class={inForce.status === 'in_force' ? '' : 'warn'}>
+                    {IN_FORCE_WORDS[inForce.status] ?? inForce.status}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )}
+
+  {/* ═══════ SOURCE MATERIAL ═══════ */}
+  {configured && !readError && (
+    <section class="reg reg-source" aria-labelledby="src-h">
+      <h2 id="src-h" class="reg-h">Source material — not MMAKF policy</h2>
+      <p class="reg-lead">
+        Every row below is somebody else&rsquo;s published rule, with the URL it was read from and
+        the date it was read. Not one of them binds an MMAKF member unless the standing column says
+        <em> Adopted by MMAKF</em> — and that standing is set by publishing an instrument, never
+        from this screen.
+      </p>
+
+      {!canAnywhere(principal, 'source:read') ? (
+        <EmptyState
+          title="The source register is a separate authority"
+          body="Reading source material requires source:read, which this account does not hold. Compiling evidence about other organisations and setting MMAKF policy are deliberately different permissions."
+        />
+      ) : sourceRows.length === 0 ? (
+        <EmptyState
+          title="No source material is registered"
+          body="docs/governance/KARATE-ACADEMY-SOURCE-REGISTER.md holds the research. Loading it here puts every excerpt, URL and retrieval date behind the rules that cite them."
+        />
+      ) : (
+        <div class="tbl-scroll" tabindex="0" role="region" aria-label="Source provisions register">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th scope="col">Standing</th>
+                <th scope="col">Whose</th>
+                <th scope="col">Ref</th>
+                <th scope="col">Topic</th>
+                <th scope="col">As published</th>
+                <th scope="col">As MMAKF reads it</th>
+                <th scope="col">Source</th>
+                {mayMarkSource && <th scope="col">Record a standing</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {sourceRows.map(({ provision, document }) => (
+                <tr class={provision.adoptionStatus === 'flagged_not_adoptable' ? 'row-flagged' : ''}>
+                  <td>
+                    <strong>{STANDING_WORDS[provision.adoptionStatus] ?? provision.adoptionStatus}</strong>
+                    {provision.adoptionNote && <span class="sub">{provision.adoptionNote}</span>}
+                  </td>
+                  <td>
+                    {/* The primary column, not a caption. */}
+                    <strong>{document.sourceOrg}</strong>
+                    <span class="sub">{LAYER_WORDS[provision.layer] ?? provision.layer}</span>
+                  </td>
+                  <td class="mono">{provision.ref}</td>
+                  <td>{provision.topic}</td>
+                  <td class="excerpt">&ldquo;{provision.sourceExcerpt}&rdquo;</td>
+                  <td>{provision.normalizedRule}</td>
+                  <td>
+                    <a href={document.sourceUrl} rel="noopener nofollow" target="_blank">
+                      {document.sourceTitle}
+                    </a>
+                    <span class="sub">read {day(document.retrievedOn)} · {provision.confidence}</span>
+                  </td>
+                  {mayMarkSource && (
+                    <td>
+                      <form method="post" action={SELF} class="acts">
+                        <input type="hidden" name="ref" value={provision.ref} />
+                        <label class="vh" for={`reason-${provision.ref}`}>Reason</label>
+                        <input
+                          id={`reason-${provision.ref}`}
+                          type="text"
+                          name="reason"
+                          placeholder="Reason (required to reject or flag)"
+                          maxlength="500"
+                        />
+                        <span class="btns">
+                          {STANDINGS.map((a) => (
+                            <button type="submit" name="action" value={a.name} title={a.help}>
+                              {a.label}
+                            </button>
+                          ))}
+                        </span>
+                      </form>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )}
+
+  {/* ═══════ DETERMINATIONS ═══════ */}
+  {configured && !readError && (
+    <section class="reg" aria-labelledby="det-h">
+      <h2 id="det-h" class="reg-h">Recent determinations</h2>
+      <p class="reg-lead">
+        What the engine decided, about whom, under which rule version. Each row pins the version
+        that produced it, so amending a rule next year cannot restate what was decided this year.
+      </p>
+
+      {determinations.length === 0 ? (
+        <EmptyState
+          title="No determinations have been recorded"
+          body="A determination is written when a rule is evaluated against a real subject. None exists yet, and an empty list is the honest answer."
+        />
+      ) : (
+        <div class="tbl-scroll" tabindex="0" role="region" aria-label="Recent determinations">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th scope="col">Reference</th>
+                <th scope="col">Rule</th>
+                <th scope="col">Subject</th>
+                <th scope="col">Outcome</th>
+                <th scope="col">Decided for</th>
+                <th scope="col">Appealable</th>
+              </tr>
+            </thead>
+            <tbody>
+              {determinations.map((d) => (
+                <tr class={d.supersededByDeterminationId ? 'row-quiet' : ''}>
+                  <td class="mono">
+                    {d.ref}
+                    {d.supersededByDeterminationId && <span class="sub">superseded</span>}
+                  </td>
+                  <td class="mono">{d.ruleCode}</td>
+                  <td>{d.subjectType}:{d.subjectId}</td>
+                  <td>
+                    <strong>{d.outcome}</strong>
+                    <span class="sub">{d.reason}</span>
+                  </td>
+                  <td>{day(d.determinedOn)}</td>
+                  <td>{d.appealable ? 'Yes' : 'Recorded as not appealable'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )}
+</AdminShell>
+
+<style>
+  .whose {
+    border: 1px solid var(--line, #d8d8d8);
+    border-top: 3px solid var(--red, #b3121f);
+    border-radius: 8px;
+    padding: 1.1rem 1.25rem;
+    margin: 0 0 1.75rem;
+  }
+  .whose-h { font-size: 1.05rem; margin: 0 0 .5rem; }
+  .whose p { margin: 0 0 .6rem; max-width: 74ch; line-height: 1.55; }
+  .whose p:last-child { margin-bottom: 0; }
+  .whose-note { font-size: .92rem; opacity: .85; }
+
+  .done, .failed {
+    border-radius: 6px;
+    padding: .7rem .9rem;
+    margin: 0 0 1.25rem;
+    max-width: 80ch;
+  }
+  .done { border: 1px solid var(--line, #d8d8d8); }
+  .failed { border: 1px solid var(--red, #b3121f); }
+
+  .reg { margin: 0 0 2.5rem; }
+  .reg-h { font-size: 1.15rem; margin: 0 0 .35rem; }
+  .reg-lead { margin: 0 0 1rem; max-width: 82ch; line-height: 1.55; opacity: .9; }
+  .reg-source .reg-h { border-left: 4px solid var(--red, #b3121f); padding-left: .6rem; }
+
+  /* A table wider than a phone scrolls inside its own box. A scrollable box
+     must also be reachable by keyboard: role + tabindex make it a focus stop,
+     and the aria-label says what a screen reader has landed in. */
+  .tbl-scroll { overflow-x: auto; border: 1px solid var(--line, #d8d8d8); border-radius: 8px; }
+  .tbl { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  .tbl th, .tbl td {
+    text-align: left;
+    vertical-align: top;
+    padding: .6rem .7rem;
+    border-bottom: 1px solid var(--line, #eee);
+  }
+  .tbl th { font-weight: 600; white-space: nowrap; }
+  .tbl tbody tr:last-child td { border-bottom: 0; }
+
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+  .sub { display: block; font-size: .8rem; opacity: .75; margin-top: .2rem; white-space: normal; }
+  .excerpt { max-width: 34ch; font-style: italic; }
+  .none { opacity: .7; font-style: italic; }
+  .warn { color: var(--red, #b3121f); font-weight: 600; }
+  .row-quiet td { opacity: .72; }
+  .row-flagged { background: color-mix(in srgb, var(--red, #b3121f) 6%, transparent); }
+
+  .acts { display: flex; flex-direction: column; gap: .35rem; min-width: 15rem; }
+  .acts input[type='text'] {
+    width: 100%;
+    padding: .35rem .45rem;
+    border: 1px solid var(--line, #d8d8d8);
+    border-radius: 4px;
+    font: inherit;
+  }
+  .btns { display: flex; flex-wrap: wrap; gap: .3rem; }
+  .btns button {
+    font: inherit;
+    font-size: .8rem;
+    padding: .3rem .55rem;
+    border: 1px solid var(--line, #d8d8d8);
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .vh {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+</style>

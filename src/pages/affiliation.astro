@@ -3,6 +3,7 @@ import Base from '@/layouts/Base.astro';
 import Icon from '@/components/Icon.astro';
 import PageHero from '@/components/PageHero.astro';
 import { get } from '@/lib/storage';
+import { centreTimings, hasTimings } from '@/lib/timings';
 
 export const prerender = false;
 
@@ -196,18 +197,31 @@ const ladder = [
         <table class="branch-tbl">
           <caption class="sr-only">The federation network, centre by centre</caption>
           <thead>
-            <tr><th scope="col">Centre</th><th scope="col">City</th><th scope="col">District</th><th scope="col">In-charge</th><th scope="col">Status</th></tr>
+            <tr><th scope="col">Centre</th><th scope="col">City</th><th scope="col">District</th><th scope="col">In-charge</th><th scope="col">Timings</th><th scope="col">Status</th></tr>
           </thead>
           <tbody>
-            {branches.map((b: any) => (
+            {branches.map((b: any) => {
+              const t = centreTimings(b, fed);
+              return (
               <tr>
                 <td style="font-family:var(--font-display);font-weight:600">{b.name}</td>
                 <td>{b.city}</td>
                 <td class="text-muted">{b.district}</td>
                 <td class="text-muted">{b.incharge}</td>
+                {/* An em dash, not the headquarters' timings. A centre that has
+                    not filed its own is shown as not having filed. */}
+                <td class="text-muted" style="min-width:22ch">
+                  {hasTimings(t) ? (
+                    <>
+                      {t.hours && <div>{t.hours}</div>}
+                      {t.sunday && <div style="margin-top:2px">{t.sunday}</div>}
+                    </>
+                  ) : '—'}
+                </td>
                 <td><span class={`pill ${b.status === 'Headquarters' ? 'featured' : ''}`}>{b.status}</span></td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

@@ -14,6 +14,16 @@ const fed = await get('federation');
 const courses = await get<any[]>('courses');
 const lessons = await get<any[]>('lessons');
 const programs = await get<any[]>('programs');
+const schedule = (await get<any[]>('schedule')) || [];
+
+// Which days carry a live online batch is a fact about the timetable the
+// federation edits at /admin, so it is read from there rather than typed here.
+const onlineDays = [...new Set(
+  schedule
+    .filter((s: any) => String(s.mode).toLowerCase() === 'online')
+    .map((s: any) => s.day)
+    .filter(Boolean),
+)];
 
 const lessonsFor = (title: string) => lessons.filter((l: any) => l.course === title);
 const freeCount = lessons.filter((l: any) => l.access === 'Free').length;
@@ -43,7 +53,7 @@ const withVideo = lessons.filter((l: any) => l.video).length;
       <div class="grid grid-3">
         {[
           { num: '01', t: 'Enrol in the Online Academy', d: `Join from anywhere in the world — your enrolment is registered with the federation like any dojo student's. Fees as notified by the office.` },
-          { num: '02', t: 'Train the curriculum + live sessions', d: 'Work through your belt-level course below, and join the weekly live classes on the schedule (Tue · Thu · Sun online batches).' },
+          { num: '02', t: 'Train the curriculum + live sessions', d: `Work through your belt-level course below, and join the weekly live classes on the schedule${onlineDays.length ? ` (${onlineDays.join(' · ')} online batches)` : ''}.` },
           { num: '03', t: 'Grade by video submission', d: 'Submit your examination kata and kihon by video. The Examination Board reviews quarterly — same syllabus, same standard as the hombu.' },
         ].map((s) => (
           <div class="card fade">

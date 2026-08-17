@@ -863,6 +863,49 @@ route actually writes.
 
 # Part 3 — registers
 
+## 2.22 The location engine and the identity foundation
+
+**Added 17 August 2026 (migration 0025). Classification: REAL+PARTIALLY WIRED —
+complete at the domain layer, UNWIRED at every surface.**
+
+Stated first because it is what a reader most needs to know: `src/db/geography.ts`
+and `src/db/identity.ts` are gated, audited and covered by 99 passing tests, and
+**no file under `src/pages` imports either of them.** By this document's own
+rule — a link is REAL only if a specific file does the work — the public and
+admin links below are absent, not weak.
+
+| Link | State |
+|---|---|
+| PUBLIC UI | **ABSENT.** Registration still collects a free-text city (`src/lib/registration.ts` `CORE_FIELDS`). |
+| AUTH | n/a at the domain layer; every write takes an `AuditContext` carrying a `Principal`. |
+| API | **ABSENT.** No endpoint. |
+| VALIDATION | REAL — `GeographyError` / `IdentityError` with codes and fields, one normaliser used on both sides of every lookup. |
+| SERVICE | REAL — `geography.ts` (≈17 exported functions), `identity.ts` (≈28). |
+| DATABASE | REAL — Postgres, 12 tables + 8 columns on `persons`. RLS enabled by `0026_data_api_lockdown.sql`. |
+| EVENT | **ABSENT.** No `domain_events` row is published. `PersonVerified`, `RoleAssigned` and the rest named in the brief are not emitted. |
+| WORKFLOW | **ABSENT.** |
+| AUTOMATION | PARTIAL — `detectPersonDuplicates()` raises candidates, and nothing calls it on the intake path yet. |
+| NOTIFICATION | **ABSENT.** |
+| CALENDAR | n/a. |
+| AUDIT | REAL — `writeAudit()` on every privileged mutation, and **deliberately without the payload**: contact values and address lines are excluded, because an audit trail is read by more people than the record itself. |
+| ADMIN UI | **ABSENT.** `duplicateQueue()` and `profileChangeQueue()` have no page. |
+| USER UI | **ABSENT.** No parent surface; the `PARENT` role still has nowhere to go. |
+| TEST | REAL — `tests/geography.test.ts` (37), `tests/identity.test.ts` (62). |
+
+### The separation this domain is built on
+
+`state_units` / `district_units` are the register of CHARTERED MMAKF BODIES.
+`countries` / `admin_areas` are a map. **No foreign key joins the two ladders in
+either direction**, and `tests/geography.test.ts` asserts that structurally by
+reading `information_schema`. The day somebody adds one, a member living in a
+state MMAKF has not chartered becomes unrecordable again — which is exactly the
+state this migration was written to end.
+
+*Missing links, named:* no surface, no endpoint, no domain event, no
+notification. Items 0a–0c in IMPLEMENTATION-QUEUE.md are these four.
+
+---
+
 ## 3.1 Unreachable production code
 
 Real, tested modules and functions with **no caller in `src/`**:
@@ -1008,3 +1051,24 @@ Stated so that no reader takes silence for confirmation.
 - The working tree was changing during this audit. §1.1 in particular describes
   a component and an endpoint that were rewritten while it was being written,
   and both states are recorded.
+
+---
+
+## Technical knowledge library (added with migration 0031)
+
+| Layer | Wired to | Enforced where |
+|---|---|---|
+| `technical_sources` → `technical_citations` | Every library record, polymorphically | `CHECK (source_id IS NOT NULL OR source_url IS NOT NULL)` — a citation citing nothing is refused |
+| `media_assets.rights` → learner surfaces | `mediaUse()` in `src/db/library.ts` | Write path (`reviewLink`) refuses approval on unresolved rights; read path (`mediaFor`) filters again |
+| `media_technical_links.state` → `/admin/technical-library` | `reviewQueue()` | `technical:read` to see, `technical:review` to decide |
+| Approval → a named person | `kata_applications`, `media_technical_links` | DB `CHECK`: approved rows must carry both an approver and a timestamp. A classifier has no person id and therefore cannot write one |
+| Reviewer identity | `users.person_id` via the session | Resolved server-side in the admin page; the posted value is ignored, so a decision cannot be attributed to a colleague |
+| `reference_curricula` → grading engine | **Deliberately not wired** | The grading engine reads `grade_requirements`; it has no path to `reference_curricula`. Another federation's syllabus cannot become examinable by being loaded |
+| `sport_kumite_rulesets` → `kumite_forms` | **Deliberately not wired** | Sport regulation and traditional teaching progression are separate tables so neither can be rendered as the other |
+| `src/data/shotokan/terminology.ts` → `technical_terms` | `importTerminology()` | One-way projection. The file stays canonical; the database is a searchable copy, not a competing definition |
+
+**Not wired, and why.** No learner route consumes any of this yet — see conflict
+4 in [parallel/PATCH-CONFLICTS.md](parallel/PATCH-CONFLICTS.md). The video
+register in `src/data/shotokan/video-register.ts` is not yet imported into
+`media_assets`; that importer is the next dependency-safe step and is described
+in the same document.

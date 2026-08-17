@@ -1,0 +1,435 @@
+---
+// /admin/technical-library — the review queue between "found" and "taught".
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHAT THIS SCREEN DECIDES, AND IN WHICH ORDER
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Every row here is a proposed link between a video and something MMAKF
+// teaches. A reviewer is being asked TWO questions about it, and the order
+// matters more than it looks:
+//
+//   1. MAY WE SHOW IT AT ALL?  — a rights question.
+//   2. IS IT CORRECT SHOTOKAN? — a technical question.
+//
+// The rights question comes first because answering the technical one first
+// wastes the reviewer's time on material the federation cannot use, and worse,
+// builds a sense that the row is nearly approved. So the rights standing is the
+// first column, a blocked row says so before its title, and the approve control
+// is not rendered at all where the rights forbid it. The module refuses the
+// same thing server-side — see reviewLink() — because a hidden button is a
+// courtesy and not a control.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHY A ROW SAYS WHO PROPOSED IT
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A classifier can put a link here. It cannot approve one, and the database
+// refuses an approved row with no named reviewer. The 'Proposed by' column
+// exists so a reviewer never mistakes a model's 94%-confident guess for a
+// colleague's considered classification — those warrant different scrutiny, and
+// a screen that renders them identically invites the reviewer to rubber-stamp
+// the first because it looks like the second.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTHORITY
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 'technical:read' to look, 'technical:review' to decide. Deliberately not
+// 'content:*': a media officer who writes federation copy holds content:write
+// and must not be able to declare that a stranger's kata demonstration is fit
+// to teach, nor that MMAKF has the right to publish it.
+
+export const prerender = false;
+
+import AdminShell from '@/components/AdminShell.astro';
+import StatCard from '@/components/StatCard.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import { reviewQueue, reviewLink, LibraryError, mediaUse } from '@/db/library';
+import * as s from '@/db/schema';
+import { eq } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/technical-library');
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const configured = isConfigured();
+
+const mayRead = Boolean(principal) && canAnywhere(principal, 'technical:read');
+const mayReview = Boolean(principal) && canAnywhere(principal, 'technical:review');
+
+/**
+ * WHO IS RECORDED AS HAVING DECIDED — resolved from the session, NEVER from the
+ * form.
+ *
+ * An approval names a person in the register permanently. If the page posted
+ * that id, any reviewer could attribute their decision to a colleague simply by
+ * editing a hidden field, and the audit trail would be worse than useless — it
+ * would be confidently wrong. So the person is looked up from the signed-in
+ * user here and the submitted value is ignored.
+ *
+ * A shared-credential session resolves to no person, and therefore cannot
+ * approve anything. That is correct: "the admin password" is not somebody who
+ * can put their name to a technical judgement.
+ */
+let reviewerPersonId: number | null = null;
+if (configured && identity?.userId) {
+  const found = await db().select({ personId: s.users.personId })
+    .from(s.users).where(eq(s.users.id, identity.userId)).limit(1);
+  reviewerPersonId = found[0]?.personId ?? null;
+}
+
+/**
+ * The decisions a reviewer can record.
+ *
+ * There is no "approve anyway". The rights answer is a fact about what MMAKF
+ * may do, not a preference a senior enough reviewer can overrule, so the only
+ * route past a blocked row is to resolve the rights on the asset itself.
+ */
+const DECISIONS = [
+  { name: 'approve', toState: 'approved', dimension: 'technical', label: 'Approve', needsRights: true },
+  { name: 'publish', toState: 'published', dimension: 'technical', label: 'Publish', needsRights: true },
+  { name: 'rights', toState: 'rights_review', dimension: 'rights', label: 'Send to rights review', needsRights: false },
+  { name: 'reject', toState: 'rejected', dimension: 'technical', label: 'Reject', needsRights: false },
+] as const;
+
+let error: string | null = null;
+let done: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const decision = DECISIONS.find((d) => d.name === get('decision')) ?? null;
+  const note = get('note') || null;
+  const rl = await rateLimit(Astro.request, 'technical-review', 60, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many decisions in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so there is no queue to work.';
+  } else if (!mayReview) {
+    Astro.response.status = 403;
+    error = 'Deciding on technical material requires technical:review, which this account does not hold in any scope.';
+  } else if (!decision) {
+    Astro.response.status = 400;
+    error = 'That is not one of the decisions this queue records.';
+  } else if (!reviewerPersonId) {
+    // The approval has to name a person in the register, not a login. The
+    // database enforces it too; this is the message that explains why.
+    Astro.response.status = 400;
+    error = 'A decision must name the person in the register who made it, and this session resolves to no person record. Sign in with a user account linked to a person.';
+  } else {
+    const id = Number(get('id'));
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: note,
+    };
+    try {
+      if (!Number.isInteger(id) || id <= 0) throw new Error('no link named');
+      await reviewLink(db(), ctx, {
+        id, toState: decision.toState, dimension: decision.dimension,
+        reviewerPersonId, note,
+      });
+      return Astro.redirect(`${SELF}?done=${decision.name}`, 303);
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = `The library refused this: it requires ${err.action}, which this account does not hold. Nothing was changed.`;
+      } else if (err instanceof LibraryError) {
+        // The module's refusals are already written for a person to read — the
+        // rights one in particular says what to do instead.
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[admin/technical-library] review failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was changed. The library refused the write, and the fault is in the server log.';
+      }
+    }
+  }
+}
+
+if (Astro.url.searchParams.has('done')) {
+  const d = DECISIONS.find((x) => x.name === Astro.url.searchParams.get('done'));
+  done = d ? `${d.label} recorded.` : null;
+}
+
+// ─── Load ───────────────────────────────────────────────────────────────────
+
+let rows: any[] = [];
+let sources: any[] = [];
+let loadError: string | null = null;
+
+if (configured && mayRead && principal) {
+  try {
+    rows = await reviewQueue(db(), principal);
+    sources = await db().select().from(s.technicalSources).orderBy(s.technicalSources.authorityTier);
+  } catch (err: any) {
+    if (!(err instanceof ForbiddenError)) {
+      console.error('[admin/technical-library] load failed', err);
+      loadError = 'The queue could not be read.';
+    }
+  }
+}
+
+const blocked = rows.filter((r) => r.rightsBlocked).length;
+const aiProposed = rows.filter((r) => r.proposedBy === 'ai').length;
+const ready = rows.length - blocked;
+
+const TIER_LABEL: Record<string, string> = {
+  mmakf_official: 'MMAKF official',
+  primary_reference: 'Primary reference',
+  competition_authority: 'Competition authority',
+  educational: 'Educational',
+  discovery: 'Discovery only',
+};
+
+const RIGHTS_HELP: Record<string, string> = {
+  embed: 'May be embedded on an MMAKF page.',
+  link: 'May be linked to only — never re-served from MMAKF.',
+  none: 'May not be shown. Resolve the rights on the asset before deciding anything else.',
+};
+
+// Rendered as a plain semantic table rather than through DataTable: every row
+// carries its own decision form, and the shared component is data-driven with
+// no slot for per-row controls. Forcing it would mean a custom cell component
+// per button.
+const COLUMNS = ['Rights', 'Video', 'Proposed placement', 'Proposed by', 'State', 'Decision'];
+
+const headerDescription =
+  'Proposed links between video and the technical curriculum. Rights are decided before technique: ' +
+  'a video MMAKF may not lawfully show is not worth a technical opinion.';
+---
+
+<AdminShell
+  title="Technical library"
+  requires="technical:read"
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin/dashboard') },
+      { name: 'Sport', url: h('/admin/grading') },
+      { name: 'Technical library', url: h('/admin/technical-library') },
+    ],
+    title: 'Technical library — review queue',
+    description: headerDescription,
+    secondary: [
+      { label: 'Kata library', href: h('/kata') },
+      { label: 'Grading', href: h('/admin/grading') },
+    ],
+  }}
+>
+  <Fragment slot="meta">
+    <span class="meta-chip meta-blocked">{blocked} blocked on rights</span>
+    <span class="meta-chip">{ready} ready for technical review</span>
+    {aiProposed > 0 && <span class="meta-chip">{aiProposed} proposed by classifier</span>}
+  </Fragment>
+
+  {/* ── What approval here does and does not mean ─────────────────────────── */}
+  <aside class="rule" aria-labelledby="rule-h">
+    <h2 id="rule-h" class="rule-h">Approving a row puts MMAKF&rsquo;s name to it.</h2>
+    <p>
+      A link approved here is shown to learners as material the federation stands
+      behind. Two separate things have to be true first, and this queue will not
+      let them be confused: that MMAKF has the <strong>right</strong> to show the
+      video, and that the technique in it is <strong>correct Shotokan</strong>.
+      A classifier may propose a row; only a named reviewer may approve one, and
+      the record keeps that name permanently.
+    </p>
+    <p class="rule-note">
+      Nothing here can be approved while its rights are unresolved. That is not a
+      setting — the store refuses it, and so does the database.
+    </p>
+  </aside>
+
+  {error && <ErrorState title="Nothing was changed" description={error} />}
+  {done && <p class="done" role="status">{done}</p>}
+  {loadError && <ErrorState title="The queue could not be read" description={loadError} />}
+
+  {!configured && (
+    <EmptyState
+      title="No federation database on this deployment"
+      description="The technical library lives in Postgres. Until DATABASE_URL is set there is no queue to work, and this screen will not pretend otherwise."
+    />
+  )}
+
+  {configured && !mayRead && (
+    <EmptyState
+      title="This account cannot read the technical library"
+      description="Reading the review queue requires technical:read. Content and media roles do not hold it: reviewing what MMAKF teaches is a separate authority from publishing what MMAKF says."
+    />
+  )}
+
+  {configured && mayRead && (
+    <>
+      <div class="stats">
+        <StatCard label="Awaiting decision" value={rows.length} />
+        <StatCard label="Blocked on rights" value={blocked} />
+        <StatCard label="Ready for technique" value={ready} />
+        <StatCard label="Registered sources" value={sources.length} />
+      </div>
+
+      {rows.length === 0 ? (
+        <EmptyState
+          title="Nothing is waiting"
+          description="No proposed link is in new, classified, rights review or technical review. New material arrives here from channel synchronisation and from the classifier; neither can approve anything."
+        />
+      ) : (
+        <table class="queue">
+          <caption>Proposed links awaiting a decision</caption>
+          <thead>
+            <tr>{COLUMNS.map((c) => <th scope="col">{c}</th>)}</tr>
+          </thead>
+          <tbody>
+          {rows.map((row) => (
+            <tr>
+              <td>
+                <span class={`rights rights-${row.use}`}>
+                  {row.use === 'none' ? 'Blocked' : row.use === 'link' ? 'Link only' : 'Embeddable'}
+                </span>
+                <span class="rights-detail">{row.asset.rights}</span>
+                <span class="sr-only">{RIGHTS_HELP[row.use]}</span>
+              </td>
+              <td>
+                <a href={row.asset.url} rel="noopener noreferrer nofollow" target="_blank">{row.asset.title}</a>
+                <span class="label">{row.label}</span>
+              </td>
+              <td>
+                {row.subjectKind.replace(/_/g, ' ')} #{row.subjectId}
+                {row.startSeconds != null && (
+                  <span class="segment">
+                    {Math.floor(row.startSeconds / 60)}:{String(row.startSeconds % 60).padStart(2, '0')}
+                    {row.endSeconds != null && `–${Math.floor(row.endSeconds / 60)}:${String(row.endSeconds % 60).padStart(2, '0')}`}
+                  </span>
+                )}
+              </td>
+              <td>
+                <span class={`proposer proposer-${row.proposedBy}`}>{row.proposedBy}</span>
+                {row.confidence != null && <span class="confidence">{row.confidence}% confident</span>}
+              </td>
+              <td>{row.state.replace(/_/g, ' ')}</td>
+              <td>
+                {!mayReview ? (
+                  <span class="no-authority">Read only</span>
+                ) : !reviewerPersonId ? (
+                  <span class="no-authority">
+                    This session is not linked to a person in the register, so it cannot sign a decision.
+                  </span>
+                ) : (
+                  <form method="POST" class="decide">
+                    <input type="hidden" name="id" value={String(row.id)} />
+                    <label class="sr-only" for={`note-${row.id}`}>Note</label>
+                    <input id={`note-${row.id}`} name="note" type="text" placeholder="Reason (recorded)" />
+                    {DECISIONS.filter((d) => !d.needsRights || row.use !== 'none').map((d) => (
+                      <button type="submit" name="decision" value={d.name}>{d.label}</button>
+                    ))}
+                    {row.use === 'none' && (
+                      <span class="blocked-note">
+                        Approval is unavailable until the rights on this video are resolved.
+                      </span>
+                    )}
+                  </form>
+                )}
+              </td>
+            </tr>
+          ))}
+          </tbody>
+        </table>
+      )}
+
+      {/* ── The source registry ───────────────────────────────────────────── */}
+      <section class="sources" aria-labelledby="sources-h">
+        <h2 id="sources-h">Source registry</h2>
+        <p class="sources-lede">
+          Assessed once, so a trusted channel is not re-argued with every upload.
+          A tier describes where material came from — never whether it is correct.
+        </p>
+        {sources.length === 0 ? (
+          <EmptyState title="No sources registered" description="Run the technical library seed to load the researched primary sources." />
+        ) : (
+          <ul class="source-list">
+            {sources.map((src) => (
+              <li>
+                <span class={`tier tier-${src.authorityTier}`}>{TIER_LABEL[src.authorityTier] ?? src.authorityTier}</span>
+                <strong>{src.organisation}</strong>
+                {src.channelUrl && <a href={src.channelUrl} rel="noopener noreferrer nofollow" target="_blank">channel</a>}
+                {src.websiteUrl && <a href={src.websiteUrl} rel="noopener noreferrer nofollow" target="_blank">website</a>}
+                {src.rightsPolicy && <p class="policy">{src.rightsPolicy}</p>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .rule {
+    border-left: 4px solid var(--c-warn, #b45309);
+    background: var(--c-surface-2, #fffbeb);
+    padding: 1rem 1.25rem;
+    margin-block: 1rem 1.5rem;
+    border-radius: 0 6px 6px 0;
+  }
+  .rule-h { font-size: 1.05rem; margin: 0 0 .5rem; }
+  .rule p { margin: 0 0 .5rem; max-width: 68ch; }
+  .rule-note { font-weight: 600; }
+
+  .stats { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); margin-block: 1.5rem; }
+
+  .rights { display: inline-block; font-weight: 700; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }
+  .rights-none { color: var(--c-danger, #b91c1c); }
+  .rights-link { color: var(--c-warn, #b45309); }
+  .rights-embed { color: var(--c-ok, #15803d); }
+  .rights-detail { display: block; font-size: .75rem; opacity: .7; font-family: var(--font-mono, monospace); }
+
+  .label { display: block; font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; opacity: .75; }
+  .segment { display: block; font-size: .75rem; font-family: var(--font-mono, monospace); opacity: .8; }
+
+  .proposer { font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }
+  .proposer-ai { color: var(--c-warn, #b45309); font-weight: 700; }
+  .confidence { display: block; font-size: .75rem; opacity: .7; }
+
+  .decide { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+  .decide input[type=text] { flex: 1 1 10rem; min-width: 8rem; padding: .3rem .5rem; font-size: .85rem; }
+  .decide button { padding: .3rem .6rem; font-size: .8rem; cursor: pointer; }
+  .blocked-note { flex: 1 1 100%; font-size: .75rem; color: var(--c-danger, #b91c1c); }
+  .no-authority { font-size: .8rem; opacity: .7; }
+
+  .done { padding: .6rem .9rem; background: var(--c-ok-bg, #ecfdf5); border-radius: 4px; }
+
+  .sources { margin-top: 2.5rem; }
+  .sources-lede { max-width: 68ch; opacity: .85; }
+  .source-list { list-style: none; padding: 0; display: grid; gap: 1rem; }
+  .source-list li { border: 1px solid var(--c-border, #e5e7eb); border-radius: 6px; padding: .85rem 1rem; }
+  .source-list a { margin-left: .6rem; font-size: .85rem; }
+  .tier { display: inline-block; font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; margin-right: .6rem; }
+  .tier-mmakf_official { color: var(--c-ok, #15803d); }
+  .tier-discovery { color: var(--c-muted, #6b7280); }
+  .policy { font-size: .85rem; margin: .5rem 0 0; opacity: .85; max-width: 72ch; }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  @media (max-width: 40rem) {
+    .decide { flex-direction: column; align-items: stretch; }
+  }
+</style>

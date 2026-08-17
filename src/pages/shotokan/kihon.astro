@@ -1,0 +1,169 @@
+---
+/**
+ * The kihon library index. §6 and §7.
+ *
+ * Grouped by the families the art itself uses — dachi, tsuki, uke, uchi, geri,
+ * tai-sabaki, ashi-sabaki — rather than by difficulty, because difficulty is a
+ * syllabus judgement and MMAKF has not published one. An index ordered
+ * "beginner to advanced" would be a grading ladder by implication, which is the
+ * one thing these pages must never imply.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { techniqueGroups, libraryStats } from '@/data/shotokan';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const groups = techniqueGroups();
+const stats = libraryStats();
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'CollectionPage',
+  name: 'Shotokan kihon — the technique library',
+  url: canonicalFor(surface, '/shotokan/kihon'),
+  description: `${stats.techniques} Shotokan techniques described as mechanics: stances, punches, blocks, strikes, kicks and body movement, each with its principles, its common errors and how to correct them.`,
+  isPartOf: { '@type': 'WebSite', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
+  hasPart: groups.flatMap((g) =>
+    g.members.map((t) => ({
+      '@type': 'LearningResource',
+      name: `${t.name} — ${t.english}`,
+      url: canonicalFor(surface, `/shotokan/techniques/${t.slug}`),
+    }))
+  ),
+};
+---
+
+<Base
+  title="Shotokan kihon — the technique library — MMAKF"
+  description={`${stats.techniques} Shotokan techniques explained as mechanics rather than as a list of names: ${stats.stances} stances, ${stats.punches} punches, ${stats.blocks} blocks, ${stats.strikes} strikes and ${stats.kicks} kicks, each with its principles, its common errors and the drills that fix them.`}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Kihon', url: '/shotokan/kihon' },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow="Kihon 基本"
+    title={`The <em class="r">${stats.techniques}</em> techniques of the basics.`}
+    lead="Stances, punches, blocks, strikes, kicks and the movement that carries them. Each one described by what the body actually does — where the weight goes, what the hip does, where the fault usually is and what corrects it."
+    pills={[`${stats.stances} stances`, `${stats.punches + stats.blocks + stats.strikes} hand techniques`, `${stats.kicks} kicks`]}
+  />
+
+  {/* ═══════ WHAT THIS IS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">Principles, not names</div>
+          <h2 class="display-2" style="margin-top:16px">A name teaches <em class="r">nobody</em>.</h2>
+          <div class="rule"></div>
+          <p class="body-txt">
+            &ldquo;Gyaku-zuki &mdash; reverse punch&rdquo; is a translation, and a student who reads it knows
+            exactly as much as before. What is worth writing down is that the punch is thrown by the hip
+            rotating against a planted rear foot, that the arm arrives last, and that the fault which ruins
+            it more often than any other is the back heel lifting to let the hips over-rotate.
+          </p>
+          <p class="body-txt">
+            So every entry here carries the mechanics part by part, the principles that survive when the
+            Japanese is forgotten, the faults with their causes and their corrections, drills, and the kata
+            and kumite the technique belongs to. Shotokan technique is public martial-arts knowledge, common
+            to every Shotokan dojo in the world, and it is written here at length for a reader who is
+            learning rather than for one who already knows.
+          </p>
+        </div>
+
+        <aside class="fade panel" aria-labelledby="not-a-syllabus">
+          <div class="eyebrow">What this library is not</div>
+          <h3 id="not-a-syllabus" class="panel-h">It is not a syllabus.</h3>
+          <p class="panel-p">
+            <strong>MMAKF has not published its grading syllabus.</strong> Nothing here says which technique
+            belongs to which belt, which combination is examined at which grade, or what standard a candidate
+            is measured against.
+          </p>
+          <p class="panel-p">
+            The families below are the families the art uses. They are deliberately <em>not</em> ordered
+            beginner-to-advanced, because an ordered list is a grading ladder by implication &mdash; and
+            inventing one would put words in the federation&rsquo;s mouth about the thing members plan their
+            training around.
+          </p>
+          <a class="btn btn-ghost" href={h('/belt-system')}>The belt system &amp; grading &rarr;</a>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE FAMILIES ═══════ */}
+  {groups.map((g, i) => (
+    <section class={i % 2 === 0 ? 'bg2' : ''} id={g.family.key}>
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">{g.members.length} {g.members.length === 1 ? 'technique' : 'techniques'}</div>
+          <h2 class="display-2">
+            {g.family.romaji}
+            {g.family.kanji && <em class="r" lang="ja" style="margin-left:12px">{g.family.kanji}</em>}
+          </h2>
+          <div class="rule"></div>
+          <p class="lead">{g.family.blurb}</p>
+        </div>
+        <div class="grid grid-3">
+          {g.members.map((t) => (
+            <a class="card hoverable fade" href={h(`/shotokan/techniques/${t.slug}`)}>
+              <div class="kata-card-top">
+                <span class="kata-kanji" lang="ja">{t.kanji ?? ''}</span>
+                {t.contested && <span class="pill">Not settled</span>}
+              </div>
+              <div class="card-title" style="font-size:1.05rem">{t.name}</div>
+              <div class="kata-meaning">{t.english}</div>
+              <div class="card-body">{t.summary.split('. ')[0]}.</div>
+              <div class="kata-card-foot">
+                <span class="text-muted">{t.commonErrors.length} common errors</span>
+                <span class="text-gold">Read &rarr;</span>
+              </div>
+            </a>
+          ))}
+        </div>
+      </div>
+    </section>
+  ))}
+
+  {/* ═══════ ELSEWHERE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">The rest of the library</div>
+        <h2 class="display-2">Kihon is <em class="r">one third</em> of it.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Kihon is the vocabulary. Kata is the literature written in it, and kumite is the conversation. The
+          three are taught together because none of them means very much alone.
+        </p>
+      </div>
+      <div class="grid grid-3">
+        <a class="card hoverable fade" href={h('/kata')}>
+          <div class="card-eyebrow">Kata</div>
+          <div class="card-title" style="font-size:1.05rem">The {stats.kata} forms of the canon</div>
+          <div class="card-body">Every kata in Shotokan: the name and what it means, the kanji, the shape it travels, and the Japanese it teaches.</div>
+          <div class="kata-card-foot"><span class="text-gold">The kata library &rarr;</span></div>
+        </a>
+        <a class="card hoverable fade" href={h('/shotokan/kumite')}>
+          <div class="card-eyebrow">Kumite</div>
+          <div class="card-title" style="font-size:1.05rem">{stats.kumiteSystems} systems, {stats.kumiteConcepts} principles</div>
+          <div class="card-body">From five-step sparring to competition tactics, with traditional development and sport kept firmly apart.</div>
+          <div class="kata-card-foot"><span class="text-gold">The kumite library &rarr;</span></div>
+        </a>
+        <a class="card hoverable fade" href={h('/shotokan/terminology')}>
+          <div class="card-eyebrow">Terminology</div>
+          <div class="card-title" style="font-size:1.05rem">{stats.terms} terms, translated and explained</div>
+          <div class="card-body">The Japanese a student meets on the floor, with what each word actually means rather than only what it translates to.</div>
+          <div class="kata-card-foot"><span class="text-gold">The glossary &rarr;</span></div>
+        </a>
+      </div>
+    </div>
+  </section>
+</Base>

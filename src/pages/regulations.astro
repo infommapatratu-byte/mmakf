@@ -2,6 +2,8 @@
 import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import { get } from '@/lib/storage';
+import { isConfigured, db } from '@/db';
+import { publicRegister, today as policyToday } from '@/db/policy';
 
 export const prerender = false;
 
@@ -415,6 +417,49 @@ const anyUnpublished = ownRows.some((d) => !d.published);
 // buttons are replaced with the contact page rather than rendering a dead
 // `mailto:` that opens an empty compose window.
 const email = txt(fed?.contact?.email);
+
+/**
+ * INSTRUMENTS ACTUALLY IN FORCE, from the regulatory engine.
+ *
+ * The Class B table above is a register of the documents a national federation
+ * is EXPECTED to hold — it describes subject matter and publication state, and
+ * it says plainly where a document does not exist. This block is a different
+ * and stricter thing: instruments MMAKF has adopted, whose version has been
+ * approved by a named person, published, and whose effective window contains
+ * today.
+ *
+ * publicRegister() filters on three conditions in SQL — MMAKF's own layer,
+ * `public` classification, and a binding version covering the date — rather
+ * than in this template. A template that forgets one of them publishes an
+ * unapproved regulation, and the query is the place that cannot forget.
+ *
+ * FAILS TO EMPTY, NEVER TO A GUESS. This is a public page; an unconfigured
+ * deployment or a database that is down must render the honest "none in force"
+ * state rather than a 500 or, far worse, a fallback list that reads as adopted
+ * policy.
+ */
+let inForce: Array<{ instrument: any; version: any }> = [];
+let engineReadable = false;
+try {
+  if (isConfigured()) {
+    inForce = await publicRegister(db(), policyToday());
+    engineReadable = true;
+  }
+} catch (err) {
+  console.error('[regulations] policy register read failed', err);
+}
+
+const asOf = new Date().toLocaleDateString('en-IN', {
+  day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
+});
+
+const effectiveDay = (v: string | null | undefined): string => {
+  if (!v) return '—';
+  const d = new Date(v);
+  return Number.isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+};
 ---
 
 <Base
@@ -563,6 +608,77 @@ const email = txt(fed?.contact?.email);
           <a href="/governance#documents" class="btn btn-ghost">Documents &amp; forms register</a>
         </div>
       </div>
+    </div>
+  </section>
+
+  {/* ═══════ IN FORCE TODAY ═══════
+
+      A stricter statement than the table above. That one lists the documents a
+      federation is expected to hold; this one lists instruments MMAKF has
+      actually adopted, approved and published, whose effective window contains
+      today. An empty list here is a true statement about the federation and is
+      printed as one. */}
+  <section id="in-force">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">In force · as at {asOf}</div>
+        <h2 class="display-2">What actually <em class="r">binds</em> a member today.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          An MMAKF instrument binds anybody only when a version of it has been approved by a named
+          person, published, and the date in question falls inside its effective window. This list is
+          resolved by date every time the page is served, so a superseded edition drops off it on the
+          day its successor takes effect — and a member can always ask which edition applied to them
+          on a past date.
+        </p>
+      </div>
+
+      {inForce.length === 0 ? (
+        <div class="card fade">
+          <h3 class="card-title">No MMAKF instrument is in force on this date.</h3>
+          <p class="card-body">
+            {engineReadable
+              ? 'The federation has adopted and published no instrument whose effective window contains today. That is the state of the register, and printing a plausible list instead would be the one failure this page exists to avoid. The rules MMAKF competes under — published by the WKF, NADA and WADA — are listed below and belong to those bodies.'
+              : 'The regulation register is not readable on this deployment, so nothing can be shown as in force. This is a configuration state, not a statement that MMAKF has adopted nothing.'}
+          </p>
+        </div>
+      ) : (
+        <div
+          class="tbl-scroll fade"
+          tabindex="0"
+          role="region"
+          aria-label="MMAKF instruments in force today"
+        >
+          <table class="reg-tbl">
+            <caption class="sr-only">
+              MMAKF instruments in force on {asOf}, with the version, the date each took effect and
+              the date it was approved.
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Instrument</th>
+                <th scope="col">Reference</th>
+                <th scope="col">Type</th>
+                <th scope="col">Version</th>
+                <th scope="col">In force from</th>
+                <th scope="col">Approved on</th>
+              </tr>
+            </thead>
+            <tbody>
+              {inForce.map(({ instrument, version }) => (
+                <tr>
+                  <th scope="row" class="reg-title">{instrument.title}</th>
+                  <td class="text-muted nowrap">{instrument.code}</td>
+                  <td>{instrument.instrumentType}</td>
+                  <td>{version.version}</td>
+                  <td>{effectiveDay(version.effectiveFrom)}</td>
+                  <td>{effectiveDay(version.approvedOn)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   </section>
 

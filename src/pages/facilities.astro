@@ -10,6 +10,17 @@ export const prerender = false;
 const fed = await get('federation');
 const facilities = await get<any[]>('facilities');
 const programs = await get<any[]>('programs');
+const schedule = (await get<any[]>('schedule')) || [];
+
+// The pill sits beside the headquarters address, so it is a claim about the
+// PHYSICAL dojo — online batches are excluded or a worldwide Zoom room would
+// count as the hombu being open. Counted, not typed, so the federation can
+// change it by editing the timetable rather than by editing this file.
+const DAY_WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'];
+const dojoDays = new Set(
+  schedule.filter((s: any) => s.day && String(s.mode).toLowerCase() !== 'online').map((s: any) => s.day),
+).size;
+const openPill = dojoDays ? `Open ${DAY_WORDS[dojoDays] ?? dojoDays} day${dojoDays === 1 ? '' : 's'}` : '';
 ---
 
 <Base
@@ -21,7 +32,7 @@ const programs = await get<any[]>('programs');
     eyebrow="The Dojo"
     title={`Inside the <em>hombu</em> dojo.`}
     lead={`Everything at ${fed.shortName} headquarters is built around one thing: serious, safe, structured training. These are the facilities every member trains with.`}
-    pills={[`${fed.headquarters}`, 'Open Mon–Sat']}
+    pills={[`${fed.headquarters}`, openPill].filter(Boolean)}
   />
 
   {/* ═══════ FACILITIES GRID ═══════ */}
@@ -87,6 +98,9 @@ const programs = await get<any[]>('programs');
           <div class="card-title" style="font-size:1.05rem">{fed.shortName} Hombu Dojo</div>
           <div class="card-body">{fed.contact.address}</div>
           <div class="card-body" style="margin-top:12px"><span class="text-gold">{fed.contact.hours}</span></div>
+          {fed.contact.hoursSunday && (
+            <div class="card-body" style="margin-top:6px"><span class="text-gold">{fed.contact.hoursSunday}</span></div>
+          )}
         </div>
       </div>
     </div>

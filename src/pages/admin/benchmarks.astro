@@ -1,0 +1,857 @@
+---
+// /admin/benchmarks — what OTHER organisations charge.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// THE ONE THING THIS SCREEN MUST NEVER BE MISREAD AS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Every figure on this page is somebody else's price. Not one of them is an
+// MMAKF fee, a proposed MMAKF fee, or a fee MMAKF has considered charging.
+//
+// The failure has a victim and it is specific: an administrator reads a
+// normalised figure next to the word "membership", does not register whose it
+// is, and quotes a British federation's annual licence to a school in
+// Jharkhand. Nobody lied. The screen simply did not make whose money it was
+// unmissable, and a reader in a hurry filled the gap.
+//
+// So the attribution is not a caption at the bottom. It is the first thing on
+// the page, it is in the heading of the register, it is the primary column of
+// every row, and no amount anywhere on this screen is ever rendered with a
+// rupee sign unless the organisation that charges it charges in rupees —
+// formatBenchmarkAmount() in src/db/benchmarks.ts prints "GBP 42.00", and
+// formatINR() is deliberately not imported into this file at all.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHAT "NORMALISED" MEANS HERE, AND WHAT IT REFUSES TO MEAN
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Normalising is expressing two fees in the same UNIT so they can be set beside
+// each other — "per person, per year" against "per person, per year". It is
+// done by normalise() in src/db/benchmarks.ts, which is the only place a factor
+// touches these amounts and which routes it through applyFactor().
+//
+// It is NOT currency conversion. A GBP figure stays in GBP. Converting needs an
+// exchange rate carrying the date it was taken, and this store holds none — so
+// a converted figure would be this system inventing a rate and attaching it to
+// a third party's price. normalise() therefore returns either a figure in the
+// observation's own currency or a REFUSAL with a sentence saying what was
+// missing, and this page prints the refusal in the cell where the number would
+// have been. An empty cell would read as nought; a refusal reads as a refusal.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTHORITY
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 'benchmark:read' to look, 'benchmark:write' to change a row's standing. Those
+// are the actions src/db/benchmarks.ts actually asserts, and this page is gated
+// on the same ones rather than on finance:* — a screen offering a control the
+// module will refuse is worse than one that does not offer it.
+//
+// NOTE WHO DOES NOT HOLD 'benchmark:read': every institution role. A client who
+// could read the market evidence behind their own quotation would be reading
+// MMAKF's pricing preparation.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHY THERE IS NO "VERIFY" BUTTON
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Because verification is not a state of the row. It is a property of the
+// CITATION: `confidence` on fee_benchmarks records how the figure was obtained
+// — read from the organisation's own published schedule, reported to MMAKF,
+// estimated, or unverified — and it is frozen onto the observation at the
+// moment it is recorded, beside the source it was recorded from.
+//
+// A button that raised an existing row from `reported` to `verified` would be
+// asserting that somebody had opened the source and seen the figure, while
+// changing nothing about what the row says it was read from. The honest act is
+// to record a NEW observation from the official publication, with its URL and
+// its date, which recordBenchmark() exists for and which leaves both the old
+// hearsay and the new citation on the record. The panel below says so where an
+// administrator would otherwise go looking for the button.
+
+import AdminShell from '@/components/AdminShell.astro';
+import StatCard from '@/components/StatCard.astro';
+import Status from '@/components/Status.astro';
+import Table from '@/components/DataTable/Table.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import type { Column } from '@/components/DataTable/types';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  listBenchmarks, listBenchmarkSources, setBenchmarkStatus,
+  normalise, unitKey, parseUnit, unitLabel, formatBenchmarkAmount,
+  isBenchmarkError,
+  type BenchmarkObservation, type BenchmarkUnit,
+  type BenchmarkPeriod, type BenchmarkSubjectKind,
+} from '@/db/benchmarks';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/benchmarks');
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const configured = isConfigured();
+
+const mayRead = Boolean(principal) && canAnywhere(principal, 'benchmark:read');
+const mayWrite = Boolean(principal) && canAnywhere(principal, 'benchmark:write');
+
+/** Every standing a row can hold. The register shows all four, not only the evidence. */
+const ALL_STATUSES = ['included', 'flagged', 'excluded', 'archived'];
+
+/**
+ * The four acts an administrator can take, and the wording for each.
+ *
+ * `verify` is deliberately absent — see the header note. A fifth entry here
+ * would be the whole of the mistake.
+ */
+const ACTS: Array<{ name: string; label: string; status: 'included' | 'excluded' | 'flagged' | 'archived'; help: string }> = [
+  {
+    name: 'include', label: 'Include', status: 'included',
+    help: 'Counted as evidence. This is the default standing of a recorded observation.',
+  },
+  {
+    name: 'flag', label: 'Flag', status: 'flagged',
+    help: 'Doubtful, and still counted as evidence. Use it when a figure looks wrong but excluding it would be curating the sample before anybody has established that it is.',
+  },
+  {
+    name: 'exclude', label: 'Exclude', status: 'excluded',
+    help: 'Not counted as evidence. Needs a reason, because an unexplained exclusion cannot be told from a figure somebody found inconvenient.',
+  },
+  {
+    name: 'archive', label: 'Archive', status: 'archived',
+    help: 'Retired — superseded by a newer observation, or about an organisation that no longer charges this. Kept on the record; never counted.',
+  },
+];
+
+// ─── The act ────────────────────────────────────────────────────────────────
+//
+// Posts to this page, not to /api/. src/middleware.ts requires application/json
+// on /api/ paths and a form with JavaScript off cannot send it; CSRF is already
+// handled, because the middleware refuses a mutating request that is not
+// same-origin before any of this runs.
+//
+// Success redirects (303), failure re-renders with what was typed. A refresh
+// after a successful change must not repeat it, and a refusal must not throw
+// away the reason somebody wrote.
+
+const DONE_MESSAGES: Record<string, string> = {
+  included: 'The observation now counts as evidence.',
+  flagged: 'The observation is flagged as doubtful and still counts as evidence. Excluding it is a separate decision.',
+  excluded: 'The observation no longer counts as evidence, and the reason is on the record beside it.',
+  archived: 'The observation is retired. It stays on the record and is never counted again.',
+};
+
+let error: string | null = null;
+let postedReason = '';
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const actName = get('action');
+  postedReason = get('reason');
+
+  const act = ACTS.find((a) => a.name === actName) ?? null;
+  const rl = await rateLimit(Astro.request, 'benchmark-standing', 40, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so there is no register to change.';
+  } else if (!mayWrite) {
+    // Re-checked against the session on every act. The rendered page is not
+    // evidence of authority: it may be minutes old and may not be where the
+    // request came from at all.
+    Astro.response.status = 403;
+    error = 'Changing what counts as evidence requires benchmark:write, which this account does not hold in any scope.';
+  } else if (!act) {
+    Astro.response.status = 400;
+    error = 'That is not one of the four standings a benchmark can hold.';
+  } else {
+    const id = Number(get('id'));
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: postedReason || null,
+    };
+    try {
+      if (!Number.isInteger(id) || id <= 0) throw new Error('no observation named');
+      await setBenchmarkStatus(db(), ctx, id, act.status, postedReason || null);
+      return Astro.redirect(`${SELF}?done=${act.status}`, 303);
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = `The benchmark store refused this: it requires ${err.action}, which this account does not hold. Nothing was changed.`;
+      } else if (isBenchmarkError(err)) {
+        // The store's own refusals are already written for a person — the
+        // reason-required message in particular explains what to do instead.
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[admin/benchmarks] standing change failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was changed. The register refused the write, and the fault is in the server log with the detail this page deliberately does not print.';
+      }
+    }
+  }
+}
+
+// ─── The comparison unit ────────────────────────────────────────────────────
+//
+// A unit is a PAIR — "per person, per year" — because "per year" alone is what
+// lets a club affiliation fee end up averaged with an athlete's licence. The
+// pair comes from the URL so a normalised view can be linked to and quoted.
+
+const PERIODS: BenchmarkPeriod[] = ['per_year', 'per_month', 'per_session', 'per_event', 'one_off'];
+const SUBJECTS: BenchmarkSubjectKind[] = ['person', 'club', 'team', 'federation', 'application'];
+
+// Two separate parameters rather than one composite, because the control is a
+// plain GET form with two selects and a browser cannot compose them into one
+// value without script. `unit` is still honoured so a normalised view stays
+// linkable in the one form the rest of the codebase writes it — unitKey().
+const rawSubject =
+  Astro.url.searchParams.get('subject') ??
+  (Astro.url.searchParams.get('unit') ? parseUnit(Astro.url.searchParams.get('unit') as string).subject : '');
+const rawPeriod =
+  Astro.url.searchParams.get('period') ??
+  (Astro.url.searchParams.get('unit') ? parseUnit(Astro.url.searchParams.get('unit') as string).period : '');
+
+// A value that is not on the list falls back to the default rather than being
+// passed through: normalise() would refuse it, and the reader would be told
+// their comparison was impossible when what happened is that a URL was mistyped.
+const target: BenchmarkUnit = {
+  subject: SUBJECTS.includes(rawSubject as BenchmarkSubjectKind)
+    ? (rawSubject as BenchmarkSubjectKind)
+    : 'person',
+  period: PERIODS.includes(rawPeriod as BenchmarkPeriod)
+    ? (rawPeriod as BenchmarkPeriod)
+    : 'per_year',
+};
+
+/** "per person" and "per year", separately — unitLabel() joins them with ", ". */
+function unitWords(u: BenchmarkUnit): { subject: string; period: string } {
+  const [subject, period] = unitLabel(u).split(', ');
+  return { subject: subject ?? u.subject, period: period ?? u.period };
+}
+
+// ─── The read ───────────────────────────────────────────────────────────────
+
+let observations: BenchmarkObservation[] = [];
+let sources: any[] = [];
+let readError: string | null = null;
+
+if (mayRead && configured) {
+  try {
+    // Every standing, not only the evidential ones: an administrator deciding
+    // whether the sample has been curated has to be able to see what was taken
+    // out of it. listBenchmarks() defaults to included + flagged, which is the
+    // right default for the recommendation engine and the wrong one for a
+    // register whose job is to show the whole record.
+    observations = await listBenchmarks(db(), principal, { statuses: ALL_STATUSES });
+    sources = await listBenchmarkSources(db(), principal);
+  } catch (err: any) {
+    if (err instanceof ForbiddenError) {
+      readError = `Reading the benchmark register requires ${err.action}, which this account does not hold.`;
+    } else {
+      console.error('[admin/benchmarks] register read failed', err);
+      readError = 'The benchmark register could not be read.';
+    }
+  }
+}
+
+// ─── The rows, with their normalisation attached ────────────────────────────
+
+interface RegisterRow extends Record<string, unknown> {
+  id: number;
+  code: string;
+  organisation: string;
+  country: string;
+  serviceLabel: string;
+  service: string;
+  audience: string;
+  theirFee: string;
+  currency: string;
+  unitAsCharged: string;
+  normalised: string;
+  /** Present only when normalise() refused. Drives the cell's styling. */
+  refusal: string | null;
+  sourceTitle: string;
+  sourceUrl: string | null;
+  sourceType: string;
+  retrieved: string;
+  confidence: string;
+  status: string;
+  notes: string | null;
+}
+
+function day(v: string | null): string {
+  if (!v) return '—';
+  const d = new Date(v);
+  return Number.isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+}
+
+const rows: RegisterRow[] = observations.map((o) => {
+  const n = normalise(o, target);
+  return {
+    id: o.id,
+    code: o.code,
+    organisation: o.organisation,
+    // Null is a real answer: a world union has no single country, and writing
+    // one in because the organisation's name contains a place would be a
+    // fabricated fact about a third party.
+    country: o.country ?? 'not stated',
+    serviceLabel: o.serviceLabel,
+    service: o.service,
+    audience: o.audience,
+    theirFee: formatBenchmarkAmount(o.amountMinor, o.currency, o.currencyExponent),
+    currency: o.currency,
+    unitAsCharged: unitLabel({ subject: o.subject, period: o.frequency }),
+    normalised: n.ok
+      ? formatBenchmarkAmount(n.amountMinor, n.currency, n.currencyExponent)
+      : 'Not comparable',
+    refusal: n.ok ? null : n.reason,
+    sourceTitle: o.sourceTitle,
+    sourceUrl: o.sourceUrl,
+    sourceType: String(o.sourceType).replace(/_/g, ' '),
+    retrieved: day(o.retrievedAt),
+    confidence: o.confidence,
+    status: o.status,
+    notes: o.notes,
+  };
+});
+
+// ─── The safeguard, computed rather than assumed ────────────────────────────
+//
+// A register of other organisations' fees that contains an MMAKF row is no
+// longer a register of other organisations' fees — it is a price list nobody
+// approved, sitting on a screen that says these are not MMAKF's prices. So the
+// claim this page makes in its first paragraph is CHECKED against the rows it
+// actually loaded, and stated as a count rather than as a promise.
+
+const OURS = /mmakf|modern\s+martial\s+arts\s+karate/i;
+const selfReferences = rows.filter((r) => OURS.test(r.organisation));
+
+const organisations = new Set(rows.map((r) => r.organisation));
+const currencies = new Set(rows.map((r) => r.currency));
+const comparableHere = rows.filter((r) => !r.refusal).length;
+const evidential = rows.filter((r) => r.status === 'included' || r.status === 'flagged').length;
+
+// ─── The row being worked ───────────────────────────────────────────────────
+
+const workId = Number(Astro.url.searchParams.get('work'));
+const working = rows.find((r) => r.id === workId) ?? null;
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done ? DONE_MESSAGES[done] ?? null : null;
+
+// ─── Columns ────────────────────────────────────────────────────────────────
+//
+// The organisation is the primary column and the first column, and it stays on
+// screen when a record collapses below the breakpoint. On a phone, where only
+// the primary columns survive, the reader must still be looking at whose fee
+// this is — losing the attribution is exactly the failure this file opens with.
+
+const columns: Column[] = [
+  { key: 'organisation', header: 'Organisation charging it', primary: true, sortable: true },
+  { key: 'country', header: 'Country', sortable: true, hint: 'Not stated where the source did not say' },
+  { key: 'serviceLabel', header: 'What they charge for', primary: true },
+  { key: 'audience', header: 'Who they charge' },
+  {
+    key: 'theirFee', header: 'Their fee', numeric: true, primary: true,
+    hint: 'In their own currency. Never converted.',
+  },
+  { key: 'currency', header: 'Currency' },
+  { key: 'unitAsCharged', header: 'As they charge it' },
+  {
+    key: 'normalised', header: `Normalised — ${unitLabel(target)}`, numeric: true,
+    hint: 'Same unit, same currency as charged. A refusal where it cannot be expressed.',
+  },
+  {
+    key: 'sourceTitle', header: 'Source',
+    href: (r: any) => (r.sourceUrl ? String(r.sourceUrl) : null),
+    hint: 'A link where the source has a URL',
+  },
+  { key: 'sourceType', header: 'Kind of source' },
+  { key: 'retrieved', header: 'Retrieved', sortable: true, initialDir: 'desc' },
+  {
+    key: 'confidence', header: 'Confidence', sortable: true,
+    hint: 'How the figure was obtained — a property of the citation, not of the row',
+  },
+  { key: 'status', header: 'Standing', status: true, sortable: true },
+  {
+    key: 'work', header: 'Change its standing',
+    render: () => (mayWrite ? 'Work this' : 'Read only'),
+    href: (r: any) => (mayWrite ? `${SELF}?work=${r.id}&unit=${unitKey(target)}#work` : null),
+  },
+];
+
+const headerDescription = !configured
+  ? 'The federation database is not configured on this deployment, so there is no register to read.'
+  : readError
+    ? 'The register could not be read.'
+    : rows.length === 0
+      ? 'Nothing has been recorded. This register holds fees charged by organisations other than MMAKF, and MMAKF’s own fees are never among them.'
+      : `${rows.length} observation${rows.length === 1 ? '' : 's'} of what ${organisations.size} organisation${organisations.size === 1 ? '' : 's'} other than MMAKF charge. Not one figure here is an MMAKF price.`;
+---
+
+<AdminShell
+  title="Benchmarks"
+  requires="benchmark:read"
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin/dashboard') },
+      { name: 'Finance', url: h('/admin/finance') },
+      { name: 'Benchmarks', url: h('/admin/benchmarks') },
+    ],
+    title: 'Benchmarks — other organisations’ fees',
+    description: headerDescription,
+    secondary: [
+      { label: 'Money dashboard', href: h('/admin/finance') },
+      {
+        label: 'MMAKF’s own fee framework',
+        href: h('/admin/fees'),
+      },
+    ],
+  }}
+>
+  <Fragment slot="meta">
+    <span class="meta-chip meta-whose">Not MMAKF’s prices</span>
+    {rows.length > 0 && (
+      <span class="meta-chip">{evidential} of {rows.length} counted as evidence</span>
+    )}
+    {currencies.size > 0 && (
+      <span class="meta-chip">{currencies.size} currenc{currencies.size === 1 ? 'y' : 'ies'}, none converted</span>
+    )}
+  </Fragment>
+
+  {/* ── The attribution, before anything else on the page ───────────────── */}
+  <aside class="whose" aria-labelledby="whose-h">
+    <h2 id="whose-h" class="whose-h">Everything below is somebody else’s price.</h2>
+    <p>
+      This register records fees charged by federations, unions and associations
+      that are <strong>not MMAKF</strong>. Nothing here is an MMAKF fee, a
+      proposed MMAKF fee, or a figure MMAKF has decided to charge. Quoting a row
+      from this page to a member, a school or a dojo would be quoting another
+      organisation&rsquo;s price as though it were the federation&rsquo;s.
+    </p>
+    <p>
+      MMAKF has published no fee rules at all. The only place an MMAKF price
+      exists is a published framework on
+      <a href={h('/admin/fees')}>the fee framework screen</a>, authored and
+      published by two different people. There is no path from this register to
+      that one: a recommendation drawn from this evidence is a <strong>draft</strong>
+      that a person approves, and no figure on this page can become a fee rule
+      by being read off a screen.
+    </p>
+    {selfReferences.length > 0 && (
+      <p class="whose-alarm" role="alert">
+        <strong>{selfReferences.length} row{selfReferences.length === 1 ? '' : 's'} in this register name MMAKF as the organisation charging.</strong>
+        That should be impossible, and while it is true this page is no longer a
+        register of other organisations&rsquo; fees. Archive
+        {selfReferences.length === 1 ? ' it' : ' them'} and record the federation&rsquo;s
+        own prices where they belong, on the fee framework screen.
+      </p>
+    )}
+  </aside>
+
+  {error && <p class="msg msg-bad" role="alert">{error}</p>}
+  {doneMessage && <p class="msg msg-ok" role="status">{doneMessage}</p>}
+
+  {!configured ? (
+    <p class="note">
+      The federation database is not configured on this deployment, so there is
+      no benchmark register to read and nothing can be recorded here. Until
+      <code>DATABASE_URL</code> is set, this screen has no evidence to show —
+      which is a different fact from &ldquo;no organisation charges anything&rdquo;.
+    </p>
+  ) : readError ? (
+    <ErrorState
+      title="The benchmark register could not be read."
+      safe="Nothing has been changed. No observation was recorded, altered, excluded or archived — this was a read that failed, and every recommendation already drawn from this evidence still rests on the snapshot it was drawn from."
+      body="The fault is in the server log with the detail this page deliberately does not print. No rows are shown, because an empty register and an unreadable one are different facts."
+    />
+  ) : (
+    <>
+      {/* ── What the register holds ─────────────────────────────────────── */}
+      <section class="band" aria-labelledby="shape-h">
+        <h2 id="shape-h" class="band-h">What is in the register</h2>
+        <div class="cards">
+          <StatCard
+            label="Observations recorded"
+            value={rows.length}
+            source={{ table: 'fee_benchmarks', filter: 'every standing — included, flagged, excluded and archived' }}
+            note="One row is one figure read from one source on one day. The same fee read again later is a new observation, so a price change is visible instead of overwriting the evidence of the old one."
+          />
+          <StatCard
+            label="Organisations, none of them MMAKF"
+            value={organisations.size}
+            source={{ table: 'fee_benchmarks', column: 'organisation', filter: 'distinct values among the rows above' }}
+          />
+          <StatCard
+            label="Counted as evidence"
+            value={evidential}
+            source={{ table: 'fee_benchmarks', filter: "status in ('included', 'flagged')" }}
+            note="Flagged rows are still evidence. Removing a doubtful figure before anybody has established that it is wrong is curating the sample."
+          />
+          <StatCard
+            label={`Comparable as ${unitLabel(target)}`}
+            value={comparableHere}
+            outOf={rows.length}
+            source={{ table: 'fee_benchmarks', filter: `normalise() accepted the row for the unit ${unitKey(target)}` }}
+            note="The rest are not missing. Each one carries the sentence saying what the source did not state, in the cell where the figure would have been."
+          />
+        </div>
+      </section>
+
+      {/* ── The comparison unit ─────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="unit-h">
+        <h2 id="unit-h" class="band-h">The unit these are compared in</h2>
+        <p class="band-p">
+          A unit is a pair. &ldquo;Per year&rdquo; on its own is what lets a
+          club affiliation fee end up averaged with an athlete&rsquo;s licence,
+          so the subject travels with the period. Changing it re-normalises every
+          row, and rows that cannot be expressed in the new unit say why rather
+          than disappearing.
+        </p>
+        <p class="band-p">
+          <strong>Currency is never converted.</strong> A figure charged in GBP
+          stays in GBP. Converting needs an exchange rate carrying the date it
+          was taken, and this register holds none — inventing one and attaching
+          it to another organisation&rsquo;s price is the thing this store is
+          built to refuse.
+        </p>
+        <form method="get" class="unit-form">
+          <div class="fields">
+            <p class="field">
+              <label class="input-label" for="u-subject">Charged to</label>
+              <select class="input" id="u-subject" name="subject">
+                {SUBJECTS.map((sub) => (
+                  <option value={sub} selected={sub === target.subject}>
+                    {unitWords({ subject: sub, period: target.period }).subject}
+                  </option>
+                ))}
+              </select>
+            </p>
+            <p class="field">
+              <label class="input-label" for="u-period">Over</label>
+              <select class="input" id="u-period" name="period">
+                {PERIODS.map((p) => (
+                  <option value={p} selected={p === target.period}>
+                    {unitWords({ subject: target.subject, period: p }).period}
+                  </option>
+                ))}
+              </select>
+            </p>
+          </div>
+          <button class="btn btn-ghost" type="submit">Compare in this unit</button>
+        </form>
+      </section>
+
+      {/* ── The row being worked ────────────────────────────────────────── */}
+      {working && (
+        <section class="band band-work" id="work" aria-labelledby="work-h">
+          <h2 id="work-h" class="band-h">
+            {working.organisation} — {working.serviceLabel}
+          </h2>
+
+          <dl class="detail">
+            <dt>Organisation</dt>
+            <dd><strong>{working.organisation}</strong> — not MMAKF, and this figure is not an MMAKF price.</dd>
+            <dt>Their fee</dt>
+            <dd>{working.theirFee}, {working.unitAsCharged}</dd>
+            <dt>Normalised</dt>
+            <dd>
+              {working.refusal
+                ? <span class="refused">{working.refusal}</span>
+                : <>{working.normalised}, {unitLabel(target)}</>}
+            </dd>
+            <dt>Source</dt>
+            <dd>
+              {working.sourceUrl
+                ? <a href={working.sourceUrl} rel="noreferrer nofollow external">{working.sourceTitle}</a>
+                : <>{working.sourceTitle} — no URL was supplied with it, and none has been invented.</>}
+            </dd>
+            <dt>Retrieved</dt>
+            <dd>{working.retrieved}</dd>
+            <dt>Confidence</dt>
+            <dd>{working.confidence} — how the figure was obtained. It is frozen onto this observation and is not changed by anything on this screen.</dd>
+            <dt>Standing</dt>
+            <dd><Status value={working.status} /></dd>
+            {working.notes && (<><dt>Notes</dt><dd>{working.notes}</dd></>)}
+          </dl>
+
+          {!mayWrite ? (
+            <p class="note">
+              This account reads the register and does not change it. Deciding
+              what counts as evidence needs <code>benchmark:write</code>.
+            </p>
+          ) : (
+            <form method="post" class="acts">
+              <input type="hidden" name="id" value={working.id} />
+              <p class="field field-wide">
+                <label class="input-label" for="w-reason">Reason</label>
+                <textarea class="input" id="w-reason" name="reason" rows="2">{postedReason}</textarea>
+                <span class="help">
+                  Required for anything other than &ldquo;include&rdquo;. Read by
+                  whoever has to defend a recommendation this evidence shaped —
+                  an unexplained exclusion cannot be told from a figure somebody
+                  found inconvenient.
+                </span>
+              </p>
+              <div class="act-buttons">
+                {ACTS.map((a) => (
+                  <button
+                    class="btn btn-ghost"
+                    type="submit"
+                    name="action"
+                    value={a.name}
+                    disabled={working.status === a.status}
+                  >{working.status === a.status ? `Already ${a.status}` : a.label}</button>
+                ))}
+              </div>
+              <ul class="act-help">
+                {ACTS.map((a) => (
+                  <li><span class="act-name">{a.label}</span><span class="act-note">{a.help}</span></li>
+                ))}
+                <li>
+                  <span class="act-name">Verify</span>
+                  <span class="act-note">
+                    Not a button, and deliberately. Verification is a property of
+                    the citation rather than of the row: raising this observation
+                    from what it says it was read from to &ldquo;verified&rdquo;
+                    would assert that somebody had opened the source, while
+                    changing nothing about what the row records. Record a new
+                    observation from the organisation&rsquo;s own published
+                    schedule instead — both the hearsay and the citation then
+                    stay on the record.
+                  </span>
+                </li>
+              </ul>
+            </form>
+          )}
+        </section>
+      )}
+
+      {/* ── The register ────────────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="reg-h">
+        <h2 id="reg-h" class="band-h">The register</h2>
+
+        {rows.length === 0 ? (
+          <EmptyState
+            title="No benchmark has been recorded."
+            body="Not an empty comparison — nothing has been observed yet. A row here is one fee, charged by one organisation that is not MMAKF, read from one source on one day. Until there are some, there is no market evidence for anybody preparing MMAKF's own fee framework to reason from."
+            action={{ label: 'See MMAKF’s own fee framework', href: h('/admin/fees') }}
+          >
+            <p class="es-extra">
+              An empty register is not a reason to reach for a plausible figure.
+              MMAKF has published no fees, and nothing in this system will invent
+              one — not here, and not on the framework screen.
+            </p>
+          </EmptyState>
+        ) : (
+          <Table
+            id="benchmarks"
+            caption="Fees charged by organisations OTHER THAN MMAKF"
+            columns={columns}
+            rows={rows}
+            paramPrefix="b"
+            defaultSort={{ key: 'organisation', dir: 'asc' }}
+            filters={[
+              {
+                key: 'status', label: 'Standing', type: 'select', anyLabel: 'every standing',
+                options: ALL_STATUSES.map((v) => ({ value: v, label: v })),
+              },
+              {
+                key: 'currency', label: 'Currency', type: 'select', anyLabel: 'every currency',
+                options: [...currencies].sort().map((c) => ({ value: c, label: c })),
+              },
+              {
+                key: 'service', label: 'Service', type: 'select', anyLabel: 'every service',
+                options: [...new Set(rows.map((r) => r.service))].sort().map((v) => ({ value: v, label: v.replace(/_/g, ' ') })),
+              },
+              { key: 'q', label: 'Search', type: 'search', placeholder: 'Organisation, service or source' },
+            ]}
+            note="Every row is another organisation's fee, in that organisation's own currency. No amount on this table has been converted to rupees, and no figure here is a price MMAKF charges or proposes to charge."
+            emptyTitle="No observation matches the filters."
+            emptyBody="Clear the filters to see the whole register, including the rows that have been excluded or archived."
+          />
+        )}
+      </section>
+
+      {/* ── Where each figure came from ─────────────────────────────────── */}
+      <section class="band" aria-labelledby="src-h">
+        <h2 id="src-h" class="band-h">The citations</h2>
+        <p class="band-p">
+          One entry per source the observations were read from. A source with no
+          URL is recorded as having none rather than being given a plausible
+          one: a figure attributed to a real federation with a fabricated link
+          is a claim about a third party who never agreed to be in this database.
+        </p>
+        {sources.length === 0 ? (
+          <p class="band-p">No source has been registered, so there is nothing to cite.</p>
+        ) : (
+          <ul class="cites">
+            {sources.map((s: any) => (
+              <li>
+                <span class="cite-org">{s.organisation}</span>
+                <span class="cite-title">
+                  {s.url
+                    ? <a href={s.url} rel="noreferrer nofollow external">{s.title}</a>
+                    : <>{s.title}</>}
+                </span>
+                <span class="cite-meta">
+                  {String(s.sourceType ?? '').replace(/_/g, ' ')} · {s.confidence}
+                  {s.publishedOn ? <> · published {day(String(s.publishedOn))}</> : null}
+                  {s.url ? null : <> · no URL was supplied</>}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </>
+  )}
+</AdminShell>
+
+<style>
+  /* The attribution. Deliberately the loudest thing on the page and deliberately
+     above every figure: a reader who scrolls to a table and stops must already
+     have passed this. */
+  .whose {
+    border: 1px solid var(--gold-dim);
+    border-left: 4px solid var(--gold);
+    background: var(--card);
+    padding: 22px 26px;
+    margin: 0 0 32px;
+    max-width: 76ch;
+  }
+  .whose-h {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    margin: 0 0 12px;
+    color: var(--white);
+  }
+  .whose p { color: var(--muted); line-height: 1.75; margin: 0 0 12px; }
+  .whose p:last-child { margin-bottom: 0; }
+  .whose strong { color: var(--off-white); }
+  .whose-alarm {
+    border: 1px solid var(--red);
+    border-left-width: 3px;
+    padding: 14px 18px;
+    margin-top: 16px !important;
+  }
+  .whose-alarm strong { color: var(--red-2); display: block; margin-bottom: 6px; }
+
+  .msg {
+    padding: 14px 18px; margin: 0 0 22px; line-height: 1.65;
+    border-left: 3px solid var(--gold); background: var(--card); max-width: 72ch;
+  }
+  .msg-bad { border-left-color: var(--red); }
+  .msg-ok { border-left-color: var(--gold); }
+
+  .band { margin: 0 0 42px; }
+  .band + .band { padding-top: 34px; border-top: 1px solid var(--border); }
+  .band-h {
+    font-family: var(--font-display); font-size: 1.15rem;
+    margin: 0 0 12px; letter-spacing: .01em;
+  }
+  .band-p { color: var(--muted); line-height: 1.75; max-width: 68ch; margin: 0 0 18px; }
+  .band-work { border-left: 3px solid var(--gold); padding-left: 22px; }
+
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 68ch;
+  }
+  code { font-family: var(--font-accent, monospace); font-size: .88em; }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px;
+  }
+
+  .detail {
+    display: grid; grid-template-columns: minmax(0, 12rem) minmax(0, 1fr);
+    gap: 8px 24px; margin: 0 0 24px; max-width: 78ch;
+  }
+  .detail dt {
+    font-family: var(--font-display); font-size: .66rem;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+    padding-top: 3px;
+  }
+  .detail dd { margin: 0; color: var(--off-white); line-height: 1.7; font-size: .92rem; }
+  .refused { color: var(--muted); font-style: italic; }
+
+  .unit-form, .acts { max-width: 760px; }
+  .fields { display: flex; flex-wrap: wrap; gap: 18px 20px; margin: 0 0 18px; }
+  .field { flex: 1 1 220px; margin: 0; }
+  .field-wide { flex: 1 1 100%; }
+  .help { display: block; margin-top: 6px; font-size: .78rem; color: var(--muted); line-height: 1.6; }
+  textarea.input { resize: vertical; }
+
+  .act-buttons { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0 22px; }
+  .act-buttons .btn { min-height: 44px; }
+  .act-buttons .btn[disabled] { opacity: .55; cursor: not-allowed; }
+
+  .act-help { list-style: none; margin: 0; padding: 0; max-width: 72ch; }
+  .act-help li { padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .act-help li:last-child { border-bottom: 0; }
+  .act-name {
+    display: inline-block; min-width: 10ch;
+    font-family: var(--font-display); font-size: .78rem; color: var(--gold-2);
+    vertical-align: top;
+  }
+  .act-note { color: var(--muted); font-size: .86rem; line-height: 1.7; }
+
+  .cites { list-style: none; margin: 0; padding: 0; max-width: 78ch; }
+  .cites li {
+    display: grid;
+    grid-template-columns: minmax(0, 14rem) minmax(0, 1fr);
+    gap: 2px 20px;
+    padding: 12px 0; border-bottom: 1px solid var(--border);
+  }
+  .cites li:last-child { border-bottom: 0; }
+  .cite-org { font-family: var(--font-display); font-size: .9rem; color: var(--off-white); }
+  .cite-title { color: var(--muted); line-height: 1.6; }
+  .cite-meta { grid-column: 2; font-size: .78rem; color: var(--muted); }
+
+  .es-extra {
+    margin-top: 14px; color: var(--muted); font-size: .88rem;
+    line-height: 1.7; max-width: 52ch;
+  }
+
+  .meta-chip {
+    font-size: var(--text-xs); color: var(--muted);
+    border: 1px solid var(--border); border-radius: var(--radius-pill);
+    padding: 3px 10px; line-height: 1.5;
+  }
+  /* The attribution, repeated in the page's metadata row, because that row is
+     what a reader sees stuck to the top once the banner has scrolled away. */
+  .meta-whose {
+    border-color: var(--gold); color: var(--gold-2);
+    font-weight: 500; letter-spacing: .02em;
+  }
+
+  @media (max-width: 760px) {
+    .detail, .cites li { grid-template-columns: 1fr; gap: 2px 0; }
+    .detail dd { margin-bottom: 12px; }
+    .cite-meta { grid-column: 1; }
+    .act-name { display: block; min-width: 0; margin-bottom: 2px; }
+    .field { flex: 1 1 100%; }
+  }
+</style>

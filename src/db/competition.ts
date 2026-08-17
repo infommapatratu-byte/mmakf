@@ -1373,8 +1373,22 @@ async function loadEntry(db: DB, entryId: number) {
  * championship, and the row would carry no sign that it had ever said anything
  * else.
  */
+/**
+ * The lock as a QUESTION, for callers that must decide rather than throw.
+ *
+ * src/db/entitlements.ts asks it: a payment that clears after the results are
+ * final cannot change the entry list, but it must not raise either — the money
+ * has already been taken, and the answer is a recorded, refundable refusal
+ * rather than an exception. Exported so the two places that care read ONE
+ * definition of "locked"; a second copy of the status list is how a lock ends
+ * up holding in one module and not the other.
+ */
+export function entriesAreLocked(event: { status?: string | null; resultsFinalisedAt?: Date | string | null }): boolean {
+  return Boolean(event.resultsFinalisedAt) || RESULTS_LOCKED_STATUSES.includes(event.status as EventStatus);
+}
+
 function assertEntriesUnlocked(event: any, what: string): void {
-  if (event.resultsFinalisedAt || RESULTS_LOCKED_STATUSES.includes(event.status)) {
+  if (entriesAreLocked(event)) {
     throw new CompetitionError(
       'results_final',
       `This event’s results are final; ${what} can no longer be changed. Record a correction against the result instead.`

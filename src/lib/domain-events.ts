@@ -458,6 +458,32 @@ export const EVENT_TYPES = {
     means: 'A gateway settlement was reconciled to the ledger.',
   },
 
+  // Entitlements — what the money actually bought. Confidential for the same
+  // reason as the rest of this section: the payload names a person, an order
+  // and a credential together, which is a sharper disclosure than any of the
+  // three alone.
+  ENTITLEMENT_ACTIVATED: {
+    floor: 'confidential', publicFields: [],
+    means: 'A server-verified payment activated the thing it paid for.',
+  },
+  /**
+   * Money was taken and the thing could NOT be issued.
+   *
+   * On the feed as its own type rather than as a failed activation, because it
+   * is not a fault to be retried — it is a refund somebody has to decide about.
+   * A payment that clears while the entry it paid for has become ineligible
+   * leaves the federation holding money for a service it will not deliver, and
+   * the one unacceptable outcome is that nobody hears about it.
+   */
+  ENTITLEMENT_BLOCKED: {
+    floor: 'confidential', publicFields: [],
+    means: 'A payment was captured but what it bought could not be activated, with a reason.',
+  },
+  ENTITLEMENT_REVOKED: {
+    floor: 'confidential', publicFields: [],
+    means: 'A completed refund reversed an entitlement; the record is kept, not deleted.',
+  },
+
   // Casework. These are the reason classification exists at all.
   // ── Training, engagement and operations (added with migration 0011) ──
   INSTITUTION_APPLICATION_SUBMITTED: {

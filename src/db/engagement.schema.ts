@@ -43,7 +43,7 @@
 // published a fee for this", and the numbers arrive when MMAKF supplies them.
 
 import {
-  pgTable, serial, text, integer, boolean, timestamp, date, jsonb, pgEnum,
+  pgTable, serial, text, integer, bigint, boolean, timestamp, date, jsonb, pgEnum,
   index, uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -285,6 +285,46 @@ export const feeRules = pgTable('fee_rules', {
   orderIdx: index('fee_rules_order_idx').on(t.frameworkId, t.sortOrder),
 }));
 
+// ─── The vocabulary of a reduction (the discount migration) ─────────────────────────
+//
+// Declared HERE, beside quote_lines, rather than in src/db/discounts.schema.ts
+// where the discount tables live. quote_lines has to name these types, and
+// discounts.schema.ts already imports this file for `institutions`, `services`
+// and `quoteVersions` — putting them the other way round would make the two
+// schema files import each other, and a circular import between modules that
+// build Drizzle table objects at load time fails in ways that are hard to read.
+//
+// They belong to the FEE ENGINE'S vocabulary in any case. A reduction is
+// something computeFee() applies; a discount policy and a concession policy are
+// two of the things that can ask for one.
+
+export const reductionBasis = pgEnum('reduction_basis', ['fixed_amount', 'percentage']);
+
+/**
+ * WHERE in the computation a reduction lands.
+ *
+ * `before_tax` reduces the taxable amount; `after_tax` reduces the
+ * tax-inclusive total. Those are genuinely different numbers, and which one the
+ * federation means is a policy decision rather than an implementation detail.
+ *
+ * A STAGE RATHER THAN A SORT NUMBER, deliberately. A discount policy is
+ * separate from a fee framework and outlives its versions, so whoever writes
+ * the discount cannot know what sort_order the framework's tax rule will carry
+ * — and a discount that landed on the wrong side of the tax line would be wrong
+ * by exactly the tax rate, quietly.
+ */
+export const reductionStage = pgEnum('reduction_stage', ['before_tax', 'after_tax']);
+
+/**
+ * What produced a quote line.
+ *
+ * The column that lets a marketing report exclude hardship. Without it a
+ * concession and a campaign discount are the same row — kind = 'discount', a
+ * label, a negative amount — and the only way to tell them apart is to match on
+ * the label text, which is not a way at all.
+ */
+export const reductionSource = pgEnum('reduction_source', ['fee_rule', 'discount', 'concession']);
+
 // ─── Leads ──────────────────────────────────────────────────────────────────
 
 export const leadSourceKind = pgEnum('lead_source_kind', [
@@ -446,6 +486,21 @@ export const quoteVersions = pgTable('quote_versions', {
   currency: text('currency').notNull().default('INR'),
 
   /**
+   * The two halves of `adjustmentMinor`, kept apart (the discount migration).
+   *
+   * `adjustmentMinor` holds every reduction added together, which is right for
+   * the arithmetic and useless for the question "what did our campaigns cost
+   * us?" — because a hardship concession is in that sum too. Splitting them
+   * here means a marketing report never has to touch a concession row to
+   * produce its own number.
+   *
+   * Both are stored NEGATIVE, matching `adjustmentMinor`, so
+   * subtotal + adjustment + tax = total continues to hold.
+   */
+  discountMinor: integer('discount_minor').notNull().default(0),
+  concessionMinor: integer('concession_minor').notNull().default(0),
+
+  /**
    * True when no rule in the framework could price the request. The quote then
    * carries NO NUMBER and the surface says so. A zero here would be read as
    * "free", which is the most expensive possible misunderstanding.
@@ -457,6 +512,36 @@ export const quoteVersions = pgTable('quote_versions', {
   issuedAt: timestamp('issued_at', { withTimezone: true }),
   approvedByUserId: integer('approved_by_user_id').references(() => users.id),
   approvedAt: timestamp('approved_at', { withTimezone: true }),
+
+  // ── FROZEN AT ISSUE (migration 0015) ──────────────────────────────────────
+  //
+  // The same rule the invoice carries, one step earlier in the story: once a
+  // quotation is issued, its amount and the exchange rate behind it are frozen
+  // on THIS version. The school that accepted a figure in March must find that
+  // figure unchanged in June, whatever the rupee did in between — and a quote
+  // is already never edited, only re-versioned, so freezing here costs nothing.
+  //
+  // `fxRateId` is provenance only. Nothing recomputes from it.
+
+  /** `currency` above is the base. This is its ISO 4217 exponent, frozen. */
+  currencyMinorUnit: integer('currency_minor_unit').notNull().default(2),
+
+  presentmentCurrency: text('presentment_currency'),
+  presentmentMinorUnit: integer('presentment_minor_unit'),
+  presentmentTotalMinor: bigint('presentment_total_minor', { mode: 'number' }),
+
+  fxRatePpm: bigint('fx_rate_ppm', { mode: 'number' }),
+  fxRateId: integer('fx_rate_id'),
+  fxSource: text('fx_source'),
+  fxRetrievedAt: timestamp('fx_retrieved_at', { withTimezone: true }),
+  fxEffectiveOn: date('fx_effective_on'),
+
+  /**
+   * The tax computation at issue. Null means none was recorded — NOT exempt.
+   * `taxMinor` above stays the fee engine's own tax line; this is the versioned
+   * tax engine's full working, kept so the figure remains explainable.
+   */
+  taxSnapshot: jsonb('tax_snapshot'),
 
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
@@ -492,8 +577,35 @@ export const quoteLines = pgTable('quote_lines', {
 
   /** Which condition matched, in words, for the "why this amount?" screen. */
   because: text('because'),
+
+  /**
+   * Where this line came from (the discount migration).
+   *
+   * A commercial discount and a hardship concession both arrive as kind
+   * 'discount' with a negative amount and a label. Without this column the only
+   * way to tell them apart in a report is to match on the label text — so a
+   * marketing summary either includes hardship cases or excludes them by
+   * accident, and neither is acceptable.
+   *
+   * `reductionStage` is stored so reproduce() can rebuild the exact reduction
+   * that was applied. A reduction is a decision taken at issue time and frozen
+   * with the quote, exactly like the inputs: re-resolving a code four years
+   * later would find it expired and quietly produce a different total.
+   */
+  sourceKind: reductionSource('source_kind').notNull().default('fee_rule'),
+  reductionStage: reductionStage('reduction_stage'),
+  /**
+   * Deliberately untyped references rather than Drizzle `.references()`.
+   *
+   * The foreign keys are real and are declared in the discount migration; naming the
+   * tables here would mean this file importing src/db/discounts.schema.ts,
+   * which already imports this one.
+   */
+  discountCodeId: integer('discount_code_id'),
+  concessionApplicationId: integer('concession_application_id'),
 }, (t) => ({
   versionIdx: index('quote_lines_version_idx').on(t.quoteVersionId, t.sortOrder),
+  sourceIdx: index('quote_lines_source_idx').on(t.sourceKind),
 }));
 
 // ─── Proposal and delivery ──────────────────────────────────────────────────

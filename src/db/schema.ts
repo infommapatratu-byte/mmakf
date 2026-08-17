@@ -16,6 +16,11 @@ import {
   uniqueIndex, index, jsonb, pgEnum,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
+// Civil geography. Imported rather than only re-exported because `persons`
+// below carries a real foreign key onto it. There is no cycle: geography.schema
+// imports nothing from this file, which is precisely because it is a map and
+// not part of the federation hierarchy.
+import { adminAreas } from './geography.schema';
 
 // ─── Shared enums ───────────────────────────────────────────────────────────
 
@@ -132,10 +137,49 @@ export const persons = pgTable('persons', {
   // The intake record this person was created from — see the note on
   // memberships.sourceRef below. Null for anyone entered by another path.
   sourceRef: text('source_ref'),
+
+  // ── Identity foundation (migration 0025) ────────────────────────────────
+  //
+  // `fullName` above STAYS, stays NOT NULL, and stays the display name: it is
+  // what the certificates say and what the rest of this repository reads. The
+  // parts below are ADDITIONAL and nullable, for matching, official forms and
+  // addressing somebody correctly.
+  //
+  // They are NOT back-filled by splitting existing names on spaces. For
+  // 'Shihan Pramod Kumar Pathak' that yields a given name of 'Shihan' and a
+  // family name of 'Kumar', and a wrong parse is worse than an absent one
+  // because nothing downstream can tell it was guessed.
+  givenName: text('given_name'),                    // PRIVATE
+  middleName: text('middle_name'),                  // PRIVATE
+  familyName: text('family_name'),                  // PRIVATE
+  preferredName: text('preferred_name'),
+  /** ISO 3166-1 alpha-2. Text, not a FK — see the note in migration 0025. */
+  nationality: text('nationality'),                 // PRIVATE
+  /** BCP-47, e.g. 'as', 'hi', 'en-IN'. */
+  preferredLanguage: text('preferred_language'),
+  /**
+   * WHERE THEY LIVE, in civil geography.
+   *
+   * Beside `stateUnitId`, never instead of it: that column says which chartered
+   * MMAKF body administers this person, and this one says where on the map they
+   * are. A member in a state MMAKF has not yet chartered has the second and not
+   * the first, and before 0025 the register had nowhere to put them.
+   */
+  residenceAreaId: integer('residence_area_id').references(() => adminAreas.id),
+  /**
+   * A normalised, order-independent form of the name, written by the identity
+   * service — never typed, never read as a display value. Duplicate detection
+   * matches on it, which is what keeps that a bounded index lookup instead of a
+   * scan of a national register.
+   */
+  matchKey: text('match_key'),                      // PRIVATE
+
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   fedIdx: uniqueIndex('persons_federation_id_uk').on(t.federationId),
+  residenceIdx: index('persons_residence_idx').on(t.residenceAreaId),
+  matchKeyIdx: index('persons_match_key_idx').on(t.matchKey),
   // At most one person per intake record. Approving the same application twice
   // must not produce two people, and only the database can settle that when the
   // two approvals race — see migration 0013.
@@ -372,3 +416,99 @@ export * from './engagement.schema';
 // confers nothing; authority and the right to sell are both the output of a
 // human decision, and a listing is reviewed separately from the seller.
 export * from './onboarding.schema';
+
+// What OTHER organisations charge, with the source of every figure. Kept apart
+// from the fee framework above by having no relationship to it at all: there is
+// no foreign key in either direction, and src/db/fee-recommendation.ts holds no
+// database handle with which to bridge them. A benchmark is evidence; an MMAKF
+// fee is a decision two people have to make.
+export * from './benchmarks.schema';
+
+// Entitlements — the join from a verified payment to the thing it bought.
+// Separate from commerce.schema.ts on purpose: those tables record MONEY, and
+// these record what the federation ISSUED in return. Conflating them is how a
+// system ends up believing that a captured payment is, by itself, a membership.
+export * from './entitlement.schema';
+
+// The fee catalogue — what the federation may charge for, as records rather
+// than paragraphs. Every entry carries a code, a category, a unit and a display
+// policy, and NOT ONE carries an amount: amounts belong to a versioned fee
+// rule, which is what stops a 2027 price change rewriting a 2026 invoice.
+export * from './fee-catalogue.schema';
+
+// Currency and tax. Both are VERSIONED and both ship EMPTY of numbers, for the
+// same reason the fee framework does: a rate is a determination MMAKF has to
+// make, and a plausible seeded one is indistinguishable six months later from a
+// rate somebody actually approved. What they add is the guarantee that once a
+// quotation or an invoice is issued, the tax and the exchange rate are frozen
+// ON that record — so a later rate movement can never change what is owed.
+export * from './currency.schema';
+export * from './tax.schema';
+
+// ─── The marketplace platform (migration 0025) ──────────────────────────────
+//
+// The shop became a MULTI-SELLER MARKETPLACE. Six files rather than one,
+// because the domains genuinely separate and a single file would be six
+// thousand lines nobody can navigate:
+//
+//   seller.schema              who is selling, and on what evidence
+//   catalogue.schema           the governed taxonomy, variants, moderation
+//   inventory.schema           locations, buckets, the movement ledger
+//   marketplace-orders.schema  the seller-order split, shipping, returns
+//   marketplace-finance.schema commission, settlement, payouts
+//   marketplace-trust.schema   reviews, performance, fraud, promotions
+//
+// ORDER MATTERS BELOW. `catalogue` references `seller` (brands), `inventory`
+// references `catalogue` (variants), `marketplace-orders` references both, and
+// `marketplace-finance` references `marketplace-orders`. Re-exporting them out
+// of dependency order does not break Drizzle — the table objects are lazily
+// referenced — but it makes the dependency direction unreadable, and the one
+// cycle that WOULD break things (order_lines → seller_orders) is avoided by
+// declaring that foreign key only in SQL. See commerce.schema.ts, `orderLines`.
+export * from './seller.schema';
+export * from './catalogue.schema';
+export * from './inventory.schema';
+export * from './marketplace-orders.schema';
+export * from './marketplace-finance.schema';
+export * from './marketplace-trust.schema';
+
+// Discount and concession policy. TWO models, not one with a flag: a discount
+// is commercial and is redeemed with a code, a concession is a decision about a
+// person's circumstances and is applied for. They carry different approval
+// authority and different audit sensitivity, and a hardship case must never
+// reach a marketing report. Both ship EMPTY — MMAKF has approved neither.
+export * from './discounts.schema';
+
+// CIVIL GEOGRAPHY — where places are, as opposed to which chartered MMAKF unit
+// administers them. The two ladders share no foreign key in either direction,
+// and that absence is the feature: the day a district row points at a state
+// unit, the register loses the ability to record a member living somewhere the
+// federation has not yet chartered.
+export * from './geography.schema';
+
+// THE IDENTITY FOUNDATION — verified contacts, address history, relationships,
+// what a guardian may actually do, consent as a versioned record, suspected
+// duplicates and governed profile changes. Not one of these is a second
+// `persons` table; every one of them hangs off `persons.id`, because one person
+// is one person id and a parallel identity record is the mistake that cannot be
+// undone later.
+export * from './identity.schema';
+
+// THE REGULATORY ENGINE — source material, MMAKF's own instruments, the rules
+// derived from them, and the determinations they produced. Kept apart from
+// governance.schema.ts, which registers FILES: a constitution PDF with a
+// checksum is not the same object as an evaluable rule with an effective date,
+// and merging them would force every uploaded document to pretend it is
+// executable. Provenance is a column here — academy_source, mmakf_regulation
+// and external_reference never merge, so academy material cannot reach a
+// federation surface by omission.
+export * from './policy.schema';
+
+// THE TECHNICAL KNOWLEDGE LIBRARY — what is known about Shotokan technique,
+// where each fact came from, and whether MMAKF has endorsed it. Kept apart from
+// technical.schema.ts, which is the GRADING AUTHORITY: a movement-level
+// description of Heian Nidan is teaching material, not a grading requirement,
+// and the two must never be reachable from one another by accident. Provenance
+// is mandatory (technical_citations), rights and endorsement are separate axes,
+// and 'unverified' is a state the schema is comfortable storing.
+export * from './library.schema';

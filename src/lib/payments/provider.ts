@@ -60,8 +60,34 @@ export interface PaymentProvider {
   readonly id: string;
   readonly label: string;
 
-  /** True when this provider has the credentials it needs. */
+  /**
+   * True when this provider may take money END TO END.
+   *
+   * Stricter than "the credentials are present", on purpose: a gateway that
+   * could take a payment and never confirm it must not be selected. This is the
+   * question selection and routing ask, and the only one they may act on.
+   */
   isConfigured(): boolean;
+
+  /**
+   * True when the credentials themselves are present, whatever else is wrong.
+   *
+   * Optional, because for a provider with nothing further to satisfy the two
+   * answers are the same one — providerHasCredentials() falls back to
+   * isConfigured() and says so. It exists because "no keys" and "keys fine,
+   * something else missing" send an operator to different places, and a surface
+   * that collapses them tells somebody to re-enter credentials that are right.
+   */
+  hasCredentials?(): boolean;
+
+  /**
+   * Why this provider cannot be used, in one operator-facing sentence, when
+   * isConfigured() is false. Null when there is nothing to add.
+   *
+   * Optional so that no caller has to know a particular gateway's rules in
+   * order to explain a routing decision. Never returns a secret.
+   */
+  readinessNote?(): string | null;
 
   createOrder(input: CreateOrderInput): Promise<CreateOrderResult>;
 

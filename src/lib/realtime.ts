@@ -243,6 +243,10 @@ export const ADMIN_SCOPES = {
     eventTypes: [
       'ORDER_PAID', 'PAYMENT_FAILED', 'REFUND_ISSUED',
       'INVOICE_ISSUED', 'SETTLEMENT_RECORDED',
+      // A blocked entitlement is money held for something that was not
+      // delivered. The finance desk is the only desk that can resolve it, so it
+      // belongs on the finance stream and not merely in a table nobody opens.
+      'ENTITLEMENT_ACTIVATED', 'ENTITLEMENT_BLOCKED', 'ENTITLEMENT_REVOKED',
     ],
     means: 'The finance desk: payments, refunds, invoices and settlement.',
   },

@@ -38,6 +38,54 @@ missing.**
 
 ---
 
+## 0a — A registration step that collects a structured address
+
+**Added 17 August 2026, and placed above the coach form because it is the same
+defect one layer down.**
+
+`src/db/geography.ts` and `src/db/identity.ts` exist, are gated, audited and
+covered by 99 tests, and **nothing in `src/pages` calls either.** Registration
+still collects a free-text city. Every member entered between now and this item
+shipping is a member whose address has to be re-resolved later.
+
+- `resolveArea()` behind a step in the membership form — country → state →
+  district, each narrowing the next through `within`
+- the ambiguity case rendered as a CHOICE, not silently resolved
+- `setPersonAddress()` on submission, and `addContact()` for email and phone
+
+**Unblocks:** coach matching by travel radius, geographic dashboards, the India
+map, state and district reporting — all of which currently have no civil
+geography to read.
+
+---
+
+## 0b — The identity queues need screens
+
+`duplicateQueue()` and `profileChangeQueue()` are written, scope-filtered in SQL
+and tested. Neither has a page, so a duplicate raised at registration is raised
+into a table nobody opens.
+
+- `/admin/duplicates` — the pair, the signals that fired, and the three
+  decisions. It must show WHICH signals, not just the score.
+- `/admin/profile-changes` — the request, the evidence, and the refusal when the
+  record moved underneath it
+- both gated on `duplicate:review` / `profilechange:decide`
+
+---
+
+## 0c — Guardian and parent surfaces
+
+`guardianCan()` is the single question every parent-facing screen must ask, and
+there is no parent-facing screen. The `PARENT` role has existed in `rbac.ts`
+since before this wave and has never had anywhere to go.
+
+- a guardian's dependants list, built from `dependantsOf()`
+- the capability grants visible to the guardian, so they can see what they hold
+- **every read gated on `guardianCan()`**, never on the `PARENT` role alone —
+  that is the whole point of the capability table
+
+---
+
 ## 1 — Coach application form
 
 `applyAsCoach()` and `applyAsCoachWithAutomation()` exist, are tested, and

@@ -30,6 +30,14 @@ export const SEED = {
       phone: '',
       address: 'MMAKF Headquarters, Patratu, Ramgarh District, Jharkhand, India',
       hours: 'Mon–Sat · 06:00–09:00 & 17:00–20:00 IST',
+      // SUNDAY IS A TRAINING DAY, and it does not follow the weekday clock —
+      // the dojo runs a long morning and an afternoon session, and both move
+      // with the season. Held as its own field rather than folded into `hours`
+      // because `hours` answers "when is the headquarters staffed" on /contact,
+      // while this answers "when can I train on a Sunday" on /facilities and
+      // /schedule. Optional: a federation record stored before this field
+      // existed renders nothing rather than breaking a page.
+      hoursSunday: 'Sun · Summer 06:00–10:00 & 15:00–18:00 · Winter 08:00–11:30 & 16:00–18:30 IST',
     },
   },
 
@@ -189,6 +197,10 @@ export const SEED = {
     { day: 'Sat', t: '7:00 AM',  d: 'Open Mat / Grading Prep',lvl: 'All Levels',    ins: 'All Instructors',      mode: 'dojo' },
     { day: 'Sat', t: '10:00 AM', d: 'School Program Batch',   lvl: 'School Students', ins: 'Senpai Ravishankar', mode: 'dojo' },
     { day: 'Sun', t: '8:00 AM',  d: 'Online: Kihon & Kata',   lvl: 'All',           ins: 'Sensei Vikas Pathak',  mode: 'online' },
+    // Seasonal. The Sunday dojo sessions move with the light, so the time
+    // column carries both timings rather than implying there is only one.
+    { day: 'Sun', t: 'Summer 6:00–10:00 AM · Winter 8:00–11:30 AM', d: 'Open Batch', lvl: 'All Levels', ins: 'All Instructors', mode: 'dojo' },
+    { day: 'Sun', t: 'Summer 3:00–6:00 PM · Winter 4:00–6:30 PM',   d: 'Open Batch', lvl: 'All Levels', ins: 'All Instructors', mode: 'dojo' },
   ],
 
   // EMPTY. Six events were listed here — a grading camp, two championships, a
@@ -484,14 +496,26 @@ export const SEED = {
     district?: string; status: string;
   }>,
 
+  // TIMINGS ARE PER CENTRE, NOT PER FEDERATION.
+  //
+  // `hours` and `hoursSunday` on a branch are that centre's own published
+  // timings. They are EMPTY for every centre below, and empty renders as absent
+  // — see src/lib/timings.ts. The federation has not collected timings from the
+  // affiliated clubs, and copying the Hombu's clock onto a club in Bokaro would
+  // publish a time nobody there keeps and send a parent to a locked door. Each
+  // unit fills its own row in from /admin.
+  //
+  // The Hombu's pair is deliberately blank too: it reads through to
+  // federation.contact.hours / hoursSunday, so the headquarters has ONE editable
+  // source shared with /contact, /facilities and /schedule.
   branches: [
-    { name: 'MMAKF Hombu Dojo',              city: 'Patratu',    district: 'Ramgarh',    incharge: 'Shihan Pramod Kumar Pathak', status: 'Headquarters' },
-    { name: 'MMAKF Ramgarh Centre',          city: 'Ramgarh',    district: 'Ramgarh',    incharge: 'Sensei Vikas Pathak',        status: 'Affiliated' },
-    { name: 'MMAKF Hazaribagh Dojo',         city: 'Hazaribagh', district: 'Hazaribagh', incharge: 'Sensei Dhiraj Pathak',       status: 'Affiliated' },
-    { name: 'MMAKF Ranchi Training Centre',  city: 'Ranchi',     district: 'Ranchi',     incharge: 'Senpai Ravishankar',         status: 'Affiliated' },
-    { name: 'MMAKF Bokaro Dojo',             city: 'Bokaro',     district: 'Bokaro',     incharge: 'Daksh Mohan Mishra',         status: 'Affiliated' },
-    { name: "Women's Wing — Partner Schools", city: '14 schools', district: 'Ramgarh & Hazaribagh', incharge: 'Sensei Sumitra Devi', status: 'Community' },
-    { name: 'MMAKF Online Academy',       city: 'Worldwide',  district: '—',          incharge: 'Federation Faculty',         status: 'Digital' },
+    { name: 'MMAKF Hombu Dojo',              city: 'Patratu',    district: 'Ramgarh',    incharge: 'Shihan Pramod Kumar Pathak', status: 'Headquarters', hours: '', hoursSunday: '' },
+    { name: 'MMAKF Ramgarh Centre',          city: 'Ramgarh',    district: 'Ramgarh',    incharge: 'Sensei Vikas Pathak',        status: 'Affiliated',   hours: '', hoursSunday: '' },
+    { name: 'MMAKF Hazaribagh Dojo',         city: 'Hazaribagh', district: 'Hazaribagh', incharge: 'Sensei Dhiraj Pathak',       status: 'Affiliated',   hours: '', hoursSunday: '' },
+    { name: 'MMAKF Ranchi Training Centre',  city: 'Ranchi',     district: 'Ranchi',     incharge: 'Senpai Ravishankar',         status: 'Affiliated',   hours: '', hoursSunday: '' },
+    { name: 'MMAKF Bokaro Dojo',             city: 'Bokaro',     district: 'Bokaro',     incharge: 'Daksh Mohan Mishra',         status: 'Affiliated',   hours: '', hoursSunday: '' },
+    { name: "Women's Wing — Partner Schools", city: '14 schools', district: 'Ramgarh & Hazaribagh', incharge: 'Sensei Sumitra Devi', status: 'Community', hours: '', hoursSunday: '' },
+    { name: 'MMAKF Online Academy',       city: 'Worldwide',  district: '—',          incharge: 'Federation Faculty',         status: 'Digital',      hours: '', hoursSunday: '' },
   ],
 
   beltGrading: {

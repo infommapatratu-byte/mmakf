@@ -1,0 +1,344 @@
+---
+/**
+ * One kumite system or principle, in depth.
+ *
+ * The route serves BOTH kinds of record — a formal partner exercise and a
+ * tactical principle — because a student typing "sen no sen" and a student
+ * typing "gohon kumite" are both asking the kumite library a question, and
+ * splitting the URL space would only mean they had to know which kind of thing
+ * they were looking for before they could look for it.
+ *
+ * The two render differently, because they ARE different: an exercise has a
+ * structure and a safety brief, and a principle has a trigger, a risk and a
+ * decision. Neither is forced into the other's shape.
+ *
+ * Rules-dependent entries carry a standing notice. §20 is explicit that
+ * outdated competition rules must not be taught as permanent truth, and this
+ * library's answer is to state no rule at all — so the notice tells the reader
+ * where the actual rules live rather than pretending the question does not
+ * arise.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { kumiteSystem, kumiteConcept, techniqueBySlug, terms as resolveTerms } from '@/data/shotokan';
+import { kataBySlug } from '@/data/kata';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const { slug } = Astro.params;
+const key = String(slug ?? '');
+const system = kumiteSystem(key);
+const concept = kumiteConcept(key);
+
+if (!system && !concept) {
+  return new Response(null, { status: 404, statusText: 'No such kumite record' });
+}
+
+const record = (system ?? concept)!;
+const glossary = resolveTerms(record.terms);
+
+// Concept-only fields, resolved once so the template stays declarative.
+const relatedTechniques = concept
+  ? concept.relatedTechniques.map((s) => techniqueBySlug(s)).filter((t) => t !== null)
+  : [];
+const relatedKata = concept
+  ? concept.relatedKata.map((s) => kataBySlug(s)).filter((k) => k !== null)
+  : [];
+
+const TEACHING_LABELS: Array<[string, string]> = [
+  ['trigger', 'Trigger'],
+  ['mechanics', 'Mechanics'],
+  ['distance', 'Distance'],
+  ['timing', 'Timing'],
+  ['decision', 'The decision'],
+  ['risk', 'The risk'],
+  ['application', 'Application'],
+];
+const teaching = concept
+  ? TEACHING_LABELS
+      .map(([k, label]) => [label, (concept.teaching as Record<string, string | undefined>)[k]] as const)
+      .filter((row): row is readonly [string, string] => Boolean(row[1]))
+  : [];
+
+const worldLabel =
+  record.world === 'sport' ? 'Sport kumite'
+  : record.world === 'traditional' ? 'Traditional development'
+  : 'Traditional and sport';
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'LearningResource',
+  name: `${record.name} — ${record.english}`,
+  alternateName: record.kanji ?? undefined,
+  inLanguage: 'en',
+  learningResourceType: system ? 'Partner exercise' : 'Tactical principle',
+  about: { '@type': 'Thing', name: 'Shotokan karate kumite' },
+  description: record.summary,
+  url: canonicalFor(surface, `/shotokan/kumite/${record.slug}`),
+  isPartOf: {
+    '@type': 'CollectionPage',
+    name: 'The MMAKF Shotokan kumite library',
+    url: canonicalFor(surface, '/shotokan/kumite'),
+  },
+};
+---
+
+<Base
+  title={`${record.name} (${record.english}) — Shotokan kumite — MMAKF`}
+  description={`${record.name}${record.kanji ? ` ${record.kanji}` : ''}, ${record.english}. ${record.summary.slice(0, 150)}`}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Kumite', url: '/shotokan/kumite' },
+    { name: record.name, url: `/shotokan/kumite/${record.slug}` },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow={system ? 'Partner exercise' : 'Kumite principle'}
+    title={`${record.name} <em class="r">${record.kanji ?? ''}</em>`}
+    lead={record.english}
+    pills={[worldLabel, ...(record.rulesDependent ? ['Rules-dependent'] : [])]}
+  />
+
+  {/* ═══════ WHAT IT IS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">What it is</div>
+          <h2 class="display-2" style="margin-top:16px">In plain words</h2>
+          <div class="rule"></div>
+          <p class="body-txt">{record.summary}</p>
+          {system && <p class="body-txt"><strong>Purpose.</strong> {system.purpose}</p>}
+          {system && <p class="body-txt"><strong>Where it leads.</strong> {system.progression}</p>}
+        </div>
+
+        {record.rulesDependent ? (
+          <aside class="fade panel" aria-labelledby="rules-notice">
+            <div class="eyebrow">Rules-dependent</div>
+            <h3 id="rules-notice" class="panel-h">No rule is stated on this page.</h3>
+            <p class="panel-p">
+              What is written here is the <strong>tactical principle</strong>, which survives a rule change.
+              No scoring value, bout length or contact level appears anywhere on it &mdash; those differ
+              between rule sets and between versions of the same rule set, and a library that printed one
+              would be teaching an out-of-date rule as a permanent fact.
+            </p>
+            <p class="panel-p">
+              For the rules actually in force, the federation&rsquo;s versioned competition regulations are
+              authoritative.
+            </p>
+            <a class="btn btn-ghost" href={h('/regulations')}>Competition regulations &rarr;</a>
+          </aside>
+        ) : (
+          <aside class="fade panel" aria-labelledby="not-a-syllabus">
+            <div class="eyebrow">MMAKF curriculum status</div>
+            <h3 id="not-a-syllabus" class="panel-h">Not placed at a grade.</h3>
+            <p class="panel-p">
+              <strong>MMAKF has not published its grading syllabus.</strong> This page does not say at which
+              grade {record.name} is examined or required. The federation has not decided it, and this
+              library does not decide it on the federation&rsquo;s behalf.
+            </p>
+            <a class="btn btn-ghost" href={h('/belt-system')}>The belt system &amp; grading &rarr;</a>
+          </aside>
+        )}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ STRUCTURE (systems) ═══════ */}
+  {system && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">{system.structure.length} steps</div>
+          <h2 class="display-2">How the exercise <em class="r">runs</em>.</h2>
+          <div class="rule"></div>
+        </div>
+        <ol class="steps fade">
+          {system.structure.map((s) => <li class="step">{s}</li>)}
+        </ol>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ SAFETY (systems) ═══════ */}
+  {system && (
+    <section>
+      <div class="container">
+        <div class="panel fade" style="max-width:74ch">
+          <div class="eyebrow">Safety</div>
+          <h3 class="panel-h">Partner work injures people when it is done carelessly.</h3>
+          <ul class="plain">
+            {system.safety.map((s) => <li class="panel-p">{s}</li>)}
+          </ul>
+        </div>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ TEACHING FRAME (concepts) ═══════ */}
+  {concept && teaching.length > 0 && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">{teaching.length} points</div>
+          <h2 class="display-2">How it is <em class="r">taught</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            The trigger that starts it, the distance and timing it needs, the decision it represents, and
+            what it costs when it is wrong.
+          </p>
+        </div>
+        <dl class="mech fade">
+          {teaching.map(([label, value]) => (
+            <div class="mech-row">
+              <dt class="mech-k">{label}</dt>
+              <dd class="mech-v">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ COMMON ERRORS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">{record.commonErrors.length} faults</div>
+        <h2 class="display-2">Common errors, and <em class="r">how to fix them</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-2">
+        {record.commonErrors.map((f) => (
+          <div class="card fade">
+            <div class="card-eyebrow">Fault</div>
+            <div class="card-title" style="font-size:1rem">{f.error}</div>
+            <div class="card-body">
+              <p style="margin:0 0 10px"><strong>Why it happens.</strong> {f.why}</p>
+              <p style="margin:0"><strong>The fix.</strong> {f.fix}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ DRILLS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Practice</div>
+        <h2 class="display-2">Drills</h2>
+        <div class="rule"></div>
+      </div>
+      <ul class="drills fade">
+        {record.drills.map((d) => <li class="drill">{d}</li>)}
+      </ul>
+    </div>
+  </section>
+
+  {/* ═══════ THE GRAPH ═══════ */}
+  {concept && (relatedTechniques.length > 0 || relatedKata.length > 0) && (
+    <section>
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">Kumite &harr; kihon &harr; kata</div>
+          <h2 class="display-2">What it <em class="r">connects to</em>.</h2>
+          <div class="rule"></div>
+        </div>
+        <div class="grid grid-2">
+          {relatedTechniques.length > 0 && (
+            <div class="card fade">
+              <div class="card-eyebrow">Techniques</div>
+              <ul class="linklist">
+                {relatedTechniques.map((t) => (
+                  <li><a href={h(`/shotokan/techniques/${t!.slug}`)}>{t!.name}</a> <span class="text-muted">{t!.english}</span></li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {relatedKata.length > 0 && (
+            <div class="card fade">
+              <div class="card-eyebrow">Kata</div>
+              <ul class="linklist">
+                {relatedKata.map((k) => (
+                  <li><a href={h(`/kata/${k!.slug}`)}>{k!.name}</a> <span class="text-muted">{k!.meaning}</span></li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ TERMINOLOGY ═══════ */}
+  {glossary.length > 0 && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">{glossary.length} terms</div>
+          <h2 class="display-2">The Japanese, <em class="r">explained</em>.</h2>
+          <div class="rule"></div>
+        </div>
+        <dl class="mech fade">
+          {glossary.map((g) => (
+            <div class="mech-row">
+              <dt class="mech-k">
+                <a href={h(`/shotokan/terminology#${g.key}`)}>{g.romaji}</a>
+                {g.kanji && <span lang="ja" class="text-muted" style="margin-left:8px">{g.kanji}</span>}
+              </dt>
+              <dd class="mech-v"><strong>{g.english}.</strong> {g.explain}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </section>
+  )}
+
+  <section>
+    <div class="container">
+      <div class="flex flex-wrap gap-3">
+        <a class="btn btn-ghost" href={h('/shotokan/kumite')}>&larr; All kumite</a>
+        <a class="btn btn-ghost" href={h('/shotokan/kihon')}>Kihon</a>
+        <a class="btn btn-ghost" href={h('/kata')}>Kata library</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .mech { margin: 0; display: grid; gap: 0; }
+  .mech-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 22%) 1fr;
+    gap: 20px;
+    padding: 16px 0;
+    border-top: 1px solid var(--line, rgba(0, 0, 0, .1));
+  }
+  .mech-row:last-child { border-bottom: 1px solid var(--line, rgba(0, 0, 0, .1)); }
+  .mech-k { font-weight: 600; margin: 0; }
+  .mech-v { margin: 0; }
+
+  .steps { margin: 0; padding-left: 1.4em; counter-reset: step; }
+  .step { margin: 0 0 14px; max-width: 78ch; }
+
+  .drills { margin: 0; padding-left: 1.4em; }
+  .drill { margin: 0 0 12px; max-width: 78ch; }
+
+  .plain { list-style: none; margin: 0; padding: 0; }
+
+  .linklist { list-style: none; margin: 8px 0 0; padding: 0; }
+  .linklist li { padding: 7px 0; border-top: 1px solid var(--line, rgba(0, 0, 0, .08)); }
+  .linklist li:first-child { border-top: 0; }
+
+  @media (max-width: 720px) {
+    .mech-row { grid-template-columns: 1fr; gap: 6px; }
+  }
+</style>

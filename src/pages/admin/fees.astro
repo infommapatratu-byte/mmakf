@@ -1,5 +1,6 @@
 ---
-// /admin/fees — where the federation's one fee framework is authored.
+// /admin/fees — where the federation's one fee framework is authored, versioned,
+// published, and retired.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // WHY THIS SCREEN EXISTS
@@ -16,26 +17,37 @@
 // a fee rule.
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// THREE THINGS THIS PAGE HAS TO MAKE UNMISSABLE
+// FOUR THINGS THIS PAGE HAS TO MAKE UNMISSABLE
 // ─────────────────────────────────────────────────────────────────────────────
 //
-//  1. PUBLISHING IS IRREVERSIBLE. A published framework can never be edited,
-//     because a quote stores the framework it was computed under and re-derives
-//     its figure from it. Editing a published rule would silently rewrite every
-//     quotation ever issued under it — a school that accepted a figure in March
-//     would find its own quotation saying something else in June. src/db/fees.ts
-//     enforces it (addRule refuses a non-draft framework); this page says so
-//     next to the control, and makes the publisher type the framework's code
-//     rather than click once.
+//  1. PUBLISHING IS IRREVERSIBLE, AND A PUBLISHED FRAMEWORK IS FROZEN. A quote
+//     stores the framework it was computed under and re-derives its figure from
+//     it. Editing a published rule would silently rewrite every quotation ever
+//     issued under it — a school that accepted a figure in March would find its
+//     own quotation saying something else in June. src/db/fees.ts enforces it
+//     (addRule refuses a non-draft framework). This page does not merely fail
+//     the attempt: WHEN THE SELECTED VERSION IS NOT A DRAFT, THE EDITING
+//     CONTROLS ARE NOT RENDERED AT ALL, and their absence is explained in words
+//     next to the one control that IS offered — cloning it into a new draft.
 //
-//  2. MONEY IS INTEGER PAISE. Every amount field here refuses a decimal point
-//     outright rather than rounding one silently. applyFactor() throws on a
-//     non-integer for the reason written in its doc comment: a rupee expressed
-//     as a float is a rounding error waiting for a large enough contract, and
-//     the multiplication runs in BigInt precisely so the last rupee of a big
-//     institutional total is exact.
+//  2. WRITING AND PUBLISHING ARE DIFFERENT AUTHORITIES. 'feeframework:write'
+//     drafts; 'feeframework:publish' freezes. The second is the irreversible
+//     one and is checked on its own, server-side, on the request — not inferred
+//     from the first and not inferred from the rendered page.
 //
-//  3. MULTIPLIERS ARE PARTS-PER-MILLION, NOT PER CENT. There is no percentage
+//  3. RUPEES ARE CONVERTED TO PAISE ON THE SERVER, AND THE ADMINISTRATOR SEES
+//     BOTH FIGURES BEFORE COMMITTING. An amount is typed in rupees, because
+//     that is what a price is to the person setting it. It is stored in integer
+//     paise, because that is the only representation that survives being
+//     multiplied by a quantity. The conversion happens HERE, on the server,
+//     through the codebase's single rupee→paise function — a conversion done in
+//     the browser is a client-supplied amount wearing a helper function. The
+//     rule form therefore has TWO steps: the first converts and shows the
+//     result, the second stores it. The previewed paise figure is never
+//     submitted back and never trusted; the write re-derives it from the rupee
+//     text, so there is exactly one conversion on the path to the column.
+//
+//  4. MULTIPLIERS ARE PARTS-PER-MILLION, NOT PER CENT. There is no percentage
 //     field on this form and there is not going to be one — a per-cent box that
 //     quietly multiplied by 10,000 to store it would be one conversion away
 //     from a factor of a hundred in the wrong direction.
@@ -51,12 +63,13 @@
 // SUPER_ADMIN and FEDERATION_ADMIN hold. A training director may read the rules
 // their quotes are computed from and may not change them, which is the point.
 //
-// NOTE ONE MISMATCH, RATHER THAN PAPERING OVER IT: createFramework(), addRule()
-// and publishFramework() assert 'finance:write', not 'feeframework:write'. The
-// two coincide today (both national roles hold both), but if they ever stop
-// coinciding this page will offer a control the module refuses. So the refusal
-// is caught below and reported with the action the module actually demanded,
-// instead of a generic failure.
+// Retiring a version is gated on 'feeframework:publish', not on write: taking a
+// framework out of force changes what the federation charges from that moment,
+// which is the same class of act as putting it into force.
+//
+// The gateway panel is gated separately again, on 'finance:read'. An auditor
+// who may read pricing rules is not thereby a person who may read the payment
+// configuration.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // FORMS POST TO THIS PAGE
@@ -76,17 +89,30 @@ import Table from '@/components/DataTable/Table.astro';
 import EmptyState from '@/components/states/EmptyState.astro';
 import ErrorState from '@/components/states/ErrorState.astro';
 import type { Column } from '@/components/DataTable/types';
-import { asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 import { isConfigured, db } from '@/db';
 import * as s from '@/db/schema';
+// Contracts live in the operations schema, which is NOT re-exported through
+// src/db/schema.ts — see the export list there. Imported under its own name so
+// it is obvious which register each figure below was counted from.
+import * as ops from '@/db/operations.schema';
 import { identify, clientIp } from '@/lib/session';
 import { rateLimit } from '@/lib/ratelimit';
 import { canAnywhere, visibleScopes, ForbiddenError } from '@/lib/rbac';
-import type { AuditContext } from '@/db/federation';
+import { writeAudit, type AuditContext } from '@/db/federation';
 import {
   activeFramework, createFramework, addRule, publishFramework,
   formatINR, isFeeError, PPM,
 } from '@/db/fees';
+import { paymentStatusReport, razorpayCapability } from '@/lib/payments';
+// THE ONE RUPEE→PAISE CONVERSION IN THIS CODEBASE, imported rather than
+// rewritten. It is a pure function that takes the rupees and the paise out of
+// the decimal string as DIGITS and reads them once, so nothing is ever
+// multiplied by a hundred and there is no rounding rule to get wrong — and,
+// more importantly, no SECOND rounding rule to disagree with the first. A local
+// copy here would be that second rule. tests/marketplace-portal.test.ts imports
+// it the same way, for the same reason.
+import { rupeesToPaise } from '@/pages/api/marketplace/[...action]';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 
 export const prerender = false;
@@ -94,6 +120,11 @@ export const prerender = false;
 const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
 const h = (p: string) => surfaceHref(surface, p);
 const SELF = h('/admin/fees');
+// Forms post back to the URL WITH its query string, because ?framework= and
+// ?edit= are what decide which version this page is looking at. A form action
+// that dropped them would re-render a different framework's screen under the
+// reader's error message.
+const SELF_HERE = `${SELF}${Astro.url.search}`;
 
 const identity = await identify(Astro.request.headers.get('cookie'));
 const principal = identity?.principal ?? null;
@@ -102,6 +133,7 @@ const configured = isConfigured();
 const mayRead = Boolean(principal) && canAnywhere(principal, 'feeframework:read');
 const mayWrite = Boolean(principal) && canAnywhere(principal, 'feeframework:write');
 const mayPublish = Boolean(principal) && canAnywhere(principal, 'feeframework:publish');
+const mayReadFinance = Boolean(principal) && canAnywhere(principal, 'finance:read');
 
 // A FEE FRAMEWORK IS A NATIONAL INSTRUMENT. There is no state's copy of it and
 // no column on fee_frameworks to filter by, so a scope filter here cannot be a
@@ -133,7 +165,7 @@ const KIND_NOTES: Record<string, { needs: Needs; note: string }> = {
   per_km: { needs: 'unit', note: 'Unit amount × the travelKm input.' },
   multiplier: { needs: 'factor', note: 'Applied to the running subtotal at this point in the order.' },
   fixed_add: { needs: 'amount', note: 'A flat addition — equipment, assessment, certification.' },
-  discount: { needs: 'amount', note: 'A negative adjustment. Enter the amount as a negative number of paise.' },
+  discount: { needs: 'amount', note: 'A negative adjustment. Enter the amount in rupees with a leading minus.' },
   tax: { needs: 'factor', note: 'A rate applied to the running subtotal, recorded separately on the quote.' },
 };
 
@@ -172,29 +204,37 @@ class InputError extends Error {}
 type Parsed = { ok: true; value: number | null } | { ok: false; message: string };
 
 /**
- * An amount, in integer paise, or nothing.
+ * An amount typed in RUPEES, returned in integer paise.
  *
- * A decimal point is REFUSED rather than rounded. Accepting "450.50" and
- * quietly storing 45050 would work until the day somebody types "450.5"
- * meaning fifty paise more, and the two readings differ by a factor of ten.
- * The unit is stated on the field; the parser holds the person to it.
+ * The conversion itself is rupeesToPaise() and is not repeated here. What this
+ * adds is the sign: a discount reduces a total, so it is entered with a leading
+ * minus, and the shared converter deliberately accepts only unsigned money.
+ * Stripping the sign, converting the magnitude and negating the integer keeps
+ * the digits-to-paise step exactly where it already lives.
+ *
+ * IT REFUSES RATHER THAN ROUNDS. More than two decimal places is a typo or a
+ * machine sending the wrong units, and quietly rounding hides which.
  */
-function parsePaise(raw: string, field: string): Parsed {
+function parseRupeesToPaise(raw: string, field: string): Parsed {
   const v = raw.trim();
   if (!v) return { ok: true, value: null };
-  if (/[.,]/.test(v)) {
+  const negative = v.startsWith('-');
+  const magnitude = negative ? v.slice(1).trim() : v;
+  const minor = rupeesToPaise(magnitude);
+  if (minor === null) {
     return {
       ok: false,
-      message: `${field} is in integer paise, so a decimal point is not accepted. One rupee is 100.`,
+      message:
+        `${field} must be an amount in rupees, with at most two decimal places — one rupee is 100 paise, ` +
+        'and the paise figure is computed on the server. A third decimal place is refused rather than rounded, ' +
+        'because rounding it would hide whether it was a typo or a wrong unit.',
     };
   }
-  if (!/^-?\d+$/.test(v)) return { ok: false, message: `${field} must be a whole number of paise.` };
-  const n = Number(v);
-  if (!Number.isSafeInteger(n)) return { ok: false, message: `${field} is out of range.` };
-  return { ok: true, value: n };
+  if (!Number.isSafeInteger(minor)) return { ok: false, message: `${field} is out of range.` };
+  return { ok: true, value: negative ? -minor : minor };
 }
 
-/** A parts-per-million factor. Same discipline, different unit. */
+/** A parts-per-million factor. Integer, and never a per cent. */
 function parsePpm(raw: string, field: string): Parsed {
   const v = raw.trim();
   if (!v) return { ok: true, value: null };
@@ -215,6 +255,30 @@ function parseCount(raw: string, field: string): Parsed {
   if (!v) return { ok: true, value: null };
   if (!/^\d+$/.test(v)) return { ok: false, message: `${field} must be a whole number.` };
   return { ok: true, value: Number(v) };
+}
+
+/** A date, or nothing. Refused rather than silently dropped when unreadable. */
+function parseDate(raw: string, field: string): { ok: true; value: string | null } | { ok: false; message: string } {
+  const v = raw.trim();
+  if (!v) return { ok: true, value: null };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(new Date(`${v}T00:00:00Z`).getTime())) {
+    return { ok: false, message: `${field} must be a date.` };
+  }
+  return { ok: true, value: v };
+}
+
+/**
+ * Paise back to the rupee text a person types.
+ *
+ * Integer arithmetic only, and the exact inverse of the converter: the text it
+ * produces converts back to the same paise. Used to fill the form when an
+ * existing rule is opened for editing, so nothing on this screen ever shows an
+ * amount the engine would read differently from the one stored.
+ */
+function paiseToRupeeText(minor: number): string {
+  const negative = minor < 0;
+  const abs = Math.abs(minor);
+  return `${negative ? '-' : ''}${Math.trunc(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
 }
 
 /**
@@ -254,21 +318,61 @@ function conditionProblem(value: unknown): string | null {
 
 const DONE_MESSAGES: Record<string, string> = {
   framework: 'The draft framework was created. It prices nothing until it has rules and is published.',
+  draft: 'The draft was updated. It still prices nothing until it is published.',
+  cloned: 'The version was cloned into a new draft, rules and all. The source version is untouched.',
   rule: 'The rule was added to the draft. It takes effect when the framework is published, and not before.',
+  rule_saved: 'The rule was changed in the draft. Nothing already issued is affected — a draft prices nothing.',
+  rule_removed: 'The rule was removed from the draft.',
   published: 'The framework is published and is now frozen. Any change from here means a new version.',
+  retired: 'The version was retired. It no longer prices anything, and every quotation issued under it keeps the figure it was issued at.',
 };
 
+type FormName = 'framework' | 'rule' | 'publish' | 'draft' | 'clone' | 'retire';
 type Posted = Record<string, string>;
+
 let posted: Posted = {};
 let error: string | null = null;
-let focusForm: 'framework' | 'rule' | 'publish' | null = null;
+let focusForm: FormName | null = null;
+
+/**
+ * The conversion the administrator is shown before committing.
+ *
+ * Computed on the server from the rupee text, displayed, and then THROWN AWAY:
+ * it is not written into a hidden field and the write path does not read it.
+ * The store step converts the rupee text again. A previewed figure that came
+ * back from the browser would be a client-supplied amount with a server's
+ * reputation.
+ */
+let conversion:
+  | { rupees: string; minor: number; formatted: string; kind: string; factorPpm: number | null }
+  | null = null;
+
+const FORM_FOR_ACTION: Record<string, FormName> = {
+  create_framework: 'framework',
+  update_draft: 'draft',
+  clone: 'clone',
+  preview_rule: 'rule',
+  add_rule: 'rule',
+  update_rule: 'rule',
+  delete_rule: 'rule',
+  publish: 'publish',
+  retire: 'retire',
+};
 
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
   posted = Object.fromEntries([...form.entries()].map(([k, v]) => [k, String(v)]));
   const get = (k: string) => String(form.get(k) ?? '').trim();
   const action = get('action');
-  focusForm = action === 'create_framework' ? 'framework' : action === 'add_rule' ? 'rule' : action === 'publish' ? 'publish' : null;
+  focusForm = FORM_FOR_ACTION[action] ?? null;
+
+  // Publishing and retiring are the irreversible acts, so they are named here
+  // rather than inferred: everything else needs write, these two need publish.
+  const needsPublishAuthority = action === 'publish' || action === 'retire';
+  // The only action that writes nothing. It still costs a database read and a
+  // render, so it is inside the rate limit; it is outside the write authority
+  // check for nothing, because it is offered only where writing is.
+  const readOnlyAction = action === 'preview_rule';
 
   const rl = await rateLimit(Astro.request, 'fee-author', 30, 60);
 
@@ -293,9 +397,14 @@ if (Astro.request.method === 'POST') {
   } else if (!nationalReach) {
     Astro.response.status = 403;
     error = 'The fee framework is a national instrument. This account holds its authority at a narrower scope, which does not contain a national record.';
-  } else if (action === 'publish' && !mayPublish) {
+  } else if (needsPublishAuthority && !mayPublish) {
+    // THE SECOND AUTHORITY, CHECKED SEPARATELY. Holding feeframework:write is
+    // not evidence of holding feeframework:publish, and the irreversible act is
+    // the second one.
     Astro.response.status = 403;
-    error = 'Publishing a framework requires feeframework:publish, which this account does not hold in any scope.';
+    error = action === 'publish'
+      ? 'Publishing a framework requires feeframework:publish, which this account does not hold in any scope.'
+      : 'Retiring a framework requires feeframework:publish, which this account does not hold in any scope. Taking a version out of force changes what the federation charges from that moment.';
   } else {
     const ctx: AuditContext = {
       principal: identity.principal,
@@ -304,81 +413,64 @@ if (Astro.request.method === 'POST') {
       reason: get('reason') || null,
     };
 
-    try {
-      if (action === 'create_framework') {
-        const title = get('title');
-        const versionRaw = get('version');
-        if (!title) throw new InputError('Give the framework a title.');
-        if (!/^\d+$/.test(versionRaw) || Number(versionRaw) < 1) {
-          throw new InputError('A framework version is a positive whole number. Versions are unique, so the next one is the lowest number not already taken.');
+    /** Read the rule fields off the form, converting rupees to paise once. */
+    const readRuleFields = () => {
+      const kind = get('kind');
+      const meta = RULE_KINDS.find((k) => k.kind === kind);
+      if (!meta) throw new InputError('That is not a rule kind this engine implements.');
+
+      const code = get('code');
+      const label = get('label');
+      if (!code) throw new InputError('Give the rule a code. It is printed on every quotation line the rule produces, and it is how a figure is traced back four years later.');
+      if (!label) throw new InputError('Give the rule a label. It is the wording the recipient of the quotation reads.');
+
+      const amount = parseRupeesToPaise(get('amountRupees'), 'The amount');
+      if (!amount.ok) throw new InputError(amount.message);
+      const factor = parsePpm(get('factorPpm'), 'The factor');
+      if (!factor.ok) throw new InputError(factor.message);
+      const minQty = parseCount(get('minQuantity'), 'The minimum quantity');
+      if (!minQty.ok) throw new InputError(minQty.message);
+      const maxQty = parseCount(get('maxQuantity'), 'The maximum quantity');
+      if (!maxQty.ok) throw new InputError(maxQty.message);
+      const sortOrder = parseCount(get('sortOrder'), 'The order');
+      if (!sortOrder.ok) throw new InputError(sortOrder.message);
+
+      // Completeness, checked here because computeFee() checks it at the
+      // moment somebody asks for a price — which is the worst possible time
+      // to discover a rule was saved without its amount.
+      if ((meta.needs === 'amount' || meta.needs === 'unit') && amount.value == null) {
+        throw new InputError(`A ${kind} rule needs an amount. Without one, computeFee() refuses the whole framework the first time it is asked for a figure.`);
+      }
+      if (meta.needs === 'factor' && factor.value == null) {
+        throw new InputError(`A ${kind} rule needs a factor in parts-per-million. ×1.0 is ${PPM}.`);
+      }
+      if (meta.needs === 'amount' || meta.needs === 'unit') {
+        if (kind === 'discount' && (amount.value ?? 0) > 0) {
+          throw new InputError('A discount reduces the total, so its amount is negative. A positive number here would add to the bill under the word "discount".');
         }
-        const row = await createFramework(db(), ctx, {
-          title,
-          version: Number(versionRaw),
-          effectiveFrom: get('effectiveFrom') || null,
-          notes: get('notes') || undefined,
-        });
-        return Astro.redirect(`${SELF}?framework=${row.id}&done=framework`, 303);
+        if (kind !== 'discount' && (amount.value ?? 0) < 0) {
+          throw new InputError('Only a discount carries a negative amount.');
+        }
       }
 
-      if (action === 'add_rule') {
-        const frameworkId = Number(get('frameworkId'));
-        if (!Number.isInteger(frameworkId) || frameworkId <= 0) throw new InputError('Say which draft the rule belongs to.');
-
-        const kind = get('kind');
-        const meta = RULE_KINDS.find((k) => k.kind === kind);
-        if (!meta) throw new InputError('That is not a rule kind this engine implements.');
-
-        const code = get('code');
-        const label = get('label');
-        if (!code) throw new InputError('Give the rule a code. It is printed on every quotation line the rule produces, and it is how a figure is traced back four years later.');
-        if (!label) throw new InputError('Give the rule a label. It is the wording the recipient of the quotation reads.');
-
-        const amount = parsePaise(get('amountMinor'), 'The amount');
-        if (!amount.ok) throw new InputError(amount.message);
-        const factor = parsePpm(get('factorPpm'), 'The factor');
-        if (!factor.ok) throw new InputError(factor.message);
-        const minQty = parseCount(get('minQuantity'), 'The minimum quantity');
-        if (!minQty.ok) throw new InputError(minQty.message);
-        const maxQty = parseCount(get('maxQuantity'), 'The maximum quantity');
-        if (!maxQty.ok) throw new InputError(maxQty.message);
-        const sortOrder = parseCount(get('sortOrder'), 'The order');
-        if (!sortOrder.ok) throw new InputError(sortOrder.message);
-
-        // Completeness, checked here because computeFee() checks it at the
-        // moment somebody asks for a price — which is the worst possible time
-        // to discover a rule was saved without its amount.
-        if ((meta.needs === 'amount' || meta.needs === 'unit') && amount.value == null) {
-          throw new InputError(`A ${kind} rule needs an amount in paise. Without one, computeFee() refuses the whole framework the first time it is asked for a figure.`);
+      let conditions: Record<string, unknown> = {};
+      const conditionsRaw = get('conditions');
+      if (conditionsRaw) {
+        try {
+          conditions = JSON.parse(conditionsRaw);
+        } catch {
+          throw new InputError('The conditions are not valid JSON. Leave the field empty for a rule that applies to every request.');
         }
-        if (meta.needs === 'factor' && factor.value == null) {
-          throw new InputError(`A ${kind} rule needs a factor in parts-per-million. ×1.0 is ${PPM}.`);
-        }
-        if (meta.needs === 'amount' || meta.needs === 'unit') {
-          if (kind === 'discount' && (amount.value ?? 0) > 0) {
-            throw new InputError('A discount reduces the total, so its amount is negative paise. A positive number here would add to the bill under the word "discount".');
-          }
-          if (kind !== 'discount' && (amount.value ?? 0) < 0) {
-            throw new InputError('Only a discount carries a negative amount.');
-          }
-        }
+        const problem = conditionProblem(conditions);
+        if (problem) throw new InputError(problem);
+      }
 
-        let conditions: Record<string, unknown> = {};
-        const conditionsRaw = get('conditions');
-        if (conditionsRaw) {
-          try {
-            conditions = JSON.parse(conditionsRaw);
-          } catch {
-            throw new InputError('The conditions are not valid JSON. Leave the field empty for a rule that applies to every request.');
-          }
-          const problem = conditionProblem(conditions);
-          if (problem) throw new InputError(problem);
-        }
+      const serviceRaw = get('serviceId');
+      const audienceRaw = get('audience');
 
-        const serviceRaw = get('serviceId');
-        const audienceRaw = get('audience');
-
-        await addRule(db(), ctx, frameworkId, {
+      return {
+        meta,
+        values: {
           code,
           label,
           kind,
@@ -391,8 +483,230 @@ if (Astro.request.method === 'POST') {
           maxQuantity: maxQty.value,
           sortOrder: sortOrder.value ?? 100,
           requiresApproval: get('requiresApproval') === 'on',
+        },
+      };
+    };
+
+    /** The framework id a rule action names, as an integer. */
+    const ruleFrameworkId = () => {
+      const id = Number(get('frameworkId'));
+      if (!Number.isInteger(id) || id <= 0) throw new InputError('Say which draft the rule belongs to.');
+      return id;
+    };
+
+    try {
+      if (action === 'create_framework') {
+        const title = get('title');
+        const versionRaw = get('version');
+        if (!title) throw new InputError('Give the framework a title.');
+        if (!/^\d+$/.test(versionRaw) || Number(versionRaw) < 1) {
+          throw new InputError('A framework version is a positive whole number. Versions are unique, so the next one is the lowest number not already taken.');
+        }
+        const from = parseDate(get('effectiveFrom'), 'The effective-from date');
+        if (!from.ok) throw new InputError(from.message);
+        const row = await createFramework(db(), ctx, {
+          title,
+          version: Number(versionRaw),
+          effectiveFrom: from.value,
+          notes: get('notes') || undefined,
         });
-        return Astro.redirect(`${SELF}?framework=${frameworkId}&done=rule`, 303);
+        return Astro.redirect(`${SELF}?framework=${row.id}&done=framework#rules`, 303);
+      }
+
+      if (action === 'update_draft') {
+        const id = Number(get('frameworkId'));
+        if (!Number.isInteger(id) || id <= 0) throw new InputError('Say which draft is being edited.');
+        const title = get('title');
+        if (!title) throw new InputError('A framework must keep a title.');
+        const from = parseDate(get('effectiveFrom'), 'The effective-from date');
+        if (!from.ok) throw new InputError(from.message);
+        const to = parseDate(get('effectiveTo'), 'The effective-to date');
+        if (!to.ok) throw new InputError(to.message);
+        if (from.value && to.value && to.value < from.value) {
+          throw new InputError('The effective window ends before it starts, so the version would never be in force on any day.');
+        }
+
+        // THE IMMUTABILITY GUARD IS IN THE WHERE CLAUSE, NOT IN AN `IF` ABOVE
+        // IT. A read-then-write would leave a window in which another session
+        // publishes this framework between the check and the update, and the
+        // update would then edit a published instrument. Written this way the
+        // database decides: the statement matches no row once the status has
+        // moved, and `updated` comes back empty.
+        const [updated] = await db().update(s.feeFrameworks)
+          .set({
+            title,
+            effectiveFrom: from.value,
+            effectiveTo: to.value,
+            notes: get('notes') || null,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(s.feeFrameworks.id, id), eq(s.feeFrameworks.status, 'draft')))
+          .returning({ id: s.feeFrameworks.id, code: s.feeFrameworks.code });
+
+        if (!updated) {
+          throw new InputError('Nothing was changed. That version is not a draft — a published framework is frozen, and correcting one means cloning it into a new version.');
+        }
+        await writeAudit(db(), ctx, {
+          entityType: 'fee_framework', entityId: id, action: 'update',
+          newValue: { code: updated.code, title, effectiveFrom: from.value, effectiveTo: to.value },
+        });
+        return Astro.redirect(`${SELF}?framework=${id}&done=draft#rules`, 303);
+      }
+
+      if (action === 'clone') {
+        const sourceId = Number(get('sourceId'));
+        if (!Number.isInteger(sourceId) || sourceId <= 0) throw new InputError('Say which version is being cloned.');
+        const title = get('title');
+        if (!title) throw new InputError('Give the new version a title. It is what an administrator reads four years from now when asked why the figure changed.');
+        const from = parseDate(get('effectiveFrom'), 'The effective-from date');
+        if (!from.ok) throw new InputError(from.message);
+
+        const [source] = await db().select().from(s.feeFrameworks)
+          .where(eq(s.feeFrameworks.id, sourceId)).limit(1);
+        if (!source) throw new InputError('That version no longer exists.');
+
+        const sourceRules = await db().select().from(s.feeRules)
+          .where(eq(s.feeRules.frameworkId, sourceId))
+          .orderBy(asc(s.feeRules.sortOrder), asc(s.feeRules.id));
+
+        // The next free version number, read at the moment of the write rather
+        // than taken from the rendered page — which may be minutes old and may
+        // have been rendered before somebody else created a version.
+        const [{ highest }] = await db()
+          .select({ highest: sql<number>`coalesce(max(${s.feeFrameworks.version}), 0)::int` })
+          .from(s.feeFrameworks);
+
+        const created = await createFramework(db(), ctx, {
+          title,
+          version: Number(highest) + 1,
+          effectiveFrom: from.value,
+          notes: get('notes') || undefined,
+        });
+
+        // Copied THROUGH addRule(), not with an INSERT ... SELECT, so every
+        // rule copied passes the same integer checks and the same draft-only
+        // guard as a rule typed by hand. A bulk copy that skipped them would be
+        // a second way to get a rule into a framework.
+        let copied = 0;
+        try {
+          for (const r of sourceRules) {
+            await addRule(db(), ctx, created.id, {
+              code: r.code,
+              label: r.label,
+              kind: r.kind,
+              serviceId: r.serviceId,
+              audience: r.audience,
+              conditions: (r.conditions ?? {}) as Record<string, unknown>,
+              amountMinor: r.amountMinor,
+              factorPpm: r.factorPpm,
+              minQuantity: r.minQuantity,
+              maxQuantity: r.maxQuantity,
+              sortOrder: r.sortOrder,
+              requiresApproval: r.requiresApproval,
+            });
+            copied += 1;
+          }
+        } catch (copyErr: any) {
+          // The draft exists and is incomplete. Saying so is the whole point:
+          // an administrator who is not told would publish a version missing
+          // rules they believe they cloned.
+          console.error('[admin/fees] clone stopped part-way', copyErr);
+          throw new InputError(
+            `${created.code} was created and ${copied} of ${sourceRules.length} rules were copied before the write was refused. ` +
+            'It is a draft, so it prices nothing — open it, check what is missing, and either finish it or leave it unpublished.'
+          );
+        }
+
+        await writeAudit(db(), ctx, {
+          entityType: 'fee_framework', entityId: created.id, action: 'create',
+          oldValue: { clonedFrom: source.code, rules: sourceRules.length },
+          newValue: { code: created.code, version: created.version, rules: copied },
+        });
+        return Astro.redirect(`${SELF}?framework=${created.id}&done=cloned#rules`, 303);
+      }
+
+      if (action === 'preview_rule') {
+        // WRITES NOTHING. It exists so the paise figure is on the screen before
+        // anybody commits to it, and so that figure is computed by the server
+        // that will store it rather than by the browser that typed it.
+        const { values } = readRuleFields();
+        conversion = {
+          rupees: get('amountRupees'),
+          minor: values.amountMinor ?? 0,
+          formatted: values.amountMinor == null ? '' : formatINR(values.amountMinor),
+          kind: values.kind,
+          factorPpm: values.factorPpm,
+        };
+      } else if (action === 'add_rule') {
+        const frameworkId = ruleFrameworkId();
+        const { values } = readRuleFields();
+        // addRule() re-reads the framework and refuses anything that is not a
+        // draft. The check is NOT repeated here — one enforcement point, in the
+        // module that owns the rule.
+        await addRule(db(), ctx, frameworkId, values);
+        return Astro.redirect(`${SELF}?framework=${frameworkId}&done=rule#rules`, 303);
+      } else if (action === 'update_rule') {
+        const frameworkId = ruleFrameworkId();
+        const ruleId = Number(get('ruleId'));
+        if (!Number.isInteger(ruleId) || ruleId <= 0) throw new InputError('Say which rule is being changed.');
+        const { values } = readRuleFields();
+
+        // Same discipline as the draft edit above: the draft-only condition is
+        // part of the statement, correlated against the rule's own framework,
+        // so a rule cannot be edited into a framework that has been published
+        // in the meantime and no pair of ids supplied by the browser can widen
+        // it. One statement, no window.
+        const [updated] = await db().update(s.feeRules)
+          .set({
+            code: values.code,
+            label: values.label,
+            kind: values.kind as any,
+            serviceId: values.serviceId,
+            audience: values.audience as any,
+            conditions: values.conditions,
+            amountMinor: values.amountMinor,
+            factorPpm: values.factorPpm,
+            minQuantity: values.minQuantity,
+            maxQuantity: values.maxQuantity,
+            sortOrder: values.sortOrder,
+            requiresApproval: values.requiresApproval,
+          })
+          .where(and(
+            eq(s.feeRules.id, ruleId),
+            eq(s.feeRules.frameworkId, frameworkId),
+            sql`exists (select 1 from fee_frameworks f where f.id = fee_rules.framework_id and f.status = 'draft')`,
+          ))
+          .returning({ id: s.feeRules.id, code: s.feeRules.code });
+
+        if (!updated) {
+          throw new InputError('Nothing was changed. Either that rule is not in this version, or the version is no longer a draft — a published framework is frozen.');
+        }
+        await writeAudit(db(), ctx, {
+          entityType: 'fee_rule', entityId: ruleId, action: 'update',
+          newValue: { framework: frameworkId, code: updated.code },
+        });
+        return Astro.redirect(`${SELF}?framework=${frameworkId}&done=rule_saved#rules`, 303);
+      } else if (action === 'delete_rule') {
+        const frameworkId = ruleFrameworkId();
+        const ruleId = Number(get('ruleId'));
+        if (!Number.isInteger(ruleId) || ruleId <= 0) throw new InputError('Say which rule is being removed.');
+
+        const [removed] = await db().delete(s.feeRules)
+          .where(and(
+            eq(s.feeRules.id, ruleId),
+            eq(s.feeRules.frameworkId, frameworkId),
+            sql`exists (select 1 from fee_frameworks f where f.id = fee_rules.framework_id and f.status = 'draft')`,
+          ))
+          .returning({ id: s.feeRules.id, code: s.feeRules.code });
+
+        if (!removed) {
+          throw new InputError('Nothing was removed. Either that rule is not in this version, or the version is no longer a draft — a published framework is frozen.');
+        }
+        await writeAudit(db(), ctx, {
+          entityType: 'fee_rule', entityId: ruleId, action: 'delete',
+          oldValue: { framework: frameworkId, code: removed.code },
+        });
+        return Astro.redirect(`${SELF}?framework=${frameworkId}&done=rule_removed#rules`, 303);
       }
 
       if (action === 'publish') {
@@ -405,14 +719,64 @@ if (Astro.request.method === 'POST') {
           throw new InputError('The framework was not published. To publish it, type its code exactly as shown next to the field — publishing cannot be undone.');
         }
         await publishFramework(db(), ctx, frameworkId);
-        return Astro.redirect(`${SELF}?framework=${frameworkId}&done=published`, 303);
+        return Astro.redirect(`${SELF}?framework=${frameworkId}&done=published#rules`, 303);
       }
 
-      throw new InputError('Unknown action.');
+      if (action === 'retire') {
+        const frameworkId = Number(get('frameworkId'));
+        if (!Number.isInteger(frameworkId) || frameworkId <= 0) throw new InputError('Say which version is being retired.');
+        if (get('confirm') !== get('expectedCode')) {
+          throw new InputError('The version was not retired. To retire it, type its code exactly as shown next to the field.');
+        }
+        const why = get('reason');
+        if (why.length < 4) {
+          throw new InputError('A retirement must say why. It is the answer to "who took this out of force, and on what authority" years later.');
+        }
+
+        // The two retired states the schema actually has, and they mean
+        // different things: superseded is "replaced by a named later version",
+        // withdrawn is "taken back and not replaced". Offering one word for
+        // both would lose the distinction the enum was written to keep.
+        const kind = get('retireAs');
+        if (kind !== 'superseded' && kind !== 'withdrawn') {
+          throw new InputError('Say whether this version is superseded by a later one or withdrawn outright.');
+        }
+
+        let supersededById: number | null = null;
+        if (kind === 'superseded') {
+          const byId = Number(get('supersededById'));
+          if (!Number.isInteger(byId) || byId <= 0) throw new InputError('Name the version that supersedes this one.');
+          if (byId === frameworkId) throw new InputError('A version cannot supersede itself.');
+          const [replacement] = await db().select({ id: s.feeFrameworks.id })
+            .from(s.feeFrameworks).where(eq(s.feeFrameworks.id, byId)).limit(1);
+          if (!replacement) throw new InputError('That replacement version no longer exists.');
+          supersededById = byId;
+        }
+
+        // Only a PUBLISHED version can be retired, and the condition is in the
+        // statement for the same reason as everywhere else on this page.
+        // Retiring a draft is not a thing: a draft prices nothing already.
+        const [retired] = await db().update(s.feeFrameworks)
+          .set({ status: kind, supersededById, updatedAt: new Date() })
+          .where(and(eq(s.feeFrameworks.id, frameworkId), eq(s.feeFrameworks.status, 'published')))
+          .returning({ id: s.feeFrameworks.id, code: s.feeFrameworks.code });
+
+        if (!retired) {
+          throw new InputError('Nothing was changed. Only a published version can be retired, and this one is not published — check its state in the list above.');
+        }
+        await writeAudit(db(), { ...ctx, reason: why }, {
+          entityType: 'fee_framework', entityId: frameworkId, action: 'revoke',
+          oldValue: { status: 'published' },
+          newValue: { code: retired.code, status: kind, supersededById },
+        });
+        return Astro.redirect(`${SELF}?framework=${frameworkId}&done=retired#rules`, 303);
+      }
+
+      if (!readOnlyAction && !FORM_FOR_ACTION[action]) throw new InputError('Unknown action.');
     } catch (err: any) {
       if (err instanceof ForbiddenError) {
-        // Named, because the two authorities do not have to stay aligned — see
-        // the note at the top of this file.
+        // Named, because the module's own required action is the one that
+        // matters — this page's checks are the courtesy, not the control.
         Astro.response.status = 403;
         error = `The fee engine refused this: it requires ${err.action}, which this account does not hold. Nothing was changed.`;
       } else if (isFeeError(err)) {
@@ -443,11 +807,46 @@ let rules: Row[] = [];
 let services: Row[] = [];
 let inForce: Row | null = null;
 let selected: Row | null = null;
+let editingRule: Row | null = null;
 let readError: string | null = null;
+let nextVersion = 1;
+
+/** Quotation versions counted per framework — the figure retirement turns on. */
+let quotesByFramework = new Map<number, number>();
+
+/**
+ * What a change to the rules would and would not reach.
+ *
+ * EVERY FIGURE HERE IS COUNTED, not estimated and not illustrated. The panel
+ * exists to answer the question an administrator actually has before publishing
+ * — "what does this touch?" — and the answer is only worth anything if each
+ * number came out of the register it names.
+ */
+let impact: {
+  liveQuoteVersions: number;
+  quoteVersionsUnderInForce: number;
+  awaitingApproval: number;
+  futureBookings: number;
+  activeMemberships: number;
+  liveContracts: number;
+  contractsBoundToAQuote: number;
+  invoicesIssued: number;
+  paymentsCaptured: number;
+} | null = null;
+
+/** The last verified signal the gateway actually sent this deployment. */
+let lastGatewayEvent: Row | null = null;
+let lastCapturedPaymentAt: Date | null = null;
 
 // Effective dates on a framework are plain dates, so "today" is today in the
 // federation's own timezone rather than the server's.
 const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+// The booking states that are still ahead of somebody. Named here rather than
+// inlined so the count below says what it counted.
+const OPEN_BOOKING_STATES = ['requested', 'qualification_required', 'proposed', 'confirmed', 'rescheduled'] as const;
+const LIVE_QUOTE_STATES = ['issued', 'awaiting_approval'] as const;
+const LIVE_CONTRACT_STATES = ['issued', 'signed', 'active'] as const;
 
 if (mayRead && nationalReach && configured) {
   try {
@@ -456,6 +855,7 @@ if (mayRead && nationalReach && configured) {
     // computed from it is computed there too.
     frameworks = await db().select().from(s.feeFrameworks).orderBy(desc(s.feeFrameworks.version));
     inForce = await activeFramework(db(), today);
+    nextVersion = frameworks.reduce((m, f) => Math.max(m, Number(f.version) || 0), 0) + 1;
 
     const wanted = Number(Astro.url.searchParams.get('framework'));
     selected = frameworks.find((f) => f.id === wanted) ?? frameworks[0] ?? null;
@@ -464,11 +864,88 @@ if (mayRead && nationalReach && configured) {
       rules = await db().select().from(s.feeRules)
         .where(eq(s.feeRules.frameworkId, selected.id))
         .orderBy(asc(s.feeRules.sortOrder), asc(s.feeRules.id));
+
+      // A rule is opened for editing by id in the URL. It is looked up INSIDE
+      // the selected version's rules rather than by id alone, so a rule
+      // belonging to another framework cannot be pulled into this form.
+      const editId = Number(Astro.url.searchParams.get('edit'));
+      editingRule = Number.isInteger(editId) && editId > 0
+        ? rules.find((r) => r.id === editId) ?? null
+        : null;
     }
 
     services = await db().select({
       id: s.services.id, code: s.services.code, title: s.services.title,
     }).from(s.services).orderBy(asc(s.services.title));
+
+    const perFramework = await db().select({
+      frameworkId: s.quoteVersions.frameworkId,
+      n: sql<number>`count(*)::int`,
+    }).from(s.quoteVersions).groupBy(s.quoteVersions.frameworkId);
+    quotesByFramework = new Map(perFramework.map((r) => [r.frameworkId, Number(r.n)]));
+
+    // ── The impact figures ──
+    const n = sql<number>`count(*)::int`;
+    const [liveQuotes] = await db().select({ n }).from(s.quoteVersions)
+      .where(inArray(s.quoteVersions.status, [...LIVE_QUOTE_STATES]));
+    const [held] = await db().select({ n }).from(s.quoteVersions)
+      .where(eq(s.quoteVersions.status, 'awaiting_approval'));
+    const [underInForce] = inForce
+      ? await db().select({ n }).from(s.quoteVersions)
+          .where(and(
+            eq(s.quoteVersions.frameworkId, inForce.id),
+            inArray(s.quoteVersions.status, [...LIVE_QUOTE_STATES]),
+          ))
+      : [{ n: 0 }];
+    const [futureBookings] = await db().select({ n }).from(s.bookings)
+      .where(and(
+        gt(s.bookings.startsAt, new Date()),
+        inArray(s.bookings.status, [...OPEN_BOOKING_STATES]),
+      ));
+    const [activeMemberships] = await db().select({ n }).from(s.memberships)
+      .where(eq(s.memberships.status, 'active'));
+    const [liveContracts] = await db().select({ n }).from(ops.contracts)
+      .where(inArray(ops.contracts.status, [...LIVE_CONTRACT_STATES]));
+    const [boundContracts] = await db().select({ n }).from(ops.contracts)
+      .where(and(
+        inArray(ops.contracts.status, [...LIVE_CONTRACT_STATES]),
+        sql`${ops.contracts.quoteVersionId} is not null`,
+      ));
+    const [invoicesIssued] = await db().select({ n }).from(s.invoices);
+    const [paymentsCaptured] = await db().select({ n }).from(s.payments)
+      .where(eq(s.payments.status, 'captured'));
+
+    impact = {
+      liveQuoteVersions: Number(liveQuotes?.n ?? 0),
+      quoteVersionsUnderInForce: Number(underInForce?.n ?? 0),
+      awaitingApproval: Number(held?.n ?? 0),
+      futureBookings: Number(futureBookings?.n ?? 0),
+      activeMemberships: Number(activeMemberships?.n ?? 0),
+      liveContracts: Number(liveContracts?.n ?? 0),
+      contractsBoundToAQuote: Number(boundContracts?.n ?? 0),
+      invoicesIssued: Number(invoicesIssued?.n ?? 0),
+      paymentsCaptured: Number(paymentsCaptured?.n ?? 0),
+    };
+
+    if (mayReadFinance) {
+      // "Last health check" is not a probe fired from a page render — a screen
+      // that called the gateway every time somebody opened it would be a
+      // self-inflicted outage on a bad day. It is the last VERIFIED SIGNAL the
+      // gateway actually sent this deployment, read from the events table that
+      // recorded it.
+      const [ev] = await db().select({
+        provider: s.paymentEvents.provider,
+        eventType: s.paymentEvents.eventType,
+        signatureValid: s.paymentEvents.signatureValid,
+        receivedAt: s.paymentEvents.receivedAt,
+      }).from(s.paymentEvents).orderBy(desc(s.paymentEvents.receivedAt)).limit(1);
+      lastGatewayEvent = ev ?? null;
+
+      const [pay] = await db().select({ capturedAt: s.payments.capturedAt })
+        .from(s.payments).where(eq(s.payments.status, 'captured'))
+        .orderBy(desc(s.payments.capturedAt)).limit(1);
+      lastCapturedPaymentAt = pay?.capturedAt ?? null;
+    }
   } catch (err: any) {
     // The same split the POST handler makes, for the same reason: a relation
     // name and a bound parameter list are facts about the server, not about
@@ -489,7 +966,35 @@ const drafts = frameworks.filter((f) => f.status === 'draft');
 // be a false statement about the federation, so the two are counted separately.
 const published = frameworks.filter((f) => f.status === 'published');
 const selectedIsDraft = selected?.status === 'draft';
+const selectedIsPublished = selected?.status === 'published';
 const publishTarget = selectedIsDraft ? selected : null;
+const retireTarget = selectedIsPublished ? selected : null;
+const selectedRuleCount = rules.length;
+const selectedQuoteCount = selected ? quotesByFramework.get(selected.id) ?? 0 : 0;
+
+/**
+ * Where a version stands, in words, derived from its row.
+ *
+ * The database records four states. The working lifecycle an administrator
+ * describes has more names than that, and most of the extra ones are not states
+ * at all — they are a published version's effective window seen from today.
+ * Deriving the phrase from `status` plus the window says the true thing without
+ * inventing a column: "scheduled" is a published framework whose window has not
+ * opened, "in force" is one whose window is open, and neither is a value
+ * anything stores.
+ */
+function phaseOf(f: Row): string {
+  if (f.status === 'draft') return 'Draft — prices nothing, and can still be changed';
+  if (f.status === 'superseded') return 'Retired — replaced by a later version';
+  if (f.status === 'withdrawn') return 'Retired — withdrawn, not replaced';
+  const from = f.effectiveFrom ? String(f.effectiveFrom) : null;
+  const to = f.effectiveTo ? String(f.effectiveTo) : null;
+  if (from && from > today) return 'Published and scheduled — its window has not opened yet';
+  if (to && to < today) return 'Published, and its window has closed';
+  return inForce && inForce.id === f.id
+    ? 'Published and in force today'
+    : 'Published, and another version is in force today';
+}
 
 const v = (k: string, fallback = '') => (posted[k] !== undefined ? posted[k] : fallback);
 const dateLabel = (value: unknown) => {
@@ -499,26 +1004,46 @@ const dateLabel = (value: unknown) => {
     ? null
     : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
 };
+const dateTimeLabel = (value: unknown) => {
+  if (!value) return null;
+  const d = new Date(String(value));
+  return Number.isNaN(d.getTime())
+    ? null
+    : d.toLocaleString('en-IN', {
+        day: 'numeric', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata',
+      });
+};
+/** A date column as the value an <input type="date"> expects. */
+const dateInput = (value: unknown) => (value ? String(value).slice(0, 10) : '');
 const conditionsLabel = (c: unknown) => {
   if (!c || typeof c !== 'object' || !Object.keys(c as object).length) return null;
   return JSON.stringify(c);
 };
 
-// ─── Publishing, and why the control may not be offered ─────────────────────
+// The error belongs beside the control that produced it. Forms on this page
+// scroll to their own anchor, so a message printed only at the top of a long
+// screen is a message an administrator never sees.
+const topError = error && !focusForm ? error : null;
+const errorFor = (f: FormName) => (error && focusForm === f ? error : null);
+
+// ─── Why a control may not be offered ───────────────────────────────────────
 //
-// One sentence, computed once, and used in three places: as the reason on the
-// refused header action, in the publish section itself, and nowhere else is
-// allowed to invent a fourth wording. PageHeader renders a refused action as a
-// focusable button carrying its reason rather than removing it, which is the
-// behaviour wanted here — an administrator who cannot publish needs to be told
-// what is missing, not shown a screen with no publish control on it at all.
+// ONE WORDING PER REFUSAL, computed once and used everywhere that refusal
+// appears. Two hand-written versions of the same refusal drift, and a reader
+// who sees them disagree cannot tell which one is the rule. PageHeader renders
+// a refused action as a focusable button carrying its reason rather than
+// removing it, which is the behaviour wanted here — an administrator who cannot
+// publish needs to be told what is missing, not shown a screen with no publish
+// control on it at all.
+
 const publishRefusal: string | null =
   !mayPublish
-    ? 'Publishing needs feeframework:publish, which this account does not hold. A draft can be prepared here and somebody who holds that action publishes it.'
+    ? 'Publishing needs feeframework:publish, which this account does not hold. A draft can be prepared here and somebody who holds that action publishes it — the two authorities are deliberately separate, because publishing is the irreversible one.'
     : !selected
       ? 'There is no version selected, so there is nothing to publish.'
       : !selectedIsDraft
-        ? `${selected.code} is ${selected.status} and frozen. A published framework can never be edited or re-published — correcting one means authoring a new version.`
+        ? `${selected.code} is ${selected.status} and frozen. A published framework can never be edited or re-published — correcting one means cloning it into a new version.`
         : rules.length === 0
           ? `${selected.code} has no rules. Publishing it would price nothing while appearing on this screen to be configured, so the fee module refuses it.`
           : null;
@@ -527,11 +1052,28 @@ const publishRefusal: string | null =
 const addRuleRefusal: string | null =
   !mayWrite
     ? 'Adding a rule needs feeframework:write, which this account does not hold.'
-    : drafts.length === 0
-      ? 'There is no draft to add a rule to. A published version cannot be edited, so changing the rules means authoring a new version.'
-      : null;
+    : !selected
+      ? 'There is no version selected.'
+      : !selectedIsDraft
+        ? `${selected.code} is ${selected.status}. Its rules are frozen, so there is no control here to change one — cloning it into a new draft is the way to change what the federation charges.`
+        : null;
 
-// The rules of the selected version. Nine columns, which is why they go through
+/** Why the selected version cannot be retired. */
+const retireRefusal: string | null =
+  !mayPublish
+    ? 'Retiring a version needs feeframework:publish. Taking a framework out of force changes what the federation charges from that moment, which is the same class of act as putting it into force.'
+    : !selected
+      ? 'There is no version selected.'
+      : selected.status === 'draft'
+        ? `${selected.code} is a draft. A draft prices nothing already, so there is nothing to take out of force — leave it unpublished, or clone it if it is worth keeping.`
+        : !selectedIsPublished
+          ? `${selected.code} is already ${selected.status}.`
+          : null;
+
+// Versions that could be named as the replacement when this one is superseded.
+const replacementOptions = frameworks.filter((f) => selected && f.id !== selected.id);
+
+// The rules of the selected version. Ten columns, which is why they go through
 // the shared table rather than a hand-written one with a duplicate card list
 // beneath it — DataTable is what turns them into records below 900px.
 //
@@ -559,6 +1101,39 @@ const ruleColumns: Column[] = [
   { key: 'conditions', header: 'Conditions', render: (r: any) => conditionsLabel(r.conditions) ?? 'unconditional' },
   { key: 'requiresApproval', header: 'Approval', render: (r: any) => (r.requiresApproval ? 'required' : 'no') },
 ];
+
+// The edit link is a COLUMN THAT ONLY EXISTS ON A DRAFT. On a published version
+// the control is not disabled, not greyed and not present: there is nothing an
+// administrator could click that the engine would then refuse, which is the
+// strongest form of "this cannot be edited" a screen can offer.
+if (selectedIsDraft && mayWrite) {
+  ruleColumns.push({
+    key: 'id',
+    header: 'Change',
+    render: () => 'Edit',
+    href: (r: any) => `${SELF}?framework=${selected!.id}&edit=${r.id}#rule-form`,
+  });
+}
+
+// ─── The gateway panel ──────────────────────────────────────────────────────
+//
+// WHAT IS SHOWN: whether a provider is configured, the mode the guard has
+// settled on, the public key id in full, whether a webhook secret is present,
+// and the last health check.
+//
+// EVERY ONE OF THOSE COMES FROM razorpayCapability(). This page does not read
+// RAZORPAY_KEY_ID, does not parse its prefix and does not decide what "test"
+// means — src/lib/payments/mode.ts owns that, and a second opinion about which
+// mode is in force is exactly the disagreement that ends with a screen saying
+// "test" over a live key.
+//
+// WHAT IS NOT SHOWN, AND HAS NO CONTROL ON THIS PAGE: RAZORPAY_KEY_SECRET and
+// RAZORPAY_WEBHOOK_SECRET. Not masked, not partially revealed, not behind a
+// "show" toggle, and not testable from here — a button that proved a secret was
+// correct is a button that leaks whether a guess was right. The capability
+// reports their presence as booleans and their values never enter this file.
+const gateway = paymentStatusReport();
+const rzp = razorpayCapability();
 ---
 
 <AdminShell
@@ -566,7 +1141,7 @@ const ruleColumns: Column[] = [
   requires="feeframework:read"
   intro="The federation's single fee framework, versioned. Nothing else in this system sets a price: a figure either comes from a rule here, or the answer is that a quotation must be prepared by hand."
 >
-  {error && <p class="msg msg-bad" role="alert">{error}</p>}
+  {topError && <p class="msg msg-bad" role="alert">{topError}</p>}
   {doneMessage && <p class="msg msg-ok" role="status">{doneMessage}</p>}
 
   {!nationalReach ? (
@@ -625,6 +1200,73 @@ const ruleColumns: Column[] = [
         )}
       </section>
 
+      {/* ── The lifecycle, as this system actually records it ───────────── */}
+      <section class="band" aria-labelledby="lifecycle-h">
+        <h2 id="lifecycle-h" class="band-h">The lifecycle</h2>
+        <p class="band-p">
+          A version is drafted, checked, published, spends its scheduled window
+          in force, and is retired. The database records
+          {' '}{s.frameworkStatus.enumValues.length} of those as states —
+          {' '}{s.frameworkStatus.enumValues.join(', ')} — and the rest are the
+          effective window seen from today. That distinction is kept on purpose
+          rather than smoothed over: a chip saying &ldquo;scheduled&rdquo; that
+          no column stores is a chip that disagrees with the register the first
+          time somebody queries it.
+        </p>
+        <ol class="life">
+          <li>
+            <span class="life-k">Draft</span>
+            <span class="life-v">
+              Authored here. It prices nothing — <code>computeFee()</code>
+              refuses any framework that is not published — and every field on
+              it, including its rules, can still be changed.
+            </span>
+          </li>
+          <li>
+            <span class="life-k">Checked</span>
+            <span class="life-v">
+              Not a state, and deliberately not one. What separates &ldquo;this
+              was reviewed&rdquo; from &ldquo;somebody clicked&rdquo; on this
+              screen is that drafting needs <code>feeframework:write</code> and
+              publishing needs <code>feeframework:publish</code>, so the two
+              can be different people, and the audit trail records who did
+              which with the authority they gave.
+            </span>
+          </li>
+          <li>
+            <span class="life-k">Published</span>
+            <span class="life-v">
+              Irreversible, and frozen from that moment. No control on this page
+              edits a published version, because every quotation issued under it
+              must keep computing to the figure it was issued at.
+            </span>
+          </li>
+          <li>
+            <span class="life-k">Scheduled</span>
+            <span class="life-v">
+              A published version whose effective-from date has not arrived.
+              Derived, not stored: it is published, and today is outside its
+              window, so <code>activeFramework()</code> does not return it yet.
+            </span>
+          </li>
+          <li>
+            <span class="life-k">In force</span>
+            <span class="life-v">
+              A published version whose window is open today. Exactly one is,
+              and it is the version every new quotation is computed against.
+            </span>
+          </li>
+          <li>
+            <span class="life-k">Retired</span>
+            <span class="life-v">
+              Superseded by a named later version, or withdrawn outright. Either
+              way it stops pricing anything, and every quotation issued under it
+              keeps the figure and the lines it was issued with.
+            </span>
+          </li>
+        </ol>
+      </section>
+
       {/* ── The versions ────────────────────────────────────────────────── */}
       <section class="band" aria-labelledby="versions-h">
         <h2 id="versions-h" class="band-h">Versions</h2>
@@ -653,10 +1295,13 @@ const ruleColumns: Column[] = [
                     ? <>{dateLabel(f.effectiveFrom) ?? 'no start'} — {dateLabel(f.effectiveTo) ?? 'no end'}</>
                     : <span class="muted">no window set</span>}
                 </span>
-                {/* The one way a status is drawn anywhere in this codebase.
-                    The local `.pill st-draft / st-published` this replaced was
-                    a third private opinion about what those two words look
-                    like, and it painted `draft` and `archived` identically. */}
+                {/* Counted, not estimated: how many quotation versions were
+                    computed against this framework. It is the figure that
+                    decides whether retiring it matters. */}
+                <span class="v-when">
+                  {quotesByFramework.get(f.id) ?? 0} quoted
+                </span>
+                {/* The one way a status is drawn anywhere in this codebase. */}
                 <Status value={f.status} />
               </li>
             ))}
@@ -666,44 +1311,50 @@ const ruleColumns: Column[] = [
 
       {/* ── The rules of the selected version ───────────────────────────── */}
       {selected && (
-        <section class="band" aria-label="Rules of the selected version">
+        <section class="band" id="rules" aria-label="Rules of the selected version">
           {/* AdminShell prints the h1, so this prints an h2 — a page with two
-              h1s gives a screen-reader user two competing titles. It does not
-              stick: it heads a section, and a sticky band here would cover the
-              version list a reader scrolls back to.
+              h1s gives a screen-reader user two competing titles.
 
-              THE PUBLISH CONTROL LIVES HERE as the one dominant action, and it
-              is marked `danger` and labelled irreversible IN WORDS as well as
-              in colour. When it cannot be taken it is rendered as a refused
-              button carrying the reason rather than removed, because an
-              administrator who cannot publish needs to be told what is missing
-              — not handed a screen with no publish control on it at all. */}
+              THE PUBLISH CONTROL LIVES HERE as the one dominant action while
+              the version is a draft, marked `danger` and labelled irreversible
+              IN WORDS as well as in colour. Once a version is published there
+              is nothing irreversible left to do to it, and the dominant action
+              becomes the only way forward: cloning it. */}
           <PageHeader
             title={selected.code}
             headingLevel="h2"
             sticky={false}
-            description={selected.status === 'draft'
+            description={selectedIsDraft
               ? `${selected.title}. This version is a draft: it prices nothing, because computeFee() refuses any framework that is not published — quoting from a draft would produce a figure the federation has not approved. Publishing it cannot be undone.`
               : `${selected.title}. This version is ${selected.status} and frozen. Its rules can no longer be changed: every quotation issued under it must keep computing to the figure it was issued at, so a change means a new version.`}
-            primary={{
-              label: 'Publish — irreversible',
-              href: '#publish',
-              danger: true,
-              unavailable: publishRefusal ?? undefined,
-            }}
-            secondary={[
-              {
-                label: 'Add a rule',
-                href: '#new-rule',
-                unavailable: addRuleRefusal ?? undefined,
-              },
-              { label: 'Author a new version', href: '#new-version' },
-            ]}
+            primary={selectedIsDraft || !mayWrite
+              ? {
+                  label: 'Publish — irreversible',
+                  href: '#publish',
+                  danger: true,
+                  unavailable: publishRefusal ?? undefined,
+                }
+              : { label: `Clone ${selected.code} into a new draft`, href: '#clone' }}
+            secondary={selectedIsDraft
+              ? [
+                  { label: 'Add a rule', href: '#rule-form', unavailable: addRuleRefusal ?? undefined },
+                  { label: 'Edit this draft', href: '#draft-edit' },
+                  { label: 'Clone this version', href: '#clone' },
+                ]
+              : [
+                  { label: 'Retire this version', href: '#retire', unavailable: retireRefusal ?? undefined },
+                  { label: 'Add a rule', href: '#rule-form', unavailable: addRuleRefusal ?? undefined },
+                  { label: 'Author a new version', href: '#new-version' },
+                ]}
           >
             <Fragment slot="meta">
               <Status value={selected.status} />
+              <span class="meta-chip">{phaseOf(selected)}</span>
               <span class="meta-chip">
-                {rules.length} {rules.length === 1 ? 'rule' : 'rules'}
+                {selectedRuleCount} {selectedRuleCount === 1 ? 'rule' : 'rules'}
+              </span>
+              <span class="meta-chip">
+                {selectedQuoteCount} {selectedQuoteCount === 1 ? 'quotation computed' : 'quotations computed'}
               </span>
               <span class="meta-chip">
                 {selected.effectiveFrom || selected.effectiveTo
@@ -714,6 +1365,27 @@ const ruleColumns: Column[] = [
           </PageHeader>
 
           {selected.notes && <p class="band-p">{selected.notes}</p>}
+
+          {/* WHY THERE IS NO EDIT CONTROL. Stated where the controls would
+              have been, because an absence explains nothing on its own. */}
+          {!selectedIsDraft && (
+            <div class="frozen">
+              <p><strong>{selected.code} is {selected.status}. Nothing on this screen can change it.</strong></p>
+              <p>
+                There is no edit control here, no disabled button and no field
+                to type into — not because the attempt would be refused, though
+                it would be, but because a version that has priced a quotation
+                must keep pricing it the same way. {selectedQuoteCount === 0
+                  ? 'No quotation has been computed against this version yet, and the rule does not depend on that: the guarantee is worth nothing if it only holds while nobody has relied on it.'
+                  : `${selectedQuoteCount} ${selectedQuoteCount === 1 ? 'quotation has' : 'quotations have'} already been computed against it, and each must still re-derive to the figure it was issued at.`}
+              </p>
+              <p>
+                To change what the federation charges, clone this version. The
+                clone is a draft with the same rules, free to edit, and this
+                version stays exactly as it is.
+              </p>
+            </div>
+          )}
 
           <Table
             id="fee-rules"
@@ -727,12 +1399,58 @@ const ruleColumns: Column[] = [
             emptyBody="Publishing it in this state is refused outright: an empty published framework would send every request to “requires a quotation” while appearing on this screen to be configured."
             emptyAction={addRuleRefusal
               ? { label: 'Author a new version', href: '#new-version' }
-              : { label: 'Add the first rule', href: '#new-rule' }}
+              : { label: 'Add the first rule', href: '#rule-form' }}
           />
         </section>
       )}
 
-      {/* ── Authoring ───────────────────────────────────────────────────── */}
+      {/* ── Editing the draft itself ─────────────────────────────────────── */}
+      {mayWrite && selected && selectedIsDraft && (
+        <section class="band" id="draft-edit" aria-labelledby="draft-edit-h">
+          <h2 id="draft-edit-h" class="band-h">Edit this draft</h2>
+          {errorFor('draft') && <p class="msg msg-bad" role="alert">{errorFor('draft')}</p>}
+          <p class="band-p">
+            The title, the notes and the effective window, while the version is
+            still a draft. Setting an effective-from date in the future is how a
+            change is scheduled: the version is published now and
+            <code>activeFramework()</code> keeps returning the current one until
+            that date arrives.
+          </p>
+          <form method="post" action={`${SELF_HERE}#draft-edit`} class="form">
+            <input type="hidden" name="action" value="update_draft" />
+            <input type="hidden" name="frameworkId" value={selected.id} />
+            <div class="fields">
+              <p class="field">
+                <label class="input-label" for="d-title">Title</label>
+                <input class="input" id="d-title" name="title" required value={v('title', selected.title ?? '')} />
+              </p>
+              <p class="field field-sm">
+                <label class="input-label" for="d-from">Effective from</label>
+                <input class="input" id="d-from" name="effectiveFrom" type="date" value={v('effectiveFrom', dateInput(selected.effectiveFrom))} />
+                <span class="help">Empty means it applies from the moment it is published.</span>
+              </p>
+              <p class="field field-sm">
+                <label class="input-label" for="d-to">Effective to</label>
+                <input class="input" id="d-to" name="effectiveTo" type="date" value={v('effectiveTo', dateInput(selected.effectiveTo))} />
+                <span class="help">Empty means open-ended. A closed window is how a version stops being in force without being retired.</span>
+              </p>
+              <p class="field field-wide">
+                <label class="input-label" for="d-notes">Notes</label>
+                <textarea class="input" id="d-notes" name="notes" rows="2">{v('notes', selected.notes ?? '')}</textarea>
+                <span class="help">What this version changed and on whose authority. Read by whoever has to defend a figure later.</span>
+              </p>
+              <p class="field field-wide">
+                <label class="input-label" for="d-reason">Reason</label>
+                <input class="input" id="d-reason" name="reason" value={v('reason')} />
+                <span class="help">Recorded in the audit trail beside the change.</span>
+              </p>
+            </div>
+            <button class="btn btn-ghost" type="submit">Save the draft</button>
+          </form>
+        </section>
+      )}
+
+      {/* ── Authoring a rule ─────────────────────────────────────────────── */}
       {!mayWrite ? (
         <p class="note">
           This account reads the framework and does not change it. Authoring a
@@ -742,14 +1460,473 @@ const ruleColumns: Column[] = [
         </p>
       ) : (
         <>
+          {selected && selectedIsDraft && (
+            <section class="band" id="rule-form" aria-labelledby="rule-form-h">
+              <h2 id="rule-form-h" class="band-h">
+                {editingRule ? `Change ${editingRule.code}` : `Add a rule to ${selected.code}`}
+              </h2>
+              {errorFor('rule') && <p class="msg msg-bad" role="alert">{errorFor('rule')}</p>}
+
+              <div class="units">
+                <p>
+                  <strong>Amounts are typed in rupees and stored in integer paise.</strong>
+                  One rupee is 100 paise. The conversion happens on the server —
+                  never in this browser — and the figure that will be stored is
+                  shown to you before anything is written. Two decimal places at
+                  most; a third is refused rather than rounded.
+                </p>
+                <p><strong>Factors are parts-per-million.</strong> ×1.0 is {PPM}. There is no per-cent field on this form.</p>
+                <p><strong>Order matters.</strong> Rules run from the lowest order upwards and multipliers are not commutative, so the sequence is part of the answer.</p>
+              </div>
+
+              {/* THE CONVERSION, SHOWN BEFORE IT IS COMMITTED. Rendered only
+                  after the server has done the arithmetic. The paise figure
+                  below is not in a hidden field and is not posted back: the
+                  store step converts the rupee text again, so there is exactly
+                  one conversion between what was typed and what is stored. */}
+              {conversion && (
+                <div class="conv" role="status">
+                  <p class="conv-h">This is what will be stored.</p>
+                  {conversion.minor !== 0 || conversion.rupees ? (
+                    <p class="conv-row">
+                      <span class="conv-typed">You typed {conversion.rupees}</span>
+                      <span class="conv-arrow" aria-hidden="true">→</span>
+                      <span class="conv-out">
+                        <strong>{conversion.minor} paise</strong>, which reads as {conversion.formatted}
+                      </span>
+                    </p>
+                  ) : (
+                    <p class="conv-row"><span class="conv-typed">No amount — this kind does not take one.</span></p>
+                  )}
+                  {conversion.factorPpm != null && (
+                    <p class="conv-row">
+                      <span class="conv-typed">Factor {conversion.factorPpm} ppm</span>
+                      <span class="conv-arrow" aria-hidden="true">→</span>
+                      <span class="conv-out">×{(conversion.factorPpm / PPM).toFixed(6)} applied to the running subtotal</span>
+                    </p>
+                  )}
+                  <p class="conv-note">
+                    Nothing has been written. Check the paise figure, then commit
+                    with the button at the bottom of the form — the server
+                    converts your rupee entry again at that point, so this
+                    display is what you are shown, never what is stored.
+                  </p>
+                </div>
+              )}
+
+              <form method="post" action={`${SELF_HERE}#rule-form`} class="form">
+                <input type="hidden" name="frameworkId" value={selected.id} />
+                {editingRule && <input type="hidden" name="ruleId" value={editingRule.id} />}
+                <div class="fields">
+                  <p class="field field-sm">
+                    <label class="input-label" for="r-code">Rule code</label>
+                    <input class="input" id="r-code" name="code" required value={v('code', editingRule?.code ?? '')} />
+                    <span class="help">Unique within the version. Printed on every quotation line this rule produces.</span>
+                  </p>
+                  <p class="field">
+                    <label class="input-label" for="r-label">Label</label>
+                    <input class="input" id="r-label" name="label" required value={v('label', editingRule?.label ?? '')} />
+                    <span class="help">The wording the recipient of the quotation reads.</span>
+                  </p>
+                  <p class="field field-sm">
+                    <label class="input-label" for="r-kind">Kind</label>
+                    <select class="input" id="r-kind" name="kind" required>
+                      {RULE_KINDS.map((k) => (
+                        <option value={k.kind} selected={v('kind', editingRule?.kind ?? '') === k.kind}>{k.kind.replace(/_/g, ' ')}</option>
+                      ))}
+                    </select>
+                  </p>
+                  <p class="field field-sm">
+                    <label class="input-label" for="r-amount">Amount, in rupees</label>
+                    <input
+                      class="input"
+                      id="r-amount"
+                      name="amountRupees"
+                      inputmode="decimal"
+                      value={v('amountRupees', editingRule?.amountMinor != null ? paiseToRupeeText(editingRule.amountMinor) : '')}
+                    />
+                    <span class="help">
+                      For a per-unit kind this is the amount per one unit. A
+                      discount is negative. The server converts it to paise and
+                      shows you both figures before storing anything.
+                    </span>
+                  </p>
+                  <p class="field field-sm">
+                    <label class="input-label" for="r-factor">Factor, in parts-per-million</label>
+                    <input class="input" id="r-factor" name="factorPpm" inputmode="numeric" pattern="-?[0-9]+" value={v('factorPpm', editingRule?.factorPpm != null ? String(editingRule.factorPpm) : '')} />
+                    <span class="help">For a multiplier or a tax only. ×1.0 is {PPM}.</span>
+                  </p>
+                  <p class="field field-sm">
+                    <label class="input-label" for="r-audience">Audience</label>
+                    <select class="input" id="r-audience" name="audience">
+                      <option value="">every audience</option>
+                      {s.audienceKind.enumValues.map((a) => (
+                        <option value={a} selected={v('audience', editingRule?.audience ?? '') === a}>{a}</option>
+                      ))}
+                    </select>
+                  </p>
+                  <p class="field field-sm">
+                    <label class="input-label" for="r-service">Service</label>
+                    <select class="input" id="r-service" name="serviceId">
+                      <option value="">every service</option>
+                      {services.map((sv) => (
+                        <option value={sv.id} selected={v('serviceId', editingRule?.serviceId != null ? String(editingRule.serviceId) : '') === String(sv.id)}>{sv.title}</option>
+                      ))}
+                    </select>
+                    {services.length === 0 && (
+                      <span class="help">No services are recorded yet, so a rule can only be written to apply to every service.</span>
+                    )}
+                  </p>
+                  <p class="field field-sm">
+                    <label class="input-label" for="r-min">Minimum quantity</label>
+                    <input class="input" id="r-min" name="minQuantity" inputmode="numeric" pattern="[0-9]+" value={v('minQuantity', editingRule?.minQuantity != null ? String(editingRule.minQuantity) : '')} />
+                    <span class="help">Optional floor for a per-unit kind.</span>
+                  </p>
+                  <p class="field field-sm">
+                    <label class="input-label" for="r-max">Maximum quantity</label>
+                    <input class="input" id="r-max" name="maxQuantity" inputmode="numeric" pattern="[0-9]+" value={v('maxQuantity', editingRule?.maxQuantity != null ? String(editingRule.maxQuantity) : '')} />
+                    <span class="help">Optional ceiling, so a bad input cannot run a per-unit rule away.</span>
+                  </p>
+                  <p class="field field-sm">
+                    <label class="input-label" for="r-order">Order</label>
+                    <input class="input" id="r-order" name="sortOrder" inputmode="numeric" pattern="[0-9]+" value={v('sortOrder', editingRule?.sortOrder != null ? String(editingRule.sortOrder) : '100')} />
+                  </p>
+                  <p class="field field-wide">
+                    <label class="input-label" for="r-conditions">Conditions, as JSON</label>
+                    <textarea class="input" id="r-conditions" name="conditions" rows="3">{v('conditions', conditionsLabel(editingRule?.conditions) ?? '')}</textarea>
+                    <span class="help">
+                      Empty means the rule applies to every request. The engine
+                      understands a value, a list of values, and an object of
+                      min, max or not — and treats anything else as no match at
+                      all, so a form it cannot read is refused here rather than
+                      becoming a rule that never fires.
+                    </span>
+                  </p>
+                  <p class="field field-wide check">
+                    <label for="r-approval">
+                      <input
+                        type="checkbox"
+                        id="r-approval"
+                        name="requiresApproval"
+                        checked={posted.action ? posted.requiresApproval === 'on' : Boolean(editingRule?.requiresApproval)}
+                      />
+                      A quotation containing this rule must be approved before it is issued
+                    </label>
+                  </p>
+                </div>
+
+                {/* TWO STEPS, AND THE SECOND ONE ONLY EXISTS AFTER THE FIRST.
+                    The commit button carries the paise figure in its own label,
+                    so the last thing read before the click is the integer that
+                    will be stored. Both buttons submit the same form and the
+                    clicked one names the action; posting the second directly
+                    would skip only the display, never the conversion — the
+                    server converts the rupee text on every path. */}
+                <div class="steps">
+                  <button class="btn btn-ghost" type="submit" name="action" value="preview_rule">
+                    Convert to paise and show me
+                  </button>
+                  {conversion && (
+                    <button class="btn btn-primary" type="submit" name="action" value={editingRule ? 'update_rule' : 'add_rule'}>
+                      {editingRule
+                        ? `Save ${conversion.minor} paise to ${editingRule.code}`
+                        : `Store ${conversion.minor} paise in ${selected.code}`}
+                    </button>
+                  )}
+                </div>
+              </form>
+
+              {editingRule && (
+                <form method="post" action={`${SELF_HERE}#rule-form`} class="form form-inline">
+                  <input type="hidden" name="action" value="delete_rule" />
+                  <input type="hidden" name="frameworkId" value={selected.id} />
+                  <input type="hidden" name="ruleId" value={editingRule.id} />
+                  <p class="help">
+                    Removing {editingRule.code} takes it out of this draft
+                    entirely. A draft prices nothing, so nothing already issued
+                    is affected.
+                  </p>
+                  <button class="btn btn-ghost btn-danger" type="submit">Remove {editingRule.code} from the draft</button>
+                  <a class="cancel" href={`${SELF}?framework=${selected.id}#rules`}>Cancel and stop editing this rule</a>
+                </form>
+              )}
+
+              <h3 class="sub-h">What each kind needs</h3>
+              <ul class="kinds">
+                {RULE_KINDS.map((k) => (
+                  <li>
+                    <span class="k-name">{k.kind.replace(/_/g, ' ')}</span>
+                    <span class="k-note">
+                      {k.note}
+                      {QUANTITY_INPUT[k.kind] ? <> If <code>{QUANTITY_INPUT[k.kind]}</code> is not supplied, the rule is skipped rather than priced at zero.</> : null}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {/* ── What a change here would affect ───────────────────────────── */}
+          {impact && (
+            <section class="band" id="impact" aria-labelledby="impact-h">
+              <h2 id="impact-h" class="band-h">What a change here would affect</h2>
+              <p class="band-p">
+                Every figure below was counted from the register it names, at the
+                moment this page was rendered. None of it is an estimate and none
+                of it is an example.
+              </p>
+
+              <div class="impact">
+                <div class="imp imp-warn">
+                  <h3>Changes with the next publication</h3>
+                  <p class="imp-lead">
+                    Only one thing does: <strong>the arithmetic behind quotations
+                    issued from the moment a new version comes into force.</strong>
+                    Nothing that already exists is recomputed.
+                  </p>
+                  <ul>
+                    <li>
+                      <strong>{impact.awaitingApproval}</strong> quotation
+                      {impact.awaitingApproval === 1 ? ' version is' : ' versions are'} awaiting approval.
+                      {impact.awaitingApproval > 0
+                        ? ' Each keeps the figure it was computed at — approving one issues that figure, not a re-computed one.'
+                        : ''}
+                    </li>
+                    <li>
+                      <strong>{impact.liveQuoteVersions}</strong> quotation
+                      {impact.liveQuoteVersions === 1 ? ' version is' : ' versions are'} live
+                      (issued or awaiting approval){inForce ? <>, of which <strong>{impact.quoteVersionsUnderInForce}</strong> {impact.quoteVersionsUnderInForce === 1 ? 'was' : 'were'} computed against {inForce.code}</> : null}.
+                      A re-quote after publication computes against the new
+                      version and becomes a NEW version of that quotation; the
+                      old one is superseded and kept.
+                    </li>
+                  </ul>
+                </div>
+
+                <div class="imp imp-safe">
+                  <h3>Unaffected, and this is the property worth trusting</h3>
+                  <p class="imp-lead">
+                    A quotation stores its framework, its inputs and its lines.
+                    A contract points at a quotation VERSION, not at a quotation
+                    that can be revised. So none of these move when a fee
+                    changes — not by policy, but because nothing in the schema
+                    connects them to a rule that could change underneath.
+                  </p>
+                  <ul>
+                    <li><strong>{impact.invoicesIssued}</strong> issued invoice{impact.invoicesIssued === 1 ? '' : 's'} — a frozen snapshot of what was printed.</li>
+                    <li><strong>{impact.paymentsCaptured}</strong> captured payment{impact.paymentsCaptured === 1 ? '' : 's'} — money already taken, at the amount it was taken at.</li>
+                    <li><strong>{impact.liveContracts}</strong> live contract{impact.liveContracts === 1 ? '' : 's'} (issued, signed or active), of which <strong>{impact.contractsBoundToAQuote}</strong> {impact.contractsBoundToAQuote === 1 ? 'is' : 'are'} bound to a specific quotation version and hold{impact.contractsBoundToAQuote === 1 ? 's' : ''} the value agreed there.</li>
+                    <li><strong>{impact.activeMemberships}</strong> active membership{impact.activeMemberships === 1 ? '' : 's'} — the register records the entitlement, not a price.</li>
+                    <li><strong>{impact.futureBookings}</strong> booking{impact.futureBookings === 1 ? '' : 's'} still ahead — a booking carries no amount at all; it is scheduled time.</li>
+                  </ul>
+                </div>
+              </div>
+
+              <p class="band-p">
+                Historical transactions are not repriced by anything on this
+                screen, and there is no control here that could reprice one. The
+                only figures a new version reaches are the ones computed after
+                it comes into force.
+              </p>
+            </section>
+          )}
+
+          {/* ── Publishing ────────────────────────────────────────────────── */}
+          <section class="band band-danger" id="publish" aria-labelledby="publish-h">
+            <h2 id="publish-h" class="band-h">Publish</h2>
+            {errorFor('publish') && <p class="msg msg-bad" role="alert">{errorFor('publish')}</p>}
+
+            <div class="warn">
+              <p><strong>Publishing cannot be undone, and a published version can never be edited.</strong></p>
+              <p>
+                A quotation stores the framework it was computed under and is
+                re-derived from it whenever anybody asks how a figure was
+                reached. If a published rule could be changed, every quotation
+                ever issued under it would silently change with it — a school
+                that accepted a figure in March would open its own quotation in
+                June and find a different number. So the rules freeze here.
+              </p>
+              <p>
+                Correcting a published framework means cloning it into a NEW
+                version. Everything already issued keeps computing to the figure
+                it was issued at, which is the only version of this that a
+                federation can defend.
+              </p>
+            </div>
+
+            {publishRefusal ? (
+              <p class="note">{publishRefusal}</p>
+            ) : publishTarget && (
+              <form method="post" action={`${SELF_HERE}#publish`} class="form">
+                <input type="hidden" name="action" value="publish" />
+                <input type="hidden" name="frameworkId" value={publishTarget.id} />
+                <input type="hidden" name="expectedCode" value={publishTarget.code} />
+                {/* What this publication will and will not do, in the figures
+                    counted above, at the point of no return. */}
+                <ul class="pre-flight">
+                  <li><strong>{selectedRuleCount}</strong> rule{selectedRuleCount === 1 ? '' : 's'} will be frozen, permanently.</li>
+                  <li>
+                    {publishTarget.effectiveFrom
+                      ? <>It comes into force on <strong>{dateLabel(publishTarget.effectiveFrom)}</strong>{String(publishTarget.effectiveFrom) > today ? ' — a scheduled change; nothing is repriced before then.' : '.'}</>
+                      : <>It comes into force <strong>immediately</strong>, because no effective-from date is set.</>}
+                  </li>
+                  {inForce && (
+                    <li>
+                      <strong>{inForce.code}</strong> is in force today. Publishing
+                      this does not alter it, and does not alter the
+                      {' '}<strong>{impact ? impact.quoteVersionsUnderInForce : 0}</strong> live
+                      quotation{impact && impact.quoteVersionsUnderInForce === 1 ? '' : 's'} computed against it.
+                    </li>
+                  )}
+                  {impact && (
+                    <li>
+                      <strong>{impact.invoicesIssued}</strong> issued invoice{impact.invoicesIssued === 1 ? '' : 's'} and
+                      {' '}<strong>{impact.paymentsCaptured}</strong> captured payment{impact.paymentsCaptured === 1 ? '' : 's'} are
+                      untouched. Nothing already transacted is recomputed.
+                    </li>
+                  )}
+                </ul>
+                <div class="fields">
+                  <p class="field">
+                    <label class="input-label" for="p-confirm">Type <code>{publishTarget.code}</code> to publish it</label>
+                    <input class="input" id="p-confirm" name="confirm" autocomplete="off" required />
+                    <span class="help">
+                      There is no unpublish, no edit and no undo — the only
+                      correction available afterwards is a new version.
+                    </span>
+                  </p>
+                  <p class="field field-wide">
+                    <label class="input-label" for="p-reason">On whose authority</label>
+                    <input class="input" id="p-reason" name="reason" value={v('reason')} />
+                    <span class="help">Recorded in the audit trail beside the publication.</span>
+                  </p>
+                </div>
+                <button class="btn btn-primary" type="submit">Publish {publishTarget.code} irreversibly</button>
+              </form>
+            )}
+          </section>
+
+          {/* ── Retiring ──────────────────────────────────────────────────── */}
+          <section class="band band-danger" id="retire" aria-labelledby="retire-h">
+            <h2 id="retire-h" class="band-h">Retire a published version</h2>
+            {errorFor('retire') && <p class="msg msg-bad" role="alert">{errorFor('retire')}</p>}
+
+            <div class="warn">
+              <p><strong>Retiring takes a version out of force. It does not delete anything and it does not reprice anything.</strong></p>
+              <p>
+                What actually changes: <code>activeFramework()</code> stops
+                returning it, so nothing new is priced against it, and
+                <code>computeFee()</code> refuses it outright — which means the
+                &ldquo;re-derive this quotation&rdquo; check reports that the
+                framework was retired instead of quietly producing a different
+                figure. That is the intended behaviour and the reason retirement
+                is not the same as deleting.
+              </p>
+              <p>
+                Every quotation issued under it keeps its stored total and its
+                stored lines, so &ldquo;why is this figure what it is?&rdquo;
+                still answers from the record.
+                {selected ? <> {selectedQuoteCount} {selectedQuoteCount === 1 ? 'quotation was' : 'quotations were'} computed against {selected.code}.</> : null}
+              </p>
+            </div>
+
+            {retireRefusal ? (
+              <p class="note">{retireRefusal}</p>
+            ) : retireTarget && (
+              <form method="post" action={`${SELF_HERE}#retire`} class="form">
+                <input type="hidden" name="action" value="retire" />
+                <input type="hidden" name="frameworkId" value={retireTarget.id} />
+                <input type="hidden" name="expectedCode" value={retireTarget.code} />
+                <div class="fields">
+                  <p class="field">
+                    <label class="input-label" for="rt-as">How it is retired</label>
+                    <select class="input" id="rt-as" name="retireAs" required>
+                      <option value="superseded" selected={v('retireAs', 'superseded') === 'superseded'}>superseded — replaced by a later version</option>
+                      <option value="withdrawn" selected={v('retireAs') === 'withdrawn'}>withdrawn — taken back, not replaced</option>
+                    </select>
+                    <span class="help">
+                      Both stop it pricing. They are different facts, and the
+                      register keeps the difference.
+                    </span>
+                  </p>
+                  <p class="field">
+                    <label class="input-label" for="rt-by">Superseded by</label>
+                    <select class="input" id="rt-by" name="supersededById">
+                      <option value="">— name the replacement —</option>
+                      {replacementOptions.map((f) => (
+                        <option value={f.id} selected={v('supersededById') === String(f.id)}>{f.code} — {f.title} ({f.status})</option>
+                      ))}
+                    </select>
+                    <span class="help">Required when superseding. Ignored when withdrawing.</span>
+                  </p>
+                  <p class="field">
+                    <label class="input-label" for="rt-confirm">Type <code>{retireTarget.code}</code> to retire it</label>
+                    <input class="input" id="rt-confirm" name="confirm" autocomplete="off" required />
+                  </p>
+                  <p class="field field-wide">
+                    <label class="input-label" for="rt-reason">Why, and on whose authority</label>
+                    <input class="input" id="rt-reason" name="reason" required value={v('reason')} />
+                    <span class="help">Required. Recorded in the audit trail beside the retirement.</span>
+                  </p>
+                </div>
+                <button class="btn btn-primary" type="submit">Retire {retireTarget.code}</button>
+              </form>
+            )}
+          </section>
+
+          {/* ── Cloning ───────────────────────────────────────────────────── */}
+          {selected && (
+            <section class="band" id="clone" aria-labelledby="clone-h">
+              <h2 id="clone-h" class="band-h">Clone {selected.code} into a new draft</h2>
+              {errorFor('clone') && <p class="msg msg-bad" role="alert">{errorFor('clone')}</p>}
+              <p class="band-p">
+                This is how a published framework is changed: it is not. A clone
+                is a new draft carrying the same {selectedRuleCount} rule{selectedRuleCount === 1 ? '' : 's'},
+                free to edit until it is published in its own right.
+                {selected.code} keeps every rule it has and keeps pricing every
+                quotation already computed against it.
+              </p>
+              <form method="post" action={`${SELF_HERE}#clone`} class="form">
+                <input type="hidden" name="action" value="clone" />
+                <input type="hidden" name="sourceId" value={selected.id} />
+                <div class="fields">
+                  <p class="field">
+                    <label class="input-label" for="c-title">Title of the new version</label>
+                    <input class="input" id="c-title" name="title" required value={v('title', selected.title ?? '')} />
+                    <span class="help">Prefilled with the title of the version being cloned. Change it to say what is different.</span>
+                  </p>
+                  <p class="field field-sm">
+                    <label class="input-label" for="c-from">Effective from</label>
+                    <input class="input" id="c-from" name="effectiveFrom" type="date" value={v('effectiveFrom')} />
+                    <span class="help">A future date schedules the change. Empty means it applies as soon as it is published.</span>
+                  </p>
+                  <p class="field field-wide">
+                    <label class="input-label" for="c-notes">Notes</label>
+                    <textarea class="input" id="c-notes" name="notes" rows="2">{v('notes')}</textarea>
+                  </p>
+                </div>
+                <p class="help">
+                  It will be created as version <strong>{nextVersion}</strong> —
+                  the next number free when this page was rendered. The number is
+                  read again at the moment of the write, so two administrators
+                  cloning at once cannot both take it.
+                </p>
+                <button class="btn btn-ghost" type="submit">Clone into a new draft</button>
+              </form>
+            </section>
+          )}
+
+          {/* ── A fresh version ───────────────────────────────────────────── */}
           <section class="band" id="new-version" aria-labelledby="new-fw-h">
-            <h2 id="new-fw-h" class="band-h">Author a new version</h2>
+            <h2 id="new-fw-h" class="band-h">Author a new version from nothing</h2>
+            {errorFor('framework') && <p class="msg msg-bad" role="alert">{errorFor('framework')}</p>}
             <p class="band-p">
-              A new version starts as a draft and prices nothing until it is
-              published. Version numbers are unique across the federation and
-              the code is derived from the number.
+              A new version starts as a draft with no rules and prices nothing
+              until it is published. Version numbers are unique across the
+              federation and the code is derived from the number.
+              {frameworks.length > 0 ? <> The next free number is <strong>{nextVersion}</strong>.</> : null}
             </p>
-            <form method="post" class="form">
+            <form method="post" action={`${SELF_HERE}#new-version`} class="form">
               <input type="hidden" name="action" value="create_framework" />
               <div class="fields">
                 <p class="field">
@@ -758,7 +1935,7 @@ const ruleColumns: Column[] = [
                 </p>
                 <p class="field field-sm">
                   <label class="input-label" for="fw-version">Version number</label>
-                  <input class="input" id="fw-version" name="version" inputmode="numeric" pattern="[0-9]+" required value={focusForm === 'framework' ? v('version') : ''} />
+                  <input class="input" id="fw-version" name="version" inputmode="numeric" pattern="[0-9]+" required value={focusForm === 'framework' ? v('version') : String(nextVersion)} />
                 </p>
                 <p class="field field-sm">
                   <label class="input-label" for="fw-from">Effective from</label>
@@ -774,200 +1951,124 @@ const ruleColumns: Column[] = [
               <button class="btn btn-ghost" type="submit">Create draft</button>
             </form>
           </section>
-
-          <section class="band" id="new-rule" aria-labelledby="new-rule-h">
-            <h2 id="new-rule-h" class="band-h">Add a rule to a draft</h2>
-
-            {drafts.length === 0 ? (
-              <p class="note">
-                There is no draft to add a rule to. A published version cannot
-                be edited — that is what makes an issued quotation reproducible
-                — so changing the rules means authoring a new version above.
-              </p>
-            ) : (
-              <>
-                <div class="units">
-                  <p><strong>Amounts are integer paise.</strong> One rupee is 100. A decimal point is refused rather than rounded, because the multiplication that follows runs in exact integer arithmetic and a float would put the error back.</p>
-                  <p><strong>Factors are parts-per-million.</strong> ×1.0 is {PPM}. There is no per-cent field on this form.</p>
-                  <p><strong>Order matters.</strong> Rules run from the lowest order upwards and multipliers are not commutative, so the sequence is part of the answer.</p>
-                </div>
-
-                <form method="post" class="form">
-                  <input type="hidden" name="action" value="add_rule" />
-                  <div class="fields">
-                    <p class="field">
-                      <label class="input-label" for="r-framework">Draft version</label>
-                      <select class="input" id="r-framework" name="frameworkId" required>
-                        {drafts.map((f) => (
-                          <option
-                            value={f.id}
-                            selected={
-                              // After a refusal, keep the draft they chose;
-                              // otherwise offer the version being viewed.
-                              focusForm === 'rule'
-                                ? v('frameworkId') === String(f.id)
-                                : Boolean(publishTarget && f.id === publishTarget.id)
-                            }
-                          >{f.code} — {f.title}</option>
-                        ))}
-                      </select>
-                    </p>
-                    <p class="field field-sm">
-                      <label class="input-label" for="r-code">Rule code</label>
-                      <input class="input" id="r-code" name="code" required value={focusForm === 'rule' ? v('code') : ''} />
-                      <span class="help">Unique within the version. Printed on every quotation line this rule produces.</span>
-                    </p>
-                    <p class="field">
-                      <label class="input-label" for="r-label">Label</label>
-                      <input class="input" id="r-label" name="label" required value={focusForm === 'rule' ? v('label') : ''} />
-                      <span class="help">The wording the recipient of the quotation reads.</span>
-                    </p>
-                    <p class="field field-sm">
-                      <label class="input-label" for="r-kind">Kind</label>
-                      <select class="input" id="r-kind" name="kind" required>
-                        {RULE_KINDS.map((k) => (
-                          <option value={k.kind} selected={focusForm === 'rule' && v('kind') === k.kind}>{k.kind.replace(/_/g, ' ')}</option>
-                        ))}
-                      </select>
-                    </p>
-                    <p class="field field-sm">
-                      <label class="input-label" for="r-amount">Amount, in paise</label>
-                      <input class="input" id="r-amount" name="amountMinor" inputmode="numeric" pattern="-?[0-9]+" value={focusForm === 'rule' ? v('amountMinor') : ''} />
-                      <span class="help">Whole paise. For a per-unit kind this is the amount per one unit. A discount is negative.</span>
-                    </p>
-                    <p class="field field-sm">
-                      <label class="input-label" for="r-factor">Factor, in parts-per-million</label>
-                      <input class="input" id="r-factor" name="factorPpm" inputmode="numeric" pattern="-?[0-9]+" value={focusForm === 'rule' ? v('factorPpm') : ''} />
-                      <span class="help">For a multiplier or a tax only. ×1.0 is {PPM}.</span>
-                    </p>
-                    <p class="field field-sm">
-                      <label class="input-label" for="r-audience">Audience</label>
-                      <select class="input" id="r-audience" name="audience">
-                        <option value="">every audience</option>
-                        {s.audienceKind.enumValues.map((a) => (
-                          <option value={a} selected={focusForm === 'rule' && v('audience') === a}>{a}</option>
-                        ))}
-                      </select>
-                    </p>
-                    <p class="field field-sm">
-                      <label class="input-label" for="r-service">Service</label>
-                      <select class="input" id="r-service" name="serviceId">
-                        <option value="">every service</option>
-                        {services.map((sv) => (
-                          <option value={sv.id} selected={focusForm === 'rule' && v('serviceId') === String(sv.id)}>{sv.title}</option>
-                        ))}
-                      </select>
-                      {services.length === 0 && (
-                        <span class="help">No services are recorded yet, so a rule can only be written to apply to every service.</span>
-                      )}
-                    </p>
-                    <p class="field field-sm">
-                      <label class="input-label" for="r-min">Minimum quantity</label>
-                      <input class="input" id="r-min" name="minQuantity" inputmode="numeric" pattern="[0-9]+" value={focusForm === 'rule' ? v('minQuantity') : ''} />
-                      <span class="help">Optional floor for a per-unit kind.</span>
-                    </p>
-                    <p class="field field-sm">
-                      <label class="input-label" for="r-max">Maximum quantity</label>
-                      <input class="input" id="r-max" name="maxQuantity" inputmode="numeric" pattern="[0-9]+" value={focusForm === 'rule' ? v('maxQuantity') : ''} />
-                      <span class="help">Optional ceiling, so a bad input cannot run a per-unit rule away.</span>
-                    </p>
-                    <p class="field field-sm">
-                      <label class="input-label" for="r-order">Order</label>
-                      <input class="input" id="r-order" name="sortOrder" inputmode="numeric" pattern="[0-9]+" value={focusForm === 'rule' ? v('sortOrder', '100') : '100'} />
-                    </p>
-                    <p class="field field-wide">
-                      <label class="input-label" for="r-conditions">Conditions, as JSON</label>
-                      <textarea class="input" id="r-conditions" name="conditions" rows="3">{focusForm === 'rule' ? v('conditions') : ''}</textarea>
-                      <span class="help">
-                        Empty means the rule applies to every request. The engine
-                        understands a value, a list of values, and an object of
-                        min, max or not — and treats anything else as no match at
-                        all, so a form it cannot read is refused here rather than
-                        becoming a rule that never fires.
-                      </span>
-                    </p>
-                    <p class="field field-wide check">
-                      <label for="r-approval">
-                        <input type="checkbox" id="r-approval" name="requiresApproval" />
-                        A quotation containing this rule must be approved before it is issued
-                      </label>
-                    </p>
-                  </div>
-                  <button class="btn btn-ghost" type="submit">Add rule to draft</button>
-                </form>
-
-                <h3 class="sub-h">What each kind needs</h3>
-                <ul class="kinds">
-                  {RULE_KINDS.map((k) => (
-                    <li>
-                      <span class="k-name">{k.kind.replace(/_/g, ' ')}</span>
-                      <span class="k-note">
-                        {k.note}
-                        {QUANTITY_INPUT[k.kind] ? <> If <code>{QUANTITY_INPUT[k.kind]}</code> is not supplied, the rule is skipped rather than priced at zero.</> : null}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </section>
-
-          {/* ── Publishing ────────────────────────────────────────────────── */}
-          <section class="band band-danger" id="publish" aria-labelledby="publish-h">
-            <h2 id="publish-h" class="band-h">Publish</h2>
-
-            <div class="warn">
-              <p><strong>Publishing cannot be undone, and a published version can never be edited.</strong></p>
-              <p>
-                A quotation stores the framework it was computed under and is
-                re-derived from it whenever anybody asks how a figure was
-                reached. If a published rule could be changed, every quotation
-                ever issued under it would silently change with it — a school
-                that accepted a figure in March would open its own quotation in
-                June and find a different number. So the rules freeze here.
-              </p>
-              <p>
-                Correcting a published framework means authoring a NEW version.
-                Everything already issued keeps computing to the figure it was
-                issued at, which is the only version of this that a federation
-                can defend.
-              </p>
-            </div>
-
-            {/* ONE WORDING, computed once above and used both here and as the
-                reason on the refused header action. Two hand-written versions
-                of the same refusal drift, and a reader who sees them disagree
-                cannot tell which is the rule. */}
-            {publishRefusal ? (
-              <p class="note">{publishRefusal}</p>
-            ) : publishTarget && (
-              <form method="post" class="form">
-                <input type="hidden" name="action" value="publish" />
-                <input type="hidden" name="frameworkId" value={publishTarget.id} />
-                <input type="hidden" name="expectedCode" value={publishTarget.code} />
-                <div class="fields">
-                  <p class="field">
-                    <label class="input-label" for="p-confirm">Type <code>{publishTarget.code}</code> to publish it</label>
-                    <input class="input" id="p-confirm" name="confirm" autocomplete="off" required />
-                    <span class="help">
-                      {rules.length} rule{rules.length === 1 ? '' : 's'} will be
-                      frozen, permanently. There is no unpublish, no edit and no
-                      undo — the only correction available afterwards is a new
-                      version.
-                    </span>
-                  </p>
-                  <p class="field field-wide">
-                    <label class="input-label" for="p-reason">On whose authority</label>
-                    <input class="input" id="p-reason" name="reason" />
-                    <span class="help">Recorded in the audit trail beside the publication.</span>
-                  </p>
-                </div>
-                <button class="btn btn-primary" type="submit">Publish {publishTarget.code} irreversibly</button>
-              </form>
-            )}
-          </section>
         </>
       )}
+
+      {/* ── The payment gateway ───────────────────────────────────────────── */}
+      <section class="band" id="gateway" aria-labelledby="gateway-h">
+        <h2 id="gateway-h" class="band-h">Payment gateway</h2>
+        {!mayReadFinance ? (
+          <p class="note">
+            The gateway configuration is read under <code>finance:read</code>,
+            which this account does not hold. Reading the federation's pricing
+            rules and reading how it takes money are separate authorities.
+          </p>
+        ) : (
+          <>
+            <p class="band-p">
+              What the fee framework decides is charged; this is what collects
+              it. Shown because a published fee with no working gateway is a
+              price nobody can pay.
+            </p>
+            <dl class="kv">
+              <div>
+                <dt>Provider that would take a payment now</dt>
+                <dd>
+                  {gateway.ready
+                    ? <>{gateway.label} — {gateway.automatic ? 'confirmed automatically against the gateway' : 'confirmed by a person, not automatically'}</>
+                    : 'None. No provider on this deployment has credentials, so no payment can be taken at all.'}
+                </dd>
+              </div>
+              <div>
+                <dt>Razorpay credentials</dt>
+                <dd>
+                  {rzp.configured
+                    ? 'Key id and API secret are both present.'
+                    : 'Not configured — the key id, the API secret, or both are absent.'}
+                  {' '}{rzp.ready
+                    ? 'The mode guard permits a charge.'
+                    : 'The mode guard does NOT permit a charge, so nothing can be taken through this provider.'}
+                </dd>
+              </div>
+              <div>
+                <dt>Mode</dt>
+                <dd>
+                  {rzp.mode === 'live' ? (
+                    <strong class="live-warn">LIVE. Real money moves. This deployment is meant to run on test credentials.</strong>
+                  ) : rzp.mode === 'test' ? (
+                    'Test. No real money moves.'
+                  ) : (
+                    'No mode is in force.'
+                  )}
+                </dd>
+              </div>
+              <div>
+                {/* The guard's own sentence, rendered verbatim. Rewriting it
+                    here would be a second account of why a gateway is refused,
+                    and the two would disagree the first time one is edited. */}
+                <dt>What the guard says</dt>
+                <dd>{rzp.message} <span class="mono">({rzp.status})</span></dd>
+              </div>
+              <div>
+                <dt>Public key id</dt>
+                <dd class="mono">{rzp.keyId ?? '—'}</dd>
+              </div>
+              <div>
+                <dt>Webhook secret</dt>
+                <dd>
+                  {rzp.webhookConfigured
+                    ? 'Configured. Its value is not shown here, is not stored in the database, and there is no control on this page that could reveal or test it.'
+                    : 'Not configured. Without it no callback can be verified, and an unverified callback is never acted on — so payments would never be confirmed automatically.'}
+                </dd>
+              </div>
+              <div>
+                <dt>Last health check</dt>
+                <dd>
+                  {rzp.lastHealthCheck ? (
+                    <>
+                      {dateTimeLabel(rzp.lastHealthCheck.at)} —
+                      {' '}{rzp.lastHealthCheck.ok ? 'credentials accepted' : 'refused'}:
+                      {' '}{rzp.lastHealthCheck.detail}
+                    </>
+                  ) : (
+                    'Not checked on this server instance. That is not a failure: the check is held per instance and a serverless instance is recycled without notice, so a blank here means nobody has asked recently — not that the gateway is down. This page does not run one, because a screen that called the gateway on every render would be a self-inflicted outage on a bad day.'
+                  )}
+                </dd>
+              </div>
+              <div>
+                {/* The durable counterpart to the health check above: one is
+                    per-instance and disappears, this one is a row somebody
+                    stored. Kept separate rather than merged, because "we asked
+                    the gateway" and "the gateway called us" are different
+                    facts. */}
+                <dt>Last verified signal from a gateway</dt>
+                <dd>
+                  {lastGatewayEvent ? (
+                    <>
+                      {dateTimeLabel(lastGatewayEvent.receivedAt)} — {lastGatewayEvent.provider}
+                      {' '}{lastGatewayEvent.eventType},
+                      {' '}{lastGatewayEvent.signatureValid ? 'signature verified' : 'SIGNATURE DID NOT VERIFY'}.
+                    </>
+                  ) : (
+                    'No gateway callback has ever been recorded on this deployment.'
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>Last captured payment</dt>
+                <dd>{lastCapturedPaymentAt ? dateTimeLabel(lastCapturedPaymentAt) : 'None recorded.'}</dd>
+              </div>
+            </dl>
+            <p class="note">
+              No secret appears on this page. The API secret and the webhook
+              secret are reported only as present or absent, and there is
+              deliberately no control here that reveals, copies or tests one —
+              a control that confirmed a secret was correct would confirm a
+              guess just as readily.
+            </p>
+          </>
+        )}
+      </section>
     </>
   )}
 </AdminShell>
@@ -1019,6 +2120,23 @@ const ruleColumns: Column[] = [
 
   .muted { color: var(--muted); }
   code { font-family: var(--font-accent, monospace); font-size: .88em; }
+  .mono { font-family: var(--font-accent, monospace); font-size: .86rem; word-break: break-all; }
+
+  /* The lifecycle, as an ordered list of what each stage IS. */
+  .life { list-style: none; counter-reset: life; margin: 0; padding: 0; max-width: 72ch; }
+  .life li {
+    counter-increment: life; display: flex; gap: 14px; align-items: baseline;
+    padding: 10px 0; border-bottom: 1px solid var(--border);
+  }
+  .life li::before {
+    content: counter(life); font-family: var(--font-accent, monospace);
+    font-size: .74rem; color: var(--gold-2); min-width: 2ch;
+  }
+  .life-k {
+    font-family: var(--font-accent, monospace); font-size: .82rem;
+    color: var(--gold-2); min-width: 11ch;
+  }
+  .life-v { color: var(--muted); font-size: .88rem; line-height: 1.65; flex: 1; }
 
   .units {
     margin: 0 0 22px; padding: 16px 20px; background: var(--bg-2);
@@ -1027,7 +2145,35 @@ const ruleColumns: Column[] = [
   .units p { margin: 0 0 8px; color: var(--muted); line-height: 1.7; font-size: .9rem; }
   .units p:last-child { margin-bottom: 0; }
 
+  /* The conversion panel. Loud on purpose: it is the one moment the rupee the
+     administrator typed and the integer the column will hold are both on the
+     screen at once. */
+  .conv {
+    margin: 0 0 22px; padding: 18px 22px; background: var(--card);
+    border: 1px solid var(--gold); border-left-width: 3px; max-width: 72ch;
+  }
+  .conv-h { margin: 0 0 12px; font-family: var(--font-display); font-size: 1rem; }
+  .conv-row {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline;
+    margin: 0 0 8px; line-height: 1.7;
+  }
+  .conv-typed { font-family: var(--font-accent, monospace); font-size: .88rem; color: var(--muted); }
+  .conv-arrow { color: var(--gold-2); }
+  .conv-out { font-size: .95rem; }
+  .conv-out strong { font-family: var(--font-accent, monospace); }
+  .conv-note { margin: 12px 0 0; font-size: .8rem; color: var(--muted); line-height: 1.6; }
+
+  /* Why a control is absent, where the control would have been. */
+  .frozen {
+    margin: 0 0 22px; padding: 18px 22px; background: var(--bg-2);
+    border-left: 3px solid var(--border); max-width: 72ch;
+  }
+  .frozen p { margin: 0 0 10px; color: var(--muted); line-height: 1.75; }
+  .frozen p:first-child { color: var(--ink, inherit); }
+  .frozen p:last-child { margin-bottom: 0; }
+
   .form { max-width: 900px; }
+  .form-inline { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); }
   .fields { display: flex; flex-wrap: wrap; gap: 18px 20px; margin: 0 0 22px; }
   .field { flex: 1 1 260px; margin: 0; }
   .field-sm { flex: 0 1 200px; }
@@ -1036,11 +2182,36 @@ const ruleColumns: Column[] = [
   .check label { display: flex; gap: 10px; align-items: flex-start; color: var(--muted); font-size: .9rem; line-height: 1.6; }
   .check input { margin-top: 3px; }
   textarea.input { resize: vertical; font-family: var(--font-accent, monospace); font-size: .86rem; }
+  .steps { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .cancel { display: inline-block; margin-left: 14px; font-size: .82rem; color: var(--muted); }
+  .btn-danger { border-color: var(--red); color: var(--red); }
 
   .kinds { list-style: none; margin: 0; padding: 0; max-width: 72ch; }
   .kinds li { padding: 9px 0; border-bottom: 1px solid var(--border); }
   .k-name { display: inline-block; min-width: 15ch; font-family: var(--font-accent, monospace); font-size: .84rem; color: var(--gold-2); }
   .k-note { color: var(--muted); font-size: .86rem; line-height: 1.6; }
+
+  /* Two columns, because the whole point is the contrast between them. */
+  .impact { display: flex; flex-wrap: wrap; gap: 20px; margin: 0 0 20px; }
+  .imp { flex: 1 1 320px; padding: 18px 22px; background: var(--card); border-left: 3px solid var(--border); }
+  .imp-warn { border-left-color: var(--gold); }
+  .imp-safe { border-left-color: var(--green, var(--gold-2)); }
+  .imp h3 { font-family: var(--font-display); font-size: .98rem; margin: 0 0 10px; }
+  .imp-lead { color: var(--muted); line-height: 1.7; margin: 0 0 12px; font-size: .9rem; }
+  .imp ul { margin: 0; padding-left: 18px; }
+  .imp li { color: var(--muted); line-height: 1.7; font-size: .88rem; margin-bottom: 8px; }
+
+  .pre-flight { margin: 0 0 22px; padding-left: 18px; max-width: 72ch; }
+  .pre-flight li { color: var(--muted); line-height: 1.7; margin-bottom: 8px; }
+
+  .kv { margin: 0; max-width: 78ch; }
+  .kv > div {
+    display: flex; flex-wrap: wrap; gap: 6px 20px;
+    padding: 11px 0; border-bottom: 1px solid var(--border);
+  }
+  .kv dt { flex: 0 0 240px; font-size: .84rem; color: var(--gold-2); }
+  .kv dd { flex: 1 1 300px; margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.65; }
+  .live-warn { color: var(--red); }
 
   .band-danger .warn {
     padding: 18px 22px; border: 1px solid var(--red); border-left-width: 3px;
@@ -1051,12 +2222,16 @@ const ruleColumns: Column[] = [
   .warn p:last-child { margin-bottom: 0; }
 
   /* ── Phone (PART AL) ─────────────────────────────────────────
-     The nine rule columns become records below 900px, and DataTable owns that
+     The rule columns become records below 900px, and DataTable owns that
      behaviour for every register in the federation. This file no longer keeps
      a second copy of the rules in step with the first. */
   @media (max-width: 900px) {
     .field, .field-sm { flex: 1 1 100%; }
     .k-name { display: block; min-width: 0; margin-bottom: 2px; }
+    .life li { flex-wrap: wrap; }
+    .life-k { min-width: 0; flex: 1 1 100%; }
+    .kv dt { flex: 1 1 100%; }
     .btn { width: 100%; }
+    .cancel { margin-left: 0; margin-top: 10px; }
   }
 </style>

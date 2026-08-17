@@ -37,8 +37,20 @@ declare global {
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-/** Paths authenticated by cryptographic signature, not by origin. */
-const SIGNATURE_AUTHENTICATED = ['/api/payments/webhook'];
+/**
+ * Paths authenticated by cryptographic signature, not by origin.
+ *
+ * Listed as EXACT paths, and each one has to be added deliberately. The match
+ * below is `===` or a `/`-delimited prefix, so a provider-specific route that
+ * sits beside an existing entry rather than under it — as
+ * /api/payments/razorpay/webhook does — is NOT covered by that entry and would
+ * otherwise be refused for having no Origin, which is exactly what a
+ * server-to-server delivery looks like.
+ */
+const SIGNATURE_AUTHENTICATED = [
+  '/api/payments/webhook',
+  '/api/payments/razorpay/webhook',
+];
 
 function deny(reason: string): Response {
   // Deliberately terse: an attacker learns nothing, and the reason is logged

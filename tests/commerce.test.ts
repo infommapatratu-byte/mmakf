@@ -499,7 +499,7 @@ describe('Razorpay adapter', () => {
   });
 
   it('rejects a non-integer or non-positive amount before calling the API', async () => {
-    process.env.RAZORPAY_KEY_ID = 'k'; process.env.RAZORPAY_KEY_SECRET = 's';
+    process.env.RAZORPAY_KEY_ID = 'rzp_test_A1b2C3d4E5'; process.env.RAZORPAY_KEY_SECRET = 's';
     for (const amount of [0, -100, 12.5, NaN]) {
       await expect(razorpay.createOrder({
         amountPaise: amount, currency: 'INR', reference: 'MMAKF-ORD-2026-000001', idempotencyKey: 'k1',
@@ -558,12 +558,22 @@ describe('provider selection reports the truth (§70)', () => {
 
   it('prefers a configured gateway over manual UPI', () => {
     process.env.MMAKF_UPI_ID = '9939144318@ybl';
-    process.env.RAZORPAY_KEY_ID = 'rzp_test'; process.env.RAZORPAY_KEY_SECRET = 'secret';
+    process.env.RAZORPAY_KEY_ID = 'rzp_test_A1b2C3d4E5'; process.env.RAZORPAY_KEY_SECRET = 'secret';
+    // The webhook secret is part of what makes this gateway configured, not an
+    // optional extra. A signed webhook is the only thing this system accepts as
+    // proof that money moved — there is no browser-return route and the
+    // reconcile cron only re-drives events that already arrived — so without it
+    // Razorpay holds itself back and manual UPI carries the federation.
+    // tests/payment-mode.test.ts asserts that refusal in its own right. THIS
+    // test is about PREFERENCE: that a gateway which can actually take a payment
+    // end to end beats manual UPI. So it supplies one that can.
+    process.env.RAZORPAY_WEBHOOK_SECRET = 'test_webhook_secret';
     const report = paymentStatusReport();
     expect(report.provider).toBe('razorpay');
     expect(report.automatic).toBe(true);
     delete process.env.MMAKF_UPI_ID;
     delete process.env.RAZORPAY_KEY_ID; delete process.env.RAZORPAY_KEY_SECRET;
+    delete process.env.RAZORPAY_WEBHOOK_SECRET;
   });
 });
 

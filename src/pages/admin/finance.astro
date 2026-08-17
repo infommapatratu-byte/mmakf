@@ -1,0 +1,956 @@
+---
+// /admin/finance — the money dashboard.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHAT THIS SCREEN IS FOR, AND THE ANSWER IT GIVES TODAY
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A treasurer's ten questions, on one page: gross, gateway cost, tax, refunds,
+// net, pending, failed, disputed, unreconciled, settled.
+//
+// Every one of those answers is ZERO today, and that is not a placeholder. No
+// payment has ever been taken through this system: MMAKF has published no fee
+// rules (src/db/fees.ts ships empty, /admin/fees is where that changes), so
+// nothing has ever been priced, so no order has ever been raised, so no
+// gateway has ever been called. A dashboard of zeros is therefore the honest
+// answer and the only defensible one.
+//
+// It is also the most dangerous screen in the system to build badly, because a
+// zero somebody counted and a zero nobody counted look identical. So:
+//
+//   · EVERY FIGURE COMES FROM A QUERY. There is no rupee literal anywhere in
+//     this file — not in the markup, not in a default, not in a comment.
+//   · A ZERO IS PRINTED AT FULL CONTRAST, with the query that produced it and
+//     a sentence saying what would make it non-zero. A reader must be able to
+//     tell "measured, and it is nought" from "we could not measure".
+//   · A FIGURE THAT COULD NOT BE PRODUCED IS A DASH WITH A REASON, never a
+//     zero. That substitution is the single worst defect a finance dashboard
+//     can ship: it reports "no refunds this year" when what happened is that
+//     the refunds table could not be read.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHY THE QUERIES ARE WRITTEN AS SQL RATHER THAN THROUGH DRIZZLE MODELS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Half of what this page reads — disputes, reconciliation_items,
+// gateway_cost_rates — is created by the reconciliation-and-disputes
+// migration, and a deployment is not obliged to have run it. A page that
+// imported a table object for a relation the database has not got would throw
+// SQLSTATE 42P01 on first render and take the whole dashboard down with it,
+// including the eight figures that WERE readable.
+//
+// So each figure declares the tables it needs, the page asks the catalogue once
+// which tables exist, and a figure whose table is absent renders as a dash
+// naming the migration that would create it. That is an operator's diagnosis in
+// place of a stack trace, and it means the dashboard degrades one figure at a
+// time instead of all at once.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// MONEY ARITHMETIC
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Sums arrive from Postgres as text and are read into BigInt. Not Number: a
+// SUM over an integer column is a bigint, and a federation that one day sums
+// several crore of paise would silently lose precision past 2^53 — the kind of
+// defect that appears only on the largest year and is never traced. Nothing
+// here multiplies money; the only subtraction is net = gross − cost − refunds,
+// which is exact in BigInt. applyFactor() in src/db/fees.ts remains the only
+// place in this codebase where a factor is applied to money, and this page
+// never applies one.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTHORITY AND SCOPE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Gated on 'finance:read'. There is nothing to guard separately, because this
+// page writes nothing at all — it has no form, no POST branch and no action.
+//
+// SCOPE IS NOT A FILTER HERE, AND SAYING SO MATTERS. orders, payments, refunds
+// and settlements carry no state, district or dojo column: MMAKF takes money
+// nationally through one gateway account. A credential bound below national
+// therefore cannot be shown a narrowed figure, and showing it the national one
+// instead would hand a district officer the federation's whole turnover. The
+// page refuses, and names which table would have to change for that to be
+// possible, rather than rendering an empty dashboard a reader would take as
+// "no money has moved in my state".
+
+import AdminShell from '@/components/AdminShell.astro';
+import StatCard from '@/components/StatCard.astro';
+import Status from '@/components/Status.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { sql, type SQL } from 'drizzle-orm';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import { formatINR } from '@/db/fees';
+import { paymentModeReport } from '@/lib/payments/mode';
+import { availableProviders, paymentStatusReport } from '@/lib/payments';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const configured = isConfigured();
+
+const mayRead = Boolean(principal) && canAnywhere(principal, 'finance:read');
+const scopes = visibleScopes(principal, 'finance:read');
+const nationalReach = scopes.kind === 'all';
+
+// ─── Which tables this database actually has ────────────────────────────────
+//
+// One catalogue read, so a figure can say "the table is not here" instead of
+// throwing. Read as a set of names rather than counted, because the diagnosis a
+// reader needs is WHICH table is missing.
+
+/**
+ * The migration that introduces each table, for the diagnosis below.
+ *
+ * NAMED WITHOUT ITS NUMBER, deliberately. Migration files get renumbered while
+ * several are in flight, and a diagnosis that quotes a number is a diagnosis
+ * that sends an operator looking for a file which no longer has that name. The
+ * descriptive half of the filename is the part that survives.
+ */
+const INTRODUCED_BY: Record<string, string> = {
+  orders: 'drizzle/…_commerce_core.sql',
+  payments: 'drizzle/…_commerce_core.sql',
+  refunds: 'drizzle/…_commerce_core.sql',
+  settlements: 'drizzle/…_commerce_core.sql',
+  payment_events: 'drizzle/…_commerce_core.sql',
+  disputes: 'drizzle/…_reconciliation_disputes_routing.sql',
+  reconciliation_items: 'drizzle/…_reconciliation_disputes_routing.sql',
+  reconciliation_runs: 'drizzle/…_reconciliation_disputes_routing.sql',
+  gateway_transactions: 'drizzle/…_reconciliation_disputes_routing.sql',
+  gateway_cost_rates: 'drizzle/…_reconciliation_disputes_routing.sql',
+};
+
+let present = new Set<string>();
+let catalogueError: string | null = null;
+
+if (mayRead && nationalReach && configured) {
+  try {
+    const rows = (await db().execute(sql`
+      select table_name from information_schema.tables
+       where table_schema = current_schema() and table_type = 'BASE TABLE'
+    `)) as unknown as Array<{ table_name: string }>;
+    present = new Set(Array.from(rows ?? []).map((r) => String(r.table_name)));
+  } catch (err) {
+    // Logged in full; summarised on the page. A relation list and a driver
+    // message are facts about the server, not about the treasurer reading it.
+    console.error('[admin/finance] could not read the table catalogue', err);
+    catalogueError = 'The database could not be asked which tables it holds.';
+  }
+}
+
+// ─── One measured figure ────────────────────────────────────────────────────
+
+/**
+ * A figure, or an explained absence. Never a zero standing in for either.
+ *
+ * `paise` and `n` are separate because most of these questions have both an
+ * amount and a count, and the two fail independently: a sum can be complete
+ * while the count that qualifies it is not.
+ */
+interface Measured {
+  paise: bigint | null;
+  n: number | null;
+  /** Why there is no figure. Null when there is one. */
+  gap: string | null;
+}
+
+const NOT_MEASURED: Measured = { paise: null, n: null, gap: null };
+
+async function measure(needs: string[], statement: SQL): Promise<Measured> {
+  const missing = needs.filter((t) => !present.has(t));
+  if (missing.length > 0) {
+    const names = missing.join(' and ');
+    const migration = INTRODUCED_BY[missing[0]];
+    return {
+      paise: null,
+      n: null,
+      gap:
+        `This figure is counted from ${names}, which this database does not have. ` +
+        (migration
+          ? `Migration ${migration} creates it and has not been applied here. `
+          : 'The migration that creates it has not been applied here. ') +
+        'Nothing is shown rather than a nought, because a nought here would read as a measurement.',
+    };
+  }
+  try {
+    const rows = (await db().execute(statement)) as unknown as Array<Record<string, string | null>>;
+    const row = Array.from(rows ?? [])[0] ?? {};
+    return {
+      // Postgres returns a bigint SUM as text. BigInt, not Number — see the
+      // header note on precision.
+      paise: row.paise == null ? null : BigInt(row.paise),
+      n: row.n == null ? null : Number(row.n),
+      gap: null,
+    };
+  } catch (err) {
+    console.error('[admin/finance] a figure could not be read', err);
+    return {
+      paise: null,
+      n: null,
+      gap:
+        'This figure could not be read from the database. The fault is in the server log with ' +
+        'the detail this page deliberately does not print. Nothing is shown rather than a nought.',
+    };
+  }
+}
+
+// ─── The ten questions ──────────────────────────────────────────────────────
+
+let gross = NOT_MEASURED;
+let gatewayCost = NOT_MEASURED;
+let taxCharged = NOT_MEASURED;
+let refunded = NOT_MEASURED;
+let pending = NOT_MEASURED;
+let failed = NOT_MEASURED;
+let disputed = NOT_MEASURED;
+let unreconciled = NOT_MEASURED;
+let settled = NOT_MEASURED;
+let mismatched = NOT_MEASURED;
+let paymentsEver = NOT_MEASURED;
+let costRates = NOT_MEASURED;
+
+if (mayRead && nationalReach && configured && !catalogueError) {
+  // Sequential rather than concurrent: the driver holds one connection per
+  // serverless invocation (max: 1 in src/db/index.ts), so firing twelve at once
+  // would queue on the same socket and gain nothing but a harder failure to
+  // read when one of them is the one that broke.
+
+  // GROSS — money actually taken. `captured` is the only payment status that
+  // means the funds moved; `authorized` is a hold and is not income.
+  gross = await measure(['payments'], sql`
+    select coalesce(sum(amount_paise), 0)::text as paise, count(*)::text as n
+      from payments where status = 'captured'`);
+
+  // GATEWAY COST — what the provider deducted, as the provider reported it.
+  // NO RATE IS APPLIED HERE. Razorpay's and PayU's published rates change and
+  // MMAKF's negotiated terms may differ from both, so this figure is never
+  // derived from a percentage in code; it is the sum of what came back on each
+  // payment. `n` counts the captured payments that carry no reported cost at
+  // all, which is the coverage gap that qualifies the total.
+  gatewayCost = await measure(['payments'], sql`
+    select coalesce(sum(coalesce(provider_fee_paise, 0) + coalesce(provider_tax_paise, 0)), 0)::text as paise,
+           count(*) filter (where provider_fee_paise is null and provider_tax_paise is null)::text as n
+      from payments where status = 'captured'`);
+
+  // TAX — what was charged to payers, from the orders that were paid. Taken
+  // from the order rather than recomputed, because an issued document keeps the
+  // figure it was issued with.
+  taxCharged = await measure(['orders'], sql`
+    select coalesce(sum(tax_paise), 0)::text as paise, count(*)::text as n
+      from orders where status in ('paid', 'fulfilled', 'partially_refunded')`);
+
+  // REFUNDS — completed only. A requested or processing refund has not left the
+  // account and must not be deducted from net.
+  refunded = await measure(['refunds'], sql`
+    select coalesce(sum(amount_paise), 0)::text as paise, count(*)::text as n
+      from refunds where status = 'completed'`);
+
+  // PENDING — orders that asked for money and have not received it.
+  pending = await measure(['orders'], sql`
+    select coalesce(sum(total_paise), 0)::text as paise, count(*)::text as n
+      from orders where status = 'awaiting_payment'`);
+
+  // FAILED — attempts that did not complete. Kept because a failed attempt is
+  // evidence, and a rising count is the first sign of a gateway problem.
+  failed = await measure(['payments'], sql`
+    select coalesce(sum(amount_paise), 0)::text as paise, count(*)::text as n
+      from payments where status = 'failed'`);
+
+  // DISPUTED — money a payer's bank is trying to take back, and which MMAKF
+  // may still defend. Restricted to INR so the sum is paise: disputes.amount_
+  // minor is in the minor unit of its own currency, and adding cents to paise
+  // would be worse than showing nothing.
+  disputed = await measure(['disputes'], sql`
+    select coalesce(sum(amount_minor), 0)::text as paise, count(*)::text as n
+      from disputes
+     where currency = 'INR'
+       and status in ('open', 'evidence_required', 'evidence_submitted', 'under_review')`);
+
+  // UNRECONCILED — captured payments that no reconciliation run has matched to
+  // a gateway transaction. This is the gap where losses hide: money the system
+  // believes it took and cannot show arriving.
+  unreconciled = await measure(['payments', 'reconciliation_items'], sql`
+    select coalesce(sum(p.amount_paise), 0)::text as paise, count(*)::text as n
+      from payments p
+     where p.status = 'captured'
+       and not exists (
+         select 1 from reconciliation_items ri
+          where ri.payment_id = p.id and ri.status = 'matched')`);
+
+  // SETTLED — what the provider says reached the bank. Never equal to gross:
+  // the gateway's own fee comes out in between, which is why both are shown.
+  settled = await measure(['settlements'], sql`
+    select coalesce(sum(amount_paise), 0)::text as paise, count(*)::text as n
+      from settlements where settled_at is not null`);
+
+  // THE ALARM. A captured payment whose amount differs from the order it pays.
+  // The server resolves the amount and compares the gateway's; it never adjusts
+  // to match. Any row here is a fulfilment that should have been blocked.
+  mismatched = await measure(['payments', 'orders'], sql`
+    select count(*)::text as n
+      from payments p join orders o on o.id = p.order_id
+     where p.status = 'captured' and p.amount_paise <> o.total_paise`);
+
+  // Has this system EVER taken a payment, in any state? The sentence at the top
+  // of the page is derived from this rather than asserted.
+  paymentsEver = await measure(['payments'], sql`
+    select count(*)::text as n from payments`);
+
+  // Gateway cost RATES — configuration, held in a table with the source each
+  // rate was taken from. Counted, never read into an arithmetic on this page.
+  costRates = await measure(['gateway_cost_rates'], sql`
+    select count(*)::text as n from gateway_cost_rates
+     where effective_from <= current_date
+       and (effective_to is null or effective_to >= current_date)`);
+}
+
+// ─── Net ────────────────────────────────────────────────────────────────────
+//
+// Produced only when all three of its components were produced. A net computed
+// over a missing component would be a smaller number presented as a fact, which
+// is exactly the arithmetic a treasurer would sign.
+
+const netProducible = gross.paise != null && gatewayCost.paise != null && refunded.paise != null;
+const net: bigint | null = netProducible
+  ? (gross.paise as bigint) - (gatewayCost.paise as bigint) - (refunded.paise as bigint)
+  : null;
+
+// The coverage caveat on net, when the gateway did not report a cost for every
+// captured payment. Today there are no captured payments, so this is null.
+const netCaveat: string | null =
+  netProducible && (gatewayCost.n ?? 0) > 0
+    ? `${gatewayCost.n} captured payment${gatewayCost.n === 1 ? '' : 's'} carry no gateway cost from the provider, so the cost deducted here is a floor and this net is an upper bound.`
+    : null;
+
+const netGap: string | null = netProducible
+  ? null
+  : 'Net is gross less gateway cost less refunds, and at least one of those three was not produced. A net computed over a missing component would understate or overstate by an unknown amount, so none is shown.';
+
+// ─── Money, formatted ───────────────────────────────────────────────────────
+
+/**
+ * A BigInt of paise, as rupees.
+ *
+ * formatINR() in src/db/fees.ts takes a Number, so the range is checked first
+ * rather than trusted. Beyond the safe integer a rupee figure would start
+ * losing its last digits silently, and a total that is wrong in the last three
+ * places is worse than one printed in paise.
+ */
+function money(paise: bigint | null): string | null {
+  if (paise == null) return null;
+  const abs = paise < 0n ? -paise : paise;
+  if (abs > BigInt(Number.MAX_SAFE_INTEGER)) return `${paise} paise`;
+  return formatINR(Number(paise));
+}
+
+interface Provenance {
+  table: string;
+  column?: string;
+  filter: string;
+}
+
+interface MoneyFigure {
+  label: string;
+  paise: bigint | null;
+  gap: string | null;
+  /** What the figure means, in one sentence. */
+  meaning: string;
+  /** What would make it non-zero. The honest-empty half of the design. */
+  populatedBy: string;
+  source: Provenance;
+  note?: string | null;
+  attention?: boolean;
+}
+
+const MONEY: MoneyFigure[] = [
+  {
+    label: 'Gross received',
+    paise: gross.paise,
+    gap: gross.gap,
+    meaning: 'Money actually taken from payers, before the gateway’s own deduction and before refunds.',
+    populatedBy:
+      'A captured payment. Nothing can be captured until a fee framework is published on /admin/fees, because until then nothing can be priced and no order can be raised.',
+    source: { table: 'payments', column: 'amount_paise', filter: "status = 'captured'" },
+    note: gross.n == null ? null : `${gross.n} captured payment${gross.n === 1 ? '' : 's'}.`,
+  },
+  {
+    label: 'Gateway cost',
+    paise: gatewayCost.paise,
+    gap: gatewayCost.gap,
+    meaning: 'What the payment provider deducted, as the provider itself reported it on each payment.',
+    populatedBy:
+      'A captured payment whose provider returned a fee. No published rate card is held in code: this figure is never derived from a percentage, only summed from what came back.',
+    source: {
+      table: 'payments',
+      column: 'provider_fee_paise + provider_tax_paise',
+      filter: "status = 'captured'",
+    },
+    note:
+      gatewayCost.n == null
+        ? null
+        : gatewayCost.n === 0
+          ? 'Every captured payment carries a reported cost, so this total is complete.'
+          : `${gatewayCost.n} captured payment${gatewayCost.n === 1 ? '' : 's'} carry no reported cost, so this is a floor rather than a total.`,
+  },
+  {
+    label: 'Tax charged',
+    paise: taxCharged.paise,
+    gap: taxCharged.gap,
+    meaning: 'Tax charged to payers on orders that were paid. Read from the order, not recomputed — an issued document keeps its own figure.',
+    populatedBy: 'A paid order carrying tax. Tax is only charged once a rule sets a rate for what is being sold.',
+    source: { table: 'orders', column: 'tax_paise', filter: "status in ('paid', 'fulfilled', 'partially_refunded')" },
+    note: taxCharged.n == null ? null : `${taxCharged.n} paid order${taxCharged.n === 1 ? '' : 's'}.`,
+  },
+  {
+    label: 'Refunded',
+    paise: refunded.paise,
+    gap: refunded.gap,
+    meaning: 'Money returned to payers. Completed refunds only — a requested or processing refund has not left the account.',
+    populatedBy: 'A refund that reached `completed`. Requested and processing refunds are deliberately not counted here.',
+    source: { table: 'refunds', column: 'amount_paise', filter: "status = 'completed'" },
+    note: refunded.n == null ? null : `${refunded.n} completed refund${refunded.n === 1 ? '' : 's'}.`,
+  },
+  {
+    label: 'Net',
+    paise: net,
+    gap: netGap,
+    meaning: 'Gross received, less gateway cost, less refunds. Not a bank balance: money the provider has not yet settled is still counted here.',
+    populatedBy: 'The three figures above. It moves the moment any of them does.',
+    source: {
+      table: 'payments, refunds',
+      filter: 'computed on this page as gross − gateway cost − refunds, in exact integer arithmetic',
+    },
+    note: netCaveat,
+  },
+];
+
+const AT_RISK: MoneyFigure[] = [
+  {
+    label: 'Pending',
+    paise: pending.paise,
+    gap: pending.gap,
+    meaning: 'Money asked for and not received. An order sits here from the moment it is raised until a payment is captured against it.',
+    populatedBy: 'An order that reached `awaiting_payment` — which is every order, briefly.',
+    source: { table: 'orders', column: 'total_paise', filter: "status = 'awaiting_payment'" },
+    note: pending.n == null ? null : `${pending.n} order${pending.n === 1 ? '' : 's'} awaiting payment.`,
+    attention: (pending.n ?? 0) > 0,
+  },
+  {
+    label: 'Failed attempts',
+    paise: failed.paise,
+    gap: failed.gap,
+    meaning: 'Payment attempts that did not complete. No money moved. Kept because a failed attempt is evidence, and a rising count is the first sign of a gateway fault.',
+    populatedBy: 'A declined card, an abandoned UPI collect request, a gateway timeout.',
+    source: { table: 'payments', column: 'amount_paise', filter: "status = 'failed'" },
+    note: failed.n == null ? null : `${failed.n} failed attempt${failed.n === 1 ? '' : 's'}.`,
+    attention: (failed.n ?? 0) > 0,
+  },
+  {
+    label: 'Disputed',
+    paise: disputed.paise,
+    gap: disputed.gap,
+    meaning: 'Money a payer’s bank is trying to reclaim, still open or still defendable. Counted in rupees only, because a dispute raised in another currency is not addable to this.',
+    populatedBy: 'A chargeback or retrieval request imported from the gateway. Every one carries an evidence deadline.',
+    source: {
+      table: 'disputes',
+      column: 'amount_minor',
+      filter: "currency = 'INR' and status in ('open', 'evidence_required', 'evidence_submitted', 'under_review')",
+    },
+    note: disputed.n == null ? null : `${disputed.n} open dispute${disputed.n === 1 ? '' : 's'}.`,
+    attention: (disputed.n ?? 0) > 0,
+  },
+];
+
+const RECONCILIATION: MoneyFigure[] = [
+  {
+    label: 'Unreconciled',
+    paise: unreconciled.paise,
+    gap: unreconciled.gap,
+    meaning: 'Captured payments that no reconciliation run has matched to a gateway transaction. This is the gap where losses hide — money the system believes it took and cannot show arriving.',
+    populatedBy: 'Any captured payment, until a reconciliation run matches it. A payment captured today is unreconciled today.',
+    source: {
+      table: 'payments',
+      column: 'amount_paise',
+      filter: "status = 'captured' and no reconciliation_items row with status = 'matched'",
+    },
+    note: unreconciled.n == null ? null : `${unreconciled.n} captured payment${unreconciled.n === 1 ? '' : 's'} unmatched.`,
+    attention: (unreconciled.n ?? 0) > 0,
+  },
+  {
+    label: 'Settled to the bank',
+    paise: settled.paise,
+    gap: settled.gap,
+    meaning: 'What the provider reports as having reached MMAKF’s bank account. Never equal to gross: the gateway’s fee comes out in between.',
+    populatedBy: 'A settlement batch imported from the provider, carrying its bank reference.',
+    source: { table: 'settlements', column: 'amount_paise', filter: 'settled_at is not null' },
+    note: settled.n == null ? null : `${settled.n} settlement batch${settled.n === 1 ? '' : 'es'}.`,
+  },
+];
+
+// ─── Can this deployment take money at all? ─────────────────────────────────
+//
+// §7 of the money rules: an admin screen may show configured / active /
+// test-or-live and a health check. It may never show a key or a webhook
+// secret. paymentModeReport() also returns the PUBLIC Razorpay key id; it is
+// deliberately not read here. It reveals nothing, and a screen that prints one
+// credential trains everybody who maintains it that printing credentials is
+// what this section does.
+
+const mode = paymentModeReport();
+const gateway = paymentStatusReport();
+const configuredProviders = availableProviders().map((p) => ({ id: p.id, label: p.label }));
+
+// ─── The honest-empty sentence, derived rather than asserted ────────────────
+
+const neverPaid = paymentsEver.n === 0;
+const ledgerReadable = !catalogueError && gross.gap == null;
+
+const headerDescription = !configured
+  ? 'The federation database is not configured on this deployment, so there is nothing to count.'
+  : !nationalReach
+    ? 'Finance figures are national. This account holds finance:read at a narrower scope.'
+    : neverPaid
+      ? 'Every figure on this page is nought, and every nought was counted. No payment has ever been taken through this system.'
+      : 'Gross, cost, tax, refunds and net, each from its own query, with the query attached.';
+---
+
+<AdminShell
+  title="Finance"
+  requires="finance:read"
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin/dashboard') },
+      { name: 'Finance', url: h('/admin/finance') },
+    ],
+    description: headerDescription,
+    secondary: [
+      { label: 'Reconciliation', href: h('/admin/reconciliation') },
+      { label: 'Benchmark register', href: h('/admin/benchmarks') },
+      { label: 'Fee framework', href: h('/admin/fees') },
+    ],
+  }}
+>
+  <Fragment slot="meta">
+    {mismatched.n != null && mismatched.n > 0 && (
+      <span class="meta-chip meta-alarm">{mismatched.n} amount mismatch{mismatched.n === 1 ? '' : 'es'}</span>
+    )}
+    <span class="meta-chip">
+      <Status value={gateway.ready ? 'connected' : 'not_required'} withMeaning={false} size="sm" bare />
+      {gateway.ready ? `Gateway: ${gateway.label}` : 'No payment provider configured'}
+    </span>
+  </Fragment>
+
+  {!nationalReach ? (
+    <p class="note">
+      Finance figures are national and cannot be narrowed. <code>orders</code>,
+      <code>payments</code>, <code>refunds</code> and <code>settlements</code>
+      carry no state, district or dojo column — MMAKF takes money nationally,
+      through one gateway account — so there is no predicate that would restrict
+      these totals to this account&rsquo;s scope. Showing the national figures
+      instead would hand out the federation&rsquo;s whole turnover, so nothing is
+      shown. This is a refusal, not an empty ledger: for a scoped figure to be
+      possible, a money row would first have to record which unit it belongs to.
+    </p>
+  ) : !configured ? (
+    <p class="note">
+      The federation database is not configured on this deployment, so there is
+      no ledger to read. Until <code>DATABASE_URL</code> is set, every figure on
+      this page is unmeasurable — which is a different fact from nought, and is
+      why none is printed.
+    </p>
+  ) : catalogueError ? (
+    <ErrorState
+      title="The finance dashboard could not read the database."
+      safe="Nothing has been changed. This page writes nothing at all — it has no form and no action — so no order, payment, refund or settlement has been touched by this failure."
+      body="The fault is in the server log with the detail this page deliberately does not print. No figure is shown, because a nought here would be indistinguishable from a measurement."
+    />
+  ) : (
+    <>
+      {/* ── What this system has ever done ──────────────────────────────── */}
+      <section class="band" aria-labelledby="state-h">
+        <h2 id="state-h" class="band-h">The state of the money</h2>
+        {neverPaid ? (
+          <p class="band-p">
+            <strong>No payment has ever been taken through this system.</strong>
+            That is a count, not an assumption: <code>payments</code> holds no
+            rows at all. So every figure below is nought, and every nought below
+            was measured. The chain that ends here starts at the fee framework —
+            MMAKF has published no fee rules, so nothing can be priced, so no
+            order can be raised, so no gateway has ever been called. Each figure
+            says what would populate it.
+          </p>
+        ) : paymentsEver.n == null ? (
+          <p class="band-p">
+            Whether any payment has ever been recorded could not be established,
+            so this page will not summarise it. The figures below each report
+            their own state.
+          </p>
+        ) : (
+          <p class="band-p">
+            <code>payments</code> holds {paymentsEver.n} attempt{paymentsEver.n === 1 ? '' : 's'} in
+            all states. The figures below count the ones that mean something
+            different from each other — captured is not authorised, and failed is
+            not refunded.
+          </p>
+        )}
+
+        {mismatched.n != null && mismatched.n > 0 && (
+          <p class="alarm" role="alert">
+            <strong>{mismatched.n} captured payment{mismatched.n === 1 ? '' : 's'} do not match the order they pay.</strong>
+            The server resolves what an order is worth and compares the
+            gateway&rsquo;s amount against it; it never adjusts to match. A
+            mismatch is a fulfilment that should have been blocked, and it is
+            listed item by item on the reconciliation page.
+            <a href={h('/admin/reconciliation')}>Work these →</a>
+          </p>
+        )}
+      </section>
+
+      {/* ── The money ───────────────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="money-h">
+        <h2 id="money-h" class="band-h">Gross, cost, tax, refunds, net</h2>
+        <div class="figs">
+          {MONEY.map((f) => (
+            <div class="fig" class:list={[{ 'fig-void': f.paise == null }]}>
+              <p class="fig-label">{f.label}</p>
+              {/* A measured nought is printed at full contrast. A figure that
+                  was not produced is a dash WITH its reason, and the two are
+                  never allowed to look alike. */}
+              <p class="fig-value">{money(f.paise) ?? '—'}</p>
+              {f.paise == null && <p class="fig-gap">{f.gap}</p>}
+              {f.note && <p class="fig-note">{f.note}</p>}
+              <p class="fig-meaning">{f.meaning}</p>
+              {f.paise === 0n && <p class="fig-populated">Nought because: {f.populatedBy}</p>}
+              <details class="fig-src">
+                <summary>How this was counted</summary>
+                <dl>
+                  <dt>Table</dt><dd><code>{f.source.table}</code></dd>
+                  {f.source.column && (<Fragment><dt>Column</dt><dd><code>{f.source.column}</code></dd></Fragment>)}
+                  <dt>Filter</dt><dd><code>{f.source.filter}</code></dd>
+                </dl>
+              </details>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* ── In flight and at risk ───────────────────────────────────────── */}
+      <section class="band" aria-labelledby="risk-h">
+        <h2 id="risk-h" class="band-h">Pending, failed, disputed</h2>
+        <div class="figs">
+          {AT_RISK.map((f) => (
+            <div class="fig" class:list={[{ 'fig-void': f.paise == null, 'fig-attention': f.attention }]}>
+              <p class="fig-label">{f.label}</p>
+              <p class="fig-value">{money(f.paise) ?? '—'}</p>
+              {f.paise == null && <p class="fig-gap">{f.gap}</p>}
+              {f.note && <p class="fig-note">{f.note}</p>}
+              <p class="fig-meaning">{f.meaning}</p>
+              {f.paise === 0n && <p class="fig-populated">Nought because: {f.populatedBy}</p>}
+              <details class="fig-src">
+                <summary>How this was counted</summary>
+                <dl>
+                  <dt>Table</dt><dd><code>{f.source.table}</code></dd>
+                  {f.source.column && (<Fragment><dt>Column</dt><dd><code>{f.source.column}</code></dd></Fragment>)}
+                  <dt>Filter</dt><dd><code>{f.source.filter}</code></dd>
+                </dl>
+              </details>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* ── Reconciled and settled ──────────────────────────────────────── */}
+      <section class="band" aria-labelledby="recon-h">
+        <h2 id="recon-h" class="band-h">Unreconciled and settled</h2>
+        <p class="band-p">
+          Gross is what this system believes it charged. Settled is what the
+          provider says reached the bank. Reconciliation is the act of showing
+          that the second follows from the first, item by item — and the
+          difference between them is where money goes missing without anybody
+          noticing.
+          <a href={h('/admin/reconciliation')}>Open the reconciliation register →</a>
+        </p>
+        <div class="figs">
+          {RECONCILIATION.map((f) => (
+            <div class="fig" class:list={[{ 'fig-void': f.paise == null, 'fig-attention': f.attention }]}>
+              <p class="fig-label">{f.label}</p>
+              <p class="fig-value">{money(f.paise) ?? '—'}</p>
+              {f.paise == null && <p class="fig-gap">{f.gap}</p>}
+              {f.note && <p class="fig-note">{f.note}</p>}
+              <p class="fig-meaning">{f.meaning}</p>
+              {f.paise === 0n && <p class="fig-populated">Nought because: {f.populatedBy}</p>}
+              <details class="fig-src">
+                <summary>How this was counted</summary>
+                <dl>
+                  <dt>Table</dt><dd><code>{f.source.table}</code></dd>
+                  {f.source.column && (<Fragment><dt>Column</dt><dd><code>{f.source.column}</code></dd></Fragment>)}
+                  <dt>Filter</dt><dd><code>{f.source.filter}</code></dd>
+                </dl>
+              </details>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* ── Counts, through the shared card ─────────────────────────────── */}
+      <section class="band" aria-labelledby="counts-h">
+        <h2 id="counts-h" class="band-h">The counts behind the amounts</h2>
+        <p class="band-p">
+          An amount and a count fail differently, and a treasurer needs both: one
+          refund of a large sum and forty small ones are the same figure above
+          and very different facts.
+        </p>
+        <div class="cards">
+          <StatCard
+            label="Captured payments"
+            value={gross.n}
+            unavailable={gross.gap}
+            source={{ table: 'payments', filter: "status = 'captured'" }}
+            note="The only payment status that means money moved. An authorised payment is a hold and is not counted."
+          />
+          <StatCard
+            label="Orders awaiting payment"
+            value={pending.n}
+            unavailable={pending.gap}
+            tone="attention"
+            source={{ table: 'orders', filter: "status = 'awaiting_payment'" }}
+            href={h('/admin/reconciliation')}
+            hrefLabel="See what is stale"
+          />
+          <StatCard
+            label="Failed attempts"
+            value={failed.n}
+            unavailable={failed.gap}
+            tone="attention"
+            source={{ table: 'payments', filter: "status = 'failed'" }}
+            note="No money moved on any of these. They are kept because a failed attempt is evidence."
+          />
+          <StatCard
+            label="Open disputes"
+            value={disputed.n}
+            unavailable={disputed.gap}
+            tone="attention"
+            source={{ table: 'disputes', filter: "status in ('open', 'evidence_required', 'evidence_submitted', 'under_review')" }}
+            note="Every one carries an evidence deadline. A deadline that passes is money lost by default rather than by decision."
+          />
+          <StatCard
+            label="Unmatched captured payments"
+            value={unreconciled.n}
+            unavailable={unreconciled.gap}
+            tone="attention"
+            source={{ table: 'payments', filter: "captured, with no reconciliation_items row at status 'matched'" }}
+            href={h('/admin/reconciliation')}
+            hrefLabel="Reconcile"
+          />
+          <StatCard
+            label="Amount mismatches"
+            value={mismatched.n}
+            unavailable={mismatched.gap}
+            tone="attention"
+            source={{ table: 'payments joined to orders', filter: "status = 'captured' and amount_paise <> orders.total_paise" }}
+            note="Each one is a payment the server should have refused to fulfil. This figure should never leave nought."
+          />
+        </div>
+      </section>
+
+      {/* ── What the money machinery is configured to do ────────────────── */}
+      <section class="band" aria-labelledby="config-h">
+        <h2 id="config-h" class="band-h">Can this deployment take money?</h2>
+        <p class="band-p">
+          Configuration, not a figure. Nothing below is read from the database
+          and nothing below is a credential: this section reports whether a key
+          is present, which mode it proves, and what that permits — never a key,
+          never a webhook secret, and never a masked version of either, because
+          a masked secret still confirms its length.
+        </p>
+
+        <dl class="conf">
+          <dt>Payment provider</dt>
+          <dd>
+            {gateway.ready ? (
+              <>
+                <Status value="connected" withMeaning={false} size="sm" />
+                {gateway.label}
+                {gateway.automatic
+                  ? ' — confirmation is automatic, from the provider’s own record.'
+                  : ' — confirmation needs a person in the federation office. No surface may imply payment is instant.'}
+              </>
+            ) : (
+              <>
+                <Status value="not_required" withMeaning={false} size="sm" />
+                No provider is configured, so no payment can be taken through this
+                deployment at all. That is today&rsquo;s honest state and not a fault.
+              </>
+            )}
+          </dd>
+
+          <dt>Providers with credentials</dt>
+          <dd>
+            {configuredProviders.length === 0
+              ? 'None.'
+              : configuredProviders.map((p) => p.label).join(', ')}
+          </dd>
+
+          <dt>Razorpay mode</dt>
+          <dd>
+            {mode.configured ? (
+              <>
+                <Status value={mode.ok ? 'connected' : 'error'} withMeaning={false} size="sm" />
+                {mode.mode ? `${mode.mode} mode.` : 'Refused.'} {mode.message}
+              </>
+            ) : (
+              <>Not configured. {mode.message}</>
+            )}
+          </dd>
+
+          <dt>Gateway cost rates configured</dt>
+          <dd>
+            {costRates.n == null ? (
+              <>Not established. {costRates.gap}</>
+            ) : costRates.n === 0 ? (
+              <>
+                None in force today. No published gateway rate is held anywhere in
+                this codebase — a rate is a row in <code>gateway_cost_rates</code>
+                with the source it was taken from, or it does not exist. Until one
+                is recorded, gateway cost can only be reported as what the provider
+                actually deducted, which is the figure above.
+              </>
+            ) : (
+              <>
+                {costRates.n} rate{costRates.n === 1 ? '' : 's'} in force today, each
+                carrying the source it was taken from. What the gateway charges MMAKF
+                is held separately from what a payer is charged, and passing it on is
+                a decision recorded against a named policy — never a default.
+              </>
+            )}
+          </dd>
+        </dl>
+      </section>
+
+      {!ledgerReadable && (
+        <p class="note">
+          Some figures on this page could not be produced. Each says so where it
+          stands, with the reason. None of them has been replaced by a nought.
+        </p>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .band { margin: 0 0 40px; }
+  .band + .band { padding-top: 34px; border-top: 1px solid var(--border); }
+  .band-h {
+    font-family: var(--font-display); font-size: 1.15rem;
+    margin: 0 0 12px; letter-spacing: .01em;
+  }
+  .band-p { color: var(--muted); line-height: 1.75; max-width: 68ch; margin: 0 0 18px; }
+  .band-p a { display: inline-block; margin-top: 6px; }
+
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 68ch;
+  }
+  code { font-family: var(--font-accent, monospace); font-size: .88em; }
+
+  .alarm {
+    padding: 16px 20px; margin: 18px 0 0; max-width: 72ch;
+    border: 1px solid var(--red); border-left-width: 3px;
+    background: var(--card); color: var(--muted); line-height: 1.75;
+  }
+  .alarm strong { color: var(--red-2); display: block; margin-bottom: 6px; }
+  .alarm a { display: inline-block; margin-top: 8px; }
+
+  /* A money figure is not a StatCard: StatCard renders an integer count through
+     Intl and has no notion of a currency, so handed a number of paise it would
+     print the paise, grouped as a count, with no currency mark and no decimal
+     point — a figure a hundred times the size of the one the reader wanted.
+     Same three-state discipline as StatCard, different unit: a measured nought
+     at full contrast, a measurement, or a dash carrying its reason. */
+  .figs {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .fig {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px 18px 14px;
+    display: flex; flex-direction: column; min-width: 0;
+  }
+  .fig-void { background: var(--bg-2); }
+  .fig-attention { border-left: 3px solid var(--red); }
+
+  .fig-label {
+    font-family: var(--font-display); font-size: .62rem;
+    letter-spacing: .2em; text-transform: uppercase;
+    color: var(--muted); line-height: 1.5; margin: 0;
+  }
+  .fig-value {
+    font-family: var(--font-display); font-size: 1.9rem; font-weight: 600;
+    line-height: 1.15; margin: 8px 0 0; color: var(--white);
+    overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+  }
+  .fig-void .fig-value { color: var(--muted); font-size: 1.5rem; }
+  .fig-attention .fig-value { color: var(--red-2); }
+
+  .fig-gap { margin: 8px 0 0; font-size: .78rem; line-height: 1.6; color: var(--off-white); }
+  .fig-note { margin: 8px 0 0; font-size: .78rem; line-height: 1.6; color: var(--off-white); }
+  .fig-meaning { margin: 8px 0 0; font-size: .78rem; line-height: 1.65; color: var(--muted); }
+  .fig-populated { margin: 8px 0 0; font-size: .76rem; line-height: 1.65; color: var(--muted); font-style: italic; }
+
+  .fig-src { margin-top: auto; padding-top: 10px; }
+  .fig-src summary {
+    display: flex; align-items: center; min-height: 44px;
+    font-family: var(--font-display); font-size: .6rem;
+    letter-spacing: .16em; text-transform: uppercase;
+    color: var(--muted); cursor: pointer;
+  }
+  .fig-src summary:hover { color: var(--gold-2); }
+  .fig-src dl {
+    display: grid; grid-template-columns: auto 1fr; gap: 3px 12px;
+    font-size: .74rem; line-height: 1.55; padding-bottom: 6px; margin: 0;
+  }
+  .fig-src dt {
+    font-family: var(--font-display); font-size: .58rem;
+    letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); padding-top: 2px;
+  }
+  .fig-src dd { color: var(--off-white); min-width: 0; margin: 0; }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px;
+  }
+
+  .conf {
+    display: grid; grid-template-columns: minmax(0, 16rem) minmax(0, 1fr);
+    gap: 10px 24px; margin: 0; max-width: 78ch;
+  }
+  .conf dt {
+    font-family: var(--font-display); font-size: .68rem;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+    padding-top: 3px;
+  }
+  .conf dd { margin: 0; color: var(--off-white); line-height: 1.7; font-size: .9rem; }
+
+  .meta-chip {
+    font-size: var(--text-xs); color: var(--muted);
+    border: 1px solid var(--border); border-radius: var(--radius-pill);
+    padding: 3px 10px; line-height: 1.5;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .meta-alarm { border-color: var(--red); color: var(--red-2); }
+
+  @media (max-width: 700px) {
+    .conf { grid-template-columns: 1fr; gap: 4px 0; }
+    .conf dd { margin-bottom: 14px; }
+  }
+</style>

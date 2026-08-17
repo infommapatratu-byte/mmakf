@@ -49,9 +49,31 @@ export const broadcastStatus = pgEnum('broadcast_status', [
   'archived', 'cancelled', 'missing',
 ]);
 
+/**
+ * Whether MMAKF may use a piece of media, and how.
+ *
+ * EXTENDED BY 0031 (technical library), additively. The original six values
+ * answered "have we cleared this?" but could not express the two distinctions
+ * the technical directive treats as critical:
+ *
+ *   'embed_allowed' vs 'link_only' — the difference between a lawful provider
+ *   embed and rehosting somebody's instructional video. Publicly viewable is
+ *   not the same as ours to serve.
+ *
+ *   'unknown' vs 'not_cleared' — the difference between "nobody has looked at
+ *   this yet" and "somebody looked, and the answer was no". Collapsing them
+ *   loses the review queue's entire reason to exist, and lets an unexamined
+ *   asset be mistaken for a rejected one (or worse, the reverse).
+ *
+ * 'do_not_use' is terminal: a rights holder has refused, and no reviewer should
+ * have to re-litigate it.
+ *
+ * Nothing was renamed or removed. Existing rows and existing code keep working.
+ */
 export const rightsStatus = pgEnum('rights_status', [
   'cleared', 'federation_owned', 'licensed', 'permission_pending',
   'restricted', 'not_cleared',
+  'embed_allowed', 'link_only', 'unknown', 'do_not_use',
 ]);
 
 // ─── Authorised media sources ───────────────────────────────────────────────

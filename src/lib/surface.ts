@@ -334,6 +334,25 @@ export const ADMIN_GROUPS: AdminGroup[] = [
     ],
   },
   {
+    label: 'Finance',
+    modules: [
+      // What the federation took, what it cost to take it, and what is still
+      // outstanding. Gated on finance:read, which is a different authority from
+      // reading the pricing rules above: a treasurer reads the money and does
+      // not set the prices, and whoever sets the prices does not need the
+      // turnover.
+      { href: '/admin/finance', label: 'Money dashboard', action: 'finance:read' },
+      { href: '/admin/reconciliation', label: 'Reconciliation', action: 'finance:read' },
+      // OTHER ORGANISATIONS' FEES, and gated on its own action rather than on
+      // finance:* — note who does not hold it: every institution role. A client
+      // reading the market evidence behind their own quotation would be reading
+      // MMAKF's pricing preparation. The label says "other federations" in the
+      // menu itself, because a menu entry reading "Benchmarks" beside "Fee
+      // framework" invites exactly the misreading the register is built to stop.
+      { href: '/admin/benchmarks', label: 'Other federations’ fees', action: 'benchmark:read' },
+    ],
+  },
+  {
     label: 'People',
     modules: [
       { href: '/admin/coaches', label: 'Coaches', action: 'coach:read' },
@@ -347,6 +366,12 @@ export const ADMIN_GROUPS: AdminGroup[] = [
     modules: [
       { href: '/admin/competition', label: 'Competitions', action: 'competition:read' },
       { href: '/admin/grading', label: 'Grading', action: 'grading:read' },
+      // The technical knowledge library and its review queue. Gated on
+      // 'technical:read' rather than 'content:read', because deciding that a
+      // third party's video meets MMAKF's technical standard — and that MMAKF
+      // may lawfully show it — is not the same authority as editing federation
+      // copy. A media officer holds content:* and does not appear here.
+      { href: '/admin/technical-library', label: 'Technical library', action: 'technical:read' },
     ],
   },
   {
@@ -368,6 +393,12 @@ export const ADMIN_GROUPS: AdminGroup[] = [
   {
     label: 'Assurance',
     modules: [
+      // The source register and the federation's own instruments, in one place
+      // and drawn as two registers. Gated on 'policy:read' rather than on
+      // 'content:read': editorial authority over the website is not authority
+      // over what MMAKF's rules are, and folding the two would put the policy
+      // register in front of everybody who can edit a page.
+      { href: '/admin/policy', label: 'Policy Centre', action: 'policy:read' },
       { href: '/admin/cases', label: 'Cases', action: 'safeguarding:read' },
       // RELABELLED. This entry said "Audit trail" and pointed at the two-person
       // approval queue, which reads no audit event at all — so anybody looking

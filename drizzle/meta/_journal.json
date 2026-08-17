@@ -85,6 +85,97 @@
       "when": 1786545049236,
       "tag": "0012_data_api_lockdown",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786545050236,
+      "tag": "0013_register_source_ref",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1786545051236,
+      "tag": "0014_fee_benchmarks",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1786545052236,
+      "tag": "0015_data_api_lockdown",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1786545053236,
+      "tag": "0016_tax_and_currency",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1786545054236,
+      "tag": "0017_data_api_lockdown",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1786545055236,
+      "tag": "0018_discounts_and_concessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786545056236,
+      "tag": "0019_reconciliation_disputes_routing",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1786545057236,
+      "tag": "0020_data_api_lockdown",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1786545058236,
+      "tag": "0021_fee_catalogue",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1786545059236,
+      "tag": "0022_data_api_lockdown",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1786545060236,
+      "tag": "0023_entitlements",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1786545061236,
+      "tag": "0024_data_api_lockdown",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1786940326788,
+      "tag": "0024_marketplace_platform",
+      "breakpoints": true
     }
   ]
 }

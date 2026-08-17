@@ -1,0 +1,268 @@
+---
+/**
+ * The kumite library index. §13 through §20.
+ *
+ * THE PAGE IS BUILT AROUND ONE SEPARATION and it is the reason §13 exists:
+ * traditional kumite development and sport kumite are different practices with
+ * different objectives, and a page that interleaved them would teach a student
+ * to fight for points in the dojo and to spar aimlessly in a match. So the
+ * formal systems are split into two clearly labelled sections, and the
+ * competition material carries a standing warning that rules change.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { systemsInWorld, conceptsInCategory, COMBINATION_FAMILIES, libraryStats } from '@/data/shotokan';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const traditional = systemsInWorld('traditional');
+const sport = systemsInWorld('sport');
+const stats = libraryStats();
+
+const SECTIONS = [
+  {
+    key: 'fundamental',
+    title: 'Fundamentals',
+    blurb: 'The things that decide an exchange before any technique is chosen: the guard, the distance, the awareness that continues after a technique lands, and deception.',
+  },
+  {
+    key: 'footwork',
+    title: 'Footwork',
+    blurb: 'Everything a fighter can do is bounded by where the feet can put the body, and how fast.',
+  },
+  {
+    key: 'initiative',
+    title: 'Sen — the three initiatives',
+    blurb: 'Who is deciding, and when. Block then counter; counter into the attack as it forms; or meet it exactly as it launches.',
+  },
+  {
+    key: 'defensive',
+    title: 'Defence',
+    blurb: 'The six answers to an attack, treated as a set of choices rather than as a single reflex.',
+  },
+  {
+    key: 'competition',
+    title: 'Competition',
+    blurb: 'Sport-specific material: managing a lead, the edge of the area, and reading an opponent inside a bout.',
+  },
+] as const;
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'CollectionPage',
+  name: 'Shotokan kumite — partner practice, tactics and competition',
+  url: canonicalFor(surface, '/shotokan/kumite'),
+  description:
+    'The Shotokan kumite library: the formal partner exercises from five-step sparring to free fighting, the fundamentals of distance and timing, the three initiatives, defensive selection, and sport-kumite tactics.',
+  isPartOf: { '@type': 'WebSite', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
+};
+---
+
+<Base
+  title="Shotokan kumite — partner practice, tactics and competition — MMAKF"
+  description="The Shotokan kumite library: gohon, sanbon, kihon ippon, jiyu ippon and free sparring; distance, timing, kamae and zanshin; go-no-sen, sen-no-sen and tai-no-sen; defensive selection and competition tactics."
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Kumite', url: '/shotokan/kumite' },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow="Kumite 組手"
+    title={`Practice with <em class="r">another person</em>.`}
+    lead="From the first five-step exercise to the tactics of a refereed bout. Two different practices, kept apart on purpose."
+    pills={[`${stats.kumiteSystems} formal systems`, `${stats.kumiteConcepts} principles`, `${stats.combinationFamilies} combination families`]}
+  />
+
+  {/* ═══════ THE SEPARATION ═══════ */}
+  <section>
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">Why this page is in two halves</div>
+          <h2 class="display-2" style="margin-top:16px">Development and <em class="r">sport</em> are not the same practice.</h2>
+          <div class="rule"></div>
+          <p class="body-txt">
+            Traditional kumite trains a decisive technique against a committed attack: the exercise is
+            structured so a student can learn distance and timing without having to survive at the same time.
+            Sport kumite trains a scoring technique inside a rule set, against an opponent who is also
+            managing a clock, an area with edges, and a scoreboard.
+          </p>
+          <p class="body-txt">
+            Both are karate. They optimise for different things, and a student taught one as though it were
+            the other learns habits that cost them in the other setting &mdash; which is why the sections
+            below are labelled and never interleaved.
+          </p>
+        </div>
+
+        <aside class="fade panel" aria-labelledby="rules-change">
+          <div class="eyebrow">About the competition material</div>
+          <h3 id="rules-change" class="panel-h">Rules change. Principles do not.</h3>
+          <p class="panel-p">
+            Nothing on these pages states a competition rule &mdash; not a scoring value, not a bout length,
+            not a contact level. Those change, they differ between rule sets, and a library that printed one
+            would be teaching an out-of-date rule as permanent truth within a season.
+          </p>
+          <p class="panel-p">
+            What is written is the <strong>tactical principle</strong>, which survives a rule change. For the
+            rules actually in force, the federation&rsquo;s versioned regulations are authoritative.
+          </p>
+          <a class="btn btn-ghost" href={h('/regulations')}>Competition regulations &rarr;</a>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ TRADITIONAL SYSTEMS ═══════ */}
+  <section class="bg2" id="traditional">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Traditional development &mdash; {traditional.length} systems</div>
+        <h2 class="display-2">The formal exercises</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Each removes something from the problem so the student can work on what is left. They are listed in
+          the order the difficulty increases, which is a fact about the exercises themselves and not a
+          statement about any grade.
+        </p>
+      </div>
+      <div class="grid grid-3">
+        {traditional.map((s) => (
+          <a class="card hoverable fade" href={h(`/shotokan/kumite/${s.slug}`)}>
+            <div class="kata-card-top">
+              <span class="kata-kanji" lang="ja">{s.kanji ?? ''}</span>
+            </div>
+            <div class="card-title" style="font-size:1.05rem">{s.name}</div>
+            <div class="kata-meaning">{s.english}</div>
+            <div class="card-body">{s.summary.split('. ')[0]}.</div>
+            <div class="kata-card-foot">
+              <span class="text-muted">{s.structure.length} steps</span>
+              <span class="text-gold">Read &rarr;</span>
+            </div>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ SPORT ═══════ */}
+  <section id="sport">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Sport kumite</div>
+        <h2 class="display-2">Competition</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          A different practice with the same technical foundation. Everything in this section depends on a
+          rule set, and says so.
+        </p>
+      </div>
+      <div class="grid grid-3">
+        {sport.map((s) => (
+          <a class="card hoverable fade" href={h(`/shotokan/kumite/${s.slug}`)}>
+            <div class="kata-card-top">
+              <span class="kata-kanji" lang="ja">{s.kanji ?? ''}</span>
+              <span class="pill">Rules-dependent</span>
+            </div>
+            <div class="card-title" style="font-size:1.05rem">{s.name}</div>
+            <div class="kata-meaning">{s.english}</div>
+            <div class="card-body">{s.summary.split('. ')[0]}.</div>
+            <div class="kata-card-foot"><span class="text-gold">Read &rarr;</span></div>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ PRINCIPLES BY CATEGORY ═══════ */}
+  {SECTIONS.map((sec, i) => {
+    const items = conceptsInCategory(sec.key as any);
+    return items.length === 0 ? null : (
+      <section class={i % 2 === 0 ? 'bg2' : ''} id={sec.key}>
+        <div class="container">
+          <div class="section-head fade">
+            <div class="eyebrow">{items.length} {items.length === 1 ? 'entry' : 'entries'}</div>
+            <h2 class="display-2">{sec.title}</h2>
+            <div class="rule"></div>
+            <p class="lead">{sec.blurb}</p>
+          </div>
+          <div class="grid grid-3">
+            {items.map((c) => (
+              <a class="card hoverable fade" href={h(`/shotokan/kumite/${c.slug}`)}>
+                <div class="kata-card-top">
+                  <span class="kata-kanji" lang="ja">{c.kanji ?? ''}</span>
+                  {c.rulesDependent && <span class="pill">Rules-dependent</span>}
+                </div>
+                <div class="card-title" style="font-size:1.05rem">{c.name}</div>
+                <div class="kata-meaning">{c.english}</div>
+                <div class="card-body">{c.summary.split('. ')[0]}.</div>
+                <div class="kata-card-foot"><span class="text-gold">Read &rarr;</span></div>
+              </a>
+            ))}
+          </div>
+        </div>
+      </section>
+    );
+  })}
+
+  {/* ═══════ COMBINATION FAMILIES ═══════ */}
+  <section id="combinations">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">{COMBINATION_FAMILIES.length} families</div>
+        <h2 class="display-2">Combinations, as <em class="r">shapes</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          A combination is not two techniques thrown quickly. It is one technique that makes the second one
+          possible &mdash; and every one of them has an answer, which is written here too.
+        </p>
+      </div>
+
+      <div class="panel fade" style="margin-bottom:24px;max-width:74ch">
+        <div class="eyebrow">A necessary caveat</div>
+        <p class="panel-p">
+          These are <strong>conceptual families</strong>, described by what they do and why they work. They
+          are <strong>not MMAKF competition doctrine</strong>, they are not numbered, and none is attached to
+          a grade. Federation-approved combinations are curriculum data entered by the technical committee,
+          and none has been published.
+        </p>
+      </div>
+
+      <div class="grid grid-2">
+        {COMBINATION_FAMILIES.map((f) => (
+          <div class="card fade">
+            <div class="card-eyebrow">
+              {f.world === 'both' ? 'Traditional and sport' : f.world === 'sport' ? 'Sport' : 'Traditional'}
+            </div>
+            <div class="card-title" style="font-size:1rem">{f.name}</div>
+            <div class="card-body" style="font-family:var(--mono,monospace);font-size:.85rem">
+              {f.shape.join('  →  ')}
+            </div>
+            <div class="card-body">
+              <p style="margin:0 0 10px"><strong>Purpose.</strong> {f.purpose}</p>
+              <p style="margin:0 0 10px"><strong>Why it works.</strong> {f.why}</p>
+              <p style="margin:0"><strong>How it is answered.</strong> {f.countered}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ ELSEWHERE ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="flex flex-wrap gap-3">
+        <a class="btn btn-ghost" href={h('/shotokan/kihon')}>Kihon &mdash; the technique library</a>
+        <a class="btn btn-ghost" href={h('/kata')}>The kata library</a>
+        <a class="btn btn-ghost" href={h('/shotokan/terminology')}>Terminology</a>
+        <a class="btn btn-ghost" href={h('/shotokan/videos')}>Video source register</a>
+      </div>
+    </div>
+  </section>
+</Base>

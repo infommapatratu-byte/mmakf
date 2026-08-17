@@ -101,9 +101,28 @@ No React, no client framework.
 | `src/db/federation.ts` → `writeAudit()` | Audit. Actor, old, new, reason, authority. |
 | `src/db/orders.ts` → `confirmPayment()` | Money. Only a verified capture marks an order paid. |
 
+**Two ladders that must never be joined** (migration 0025). `state_units` /
+`district_units` are the register of **chartered MMAKF bodies**. `countries` /
+`admin_areas` are **civil geography** — where places are, whether or not MMAKF
+has any presence there. There is no foreign key between them in either
+direction, and `tests/geography.test.ts` asserts that structurally. Join them and
+the register loses the ability to record a member living in a state the
+federation has not yet chartered — which is every state it is trying to expand
+into. Which unit *administers* an area is a lookup somebody maintains, not an
+equality.
+
 **Invariants that are load-bearing:**
 - Rank history is append-only; current rank is *derived*. A partial unique index enforces at most
   one active rank per person per kind, even against a raw INSERT.
+- **Being a parent is not a permission.** A guardianship starts `asserted` and
+  confers nothing; verified, it still confers nothing until a capability is
+  granted one at a time in `guardian_authorizations`. `guardianCan()` is the only
+  function that answers "may this person do this for that person", and
+  `view_medical` / `view_safeguarding` are gated twice — the office that attaches
+  a parent to a child cannot also hand over the safeguarding file.
+- **Consent is a record, not a flag.** `consent_records` is append-only and
+  carries the policy *version*; a withdrawal is a new row. Only that shape can
+  answer "was consent in force when that photograph was taken?"
 - Money is integer paise everywhere. Never a float.
 - Results and certificates lock. Corrections create new versions; nothing is edited in place.
 - Everything is versioned — syllabus, ranking rulesets, documents — so a 2026 record keeps the

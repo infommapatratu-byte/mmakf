@@ -187,6 +187,7 @@ if (authed) {
               <div><label class="input-label" for="fed-contact-phone">Phone</label><input class="input" id="fed-contact-phone" name="contact.phone" value={data!.federation.contact.phone} /></div>
               <div style="grid-column:1/-1"><label class="input-label" for="fed-contact-address">Address</label><input class="input" id="fed-contact-address" name="contact.address" value={data!.federation.contact.address} /></div>
               <div style="grid-column:1/-1"><label class="input-label" for="fed-contact-hours">Office hours</label><input class="input" id="fed-contact-hours" name="contact.hours" value={data!.federation.contact.hours} /></div>
+              <div style="grid-column:1/-1"><label class="input-label" for="fed-contact-hours-sunday">Sunday class timings</label><input class="input" id="fed-contact-hours-sunday" name="contact.hoursSunday" value={data!.federation.contact.hoursSunday ?? ''} /></div>
             </div>
             <button type="submit" class="btn btn-primary" style="margin-top:18px">Save Profile</button>
           </form>
@@ -377,9 +378,10 @@ if (authed) {
             {n:'state',l:'State'},{n:'unit',l:'Unit name',full:true},{n:'hq',l:'Headquarters'},{n:'districts',l:'District units',type:'number'},{n:'status',l:'Status (Active/Provisional/Forming)'},{n:'since',l:'Since'}
           ]} />
 
-        <ListPanel id="branches" title="Branch Network" subtitle="Centres listed on the /affiliation page." apiKey="branches"
+        <ListPanel id="branches" title="Branch Network" subtitle="Centres on /affiliation and /network. Timings are each centre's own — left blank, the centre is published as not having filed them. The Hombu's blank fields read through to the federation's own hours above." apiKey="branches"
           rows={data!.branches} fields={[
-            {n:'name',l:'Centre name',full:true},{n:'city',l:'City'},{n:'district',l:'District'},{n:'incharge',l:'In-charge'},{n:'status',l:'Status'}
+            {n:'name',l:'Centre name',full:true},{n:'city',l:'City'},{n:'district',l:'District'},{n:'incharge',l:'In-charge'},{n:'status',l:'Status'},
+            {n:'hours',l:'Class timings (this centre)',full:true},{n:'hoursSunday',l:'Sunday timings (this centre)',full:true}
           ]} />
 
         <ListPanel id="products" title="Shop Products" subtitle="Equipment & merchandise." apiKey="products"

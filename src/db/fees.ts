@@ -242,6 +242,68 @@ export function matchConditions(conditions: unknown, inputs: FeeInputs): Conditi
 
 // ─── Computation ────────────────────────────────────────────────────────────
 
+// ─── Reductions ─────────────────────────────────────────────────────────────
+//
+// A REDUCTION is a discount or a concession, resolved by src/db/discounts.ts
+// and applied HERE so it becomes an explained line on the quote rather than a
+// mysterious subtraction from a total. "Why is this ₹4,20,000 and not
+// ₹4,80,000?" has to be answerable from the record, and a total that arrives
+// pre-discounted from somewhere else cannot answer it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE SECURITY PROPERTY, AND WHY IT IS A SYMBOL
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A CLIENT MAY SUPPLY A DISCOUNT CODE. A CLIENT MAY NEVER SUPPLY AN AMOUNT.
+//
+// The obvious way to enforce that is discipline: only ever build a Reduction
+// from database rows. Discipline is a promise. So a resolved Reduction must
+// carry RESOLVED_BY_SERVER — a module-private symbol — and computeFee() refuses
+// any that does not. JSON cannot carry a symbol, `structuredClone` does not
+// copy one and no request body can forge one, so a reduction that reached this
+// function from outside the process is rejected by construction rather than by
+// remembering to check. src/db/discounts.ts stamps them in exactly one place.
+//
+// Refused rather than ignored, deliberately: a caller that assembled a
+// reduction by hand has a bug, and silently dropping it would show them a full
+// price with no explanation of the discount that vanished.
+
+export const RESOLVED_BY_SERVER = Symbol.for('mmakf.fee.reduction.resolved');
+
+export type ReductionStage = 'before_tax' | 'after_tax';
+export type ReductionBasis = 'fixed_amount' | 'percentage';
+export type ReductionSource = 'discount' | 'concession';
+
+export interface Reduction {
+  /** Set by src/db/discounts.ts and nothing else. See the note above. */
+  readonly [RESOLVED_BY_SERVER]?: true;
+  source: ReductionSource;
+  /** The RULE or POLICY code — never the redeemed token, which is a secret. */
+  sourceCode: string;
+  label: string;
+  stage: ReductionStage;
+  basis: ReductionBasis;
+  /** A POSITIVE magnitude in paise, for `fixed_amount`. */
+  amountMinor?: number | null;
+  /** Parts-per-million of the running total, for `percentage`. */
+  percentPpm?: number | null;
+  maxReductionMinor?: number | null;
+  /**
+   * A floor. Below this running subtotal the reduction does not apply.
+   *
+   * Checked HERE rather than in the resolver because the resolver has no
+   * subtotal: it runs before the framework has priced anything. A reduction
+   * held back this way is recorded in `Computation.skipped`, so the quotation
+   * can still say why the code the customer typed produced nothing.
+   */
+  minSubtotalMinor?: number | null;
+  /** The rule that matched, in words, for the "why this amount?" screen. */
+  because: string;
+  requiresApproval?: boolean;
+  discountCodeId?: number | null;
+  concessionApplicationId?: number | null;
+}
+
 export interface ComputedLine {
   ruleId: number | null;
   ruleCode: string | null;
@@ -254,6 +316,11 @@ export interface ComputedLine {
   runningTotalMinor: number;
   because: string | null;
   requiresApproval: boolean;
+  /** Which model produced this line, so a marketing report can exclude hardship. */
+  source: 'fee_rule' | 'discount' | 'concession';
+  reductionStage: ReductionStage | null;
+  discountCodeId: number | null;
+  concessionApplicationId: number | null;
 }
 
 export interface Computation {
@@ -264,6 +331,15 @@ export interface Computation {
   lines: ComputedLine[];
   subtotalMinor: number;
   adjustmentMinor: number;
+  /**
+   * The two halves of `adjustmentMinor`, kept apart. Both NEGATIVE.
+   *
+   * A campaign report needs to know what discounts cost the federation, and it
+   * must not be able to find that number by reading a figure that has hardship
+   * concessions inside it.
+   */
+  discountMinor: number;
+  concessionMinor: number;
   taxMinor: number;
   totalMinor: number;
   /** True when nothing priced it. The caller must then show no figure at all. */
@@ -286,7 +362,8 @@ export interface Computation {
 export async function computeFee(
   db: DB,
   frameworkId: number,
-  inputs: FeeInputs
+  inputs: FeeInputs,
+  opts: { reductions?: Reduction[] } = {}
 ): Promise<Computation> {
   const [framework] = await db.select().from(s.feeFrameworks)
     .where(eq(s.feeFrameworks.id, frameworkId)).limit(1);
@@ -307,10 +384,134 @@ export async function computeFee(
   const skipped: Computation['skipped'] = [];
   let running = 0;
   let adjustment = 0;
+  let discountTotal = 0;
+  let concessionTotal = 0;
   let tax = 0;
   let needsApproval = false;
 
+  // ── Reductions, validated before a single rule runs ──
+  //
+  // Rejected as a group if any one is unstamped: a caller who hand-built one
+  // has a bug, and applying the rest would quietly produce a total that is
+  // right by arithmetic and wrong by authority.
+  const reductions = opts.reductions ?? [];
+  for (const r of reductions) {
+    if (r[RESOLVED_BY_SERVER] !== true) {
+      throw new FeeError(
+        'unresolved_reduction',
+        `Reduction ${r?.sourceCode ?? '(unnamed)'} did not come from the server's own resolver. ` +
+        'A discount CODE may be supplied by a client; a discount AMOUNT never may. ' +
+        'Resolve it through src/db/discounts.ts.'
+      );
+    }
+  }
+
+  /**
+   * Turn one resolved reduction into a line.
+   *
+   * Two clamps, in this order, and both recorded on the line:
+   *  1. the policy's own cap, if it set one;
+   *  2. the amount outstanding — a reduction can take a total to zero and no
+   *     further. A negative total is a refund the federation never agreed to,
+   *     and it would flow straight into an invoice.
+   */
+  const applyReduction = (r: Reduction) => {
+    if (r.minSubtotalMinor != null && running < r.minSubtotalMinor) {
+      // Not silently dropped. The customer typed a code and is owed a reason.
+      skipped.push({
+        ruleCode: r.sourceCode,
+        because: `the amount is ${formatINR(running)}, below the ${formatINR(r.minSubtotalMinor)} this reduction requires`,
+      });
+      return;
+    }
+
+    let reduction: number;
+    if (r.basis === 'fixed_amount') {
+      // Zero is permitted here and forbidden by the CHECK on discount_rules.
+      // The difference is deliberate: a RULE worth nothing is a configuration
+      // mistake, while a reduction of zero is a real outcome — it is what a
+      // reduction clamped to the amount outstanding looks like when replayed by
+      // reproduce(), and refusing it would make a frozen quotation
+      // unreproducible for having been fully clamped.
+      if (r.amountMinor == null || !Number.isInteger(r.amountMinor) || r.amountMinor < 0) {
+        throw new FeeError('reduction_incomplete', `Reduction ${r.sourceCode} is a fixed amount with no whole, non-negative amount in paise.`);
+      }
+      reduction = r.amountMinor;
+    } else {
+      if (r.percentPpm == null || !Number.isInteger(r.percentPpm) || r.percentPpm <= 0 || r.percentPpm > PPM) {
+        throw new FeeError(
+          'reduction_incomplete',
+          `Reduction ${r.sourceCode} is a percentage and its rate is not between 1 and ${PPM} parts-per-million.`
+        );
+      }
+      // applyFactor(), not a re-implementation. It is the only multiplier in
+      // this codebase and it is where the BigInt and the half-up rounding live.
+      reduction = applyFactor(running, r.percentPpm);
+    }
+
+    const notes: string[] = [r.because].filter(Boolean);
+    if (r.maxReductionMinor != null && reduction > r.maxReductionMinor) {
+      reduction = r.maxReductionMinor;
+      notes.push(`capped at ${formatINR(r.maxReductionMinor)} by the policy`);
+    }
+    const outstanding = Math.max(running, 0);
+    if (reduction > outstanding) {
+      reduction = outstanding;
+      notes.push('limited to the amount outstanding, so the total cannot fall below zero');
+    }
+
+    const amount = -reduction;
+    running += amount;
+    adjustment += amount;
+    if (r.source === 'discount') discountTotal += amount;
+    else concessionTotal += amount;
+    if (r.requiresApproval) needsApproval = true;
+
+    lines.push({
+      ruleId: null,
+      ruleCode: r.sourceCode,
+      // The existing fee_rule_kind vocabulary. A reduction IS a discount line
+      // on the quote; `source` below is what says which model authorised it.
+      kind: 'discount',
+      label: r.label,
+      quantity: null,
+      unitAmountMinor: null,
+      factorPpm: r.basis === 'percentage' ? (r.percentPpm ?? null) : null,
+      amountMinor: amount,
+      runningTotalMinor: running,
+      because: notes.join('; ') || null,
+      requiresApproval: Boolean(r.requiresApproval),
+      source: r.source,
+      reductionStage: r.stage,
+      discountCodeId: r.discountCodeId ?? null,
+      concessionApplicationId: r.concessionApplicationId ?? null,
+    });
+  };
+
+  /**
+   * A reduction only applies to something that was priced.
+   *
+   * `feeLines` counts lines produced by the framework's own rules. If none did,
+   * the request needs a manual quotation and a discount on nothing is not a
+   * discount — it is a negative total waiting to be shown to a school.
+   */
+  let feeLines = 0;
+  let flushedBeforeTax = false;
+  const flush = (stage: ReductionStage) => {
+    if (!feeLines) return;
+    for (const r of reductions) if (r.stage === stage) applyReduction(r);
+  };
+
   for (const rule of rules) {
+    // The before-tax reductions land immediately before the framework's FIRST
+    // tax rule, which is what makes `before_tax` mean what it says: the tax is
+    // then computed on the reduced amount. Sorting by number instead would
+    // require whoever writes a discount policy to know a fee framework's
+    // internal sort orders, which they cannot — the two are versioned apart.
+    if (rule.kind === 'tax' && !flushedBeforeTax) {
+      flushedBeforeTax = true;
+      flush('before_tax');
+    }
     // Service and audience are matched before the JSON conditions because they
     // are the two the federation always discriminates on, and a null means
     // "applies to all" rather than "applies to none".
@@ -374,12 +575,48 @@ export async function computeFee(
       let qty = Math.trunc(n);
       if (rule.minQuantity != null && qty < rule.minQuantity) qty = rule.minQuantity;
       if (rule.maxQuantity != null && qty > rule.maxQuantity) qty = rule.maxQuantity;
+
+      // A NEGATIVE QUANTITY IS A CLIENT-SUPPLIED DISCOUNT WEARING A COUNT'S
+      // CLOTHES. `participants: -400` against a per-participant rule produced a
+      // negative line and took money OFF the total — a price the client chose,
+      // through the one field a client is supposed to be allowed to choose.
+      // Every caller today happens to sanitise (admin/quotes.astro requires
+      // /^\d+$/, applications.ts passes a literal 1), so this was safe by
+      // accident rather than by construction. It is refused here because this
+      // is the module that claims to be the only place a price is decided, and
+      // a guarantee that depends on all six callers remembering is not one.
+      //
+      // A rule whose own minQuantity is negative is a rule-authoring fault and
+      // is named as such, so it cannot be mistaken for bad input.
+      if (qty < 0) {
+        throw new FeeError(
+          'bad_quantity',
+          `Rule ${rule.code} was given a quantity of ${qty} for ${String(key)}. ` +
+          'A quantity is a count and cannot be negative — a negative one would reduce the total, ' +
+          'which is a discount, and a discount is never something an input supplies.'
+        );
+      }
+
       quantity = qty;
       amount = rule.amountMinor * quantity;
+
+      // Past 2^53 the product is no longer the number it claims to be, and the
+      // engine's first promise is REPRODUCIBLE. Returning a silently-inexact
+      // figure is worse than refusing: the integer column would reject it on the
+      // way to a quote_version, but nothing stops a preview screen from printing
+      // it to a school first.
+      if (!Number.isSafeInteger(amount)) {
+        throw new FeeError(
+          'amount_out_of_range',
+          `Rule ${rule.code} × ${quantity} exceeds the range this engine computes exactly. ` +
+          'Set a maxQuantity on the rule, or price this request as a manual quotation.'
+        );
+      }
     }
 
     running += amount;
     if (rule.requiresApproval) needsApproval = true;
+    feeLines += 1;
 
     lines.push({
       ruleId: rule.id,
@@ -393,10 +630,23 @@ export async function computeFee(
       runningTotalMinor: running,
       because: cond.because || null,
       requiresApproval: Boolean(rule.requiresApproval),
+      source: 'fee_rule',
+      reductionStage: null,
+      discountCodeId: null,
+      concessionApplicationId: null,
     });
   }
 
-  const priced = lines.length > 0;
+  // A framework with no tax rule never reached the flush inside the loop, so
+  // `before_tax` lands at the end — which is the same place, there being no tax
+  // to be before.
+  if (!flushedBeforeTax) {
+    flushedBeforeTax = true;
+    flush('before_tax');
+  }
+  flush('after_tax');
+
+  const priced = feeLines > 0;
   const subtotal = running - tax;
 
   return {
@@ -407,6 +657,8 @@ export async function computeFee(
     lines,
     subtotalMinor: priced ? subtotal - adjustment : 0,
     adjustmentMinor: priced ? adjustment : 0,
+    discountMinor: priced ? discountTotal : 0,
+    concessionMinor: priced ? concessionTotal : 0,
     taxMinor: priced ? tax : 0,
     totalMinor: priced ? running : 0,
     requiresManualQuote: !priced,
@@ -586,6 +838,14 @@ export async function issueQuote(
     frameworkId: number;
     inputs: FeeInputs;
     validUntil?: string | null;
+    /**
+     * Reductions already resolved by src/db/discounts.ts.
+     *
+     * Passed through untouched. This function does not resolve a code and does
+     * not read a discount table — if it did, there would be two places that
+     * decide what a discount is worth, and the second one would drift.
+     */
+    reductions?: Reduction[];
   }
 ): Promise<IssuedQuote> {
   // Issuing a quotation is not editing the rules it is computed from, and it is
@@ -593,7 +853,9 @@ export async function issueQuote(
   // other two — which is the separation that stops one person discounting
   // unobserved.
   assertCan(ctx.principal, 'quote:issue', {});
-  const computation = await computeFee(db, input.frameworkId, input.inputs);
+  const computation = await computeFee(db, input.frameworkId, input.inputs, {
+    reductions: input.reductions,
+  });
 
   // Re-version an existing quote for the same request rather than creating a
   // second quote, so a request has one quotation with a history.
@@ -633,6 +895,8 @@ export async function issueQuote(
     inputs: computation.inputs as any,
     subtotalMinor: computation.subtotalMinor,
     adjustmentMinor: computation.adjustmentMinor,
+    discountMinor: computation.discountMinor,
+    concessionMinor: computation.concessionMinor,
     taxMinor: computation.taxMinor,
     totalMinor: computation.totalMinor,
     currency: computation.currency,
@@ -657,6 +921,10 @@ export async function issueQuote(
         amountMinor: l.amountMinor,
         runningTotalMinor: l.runningTotalMinor,
         because: l.because,
+        sourceKind: l.source,
+        reductionStage: l.reductionStage,
+        discountCodeId: l.discountCodeId,
+        concessionApplicationId: l.concessionApplicationId,
       }))
     );
   }
@@ -906,11 +1174,47 @@ export async function reproduce(db: DB, quoteVersionId: number) {
     .where(eq(s.quoteVersions.id, quoteVersionId)).limit(1);
   if (!qv) throw new FeeError('unknown_quote_version', 'No such quote version.');
 
-  const recomputed = await computeFee(db, qv.frameworkId, qv.inputs as FeeInputs);
+  // ── The reductions are read back from the quote, NOT re-resolved ──
+  //
+  // Re-running resolveDiscountCodes() here would find the code expired, the
+  // campaign cap reached or the concession revoked, and would report the
+  // quotation as unreproducible when nothing about it had changed. A reduction
+  // is a DECISION taken at issue time and frozen with the inputs, exactly like
+  // the framework version — so it is replayed at the magnitude that was
+  // granted, and what this function actually re-tests is the fee arithmetic
+  // underneath it.
+  const storedLines = await db.select().from(s.quoteLines)
+    .where(eq(s.quoteLines.quoteVersionId, quoteVersionId))
+    .orderBy(asc(s.quoteLines.sortOrder));
+
+  const frozen: Reduction[] = storedLines
+    .filter((l: any) => l.sourceKind === 'discount' || l.sourceKind === 'concession')
+    .map((l: any) => ({
+      [RESOLVED_BY_SERVER]: true as const,
+      source: l.sourceKind as ReductionSource,
+      sourceCode: l.ruleCode ?? '(frozen)',
+      label: l.label,
+      stage: (l.reductionStage ?? 'before_tax') as ReductionStage,
+      // Replayed as the fixed magnitude that was granted, whatever basis
+      // produced it. A percentage recomputed against a subtotal that has since
+      // been recalculated is a different number, and the figure the federation
+      // stands behind is the one it sent.
+      basis: 'fixed_amount' as const,
+      amountMinor: Math.abs(l.amountMinor),
+      because: l.because,
+      discountCodeId: l.discountCodeId ?? null,
+      concessionApplicationId: l.concessionApplicationId ?? null,
+    }));
+
+  const recomputed = await computeFee(db, qv.frameworkId, qv.inputs as FeeInputs, {
+    reductions: frozen,
+  });
   return {
     stored: {
       subtotalMinor: qv.subtotalMinor,
       adjustmentMinor: qv.adjustmentMinor,
+      discountMinor: qv.discountMinor,
+      concessionMinor: qv.concessionMinor,
       taxMinor: qv.taxMinor,
       totalMinor: qv.totalMinor,
       requiresManualQuote: qv.requiresManualQuote,
@@ -920,6 +1224,8 @@ export async function reproduce(db: DB, quoteVersionId: number) {
       recomputed.totalMinor === qv.totalMinor &&
       recomputed.subtotalMinor === qv.subtotalMinor &&
       recomputed.taxMinor === qv.taxMinor &&
+      recomputed.discountMinor === qv.discountMinor &&
+      recomputed.concessionMinor === qv.concessionMinor &&
       recomputed.requiresManualQuote === qv.requiresManualQuote,
   };
 }

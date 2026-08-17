@@ -11,6 +11,24 @@ const fed = await get('federation');
 const schedule = await get<any[]>('schedule');
 const programs = await get<any[]>('programs');
 
+// HOW MANY DAYS THE DOJO IS OPEN IS A FACT ABOUT THE TIMETABLE, so it is counted
+// from the schedule the federation edits at /admin and never typed here. The
+// page used to assert "Twelve batches" and "seven days" as literals; delete a
+// Sunday row from the admin console and the literals would have gone on
+// claiming a week that no longer existed.
+const DAY_WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'];
+const openDays = new Set((schedule ?? []).map((s: any) => s.day).filter(Boolean)).size;
+const openDaysLabel = DAY_WORDS[openDays] ?? String(openDays);
+const onlineDays = [...new Set(
+  (schedule ?? [])
+    .filter((s: any) => String(s.mode).toLowerCase() === 'online')
+    .map((s: any) => s.day)
+    .filter(Boolean),
+)];
+// Both hour strings come from the editable federation record. hoursSunday is
+// optional: a record saved before the field existed renders the weekday line alone.
+const hoursLine = [fed.contact.hours, fed.contact.hoursSunday].filter(Boolean).join('. ');
+
 const etiquette = [
   'Bow (rei) when entering and leaving the dojo floor.',
   'Arrive 10 minutes early; late entrants wait at the edge of the mat for the sensei\'s signal.',
@@ -29,7 +47,7 @@ const etiquette = [
     image="https://images.unsplash.com/photo-1599058917212-d750089bc07e?auto=format&fit=crop&w=1800&q=70"
     eyebrow="Class Calendar"
     title={`The weekly <em>timetable</em>.`}
-    lead={`Twelve batches a week across dojo and online. ${fed.contact.hours}.`}
+    lead={`${schedule.length} batches a week across dojo and online, ${openDaysLabel} days. ${hoursLine}.`}
     pills={['Dojo · Patratu', 'Online · Worldwide']}
   />
 
@@ -57,6 +75,7 @@ const etiquette = [
         </table>
       </div>
       <div class="mt-6 text-muted" style="font-size:.82rem">
+        {fed.contact.hoursSunday && <><strong>Sunday runs on seasonal timings.</strong> {fed.contact.hoursSunday}.<br /></>}
         Timings may shift on tournament and grading weekends — changes are posted in the
         <a href="/events" class="text-gold">events calendar</a> and announced in class.
       </div>
@@ -95,9 +114,9 @@ const etiquette = [
     <div class="container">
       <div class="grid grid-3">
         {[
-          { icon: 'clock',  t: 'Morning batches',  d: 'Weekday 6:00 AM sessions suit school and college students — train before the day begins.' },
-          { icon: 'monitor', t: 'Online evenings', d: 'Tue / Thu / Sun online sessions carry the same syllabus for remote students worldwide.' },
-          { icon: 'users',  t: 'Saturday open mat', d: 'The whole federation trains together — grading prep, questions, and cross-batch sparring.' },
+          { icon: 'clock',  t: 'Morning batches',  d: 'Early morning sessions run on every day the dojo is open — including the long Sunday morning block — so school and college students can train before the day begins.' },
+          { icon: 'monitor', t: 'Online sessions', d: `${onlineDays.join(' / ')} online sessions carry the same syllabus for remote students worldwide.` },
+          { icon: 'users',  t: 'Weekend open batches', d: `Saturday open mat and the Sunday open batch — all levels, all instructors, grading prep and cross-batch sparring.${fed.contact.hoursSunday ? ' Sunday runs a morning and an afternoon block, on seasonal timings.' : ''}` },
         ].map((c) => (
           <div class="card fade">
             <div class="card-icon"><Icon name={c.icon} size={32} color="var(--gold)" /></div>

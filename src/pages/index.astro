@@ -414,6 +414,9 @@ const gallery = (data.gallery || []).filter((g: any) => g.img);
             <a href="mailto:admin@mmakf.in" class="text-gold">admin@mmakf.in</a>
           </div>
           <div class="card-body">{fed.contact.hours}</div>
+          {fed.contact.hoursSunday && (
+            <div class="card-body" style="margin-top:6px">{fed.contact.hoursSunday}</div>
+          )}
         </div>
         <div class="card fade">
           <div class="card-eyebrow">UPI / Payments</div>

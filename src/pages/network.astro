@@ -9,11 +9,15 @@
 import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import { get } from '@/lib/storage';
+import { centreTimings, hasTimings, isHeadquarters } from '@/lib/timings';
 
 export const prerender = false;
 
 const branches = (await get<any[]>('branches')) || [];
-const isHq = (b: any) => /headquarters|hombu/i.test(`${b?.status ?? ''} ${b?.name ?? ''}`);
+const fed = await get('federation');
+// One definition of "is this the Hombu", shared with /affiliation, so the two
+// pages cannot disagree about which row inherits the federation's timings.
+const isHq = isHeadquarters;
 const hq = branches.filter(isHq);
 const centres = branches.filter((b: any) => !isHq(b));
 const districts = [...new Set(branches.map((b: any) => b.district).filter(Boolean))];
@@ -44,13 +48,18 @@ const districts = [...new Set(branches.map((b: any) => b.district).filter(Boolea
       <section class="net-sec">
         <h2 class="display-2">Headquarters</h2>
         <ul class="net-list">
-          {hq.map((b: any) => (
+          {hq.map((b: any) => {
+            const t = centreTimings(b, fed);
+            return (
             <li>
               <p class="n-name">{b.name}</p>
               <p class="n-where">{[b.city, b.district].filter(Boolean).join(' · ')}</p>
               {b.incharge && <p class="n-who">Officer in charge: {b.incharge}</p>}
+              {t.hours && <p class="n-when">{t.hours}</p>}
+              {t.sunday && <p class="n-when">{t.sunday}</p>}
             </li>
-          ))}
+            );
+          })}
         </ul>
       </section>
     )}
@@ -61,14 +70,22 @@ const districts = [...new Set(branches.map((b: any) => b.district).filter(Boolea
         <p class="net-note">No affiliated centres are on the register.</p>
       ) : (
         <ul class="net-list">
-          {centres.map((b: any) => (
+          {centres.map((b: any) => {
+            const t = centreTimings(b, fed);
+            return (
             <li>
               <p class="n-name">{b.name}</p>
               <p class="n-where">{[b.city, b.district].filter(Boolean).join(' · ')}</p>
               {b.incharge && <p class="n-who">Officer in charge: {b.incharge}</p>}
+              {t.hours && <p class="n-when">{t.hours}</p>}
+              {t.sunday && <p class="n-when">{t.sunday}</p>}
+              {/* Stated, not guessed. A centre that has not filed its timings
+                  says so, rather than borrowing the headquarters' clock. */}
+              {!hasTimings(t) && <p class="n-when n-when-none">Timings not published — ask the centre before travelling.</p>}
               {b.status && <p class="n-status">{b.status}</p>}
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
     </section>
@@ -99,6 +116,8 @@ const districts = [...new Set(branches.map((b: any) => b.district).filter(Boolea
   .n-name { margin: 0; font-family: var(--font-display); font-size: 1.15rem; }
   .n-where { margin: 4px 0 0; color: var(--gold-2); font-size: .9rem; }
   .n-who, .n-status { margin: 4px 0 0; color: var(--muted); font-size: .86rem; }
+  .n-when { margin: 4px 0 0; color: var(--gold-3); font-size: .86rem; }
+  .n-when-none { color: var(--muted); font-style: italic; }
   .net-cta .btn { margin-top: 20px; }
   @media (max-width: 640px) { .net-stats dd { font-size: 1.6rem; } }
 </style>

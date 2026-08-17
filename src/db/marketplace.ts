@@ -278,6 +278,30 @@ export async function mySellerAccount(db: DB, principal: Principal) {
   };
 }
 
+/**
+ * A public URL for a seller's shop, unique across the marketplace.
+ *
+ * Derived from the trading name, and falling back to the seller's own ref —
+ * which is already unique — the moment there is any collision at all. TWO SHOPS
+ * AT ONE ADDRESS IS NOT A COSMETIC PROBLEM: if the second is a copy of the
+ * first it is an impersonation, and the federation's own badge would be sitting
+ * on whichever of them the query happened to return.
+ *
+ * Deliberately not clever. No transliteration, no incrementing counter: an
+ * ugly-but-correct slug can be changed by the seller afterwards, and a
+ * -2 suffix quietly attached to a legitimate trader's name cannot.
+ */
+async function allocateStoreSlug(db: DB, seller: any): Promise<string> {
+  const base = String(seller.tradingName ?? '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const fallback = String(seller.ref ?? '').toLowerCase();
+  if (!base) return fallback;
+
+  const taken = (await db.select({ id: s.sellers.id })
+    .from(s.sellers).where(eq(s.sellers.storeSlug, base)).limit(1))[0];
+  return taken ? fallback : base;
+}
+
 async function loadSeller(db: DB, sellerId: number) {
   const row = (await db.select().from(s.sellers).where(eq(s.sellers.id, sellerId)).limit(1))[0];
   if (!row) throw new MarketplaceError('unknown_seller', 'No such seller.');
@@ -327,6 +351,23 @@ async function decideSeller(
     patch.decisionReason = reason;
     // Clearing the suspension fields on approval would erase the fact that a
     // suspension happened, so they are left exactly where they are.
+
+    // ── THE STOREFRONT OPENS WITH THE APPROVAL (migration 0029) ─────────────
+    //
+    // publicListingPredicate() now requires `store_status = 'open'`, and the
+    // column defaults to 'not_created'. Approving a seller without opening
+    // their store would approve somebody whose listings can never become
+    // visible — the failure would present as "approval does nothing", which is
+    // the hardest kind to diagnose because nothing errored.
+    //
+    // Only on the FIRST approval: a seller who closed their own shop and was
+    // later reinstated keeps it closed, because reopening it would override a
+    // decision they made about their own business.
+    if (seller.storeStatus === 'not_created') {
+      patch.storeSlug = seller.storeSlug ?? await allocateStoreSlug(db, seller);
+      patch.storeStatus = 'open';
+      patch.storeOpenedAt = now;
+    }
   } else if (action === 'reject') {
     patch.decisionReason = reason;
   } else if (action === 'suspend') {
@@ -510,6 +551,68 @@ export interface ReviewableContent {
   priceMinor: number;
   currency: string;
   media: { url: string; alt: string | null; sortOrder: number }[];
+  /**
+   * The product detail added by migration 0029, and the variants a buyer
+   * actually chooses between. OPTIONAL, and the optionality is load-bearing —
+   * see the v2 note in listingContentHash().
+   */
+  detail?: ReviewableDetail | null;
+  variants?: ReviewableVariant[] | null;
+}
+
+/** The 0029 product-detail block. Every field is a claim a reviewer must see. */
+export interface ReviewableDetail {
+  categoryId?: number | null;
+  brandId?: number | null;
+  specifications?: Record<string, unknown> | null;
+  materials?: string | null;
+  weightGrams?: number | null;
+  lengthMm?: number | null;
+  widthMm?: number | null;
+  heightMm?: number | null;
+  countryOfOrigin?: string | null;
+  warranty?: string | null;
+  gtin?: string | null;
+  sport?: string | null;
+  discipline?: string | null;
+  shotokanRelevant?: boolean | null;
+  ageMinYears?: number | null;
+  ageMaxYears?: number | null;
+  safetyClassification?: string | null;
+  certification?: string | null;
+  usageInstructions?: string | null;
+  warning?: string | null;
+  hsnCode?: string | null;
+  taxRateBps?: number | null;
+  shippingClass?: string | null;
+}
+
+/**
+ * A variant, as the REVIEWER sees it. Note what is absent: stock.
+ */
+export interface ReviewableVariant {
+  sku: string;
+  label: string;
+  priceMinor: number;
+  attributes?: Record<string, unknown> | null;
+}
+
+/** The v2 detail keys, in a FIXED order. Changing this order rewrites hashes. */
+const DETAIL_KEYS: (keyof ReviewableDetail)[] = [
+  'categoryId', 'brandId', 'specifications', 'materials',
+  'weightGrams', 'lengthMm', 'widthMm', 'heightMm',
+  'countryOfOrigin', 'warranty', 'gtin',
+  'sport', 'discipline', 'shotokanRelevant',
+  'ageMinYears', 'ageMaxYears', 'safetyClassification', 'certification',
+  'usageInstructions', 'warning', 'hsnCode', 'taxRateBps', 'shippingClass',
+];
+
+/** Present means "the seller has stated something here". Empty string is absent. */
+function stated(v: unknown): boolean {
+  if (v === null || v === undefined) return false;
+  if (typeof v === 'string') return v.trim().length > 0;
+  if (typeof v === 'object') return Object.keys(v as object).length > 0;
+  return true;
 }
 
 /**
@@ -524,11 +627,37 @@ export interface ReviewableContent {
  * their listing back into the review queue three times in a day; the queue
  * would become unreadable, and an unread queue approves everything. A stock
  * count also cannot mislead anybody about what the item IS, which is the whole
- * question review answers.
+ * question review answers. The same reasoning keeps VARIANT STOCK out while
+ * variant PRICE and LABEL are in: adding a size or repricing one changes what
+ * MMAKF approved; selling three of them does not.
+ *
+ * ─── WHY THERE ARE TWO VERSIONS, AND WHY v1 SURVIVES ────────────────────────
+ *
+ * Migration 0029 added twenty-three product-detail fields and a variant table,
+ * and every one of them is a claim review exists to check — a certification, an
+ * age suitability, a country of origin. They must feed the hash.
+ *
+ * But adding fields to a hash normally invalidates every hash already stored.
+ * Under the public predicate, an invalidated hash means the listing is no
+ * longer the listing MMAKF approved, so it LEAVES PUBLIC VIEW. Shipping 0029
+ * with a naive v2 would therefore have emptied the shop on deploy — with no
+ * error, no failing test, and a cause nobody would find because nobody wrote
+ * it.
+ *
+ * So: the extended block is hashed ONLY when the seller has stated something in
+ * it. A listing written before 0029 has all twenty-three fields null and one
+ * backfilled 'Standard' variant, contributes nothing, and hashes BYTE-FOR-BYTE
+ * as it did under v1. It stays approved and it stays visible.
+ *
+ * The moment a seller touches any of the new fields the hash becomes a v2 hash,
+ * differs from the approved one, and the listing goes back to review — which is
+ * exactly the behaviour wanted, arriving exactly when it should.
+ *
+ * tests/marketplace-platform.test.ts asserts the byte-identity directly. Do not
+ * "simplify" this by always hashing the extended block.
  */
 export function listingContentHash(content: ReviewableContent): string {
-  const canonical = JSON.stringify([
-    'v1',
+  const base = [
     content.title.trim(),
     (content.description ?? '').trim(),
     content.category,
@@ -537,7 +666,34 @@ export function listingContentHash(content: ReviewableContent): string {
     [...content.media]
       .map((m) => [m.url.trim(), (m.alt ?? '').trim()])
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)),
-  ]);
+  ];
+
+  const detail = content.detail ?? null;
+  const statedDetail = DETAIL_KEYS
+    .map((k) => [k, detail ? (detail as any)[k] : null] as const)
+    .filter(([, v]) => stated(v));
+
+  // A single backfilled 'Standard' variant is not a statement about anything —
+  // it is the shape migration 0029 gave to a listing that had one price. Only a
+  // seller who has actually built a variant set contributes to the hash.
+  const variants = (content.variants ?? []).filter((v) => v && v.sku);
+  const statedVariants = variants.length > 1 || variants.some((v) => v.label !== 'Standard');
+
+  if (!statedDetail.length && !statedVariants) {
+    return digest(JSON.stringify(['v1', ...base]));
+  }
+
+  return digest(JSON.stringify([
+    'v2',
+    ...base,
+    statedDetail.map(([k, v]) => [k, typeof v === 'string' ? v.trim() : v]),
+    [...variants]
+      .map((v) => [v.sku.trim(), v.label.trim(), v.priceMinor, v.attributes ?? null])
+      .sort((a, b) => (String(a[0]) < String(b[0]) ? -1 : String(a[0]) > String(b[0]) ? 1 : 0)),
+  ]));
+}
+
+function digest(canonical: string): string {
   return crypto.createHash('sha256').update(canonical).digest('base64url').slice(0, 32);
 }
 
@@ -557,6 +713,22 @@ async function readContent(db: DB, listing: any): Promise<ReviewableContent> {
     url: s.listingMedia.url, alt: s.listingMedia.alt, sortOrder: s.listingMedia.sortOrder,
   }).from(s.listingMedia).where(eq(s.listingMedia.listingId, listing.id)).orderBy(asc(s.listingMedia.sortOrder));
 
+  // The 0029 product detail and variant set, read from the listing row and the
+  // variant table. Both are part of the reviewable content — see the v2 note
+  // above listingContentHash() for why reading them cannot invalidate a
+  // pre-0029 approval.
+  const variants = await db.select({
+    sku: s.listingVariants.sku,
+    label: s.listingVariants.label,
+    priceMinor: s.listingVariants.priceMinor,
+    attributes: s.listingVariants.attributes,
+  }).from(s.listingVariants)
+    .where(eq(s.listingVariants.listingId, listing.id))
+    .orderBy(asc(s.listingVariants.sortOrder), asc(s.listingVariants.id));
+
+  const detail: ReviewableDetail = {};
+  for (const k of DETAIL_KEYS) (detail as any)[k] = (listing as any)[k] ?? null;
+
   return {
     title: listing.title,
     description: listing.description ?? null,
@@ -564,6 +736,10 @@ async function readContent(db: DB, listing: any): Promise<ReviewableContent> {
     priceMinor: listing.priceMinor,
     currency: listing.currency ?? 'INR',
     media: media.map((m: any) => ({ url: m.url, alt: m.alt ?? null, sortOrder: m.sortOrder })),
+    detail,
+    variants: variants.map((v: any) => ({
+      sku: v.sku, label: v.label, priceMinor: v.priceMinor, attributes: v.attributes ?? null,
+    })),
   };
 }
 

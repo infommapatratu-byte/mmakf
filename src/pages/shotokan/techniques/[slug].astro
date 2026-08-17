@@ -1,0 +1,459 @@
+---
+/**
+ * One technique, in depth. §35.
+ *
+ * Everything on this page comes from src/data/shotokan. The page writes no
+ * martial-arts content of its own, which is what keeps forty-odd technique
+ * pages saying the same thing the same way — the same lesson src/data/kata.ts
+ * learned across twenty-six kata pages.
+ *
+ * THREE ABSENCES ARE RENDERED LOUDLY RATHER THAN SKIPPED:
+ *
+ *  · THE GRADE. MMAKF has not published which technique it examines at which
+ *    kyu, so `curriculum` is null on every record and this page prints that as
+ *    a stated fact with a link to /belt-system. A page that simply omitted it
+ *    would read as an oversight; one that names the gap is credible, and it is
+ *    also the truth.
+ *
+ *  · THE VIDEO. A technique with no registered recording says so in the same
+ *    size type as everything else. No search URL is dressed up as a recording,
+ *    and a recording whose rights have not been decided is shown as a REFERENCE
+ *    AWAITING REVIEW rather than as an embed — see /shotokan/videos.
+ *
+ *  · THE DISAGREEMENT. Where Shotokan organisations genuinely differ, the
+ *    `contested` note is printed at full weight rather than tucked into a
+ *    footnote. A student whose instructor teaches soto-uke the other way round
+ *    should find that acknowledged here, not contradicted.
+ *
+ * An unknown slug 404s. It does not render an empty technique.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { techniqueGraph, familyByKey } from '@/data/shotokan';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const { slug } = Astro.params;
+const graph = techniqueGraph(String(slug ?? ''));
+
+// A slug that is not a technique is not a page. Rendering a blank one would put
+// an empty, indexable URL into search for every typo anyone makes.
+if (!graph) {
+  return new Response(null, { status: 404, statusText: 'No such technique' });
+}
+
+const { technique: t, kata, kumite, systems, glossary, videos, siblings, combinations } = graph;
+const family = familyByKey(t.family);
+
+/**
+ * The mechanics, in a fixed order with human labels.
+ *
+ * Driven by a list rather than by Object.entries so the order is the order a
+ * body actually performs the technique in — start, then travel, then arrival,
+ * then recovery — instead of whatever order the fields happened to be typed.
+ */
+const MECHANIC_LABELS: Array<[keyof typeof t.mechanics, string]> = [
+  ['stance', 'Stance'],
+  ['start', 'Starting position'],
+  ['chamber', 'Chamber'],
+  ['weight', 'Weight distribution'],
+  ['feet', 'Feet'],
+  ['knees', 'Knees'],
+  ['centre', 'Centre of gravity'],
+  ['supportFoot', 'Supporting foot'],
+  ['hips', 'Hips'],
+  ['shoulders', 'Shoulders'],
+  ['elbows', 'Elbows'],
+  ['hikite', 'Hikite'],
+  ['trajectory', 'Trajectory'],
+  ['extension', 'Extension'],
+  ['movement', 'Movement'],
+  ['target', 'Target'],
+  ['contact', 'Contact surface'],
+  ['kime', 'Kime'],
+  ['retraction', 'Retraction'],
+  ['recovery', 'Recovery'],
+  ['balance', 'Balance'],
+  ['guard', 'Guard'],
+  ['distance', 'Distance'],
+  ['timing', 'Timing'],
+  ['breathing', 'Breathing'],
+];
+const mechanics = MECHANIC_LABELS
+  .map(([key, label]) => [label, t.mechanics[key]] as const)
+  .filter((row): row is readonly [string, string] => Boolean(row[1]));
+
+/**
+ * Structured data. Only what is on the page.
+ *
+ * §46 forbids fabricating duration, upload date, creator or rating, so this
+ * carries none of them — and deliberately no VideoObject at all, because the
+ * page embeds no video it has the rights to describe as its own.
+ */
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'LearningResource',
+  name: `${t.name} — ${t.english}`,
+  alternateName: t.kanji ?? undefined,
+  inLanguage: 'en',
+  learningResourceType: 'Technique reference',
+  educationalLevel: 'Shotokan karate',
+  about: { '@type': 'Thing', name: 'Shotokan karate' },
+  description: t.summary,
+  url: canonicalFor(surface, `/shotokan/techniques/${t.slug}`),
+  isPartOf: {
+    '@type': 'CollectionPage',
+    name: 'The MMAKF Shotokan kihon library',
+    url: canonicalFor(surface, '/shotokan/kihon'),
+  },
+  publisher: {
+    '@type': 'SportsOrganization',
+    name: 'Modern Martial Arts Karate-Do Federation of India',
+    url: 'https://www.mmakf.in',
+  },
+};
+---
+
+<Base
+  title={`${t.name} (${t.english}) — Shotokan technique — MMAKF`}
+  description={`${t.name}${t.kanji ? ` ${t.kanji}` : ''}, ${t.english}. Mechanics, principles, common errors and how to correct them, drills, application, and the kata and kumite it belongs to.`}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Kihon', url: '/shotokan/kihon' },
+    { name: t.name, url: `/shotokan/techniques/${t.slug}` },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow={family ? `${family.romaji} — ${family.english}` : 'Shotokan technique'}
+    title={`${t.name} <em class="r">${t.kanji ?? ''}</em>`}
+    lead={t.english}
+    pills={[
+      ...(family ? [family.english] : []),
+      `${t.commonErrors.length} common errors`,
+      `${t.drills.length} drills`,
+    ]}
+  />
+
+  {/* ═══════ WHAT IT IS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">What it is</div>
+          <h2 class="display-2" style="margin-top:16px">The technique, <em class="r">and its job</em>.</h2>
+          <div class="rule"></div>
+          <p class="body-txt">{t.summary}</p>
+          <p class="body-txt"><strong>Application.</strong> {t.application}</p>
+        </div>
+
+        <aside class="fade panel" aria-labelledby="syllabus-gap">
+          <div class="eyebrow">MMAKF curriculum status</div>
+          <h3 id="syllabus-gap" class="panel-h">Not placed at a grade.</h3>
+          <p class="panel-p">
+            <strong>MMAKF has not published its grading syllabus.</strong> This page does not say at which
+            kyu {t.name} is examined, in which combination it is tested, or to what standard &mdash;
+            because the federation has not decided it.
+          </p>
+          <p class="panel-p">
+            The record holds a named, empty place for that. The day the federation publishes its syllabus it
+            is filled in; until then this page says so out loud rather than leaving a reader to assume.
+          </p>
+          <a class="btn btn-ghost" href={h('/belt-system')}>The belt system &amp; grading &rarr;</a>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ MECHANICS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">{mechanics.length} points</div>
+        <h2 class="display-2">Mechanics</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          What each part of the body does, in the order it does it.
+        </p>
+      </div>
+      <dl class="mech fade">
+        {mechanics.map(([label, value]) => (
+          <div class="mech-row">
+            <dt class="mech-k">{label}</dt>
+            <dd class="mech-v">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  </section>
+
+  {/* ═══════ PRINCIPLES ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Principles</div>
+        <h2 class="display-2">What survives when <em class="r">the name is forgotten</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <ol class="principles fade">
+        {t.principles.map((p) => <li class="principle">{p}</li>)}
+      </ol>
+    </div>
+  </section>
+
+  {/* ═══════ COMMON ERRORS ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">{t.commonErrors.length} faults</div>
+        <h2 class="display-2">Common errors, and <em class="r">how to fix them</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Naming a fault teaches nobody. Each one below carries why it happens and what corrects it.
+        </p>
+      </div>
+      <div class="grid grid-2">
+        {t.commonErrors.map((f) => (
+          <div class="card fade">
+            <div class="card-eyebrow">Fault</div>
+            <div class="card-title" style="font-size:1rem">{f.error}</div>
+            <div class="card-body">
+              <p style="margin:0 0 10px"><strong>Why it happens.</strong> {f.why}</p>
+              <p style="margin:0"><strong>The fix.</strong> {f.fix}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ DRILLS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Practice</div>
+        <h2 class="display-2">Drills</h2>
+        <div class="rule"></div>
+      </div>
+      <ul class="drills fade">
+        {t.drills.map((d) => <li class="drill">{d}</li>)}
+      </ul>
+    </div>
+  </section>
+
+  {/* ═══════ WHERE IT IS NOT SETTLED ═══════ */}
+  {t.contested && (
+    <section class="bg2">
+      <div class="container">
+        <div class="panel fade" style="max-width:64ch">
+          <div class="eyebrow">Where Shotokan does not agree</div>
+          <h3 class="panel-h">This one is not settled.</h3>
+          <p class="panel-p">{t.contested}</p>
+          <p class="panel-p">
+            It is written here rather than resolved silently, because a student whose instructor teaches it
+            the other way should find that acknowledged and not contradicted.
+          </p>
+        </div>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ THE GRAPH ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Kihon &harr; kata &harr; kumite</div>
+        <h2 class="display-2">Where it <em class="r">appears</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Kihon is the vocabulary, kata is the literature, kumite is the conversation. Every link below was
+          written down deliberately; none of it was inferred from a name matching.
+        </p>
+      </div>
+
+      <div class="grid grid-3">
+        <div class="card fade">
+          <div class="card-eyebrow">Kata</div>
+          {kata.length === 0 ? (
+            <div class="card-body">
+              No kata is recorded as containing {t.name} uncontroversially. That is an absence of a recorded
+              link, not evidence that it appears in none.
+            </div>
+          ) : (
+            <ul class="linklist">
+              {kata.map((k) => (
+                <li><a href={h(`/kata/${k.slug}`)}>{k.name}</a> <span class="text-muted">{k.meaning}</span></li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div class="card fade">
+          <div class="card-eyebrow">Kumite</div>
+          {kumite.length === 0 && systems.length === 0 ? (
+            <div class="card-body">No kumite principle is recorded against this technique.</div>
+          ) : (
+            <ul class="linklist">
+              {kumite.map((c) => (
+                <li><a href={h(`/shotokan/kumite/${c.slug}`)}>{c.name}</a> <span class="text-muted">{c.english}</span></li>
+              ))}
+              {systems.map((sys) => (
+                <li><a href={h(`/shotokan/kumite/${sys.slug}`)}>{sys.name}</a> <span class="text-muted">{sys.english}</span></li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div class="card fade">
+          <div class="card-eyebrow">Same family</div>
+          {siblings.length === 0 ? (
+            <div class="card-body">Nothing else is filed under this family yet.</div>
+          ) : (
+            <ul class="linklist">
+              {siblings.map((s) => (
+                <li><a href={h(`/shotokan/techniques/${s.slug}`)}>{s.name}</a> <span class="text-muted">{s.english}</span></li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      {combinations.length > 0 && (
+        <div class="panel fade" style="margin-top:28px">
+          <div class="eyebrow">Combination families</div>
+          <h3 class="panel-h">{t.name} appears in these shapes.</h3>
+          <p class="panel-p">
+            These are <strong>conceptual families</strong>, not MMAKF grading combinations. The federation has
+            approved no combination list, and none is invented here.
+          </p>
+          <ul class="linklist">
+            {combinations.map((c) => (
+              <li><strong>{c.name}</strong> &mdash; <span class="text-muted">{c.purpose}</span></li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ TERMINOLOGY ═══════ */}
+  {glossary.length > 0 && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">{glossary.length} terms</div>
+          <h2 class="display-2">The Japanese, <em class="r">explained</em>.</h2>
+          <div class="rule"></div>
+        </div>
+        <dl class="mech fade">
+          {glossary.map((g) => (
+            <div class="mech-row">
+              <dt class="mech-k">
+                <a href={h(`/shotokan/terminology#${g.key}`)}>{g.romaji}</a>
+                {g.kanji && <span lang="ja" class="text-muted" style="margin-left:8px">{g.kanji}</span>}
+              </dt>
+              <dd class="mech-v"><strong>{g.english}.</strong> {g.explain}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ RECORDINGS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Reference recordings</div>
+        <h2 class="display-2">Video</h2>
+        <div class="rule"></div>
+      </div>
+      {videos.length === 0 ? (
+        <div class="panel fade" style="max-width:64ch">
+          <p class="panel-p">
+            <strong>No recording in the register is tagged to {t.name}.</strong> MMAKF has not filmed this
+            technique, and the discovery pass did not find an external recording specific enough to attribute
+            to it without guessing.
+          </p>
+          <p class="panel-p">
+            Nothing is shown here rather than a search link dressed up as a demonstration. What has been
+            found, checked and registered is listed in full on the source register.
+          </p>
+          <a class="btn btn-ghost" href={h('/shotokan/videos')}>The video source register &rarr;</a>
+        </div>
+      ) : (
+        <div class="grid grid-2">
+          {videos.map((v) => (
+            <div class="card fade">
+              <div class="card-eyebrow">
+                {v.channelIsSourceOrganisation ? 'External reference' : 'Awaiting rights decision'}
+              </div>
+              <div class="card-title" style="font-size:1rem">{v.title}</div>
+              <div class="card-body">
+                <a href={v.channelUrl} rel="noopener nofollow">{v.channel}</a>
+                {v.durationSeconds && <> &middot; {Math.round(v.durationSeconds / 60)} min</>}
+                {v.publishedOn && <> &middot; published {v.publishedOn}</>}
+              </div>
+              <div class="card-body">
+                {v.channelIsSourceOrganisation ? (
+                  <a href={`https://www.youtube.com/watch?v=${v.id}`} rel="noopener nofollow">Watch on YouTube &rarr;</a>
+                ) : (
+                  <span class="text-muted">
+                    Uploaded by a third party, not by the organisation being cited. Held for a technical
+                    committee rights decision and not embedded here.
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ NAVIGATION ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="flex flex-wrap gap-3">
+        <a class="btn btn-ghost" href={h('/shotokan/kihon')}>&larr; All kihon</a>
+        <a class="btn btn-ghost" href={h('/shotokan/kumite')}>Kumite</a>
+        <a class="btn btn-ghost" href={h('/kata')}>Kata library</a>
+        <a class="btn btn-ghost" href={h('/shotokan/terminology')}>Terminology</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .mech { margin: 0; display: grid; gap: 0; }
+  .mech-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 22%) 1fr;
+    gap: 20px;
+    padding: 16px 0;
+    border-top: 1px solid var(--line, rgba(0, 0, 0, .1));
+  }
+  .mech-row:last-child { border-bottom: 1px solid var(--line, rgba(0, 0, 0, .1)); }
+  .mech-k { font-weight: 600; margin: 0; }
+  .mech-v { margin: 0; }
+
+  .principles { margin: 0; padding-left: 1.4em; }
+  .principle { margin: 0 0 14px; max-width: 76ch; }
+
+  .drills { margin: 0; padding-left: 1.4em; }
+  .drill { margin: 0 0 12px; max-width: 76ch; }
+
+  .linklist { list-style: none; margin: 8px 0 0; padding: 0; }
+  .linklist li { padding: 7px 0; border-top: 1px solid var(--line, rgba(0, 0, 0, .08)); }
+  .linklist li:first-child { border-top: 0; }
+
+  /* One column on a phone: a 22% label column becomes two words per line. */
+  @media (max-width: 720px) {
+    .mech-row { grid-template-columns: 1fr; gap: 6px; }
+  }
+</style>

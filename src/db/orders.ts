@@ -168,9 +168,24 @@ export async function createOrder(db: DB, ctx: AuditContext | null, draft: Draft
     });
   }
 
+  // Shipping is the ONE amount a caller still hands in, and it was accepted on
+  // `Number.isInteger` alone — which is true of -500000. A negative carriage
+  // charge is a discount nobody authorised: it reduces the total the gateway is
+  // asked for, and `total <= 0` does not catch it because a big enough basket
+  // stays positive all the way down to ₹1. Bounded here, at the only place a
+  // caller can reach it.
   const shipping = Number.isInteger(draft.shippingPaise) ? draft.shippingPaise! : 0;
+  if (shipping < 0) throw new OrderError('bad_amount', 'Shipping cannot be negative');
+
   const total = subtotal + tax + shipping;
   if (total <= 0) throw new OrderError('bad_total', 'Order total must be positive');
+  // Beyond this, `unit * qty` above has left the exactly-representable range and
+  // every figure downstream is a rounded approximation of itself. The integer
+  // column would reject it, but only AFTER the order number was consumed and
+  // the stock reserved — so it is refused here, while nothing has been written.
+  if (!Number.isSafeInteger(total)) {
+    throw new OrderError('bad_total', 'Order total is beyond the range this system will price');
+  }
 
   const orderNo = await nextOrderNo(db);
   const needsShipping = priced.some((l) => l.kind === 'product');
@@ -267,9 +282,17 @@ export async function confirmPayment(
     )).limit(1))[0];
 
   // Match on the provider order id, which is what we stored when checkout began.
-  const payment = existing ?? (await db.select().from(s.payments)
-    .where(eq(s.payments.providerOrderId, verified.providerOrderId))
-    .orderBy(desc(s.payments.id)).limit(1))[0];
+  //
+  // Only when there IS one. A gateway entity carrying no order id yields the
+  // empty string, and `provider_order_id = ''` is a query that matches whatever
+  // row happens to hold an empty reference — a payment picked by accident
+  // rather than the one this event is about. No match at all is the correct
+  // answer to "which payment is this?" when the event does not say.
+  const payment = existing ?? (verified.providerOrderId
+    ? (await db.select().from(s.payments)
+      .where(eq(s.payments.providerOrderId, verified.providerOrderId))
+      .orderBy(desc(s.payments.id)).limit(1))[0]
+    : undefined);
 
   if (!payment) return null;
 
@@ -281,6 +304,12 @@ export async function confirmPayment(
     // that followed, the gateway's and the cron's alike, so the money stayed
     // taken and nothing was ever issued for it. Prove it finished first.
     await assertConfirmationComplete(db, payment);
+    // A replay still activates. The entitlement engine is idempotent through a
+    // unique index, so re-running it issues nothing twice — and a payment whose
+    // activation was interrupted (the process died between the commit below and
+    // the activation) has no other way back. Retrying it here is what makes the
+    // webhook's own retry, and the reconcile cron, self-healing.
+    await activate(db, ctx, payment.orderId);
     return { orderId: payment.orderId, alreadyProcessed: true };   // replay
   }
 
@@ -380,7 +409,37 @@ export async function confirmPayment(
     }).where(eq(s.payments.id, payment.id));
   });
 
+  // ── The money is now taken and recorded. Issue what it bought. ───────────
+  //
+  // AFTER the commit, deliberately, and not inside it. Activation issues
+  // memberships and confirms entries through modules that open their own
+  // transactions; nesting them under this one would make a failure while
+  // issuing a membership roll back the record that the money was taken, which
+  // is the more dangerous of the two half-states. Outside it, the worst case is
+  // a paid order whose entitlement is missing — visible in
+  // entitlements.activationBacklog(), retried by the replay path above, and
+  // never a payment this system has forgotten.
+  await activate(db, ctx, order.id);
+
   return { orderId: order.id, alreadyProcessed };
+}
+
+/**
+ * Hand a confirmed payment to the entitlement engine.
+ *
+ * Imported dynamically so that src/db/orders.ts stays loadable on its own —
+ * entitlements.ts reaches into membership, competition and booking, and a
+ * static import would drag all three into every module that only wanted to
+ * price an order.
+ *
+ * A failure here is re-thrown. The webhook records it against the event and the
+ * reconcile cron retries it, which is exactly the exceptions queue those two
+ * were built for; swallowing it would leave money taken, nothing issued, and no
+ * trace that anything was meant to be.
+ */
+async function activate(db: DB, ctx: AuditContext | null, orderId: number): Promise<void> {
+  const { activateForOrder } = await import('./entitlements');
+  await activateForOrder(db, ctx, orderId);
 }
 
 /** Order statuses that are only reachable once a confirmation has completed. */
@@ -578,7 +637,25 @@ export async function expireStaleOrders(db: DB): Promise<number> {
   return expired;
 }
 
-/** Refunds require authority and a reason, and never delete the payment (§78). */
+/**
+ * Refunds require authority and a reason, and never delete the payment (§78).
+ *
+ * ONE TRANSACTION, WITH THE PAYMENT ROW LOCKED. The over-refund guard below is
+ * a read (every refund so far), an arithmetic comparison, and then a write. Run
+ * loose, those three steps are not one decision: two requests for ₹6,00,000
+ * against a ₹10,00,000 capture BOTH read a prior total of zero, both find
+ * headroom, and both insert — ₹12,00,000 requested against ₹10,00,000 taken.
+ * That is not a stress-test artefact; it needs only two operators, or one
+ * double-clicking, because each call suspends on its read before either write.
+ *
+ * confirmPayment() solves exactly this problem for captures, 300 lines above,
+ * with db.transaction() and .for('update'). This does the same, and for the
+ * same reason: the guard has to hold against the state at the moment of the
+ * INSERT, not the state at the moment of the SELECT. Locking the PAYMENT rather
+ * than the refunds is deliberate — the invariant is a property of the payment
+ * ("nothing may be refunded beyond what this payment captured"), and a lock on
+ * rows that do not exist yet cannot exclude the insert of a new one.
+ */
 export async function requestRefund(
   db: DB,
   ctx: AuditContext,
@@ -586,31 +663,153 @@ export async function requestRefund(
 ) {
   assertCan(ctx.principal, 'finance:write', {});
   if (!input.reason?.trim()) throw new OrderError('no_reason', 'A refund requires a reason');
-
-  const payment = (await db.select().from(s.payments).where(eq(s.payments.id, input.paymentId)).limit(1))[0];
-  if (!payment) throw new OrderError('unknown_payment', 'Unknown payment');
-  if (payment.status !== 'captured' && payment.status !== 'partially_refunded') {
-    throw new OrderError('not_refundable', 'Only a captured payment can be refunded');
+  // Rejected before any row is read: a non-integer or out-of-range amount is a
+  // caller fault, and letting it reach the arithmetic below would compare paise
+  // against a float.
+  if (!Number.isSafeInteger(input.amountPaise) || input.amountPaise <= 0) {
+    throw new OrderError('bad_amount', 'A refund amount is a positive whole number of paise');
   }
 
-  const already = await db.select().from(s.refunds).where(eq(s.refunds.paymentId, payment.id));
-  const refunded = already.reduce((sum: number, r: any) => sum + (r.status === 'failed' ? 0 : r.amountPaise), 0);
-  if (input.amountPaise <= 0 || refunded + input.amountPaise > payment.amountPaise) {
-    throw new OrderError('over_refund', 'Refund exceeds the amount captured');
-  }
+  const refund = await db.transaction(async (tx: DB) => {
+    // FOR UPDATE. Any concurrent requestRefund against this payment now waits
+    // here until this transaction commits, and then reads the refund it wrote.
+    const payment = (await tx.select().from(s.payments)
+      .where(eq(s.payments.id, input.paymentId)).limit(1).for('update'))[0];
+    if (!payment) throw new OrderError('unknown_payment', 'Unknown payment');
+    if (payment.status !== 'captured' && payment.status !== 'partially_refunded') {
+      throw new OrderError('not_refundable', 'Only a captured payment can be refunded');
+    }
 
-  const [refund] = await db.insert(s.refunds).values({
-    paymentId: payment.id,
-    orderId: payment.orderId,
-    amountPaise: input.amountPaise,
-    reason: input.reason.trim(),
-    status: 'requested',
-    requestedByUserId: ctx.principal.userId ?? null,
-  }).returning();
+    // Read INSIDE the lock, or the count is a photograph of a moment that has
+    // already passed.
+    const already = await tx.select().from(s.refunds).where(eq(s.refunds.paymentId, payment.id));
+    const refunded = already.reduce((sum: number, r: any) => sum + (r.status === 'failed' ? 0 : r.amountPaise), 0);
+    if (refunded + input.amountPaise > payment.amountPaise) {
+      throw new OrderError(
+        'over_refund',
+        `Refund exceeds the amount captured: ${formatINR(refunded)} is already refunded or requested ` +
+        `against ${formatINR(payment.amountPaise)}, leaving ${formatINR(payment.amountPaise - refunded)}.`
+      );
+    }
 
-  await writeAudit(db, { ...ctx, reason: input.reason }, {
-    entityType: 'refund', entityId: refund.id, action: 'create',
-    newValue: { paymentId: payment.id, amountPaise: input.amountPaise },
+    const [row] = await tx.insert(s.refunds).values({
+      paymentId: payment.id,
+      orderId: payment.orderId,
+      amountPaise: input.amountPaise,
+      reason: input.reason.trim(),
+      status: 'requested',
+      requestedByUserId: ctx.principal.userId ?? null,
+    }).returning();
+
+    // Inside the transaction too. An audit row that survives a rolled-back
+    // refund describes something that did not happen.
+    await writeAudit(tx, { ...ctx, reason: input.reason }, {
+      entityType: 'refund', entityId: row.id, action: 'create',
+      newValue: { paymentId: payment.id, amountPaise: input.amountPaise },
+    });
+    return row;
   });
+
   return refund;
+}
+
+/**
+ * Record that a refund actually completed — the money left the account.
+ *
+ * requestRefund() records an INTENTION. Nothing turned that intention into a
+ * completed refund, so the ledger never learned that money went back and the
+ * thing the payment had activated stayed active for ever. A member could be
+ * refunded in full and still verify as a member; that is not a refund, it is a
+ * gift with paperwork.
+ *
+ * WHAT COMPLETION MEANS HERE, precisely: the gateway (or, for manual UPI, the
+ * finance officer with a bank reference) has confirmed the money moved. It is
+ * recorded once — a second call is reported as a replay rather than posting the
+ * reversal twice.
+ *
+ * The entitlement reversal is the LAST step and runs outside this function's
+ * writes, for the reason activation does: reversing a membership is the
+ * membership module's business, and a fault there must not un-record a refund
+ * the bank has already made.
+ */
+export async function completeRefund(
+  db: DB,
+  ctx: AuditContext,
+  input: { refundId: number; providerRefundId?: string | null; now?: Date }
+) {
+  assertCan(ctx.principal, 'finance:write', {});
+  const now = input.now ?? new Date();
+
+  const refund = (await db.select().from(s.refunds).where(eq(s.refunds.id, input.refundId)).limit(1))[0];
+  if (!refund) throw new OrderError('unknown_refund', 'Unknown refund');
+  if (refund.status === 'completed') {
+    // Idempotent by intent: the reversal below has already been posted, and a
+    // second set of ledger entries would show the federation refunding twice.
+    return { refund, alreadyCompleted: true };
+  }
+  if (refund.status === 'failed') {
+    throw new OrderError('refund_failed', 'This refund failed at the provider and cannot be completed without a new one.');
+  }
+
+  const payment = (await db.select().from(s.payments).where(eq(s.payments.id, refund.paymentId)).limit(1))[0];
+  const order = (await db.select().from(s.orders).where(eq(s.orders.id, refund.orderId)).limit(1))[0];
+  if (!payment || !order) throw new OrderError('unknown_payment', 'The refund names a payment or order that no longer exists');
+
+  const completed = (await db.select().from(s.refunds).where(eq(s.refunds.paymentId, payment.id)))
+    .filter((r: any) => r.status === 'completed')
+    .reduce((sum: number, r: any) => sum + r.amountPaise, 0) + refund.amountPaise;
+  const full = completed >= payment.amountPaise;
+
+  await db.transaction(async (tx: DB) => {
+    await tx.update(s.refunds).set({
+      status: 'completed',
+      providerRefundId: input.providerRefundId ?? refund.providerRefundId ?? null,
+      approvedByUserId: refund.approvedByUserId ?? ctx.principal.userId ?? null,
+      completedAt: now,
+    }).where(eq(s.refunds.id, refund.id));
+
+    await tx.update(s.payments).set({
+      status: full ? 'refunded' : 'partially_refunded',
+      updatedAt: now,
+    }).where(eq(s.payments.id, payment.id));
+
+    await tx.update(s.orders).set({
+      status: full ? 'refunded' : 'partially_refunded',
+      updatedAt: now,
+    }).where(eq(s.orders.id, order.id));
+
+    // The reversal, posted as its own pair rather than by deleting the original
+    // entries. An accounts trail that can be edited is not a trail (§78).
+    const today = now.toISOString().slice(0, 10);
+    await tx.insert(s.ledgerEntries).values({
+      account: 'income.refunds',
+      direction: 'debit',
+      amountPaise: refund.amountPaise,
+      orderId: order.id, paymentId: payment.id, refundId: refund.id,
+      description: `Refund — ${order.orderNo}`,
+      occurredOn: today,
+    });
+    await tx.insert(s.ledgerEntries).values({
+      account: 'assets.gateway_receivable',
+      direction: 'credit',
+      amountPaise: refund.amountPaise,
+      orderId: order.id, paymentId: payment.id, refundId: refund.id,
+      description: `Refund paid out — ${order.orderNo}`,
+      occurredOn: today,
+    });
+
+    await writeAudit(tx, { ...ctx, reason: refund.reason }, {
+      entityType: 'refund', entityId: refund.id, action: 'update',
+      oldValue: { status: refund.status },
+      newValue: { status: 'completed', amountPaise: refund.amountPaise, fullyRefunded: full },
+    });
+  });
+
+  // What the money bought is now withdrawn, with the reason and a timestamp,
+  // and the entitlement row is kept. See src/db/entitlements.ts.
+  const { revokeForRefund } = await import('./entitlements');
+  const revocation = await revokeForRefund(db, ctx, refund.id, { now });
+
+  const after = (await db.select().from(s.refunds).where(eq(s.refunds.id, refund.id)).limit(1))[0];
+  return { refund: after, alreadyCompleted: false, fullyRefunded: full, revocation };
 }

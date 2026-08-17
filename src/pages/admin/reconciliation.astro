@@ -1,0 +1,825 @@
+---
+// /admin/reconciliation — the run, the classifications, and every exception.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHAT RECONCILIATION IS, AND WHY A FEDERATION CANNOT SKIP IT
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// /admin/finance reports what this system BELIEVES it charged. A gateway
+// statement reports what actually moved. Reconciliation is the act of showing,
+// item by item, that the second follows from the first — and the residue, the
+// items that will not line up, is where money goes missing without anybody
+// noticing. A treasurer who has only the first number has a report; a treasurer
+// who has both and the difference has an account.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// THREE THINGS THIS PAGE REFUSES TO DO
+// ═══════════════════════════════════════════════════════════════════════════
+//
+//  1. IT NEVER SHOWS A FIGURE IT DID NOT COUNT. Every number here comes from a
+//     query written a few lines above it, and a figure that could not be
+//     produced is a dash carrying its reason. There is no sample run, no
+//     illustrative exception and no placeholder amount anywhere in this file.
+//
+//  2. IT NEVER ADJUSTS A RECORD TO MAKE IT AGREE. An amount mismatch is
+//     reported, not reconciled by moving one of the two numbers. That is the
+//     whole point: the moment a system can quietly write one figure onto
+//     another to make a report balance, the report proves nothing.
+//
+//  3. IT NEVER TREATS "NO EXCEPTIONS" AS "ALL WELL" WITHOUT SAYING WHICH.
+//     An empty exception list means one of two very different things — every
+//     item matched, or nothing was ever compared. A failed run in particular
+//     leaves both the exception list and the matched list empty, and reading
+//     that as a clean result is the failure this page is built to prevent. The
+//     run's own status is therefore printed above its counts, always.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHY THE READS ARE SQL AND NOT DRIZZLE MODELS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// reconciliation_runs, reconciliation_items and disputes are created by
+// the reconciliation-and-disputes migration, and a deployment is not
+// obliged to have applied it. Importing a table object for a relation the
+// database has not got throws SQLSTATE 42P01 on first render and takes the
+// whole page with it — including the exception queries below, which read only
+// the commerce tables from 0002 and would have worked perfectly.
+//
+// So the page asks the catalogue once which tables exist, and a section whose
+// table is absent says so by name and by migration. That is an operator's
+// diagnosis where a stack trace would otherwise be, and it keeps the four
+// exception classes that need no run at all visible on a database that has
+// never reconciled anything.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTHORITY
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 'finance:read'. This page writes nothing — it has no form, no POST branch and
+// no action — so there is no write to guard separately. Resolving an exception
+// is a change to the money record and belongs where it can be audited, not on a
+// dashboard. What this screen owes its reader is the list and the instruction.
+//
+// Scope is not a filter: the commerce tables carry no state, district or dojo
+// column, so a narrower credential cannot be given a narrower answer and is
+// refused rather than shown the national one.
+
+import AdminShell from '@/components/AdminShell.astro';
+import StatCard from '@/components/StatCard.astro';
+import Status from '@/components/Status.astro';
+import Table from '@/components/DataTable/Table.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import type { Column } from '@/components/DataTable/types';
+import { sql, type SQL } from 'drizzle-orm';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import { formatINR } from '@/db/fees';
+import { statusOf } from '@/lib/status';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const configured = isConfigured();
+
+const mayRead = Boolean(principal) && canAnywhere(principal, 'finance:read');
+const scopes = visibleScopes(principal, 'finance:read');
+const nationalReach = scopes.kind === 'all';
+
+/** How many rows any one list will show. Stated on the page, never silently cut. */
+const LIMIT = 100;
+
+// ─── What exists in this database ───────────────────────────────────────────
+
+// Named without its number, deliberately: migration files get renumbered while
+// several are in flight, and a diagnosis quoting a number sends an operator
+// looking for a file that no longer has that name.
+const INTRODUCED_BY: Record<string, string> = {
+  reconciliation_runs: 'drizzle/…_reconciliation_disputes_routing.sql',
+  reconciliation_items: 'drizzle/…_reconciliation_disputes_routing.sql',
+  gateway_transactions: 'drizzle/…_reconciliation_disputes_routing.sql',
+};
+
+let present = new Set<string>();
+let fatal: string | null = null;
+
+if (mayRead && nationalReach && configured) {
+  try {
+    const rows = (await db().execute(sql`
+      select table_name from information_schema.tables
+       where table_schema = current_schema() and table_type = 'BASE TABLE'
+    `)) as unknown as Array<{ table_name: string }>;
+    present = new Set(Array.from(rows ?? []).map((r) => String(r.table_name)));
+  } catch (err) {
+    console.error('[admin/reconciliation] could not read the table catalogue', err);
+    fatal = 'The database could not be asked which tables it holds.';
+  }
+}
+
+type Row = Record<string, any>;
+
+/** A list, or an explained absence. Never an empty list standing in for one. */
+interface Listed {
+  rows: Row[];
+  /** Why there is no list. Null when there is one — including an empty one. */
+  gap: string | null;
+}
+
+const NOTHING: Listed = { rows: [], gap: null };
+
+function missingNote(missing: string[]): string {
+  const migration = INTRODUCED_BY[missing[0]];
+  return (
+    `This section reads ${missing.join(' and ')}, which this database does not have. ` +
+    (migration
+      ? `Migration ${migration} creates it and has not been applied here. `
+      : 'The migration that creates it has not been applied here. ') +
+    'Nothing is listed rather than an empty table, because an empty table here would read as “no exceptions”.'
+  );
+}
+
+async function list(needs: string[], statement: SQL): Promise<Listed> {
+  const missing = needs.filter((t) => !present.has(t));
+  if (missing.length > 0) return { rows: [], gap: missingNote(missing) };
+  try {
+    const rows = (await db().execute(statement)) as unknown as Row[];
+    return { rows: Array.from(rows ?? []), gap: null };
+  } catch (err) {
+    console.error('[admin/reconciliation] a list could not be read', err);
+    return {
+      rows: [],
+      gap:
+        'This list could not be read from the database. The fault is in the server log with the ' +
+        'detail this page deliberately does not print. Nothing is listed rather than an empty table.',
+    };
+  }
+}
+
+// ─── The runs ───────────────────────────────────────────────────────────────
+
+let runs: Listed = NOTHING;
+let classifications: Listed = NOTHING;
+let exceptions: Listed = NOTHING;
+let latest: Row | null = null;
+
+// Exceptions that need no run at all, read straight from the commerce tables.
+let unfulfilled: Listed = NOTHING;
+let uninvoiced: Listed = NOTHING;
+let impossible: Listed = NOTHING;
+let stale: Listed = NOTHING;
+let mismatched: Listed = NOTHING;
+
+if (mayRead && nationalReach && configured && !fatal) {
+  // ── The run register ────────────────────────────────────────────────────
+  runs = await list(['reconciliation_runs'], sql`
+    select id, ref, gateway, currency, status,
+           period_start, period_end,
+           gateway_count, mmakf_count, matched_count, exception_count,
+           gateway_total_minor::text as gateway_total_minor,
+           mmakf_total_minor::text  as mmakf_total_minor,
+           variance_minor::text     as variance_minor,
+           started_at, completed_at, failure_reason, unsettled_after_days
+      from reconciliation_runs
+     order by coalesce(completed_at, started_at, created_at) desc, id desc
+     limit ${LIMIT}`);
+
+  // The run being read. A URL may name one; otherwise the most recent.
+  const wanted = Number(Astro.url.searchParams.get('run'));
+  latest = runs.rows.find((r) => Number(r.id) === wanted) ?? runs.rows[0] ?? null;
+
+  if (latest) {
+    // ── How that run classified every item it looked at ───────────────────
+    //
+    // Grouped in SQL rather than counted in the template: a template that
+    // counted rows it had paged would report the page's counts as the run's.
+    classifications = await list(['reconciliation_items'], sql`
+      select status, count(*)::int as items,
+             coalesce(sum(abs(coalesce(variance_minor, 0))), 0)::text as variance_minor
+        from reconciliation_items
+       where run_id = ${Number(latest.id)}
+       group by status
+       order by count(*) desc`);
+
+    // ── Every item that is not matched and not resolved ───────────────────
+    exceptions = await list(['reconciliation_items'], sql`
+      select id, status, exception_key, detail,
+             gateway_amount_minor, mmakf_amount_minor, variance_minor,
+             gateway_currency, mmakf_currency,
+             payment_id, order_id, settlement_id, refund_id, dispute_id,
+             task_id, created_at
+        from reconciliation_items
+       where run_id = ${Number(latest.id)}
+         and status <> 'matched'
+         and resolved_at is null
+       order by id
+       limit ${LIMIT}`);
+  }
+
+  // ── The four exception classes that need no run ─────────────────────────
+  //
+  // These read only the commerce tables, so they answer on a database that has
+  // never reconciled anything — which is every deployment until the first run.
+  // Each is a real failure mode with a real consequence, not a health check.
+
+  // Money captured, fulfilment failed. The webhook handler returns 200 when
+  // fulfilment throws (a provider retry would hit the replay guard and change
+  // nothing), so nothing else was ever going to look at these again.
+  unfulfilled = await list(['payment_events'], sql`
+    select id, provider, event_id, event_type, processing_error, received_at, processed_at
+      from payment_events
+     where signature_valid = true and processing_error is not null
+     order by id desc
+     limit ${LIMIT}`);
+
+  // Money taken, no receipt issued.
+  uninvoiced = await list(['payments', 'orders', 'invoices'], sql`
+    select p.id, o.order_no, p.provider, p.amount_paise::text as amount_paise, p.captured_at
+      from payments p
+      join orders o on o.id = p.order_id
+     where p.status = 'captured'
+       and not exists (select 1 from invoices i where i.order_id = o.id)
+     order by p.id desc
+     limit ${LIMIT}`);
+
+  // A state that should be unreachable: paid, with no instant of payment.
+  impossible = await list(['orders'], sql`
+    select id, order_no, status, total_paise::text as total_paise, created_at, updated_at
+      from orders
+     where status = 'paid' and paid_at is null
+     order by id desc
+     limit ${LIMIT}`);
+
+  // Unpaid orders past their own expiry, still holding a stock reservation.
+  stale = await list(['orders'], sql`
+    select id, order_no, total_paise::text as total_paise, expires_at, created_at
+      from orders
+     where status = 'awaiting_payment'
+       and expires_at is not null
+       and expires_at < now()
+     order by expires_at asc
+     limit ${LIMIT}`);
+
+  // THE ALARM. A captured payment for an amount the order does not agree with.
+  mismatched = await list(['payments', 'orders'], sql`
+    select p.id, o.order_no, p.provider, p.provider_payment_id,
+           p.amount_paise::text as amount_paise,
+           o.total_paise::text  as total_paise,
+           p.captured_at
+      from payments p
+      join orders o on o.id = p.order_id
+     where p.status = 'captured' and p.amount_paise <> o.total_paise
+     order by p.id desc
+     limit ${LIMIT}`);
+}
+
+// ─── Money, formatted, in the currency it was actually recorded in ──────────
+
+/**
+ * A minor-unit amount as text.
+ *
+ * INR goes through formatINR() and everything else is printed as minor units
+ * beside its ISO code. That is deliberately ugly: a reconciliation item can
+ * carry a gateway currency and an MMAKF currency that DISAGREE — that is one of
+ * the classifications — and rendering both with a rupee sign would hide the
+ * very discrepancy the row exists to report.
+ */
+function amount(minor: unknown, currency?: unknown): string {
+  if (minor === null || minor === undefined || minor === '') return '—';
+  const code = String(currency ?? 'INR').toUpperCase();
+  const n = Number(minor);
+  if (!Number.isFinite(n)) return String(minor);
+  if (code === 'INR') return formatINR(n);
+  return `${n} ${code} minor units`;
+}
+
+/** A bigint-as-text total from a run. Same rule, same reason. */
+function total(text: unknown, currency: unknown): string {
+  if (text === null || text === undefined) return '—';
+  const code = String(currency ?? 'INR').toUpperCase();
+  const big = BigInt(String(text));
+  const abs = big < 0n ? -big : big;
+  if (code !== 'INR') return `${big} ${code} minor units`;
+  if (abs > BigInt(Number.MAX_SAFE_INTEGER)) return `${big} paise`;
+  return formatINR(Number(big));
+}
+
+function when(v: unknown): string {
+  if (!v) return '—';
+  const d = new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleString('en-IN', {
+        day: 'numeric', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata',
+      });
+}
+
+// ─── What to do about each classification ───────────────────────────────────
+//
+// Not decoration, and not a restatement of the status. §"no dead ends": an
+// exception register that names a problem and stops has moved the work from the
+// software to whoever happens to be reading, and they will guess. Each sentence
+// below says what the next act is and, where it matters, what NOT to do.
+//
+// Keyed on the reconciliation_status enum. A value with no entry falls back to
+// the dictionary's own meaning rather than to silence.
+
+const WHAT_TO_DO: Record<string, string> = {
+  missing_in_mmakf:
+    'Identify what this money was for. The gateway holds a transaction against a reference this system does not know, so it is income MMAKF has not recognised — and somewhere there is a payer who has paid and received nothing. Find the order, or raise one, before touching the totals.',
+  missing_at_gateway:
+    'Establish whether the payment was ever really captured, from the gateway’s own record and not from ours. This system believed it was, and may have issued an entitlement against it. If the gateway never had it, what was issued has to be withdrawn.',
+  duplicate:
+    'Decide which copy is the real transaction and resolve the other with a reason. Both are counting towards gross until you do, so every figure on the finance dashboard is overstated while this sits here.',
+  amount_mismatch:
+    'Do not adjust either record to make them agree. Establish which is right from the gateway’s statement, correct the wrong one with a recorded reason, and check what was fulfilled — an order paid for less than it was worth has already been delivered.',
+  currency_mismatch:
+    'Establish which currency the money actually moved in. Until then the two records cannot be compared at all, and any total that contains this item is not a total.',
+  unsettled:
+    'Nothing, while it is recent. Chase the provider once it is older than the settlement terms MMAKF actually agreed — this system holds no default expectation and will not invent one, because a threshold in code would be a commercial term nobody signed.',
+  refunded:
+    'Explained rather than lost: the difference is a refund. Confirm the refund was authorised by somebody who could authorise it, then resolve the item.',
+  disputed:
+    'Work the dispute itself, not this item — it resolves when the dispute does. The thing that matters is the evidence deadline: money not defended by then is lost by default rather than by decision.',
+};
+
+// ─── The registers, as tables ───────────────────────────────────────────────
+
+const runColumns: Column[] = [
+  { key: 'ref', header: 'Run', primary: true },
+  { key: 'gateway', header: 'Gateway' },
+  { key: 'status', header: 'Status', status: { domain: 'reconciliation_run' } },
+  {
+    key: 'period_start', header: 'Period', sortable: true, initialDir: 'desc',
+    render: (r: any) => `${when(r.period_start)} — ${when(r.period_end)}`,
+  },
+  { key: 'gateway_count', header: 'At gateway', numeric: true, sortable: true },
+  { key: 'mmakf_count', header: 'In MMAKF', numeric: true, sortable: true },
+  { key: 'matched_count', header: 'Matched', numeric: true, sortable: true },
+  { key: 'exception_count', header: 'Exceptions', numeric: true, sortable: true },
+  {
+    key: 'variance_minor', header: 'Variance', numeric: true,
+    hint: 'Gateway total less MMAKF total',
+    render: (r: any) => total(r.variance_minor, r.currency),
+  },
+  { key: 'completed_at', header: 'Completed', sortable: true, initialDir: 'desc', render: (r: any) => when(r.completed_at) },
+];
+
+const exceptionColumns: Column[] = [
+  { key: 'status', header: 'Classification', status: { domain: 'reconciliation' }, primary: true },
+  { key: 'detail', header: 'What the run found', primary: true },
+  {
+    key: 'gateway_amount_minor', header: 'At gateway', numeric: true,
+    render: (r: any) => amount(r.gateway_amount_minor, r.gateway_currency),
+  },
+  {
+    key: 'mmakf_amount_minor', header: 'In MMAKF', numeric: true,
+    render: (r: any) => amount(r.mmakf_amount_minor, r.mmakf_currency),
+  },
+  {
+    key: 'variance_minor', header: 'Variance', numeric: true,
+    render: (r: any) => amount(r.variance_minor, r.gateway_currency ?? r.mmakf_currency),
+  },
+  { key: 'exception_key', header: 'Exception key', hint: 'Stable across runs, so one problem is not raised twice' },
+  {
+    key: 'what', header: 'What to do about it',
+    render: (r: any) => WHAT_TO_DO[String(r.status)] ?? statusOf(String(r.status), 'reconciliation').meaning ?? '—',
+  },
+];
+
+const unfulfilledColumns: Column[] = [
+  { key: 'event_id', header: 'Provider event', primary: true },
+  { key: 'provider', header: 'Provider' },
+  { key: 'event_type', header: 'Event' },
+  { key: 'processing_error', header: 'Why fulfilment failed', primary: true },
+  { key: 'received_at', header: 'Received', sortable: true, initialDir: 'desc', render: (r: any) => when(r.received_at) },
+];
+
+const uninvoicedColumns: Column[] = [
+  { key: 'order_no', header: 'Order', primary: true },
+  { key: 'provider', header: 'Provider' },
+  { key: 'amount_paise', header: 'Captured', numeric: true, render: (r: any) => amount(r.amount_paise, 'INR') },
+  { key: 'captured_at', header: 'Captured at', sortable: true, initialDir: 'desc', render: (r: any) => when(r.captured_at) },
+];
+
+const impossibleColumns: Column[] = [
+  { key: 'order_no', header: 'Order', primary: true },
+  { key: 'status', header: 'Status', status: true },
+  { key: 'total_paise', header: 'Order total', numeric: true, render: (r: any) => amount(r.total_paise, 'INR') },
+  { key: 'updated_at', header: 'Last written', sortable: true, initialDir: 'desc', render: (r: any) => when(r.updated_at) },
+];
+
+const staleColumns: Column[] = [
+  { key: 'order_no', header: 'Order', primary: true },
+  { key: 'total_paise', header: 'Reserved value', numeric: true, render: (r: any) => amount(r.total_paise, 'INR') },
+  { key: 'expires_at', header: 'Expired at', sortable: true, initialDir: 'asc', render: (r: any) => when(r.expires_at) },
+  { key: 'created_at', header: 'Raised', sortable: true, initialDir: 'desc', render: (r: any) => when(r.created_at) },
+];
+
+const mismatchColumns: Column[] = [
+  { key: 'order_no', header: 'Order', primary: true },
+  { key: 'amount_paise', header: 'Gateway took', numeric: true, render: (r: any) => amount(r.amount_paise, 'INR') },
+  { key: 'total_paise', header: 'Order was worth', numeric: true, render: (r: any) => amount(r.total_paise, 'INR') },
+  { key: 'provider', header: 'Provider' },
+  { key: 'provider_payment_id', header: 'Provider reference' },
+  { key: 'captured_at', header: 'Captured', sortable: true, initialDir: 'desc', render: (r: any) => when(r.captured_at) },
+];
+
+// ─── The page's own summary sentence, derived rather than asserted ──────────
+
+const directExceptionCount =
+  unfulfilled.rows.length + uninvoiced.rows.length + impossible.rows.length +
+  stale.rows.length + mismatched.rows.length;
+
+const anyDirectGap = [unfulfilled, uninvoiced, impossible, stale, mismatched].some((l) => l.gap);
+
+const headerDescription = !configured
+  ? 'The federation database is not configured on this deployment, so there is nothing to reconcile.'
+  : !nationalReach
+    ? 'Reconciliation is national. This account holds finance:read at a narrower scope.'
+    : runs.gap
+      ? 'The run register is not available on this database. The exceptions that need no run are still listed below.'
+      : runs.rows.length === 0
+        ? 'No reconciliation run has ever been recorded. The exceptions that can be found without one are listed below.'
+        : 'The run, how it classified every item, and every exception it left behind.';
+---
+
+<AdminShell
+  title="Reconciliation"
+  requires="finance:read"
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin/dashboard') },
+      { name: 'Finance', url: h('/admin/finance') },
+      { name: 'Reconciliation', url: h('/admin/reconciliation') },
+    ],
+    description: headerDescription,
+    secondary: [
+      { label: 'Money dashboard', href: h('/admin/finance') },
+      { label: 'Benchmark register', href: h('/admin/benchmarks') },
+    ],
+  }}
+>
+  <Fragment slot="meta">
+    {latest && <Status value={String(latest.status)} domain="reconciliation_run" />}
+    {!anyDirectGap && (
+      <span class="meta-chip" class:list={[{ 'meta-alarm': directExceptionCount > 0 }]}>
+        {directExceptionCount} exception{directExceptionCount === 1 ? '' : 's'} found without a run
+      </span>
+    )}
+  </Fragment>
+
+  {!nationalReach ? (
+    <p class="note">
+      Reconciliation is national and cannot be narrowed. <code>orders</code>,
+      <code>payments</code>, <code>settlements</code> and the reconciliation
+      register carry no state, district or dojo column — MMAKF takes money
+      through one gateway account — so there is no predicate that would restrict
+      these items to this account&rsquo;s scope, and showing the national list
+      instead would disclose the federation&rsquo;s whole money record. This is a
+      refusal, not an empty register.
+    </p>
+  ) : !configured ? (
+    <p class="note">
+      The federation database is not configured on this deployment, so there is
+      no money record to reconcile and no run register to read. Until
+      <code>DATABASE_URL</code> is set, nothing on this page is measurable —
+      which is a different fact from &ldquo;nothing is wrong&rdquo;.
+    </p>
+  ) : fatal ? (
+    <ErrorState
+      title="The reconciliation register could not be read."
+      safe="Nothing has been changed. This page writes nothing at all — it has no form and no action — so no order, payment, settlement or reconciliation item has been touched by this failure."
+      body="The fault is in the server log with the detail this page deliberately does not print. No list is shown, because an empty exception table would read as “no exceptions” and this was a read that failed."
+    />
+  ) : (
+    <>
+      {/* ── The run ─────────────────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="runs-h">
+        <h2 id="runs-h" class="band-h">The runs</h2>
+
+        {runs.gap ? (
+          <p class="note">{runs.gap}</p>
+        ) : runs.rows.length === 0 ? (
+          <EmptyState
+            title="No reconciliation run has ever been recorded."
+            body="Not an empty list — nothing has ever run. A run compares a gateway’s statement for a period against what this system recorded, and writes one classified item for every transaction on either side. Until one has, nothing here proves the money agrees; the exceptions below are the ones that can be found without a statement at all."
+            action={{ label: 'See the money dashboard', href: h('/admin/finance') }}
+          />
+        ) : (
+          <>
+            <Table
+              id="recon-runs"
+              caption="Reconciliation runs, most recently completed first"
+              columns={runColumns}
+              rows={runs.rows}
+              paramPrefix="run"
+              note={`The ${runs.rows.length === 1 ? 'one run' : `${runs.rows.length} most recent runs`}. A run's status is printed beside its counts on purpose: a failed run leaves both the matched list and the exception list empty, and that is not a clean result.`}
+              emptyTitle="No run matches the filters."
+              emptyBody="Clear the filters to see the register."
+            />
+
+            {latest && latest.status === 'failed' && (
+              <p class="alarm" role="alert">
+                <strong>The most recent run failed.</strong>
+                Its counts below are what it managed before it stopped, not a
+                verdict on the period. Nothing is proven either way — the absence
+                of exceptions here is the absence of a comparison.
+                {latest.failure_reason ? <> The run recorded: {String(latest.failure_reason)}</> : null}
+              </p>
+            )}
+
+            {latest && latest.unsettled_after_days == null && (
+              <p class="qualify">
+                This run did not check settlement age. MMAKF has published no
+                settlement expectation, and a default in code would be this
+                system deciding a commercial term on the federation&rsquo;s
+                behalf — so no item was classified <code>unsettled</code> by
+                age, and old money will not appear below merely for being old.
+              </p>
+            )}
+          </>
+        )}
+      </section>
+
+      {/* ── How the run classified what it looked at ────────────────────── */}
+      {latest && (
+        <section class="band" aria-labelledby="class-h">
+          <h2 id="class-h" class="band-h">
+            How {String(latest.ref)} classified every item
+          </h2>
+
+          {classifications.gap ? (
+            <p class="note">{classifications.gap}</p>
+          ) : classifications.rows.length === 0 ? (
+            <p class="band-p">
+              This run wrote no items at all. That is not the same as
+              &ldquo;everything matched&rdquo;: a run that matched everything
+              still writes one <code>matched</code> item per transaction. An
+              empty item list means the run found nothing on either side to
+              compare — an empty period, or a statement that never arrived.
+            </p>
+          ) : (
+            <>
+              <p class="band-p">
+                One line per classification, counted in SQL over the whole run
+                rather than over the rows this page happens to be showing.
+              </p>
+              <ul class="classes">
+                {classifications.rows.map((c) => (
+                  <li>
+                    <span class="cl-chip"><Status value={String(c.status)} domain="reconciliation" /></span>
+                    <span class="cl-count">{Number(c.items)}</span>
+                    <span class="cl-body">
+                      <span class="cl-mean">{statusOf(String(c.status), 'reconciliation').meaning}</span>
+                      {String(c.status) !== 'matched' && (
+                        <span class="cl-do">{WHAT_TO_DO[String(c.status)] ?? ''}</span>
+                      )}
+                      <span class="cl-var">
+                        Absolute variance across these items: {total(c.variance_minor, latest.currency)}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          <div class="cards">
+            <StatCard
+              label="Transactions at the gateway"
+              value={latest.gateway_count == null ? null : Number(latest.gateway_count)}
+              unavailable={latest.gateway_count == null ? 'The run recorded no gateway count.' : null}
+              source={{ table: 'reconciliation_runs', column: 'gateway_count', filter: `id = ${Number(latest.id)}` }}
+            />
+            <StatCard
+              label="Transactions in MMAKF"
+              value={latest.mmakf_count == null ? null : Number(latest.mmakf_count)}
+              unavailable={latest.mmakf_count == null ? 'The run recorded no MMAKF count.' : null}
+              source={{ table: 'reconciliation_runs', column: 'mmakf_count', filter: `id = ${Number(latest.id)}` }}
+            />
+            <StatCard
+              label="Matched"
+              value={latest.matched_count == null ? null : Number(latest.matched_count)}
+              unavailable={latest.matched_count == null ? 'The run recorded no matched count.' : null}
+              source={{ table: 'reconciliation_runs', column: 'matched_count', filter: `id = ${Number(latest.id)}` }}
+              note="Agreed to the paisa on both sides."
+            />
+            <StatCard
+              label="Exceptions"
+              value={latest.exception_count == null ? null : Number(latest.exception_count)}
+              unavailable={latest.exception_count == null ? 'The run recorded no exception count.' : null}
+              tone="attention"
+              source={{ table: 'reconciliation_runs', column: 'exception_count', filter: `id = ${Number(latest.id)}` }}
+              note="Every one of these has somebody's name on it. An exception nobody is told to act on is a silent loss."
+            />
+          </div>
+        </section>
+      )}
+
+      {/* ── Every unmatched item ────────────────────────────────────────── */}
+      {latest && (
+        <section class="band" aria-labelledby="items-h">
+          <h2 id="items-h" class="band-h">Unmatched items, and what to do about each</h2>
+
+          {exceptions.gap ? (
+            <p class="note">{exceptions.gap}</p>
+          ) : (
+            <Table
+              id="recon-items"
+              caption={`Unresolved exceptions from ${String(latest.ref)}`}
+              columns={exceptionColumns}
+              rows={exceptions.rows}
+              paramPrefix="ex"
+              filters={[
+                {
+                  key: 'status',
+                  label: 'Classification',
+                  type: 'select',
+                  anyLabel: 'every classification',
+                  options: classifications.rows
+                    .filter((c) => String(c.status) !== 'matched')
+                    .map((c) => ({ value: String(c.status), label: statusOf(String(c.status), 'reconciliation').label })),
+                },
+                { key: 'q', label: 'Search', type: 'search', placeholder: 'Reference, or words from the detail' },
+              ]}
+              note={`Resolved items are not listed: this is the work outstanding, not the history. Nothing on this page adjusts a record to make two figures agree — that is the one act reconciliation must never perform.${
+                exceptions.rows.length >= LIMIT
+                  ? ` This read was capped at ${LIMIT} items and returned ${LIMIT}, so there are almost certainly more than are shown.`
+                  : ''
+              }`}
+              emptyTitle="This run left no unresolved exception."
+              emptyBody="Every item it classified either matched or has since been resolved with a reason. Read the run's status above before treating that as a clean period — a run that failed also leaves this list empty."
+              emptyAction={{ label: 'Back to the money dashboard', href: h('/admin/finance') }}
+            />
+          )}
+        </section>
+      )}
+
+      {/* ── The exceptions that need no run ─────────────────────────────── */}
+      <section class="band" aria-labelledby="direct-h">
+        <h2 id="direct-h" class="band-h">Exceptions visible without a gateway statement</h2>
+        <p class="band-p">
+          Five failure modes that can be found from MMAKF&rsquo;s own records
+          alone, so they answer on a database that has never reconciled anything
+          — which is every deployment until the first statement arrives. Each is
+          a real consequence, not a health check.
+        </p>
+
+        {/* 1 — money taken, nothing issued */}
+        {unfulfilled.gap ? <p class="note">{unfulfilled.gap}</p> : (
+          <Table
+            id="recon-unfulfilled"
+            caption="Verified provider events whose fulfilment failed"
+            columns={unfulfilledColumns}
+            rows={unfulfilled.rows}
+            paramPrefix="uf"
+            note="Money was captured and what it paid for was not issued. The webhook handler deliberately answers 200 when fulfilment throws — a provider retry would hit the replay guard and change nothing — so the scheduled job is the only thing that retries these, and anything still here has already failed a retry. WHAT TO DO: issue what was paid for by hand, or refund it. Do not re-deliver the webhook; the replay guard will discard it."
+            emptyTitle="No captured payment is waiting on a failed fulfilment."
+            emptyBody="Every verified provider event either processed or has not been received. This is the queue that decides whether anybody has paid MMAKF and received nothing."
+            emptyAction={{ label: 'See the money dashboard', href: h('/admin/finance') }}
+          />
+        )}
+
+        {/* 2 — money taken, no receipt */}
+        {uninvoiced.gap ? <p class="note">{uninvoiced.gap}</p> : (
+          <Table
+            id="recon-uninvoiced"
+            caption="Captured payments with no invoice issued"
+            columns={uninvoicedColumns}
+            rows={uninvoiced.rows}
+            paramPrefix="ui"
+            note="Money taken and no tax document raised. WHAT TO DO: issue the invoice. The invoice series is numbered separately from orders precisely so it has no gaps, and a payer with no receipt has no way to claim what they paid for."
+            emptyTitle="Every captured payment has an invoice."
+            emptyBody="No money has been taken without a receipt being issued for it."
+            emptyAction={{ label: 'See the money dashboard', href: h('/admin/finance') }}
+          />
+        )}
+
+        {/* 3 — a state that should be unreachable */}
+        {impossible.gap ? <p class="note">{impossible.gap}</p> : (
+          <Table
+            id="recon-impossible"
+            caption="Orders marked paid with no instant of payment"
+            columns={impossibleColumns}
+            rows={impossible.rows}
+            paramPrefix="im"
+            note="This state should be unreachable: an order becomes paid and records when, in the same write. A row here means the two diverged. WHAT TO DO: do not repair it silently — establish from the provider whether the money moved, and record the correction with a reason, because whichever way it goes one of the two facts on this row is false."
+            emptyTitle="No order is paid without an instant of payment."
+            emptyBody="The write that marks an order paid and the write that records when have not diverged."
+            emptyAction={{ label: 'See the money dashboard', href: h('/admin/finance') }}
+          />
+        )}
+
+        {/* 4 — stock held by nobody */}
+        {stale.gap ? <p class="note">{stale.gap}</p> : (
+          <Table
+            id="recon-stale"
+            caption="Unpaid orders past their own expiry"
+            columns={staleColumns}
+            rows={stale.rows}
+            paramPrefix="st"
+            note="An unpaid order holds its stock reservation until it expires, and the scheduled job releases it. WHAT TO DO: if rows persist here, the scheduled job is not running — the symptom members see is an item showing as out of stock while it sits on the shelf."
+            emptyTitle="No expired order is still holding a reservation."
+            emptyBody="Either nothing has expired, or the scheduled job released everything that did."
+            emptyAction={{ label: 'See the money dashboard', href: h('/admin/finance') }}
+          />
+        )}
+
+        {/* 5 — the alarm */}
+        {mismatched.gap ? <p class="note">{mismatched.gap}</p> : (
+          <Table
+            id="recon-mismatch"
+            caption="Captured payments that do not match the order they pay"
+            columns={mismatchColumns}
+            rows={mismatched.rows}
+            paramPrefix="mm"
+            note="The server resolves what an order is worth and compares the gateway's amount against it. It NEVER adjusts to match, and a mismatch blocks fulfilment. WHAT TO DO: every row here is a payment that should not have been fulfilled — establish which figure is right from the provider's own record, and treat what was delivered as delivered against the wrong price. This list should never leave nought."
+            emptyTitle="Every captured payment matches the order it pays."
+            emptyBody="No payment has ever been accepted for an amount the order did not agree with."
+            emptyAction={{ label: 'See the money dashboard', href: h('/admin/finance') }}
+          />
+        )}
+      </section>
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .band { margin: 0 0 44px; }
+  .band + .band { padding-top: 34px; border-top: 1px solid var(--border); }
+  .band-h {
+    font-family: var(--font-display); font-size: 1.15rem;
+    margin: 0 0 12px; letter-spacing: .01em;
+  }
+  .band-p { color: var(--muted); line-height: 1.75; max-width: 68ch; margin: 0 0 18px; }
+
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 68ch;
+  }
+  .qualify {
+    margin: 16px 0 0; padding: 14px 18px; max-width: 72ch;
+    background: var(--bg-2); border-left: 3px solid var(--gold-dim);
+    color: var(--muted); line-height: 1.7; font-size: .88rem;
+  }
+  code { font-family: var(--font-accent, monospace); font-size: .88em; }
+
+  .alarm {
+    padding: 16px 20px; margin: 18px 0 0; max-width: 72ch;
+    border: 1px solid var(--red); border-left-width: 3px;
+    background: var(--card); color: var(--muted); line-height: 1.75;
+  }
+  .alarm strong { color: var(--red-2); display: block; margin-bottom: 6px; }
+
+  /* One classification per row: the chip, the count, then what it means and
+     what to do. Not a table — the instruction is a paragraph, and a paragraph
+     in a table cell is unreadable on a phone. */
+  .classes { list-style: none; margin: 0 0 26px; padding: 0; }
+  .classes li {
+    display: grid;
+    grid-template-columns: minmax(0, 12rem) minmax(0, 4rem) minmax(0, 1fr);
+    gap: 4px 18px; align-items: start;
+    padding: 14px 0; border-bottom: 1px solid var(--border);
+  }
+  .classes li:last-child { border-bottom: 0; }
+  .cl-count {
+    font-family: var(--font-display); font-size: 1.3rem; font-weight: 600;
+    color: var(--white); font-variant-numeric: tabular-nums; text-align: right;
+  }
+  .cl-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .cl-mean { color: var(--off-white); line-height: 1.7; font-size: .9rem; }
+  .cl-do { color: var(--muted); line-height: 1.7; font-size: .86rem; }
+  .cl-var { color: var(--muted); font-size: .78rem; }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px;
+  }
+
+  .meta-chip {
+    font-size: var(--text-xs); color: var(--muted);
+    border: 1px solid var(--border); border-radius: var(--radius-pill);
+    padding: 3px 10px; line-height: 1.5;
+  }
+  .meta-alarm { border-color: var(--red); color: var(--red-2); }
+
+  /* Two tables in a row need air between them, and the register headings need
+     to stay distinguishable once they stack. */
+  :global(.band .dt + .dt),
+  :global(.band figure + figure) { margin-top: 34px; }
+
+  @media (max-width: 760px) {
+    .classes li {
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px 12px;
+    }
+    .cl-body { grid-column: 1 / -1; }
+  }
+</style>

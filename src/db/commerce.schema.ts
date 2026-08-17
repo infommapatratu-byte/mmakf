@@ -19,7 +19,7 @@
 //    federation's decision; that a fee exists and is collectable is engineering.
 
 import {
-  pgTable, serial, text, integer, timestamp, date, boolean,
+  pgTable, serial, text, integer, bigint, timestamp, date, boolean,
   uniqueIndex, index, jsonb, pgEnum,
 } from 'drizzle-orm/pg-core';
 import { persons, dojos, stateUnits } from './schema';
@@ -212,8 +212,37 @@ export const orderLines = pgTable('order_lines', {
   taxPaise: integer('tax_paise').notNull().default(0),
   totalPaise: integer('total_paise').notNull(),
 
+  // ── MARKETPLACE ATTRIBUTION (migration 0025) ──────────────────────────────
+  //
+  // A marketplace line belongs to a SELLER ORDER as well as to the order. All
+  // four columns are nullable because the order spine carries membership fees,
+  // grading fees and event entries too, and none of those has a seller.
+  //
+  // NO `.references()` ON sellerOrderId, DELIBERATELY. `seller_orders` is
+  // defined in src/db/marketplace-orders.schema.ts, which imports this file;
+  // declaring the reference here would close an import cycle that breaks
+  // drizzle-kit and, worse, resolves to `undefined` at module-evaluation time
+  // in a way that fails silently. The FOREIGN KEY IS REAL — it is declared in
+  // drizzle/0025_marketplace_platform.sql — it is simply not declared twice.
+  //
+  // `sellerId` is DENORMALISED here on purpose, for the same reason it is on
+  // stock_items: every seller-facing query filters on it in SQL, and a filter
+  // that needs a join to seller_orders is a filter somebody eventually writes
+  // without the join. "Seller A attempts: view Seller B orders. MUST FAIL." is
+  // one of the brief's named attacks, and the cheapest correct filter is the
+  // one that stays written.
+  sellerOrderId: integer('seller_order_id'),
+  sellerId: integer('seller_id'),
+  listingId: integer('listing_id'),
+  listingVariantId: integer('listing_variant_id'),
+
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => ({ orderIdx: index('order_lines_order_idx').on(t.orderId) }));
+}, (t) => ({
+  orderIdx: index('order_lines_order_idx').on(t.orderId),
+  sellerOrderIdx: index('order_lines_seller_order_idx').on(t.sellerOrderId),
+  sellerIdx: index('order_lines_seller_idx').on(t.sellerId),
+  variantIdx: index('order_lines_listing_variant_idx').on(t.listingVariantId),
+}));
 
 // ─── Payments ───────────────────────────────────────────────────────────────
 
@@ -310,6 +339,51 @@ export const invoices = pgTable('invoices', {
   gstin: text('gstin'),
   placeOfSupply: text('place_of_supply'),
   verifyToken: text('verify_token').notNull(),         // powers the public check
+
+  // ── FROZEN AT ISSUE (migration 0015) ──────────────────────────────────────
+  //
+  // THE RULE: once an invoice is issued, the commercial amount and the exchange
+  // rate used are frozen ON THIS ROW. A later FX movement must never change
+  // what a customer owes.
+  //
+  // That is why the rate is copied here rather than looked up. `fxRateId` below
+  // is PROVENANCE — "this figure came from that recorded rate" — and is never
+  // read back to recompute an amount; fx_rates is a table whose entire purpose
+  // is to change, and an invoice pointing into it would move with it.
+  //
+  // Every column is nullable or defaulted because invoices already exist. An
+  // INR-only invoice has no presentment currency and no rate: base is INR,
+  // presentment is null, and nothing was converted.
+
+  /** What the federation accounts in. INR, in paise. */
+  baseCurrency: text('base_currency').notNull().default('INR'),
+  /** The base currency's ISO 4217 exponent, frozen — see currencies.minorUnit. */
+  baseMinorUnit: integer('base_minor_unit').notNull().default(2),
+
+  /** What the customer was billed in. Null means the same as base. */
+  presentmentCurrency: text('presentment_currency'),
+  presentmentMinorUnit: integer('presentment_minor_unit'),
+  presentmentTotalMinor: bigint('presentment_total_minor', { mode: 'number' }),
+
+  /**
+   * The rate ACTUALLY USED, in minor-per-minor parts-per-million.
+   * bigint for the same overflow reason as fx_rates.ratePpm.
+   */
+  fxRatePpm: bigint('fx_rate_ppm', { mode: 'number' }),
+  fxRateId: integer('fx_rate_id'),
+  fxSource: text('fx_source'),
+  fxRetrievedAt: timestamp('fx_retrieved_at', { withTimezone: true }),
+  fxEffectiveOn: date('fx_effective_on'),
+
+  /**
+   * The tax computation as it stood at issue: rules, rate versions, rates and
+   * amounts. Publishing a new rate version tomorrow leaves this untouched.
+   *
+   * Null means no tax computation was recorded — NOT that the supply is exempt.
+   * src/db/tax.ts keeps those two apart everywhere, and so does this column.
+   */
+  taxSnapshot: jsonb('tax_snapshot'),
+
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   invoiceNoIdx: uniqueIndex('invoices_invoice_no_uk').on(t.invoiceNo),

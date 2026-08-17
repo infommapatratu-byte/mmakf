@@ -61,7 +61,7 @@
 // how long a review takes. Each has a place to arrive and no default.
 
 import {
-  pgTable, serial, text, integer, timestamp, jsonb, pgEnum,
+  pgTable, serial, text, integer, timestamp, jsonb, pgEnum, boolean,
   index, uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { and, eq, sql } from 'drizzle-orm';
@@ -186,6 +186,88 @@ export const sellerStatus = pgEnum('seller_status', [
 ]);
 
 /**
+ * WHAT KIND OF THING IS SELLING. Added by migration 0025.
+ *
+ * Not decoration. A manufacturer, a federation store and an individual who
+ * sells three belts a year carry different verification burdens, different
+ * brand-authorisation expectations and — when MMAKF decides them — different
+ * commission bands. Folding them into one undifferentiated "seller" left the
+ * register unable to tell a factory from a teenager, and left the reviewer with
+ * nothing to go on but a trading name.
+ *
+ * A pgEnum and not free text, for the same reason `listingCategory` is one: a
+ * seller must not be able to invent a category of seller by typing it.
+ *
+ * 'federation' is in the list because MMAKF sells its own goods THROUGH this
+ * marketplace rather than beside it — one order spine, one settlement model,
+ * and the federation's own store subject to the same catalogue rules as
+ * everybody else's. A platform that exempts its own shop from its own
+ * moderation has not built a marketplace; it has built a shop with tenants.
+ */
+export const sellerType = pgEnum('seller_type', [
+  'manufacturer',
+  'distributor',
+  'brand',
+  'retailer',
+  'dojo',
+  'federation',
+  'institutional',
+  'individual',
+  'service_provider',
+]);
+
+/**
+ * The legal form of the selling entity, which is what determines which
+ * registration documents can even exist. Asking a sole proprietor for a
+ * certificate of incorporation is how a verification queue stalls on a document
+ * that was never going to arrive.
+ */
+export const sellerBusinessType = pgEnum('seller_business_type', [
+  'individual', 'sole_proprietor', 'partnership', 'private_company',
+  'public_company', 'llp', 'trust', 'society', 'federation', 'club', 'dojo', 'other',
+]);
+
+/**
+ * THE STOREFRONT, WHICH IS NOT THE SELLER.
+ *
+ * A seller can be approved with no store yet; a store can be closed by its
+ * owner for a fortnight without the seller being suspended; and a store can be
+ * force-closed by MMAKF while the seller record stays approved pending review.
+ * One status cannot express those three, and the middle one matters most — a
+ * seller going away for a fortnight must not have to be suspended in order to
+ * stop taking orders, because a suspension is a governance record that will
+ * follow them.
+ */
+export const storeStatus = pgEnum('store_status', [
+  'not_created', 'draft', 'open', 'closed_by_seller', 'closed_by_federation',
+]);
+
+/**
+ * Whether the seller currently satisfies whatever MMAKF requires of them.
+ *
+ * SEPARATE FROM sellerStatus, because compliance drifts without anybody
+ * deciding anything: a GST registration lapses, a brand authorisation expires,
+ * an agreement version is superseded. None of those is a suspension — nobody
+ * suspended anybody — and recording them as one would leave the register unable
+ * to say whether a shop was closed for misconduct or for a lapsed certificate.
+ */
+export const sellerComplianceStatus = pgEnum('seller_compliance_status', [
+  'not_assessed', 'compliant', 'action_required', 'lapsed', 'breach',
+]);
+
+/**
+ * The band a seller's measured performance falls in.
+ *
+ * BANDS, NOT A BARE SCORE, because the brief is explicit that one bad incident
+ * must not trigger enforcement. A band is a considered position a human moves a
+ * seller into and out of; src/db/marketplace-trust.ts computes the evidence for
+ * it and never applies a penalty on its own.
+ */
+export const sellerPerformanceBand = pgEnum('seller_performance_band', [
+  'unrated', 'good', 'watch', 'at_risk', 'critical',
+]);
+
+/**
  * A person or dojo approved to sell through MMAKF.
  *
  * SEPARATE FROM A ROLE BINDING ON PURPOSE. Selling is not authority over other
@@ -237,6 +319,86 @@ export const sellers = pgTable('sellers', {
   /** Free-form supporting material, on the same terms as an application's evidence. */
   evidence: jsonb('evidence'),
 
+  // ── Added by migration 0025: WHO IS SELLING, in enough detail to review ────
+  //
+  // Every column below is nullable, and that is deliberate rather than lazy.
+  // Seller rows already exist, and a NOT NULL with a chosen default would
+  // silently assert that an existing seller is (say) a 'retailer' when nobody
+  // ever asked them. `sellerDossier()` in src/db/seller-registry.ts reports what
+  // is absent so a reviewer can ask for it; nothing here fills a gap in.
+
+  sellerType: sellerType('seller_type'),
+  businessType: sellerBusinessType('business_type'),
+
+  /** The name on the registration certificate. Frequently not the trading name. */
+  legalName: text('legal_name'),
+  /** The name on the goods, which is a third thing again. */
+  brandName: text('brand_name'),
+  registrationNumber: text('registration_number'),
+  website: text('website'),
+  /** [{ platform, url }] — captured for review, never rendered as a verified claim. */
+  socialProfiles: jsonb('social_profiles'),
+  businessDescription: text('business_description'),
+  yearsOperating: integer('years_operating'),
+  businessCategory: text('business_category'),
+
+  // ── The storefront ────────────────────────────────────────────────────────
+  //
+  // The slug is the seller's public URL and is UNIQUE, because two shops at one
+  // address is a support incident — and if the second is a copy of the first it
+  // is an impersonation. Null until a store is actually created.
+  storeSlug: text('store_slug'),
+  storeStatus: storeStatus('store_status').notNull().default('not_created'),
+  storeTagline: text('store_tagline'),
+  storeAbout: text('store_about'),
+  storeLogoUrl: text('store_logo_url'),
+  /** Free-text specialisms shown on the storefront. Never a verified claim. */
+  storeSpecialisms: jsonb('store_specialisms'),
+  storeOpenedAt: timestamp('store_opened_at', { withTimezone: true }),
+  storeClosedAt: timestamp('store_closed_at', { withTimezone: true }),
+  storeClosedReason: text('store_closed_reason'),
+
+  complianceStatus: sellerComplianceStatus('compliance_status').notNull().default('not_assessed'),
+
+  /**
+   * The commercial tier MMAKF has placed this seller in, if any.
+   *
+   * TEXT, NULLABLE, AND CARRYING NO RATE. A tier is a label a commission rule
+   * may match on (src/db/marketplace-finance.schema.ts); it is not itself a
+   * percentage, because a percentage in the row that gets paid is a commission
+   * MMAKF never approved, sitting exactly where nobody would look for it.
+   */
+  tier: text('tier'),
+
+  // ── Measured, never asserted ──────────────────────────────────────────────
+  //
+  // DERIVED columns, refreshed by src/db/marketplace-trust.ts from published
+  // reviews and completed orders. They are cached here because the storefront
+  // and the admin list would otherwise aggregate two large tables on every page
+  // load. NOTHING WRITES THEM FROM USER INPUT — a seller cannot set their own
+  // rating any more than they can set their own badge.
+  ratingAvgBps: integer('rating_avg_bps'),          // 4.25 stars = 42500
+  ratingCount: integer('rating_count').notNull().default(0),
+  performanceScoreBps: integer('performance_score_bps'),
+  performanceBand: sellerPerformanceBand('performance_band').notNull().default('unrated'),
+  performanceComputedAt: timestamp('performance_computed_at', { withTimezone: true }),
+
+  // ── Restriction and termination ───────────────────────────────────────────
+  //
+  // RESTRICTED IS NOT SUSPENDED. A restricted seller keeps trading in the
+  // categories they are trusted with and is barred from the rest; a suspended
+  // one is out entirely. The brief names both states, and collapsing them would
+  // force MMAKF to close a whole shop over one product line — which in practice
+  // means it closes nothing, and the restriction is never applied at all.
+  restrictedAt: timestamp('restricted_at', { withTimezone: true }),
+  restrictedReason: text('restricted_reason'),
+  /** Category slugs the seller may NOT list in while restricted. */
+  restrictedCategories: jsonb('restricted_categories'),
+
+  terminatedAt: timestamp('terminated_at', { withTimezone: true }),
+  terminatedByUserId: integer('terminated_by_user_id').references(() => users.id),
+  terminatedReason: text('terminated_reason'),
+
   appliedAt: timestamp('applied_at', { withTimezone: true }).notNull().defaultNow(),
   approvedByUserId: integer('approved_by_user_id').references(() => users.id),
   approvedAt: timestamp('approved_at', { withTimezone: true }),
@@ -254,6 +416,14 @@ export const sellers = pgTable('sellers', {
   userUk: uniqueIndex('sellers_user_uk').on(t.userId),
   statusIdx: index('sellers_status_idx').on(t.status),
   stateIdx: index('sellers_state_idx').on(t.stateUnitId),
+  // ONE STOREFRONT PER URL. PARTIAL, because a slug is null until a store
+  // exists, and in Postgres a plain unique index treats every null as distinct
+  // — so it would constrain nothing while looking exactly like a constraint,
+  // which is worse than having none.
+  storeSlugUk: uniqueIndex('sellers_store_slug_uk').on(t.storeSlug)
+    .where(sql`store_slug is not null`),
+  typeIdx: index('sellers_type_idx').on(t.sellerType),
+  storeIdx: index('sellers_store_status_idx').on(t.storeStatus),
 }));
 
 // ─── Listings ───────────────────────────────────────────────────────────────
@@ -328,10 +498,90 @@ export const listings = pgTable('listings', {
   priceMinor: integer('price_minor').notNull(),
   currency: text('currency').notNull().default('INR'),
 
+  // ── Added by migration 0025: REVIEWABLE PRODUCT DETAIL ────────────────────
+  //
+  // Every column in this block feeds `content_hash`, because every one of them
+  // is a claim a reviewer would want to have seen before it went in front of
+  // the public. A certification that appears on Tuesday under Monday's approval
+  // is precisely the failure the second gate exists to prevent, and it is a
+  // graver one than a changed title: "CE certified" is a safety claim.
+  //
+  // HOW THIS AVOIDS EMPTYING THE SHOP ON DEPLOY. Adding fields to a hash
+  // normally invalidates every hash already stored, which would drop every
+  // approved listing out of public view the moment 0025 ships. It does not,
+  // because listingContentHash() in src/db/marketplace.ts hashes the extended
+  // block ONLY when at least one of these fields is set. A listing written
+  // before 0025 has all of them null, hashes exactly as it did under v1, and
+  // stays approved and visible. The rule is enforced by a test that asserts a
+  // pre-0025 listing's hash is byte-identical.
+
+  /** The catalogue node. Nullable: `category` above is the legacy four-value axis. */
+  categoryId: integer('category_id'),
+  /** The brand claimed. A CLAIM — the badge comes from brand_authorisations. */
+  brandId: integer('brand_id'),
+
+  /** { material: 'cotton', gsm: '400', ... } — free-form, seller-declared. */
+  specifications: jsonb('specifications'),
+  materials: text('materials'),
+  weightGrams: integer('weight_grams'),
+  lengthMm: integer('length_mm'),
+  widthMm: integer('width_mm'),
+  heightMm: integer('height_mm'),
+  countryOfOrigin: text('country_of_origin'),
+  warranty: text('warranty'),
+  gtin: text('gtin'),
+
+  /** Discipline relevance, for the marketplace filters the brief names. */
+  sport: text('sport'),
+  discipline: text('discipline'),
+  /** Whether the seller asserts Shotokan relevance. A claim, not a badge. */
+  shotokanRelevant: boolean('shotokan_relevant'),
+
+  // ── Safety: the block that must never be silently absent ──────────────────
+  //
+  // ageMinYears is NULLABLE and its absence means UNSTATED, not "suitable for
+  // everyone". src/db/catalogue.ts keeps those two apart everywhere, because a
+  // null read as "all ages" on a piece of protective equipment is the exact
+  // shape of a harm this system is meant to prevent.
+  ageMinYears: integer('age_min_years'),
+  ageMaxYears: integer('age_max_years'),
+  safetyClassification: text('safety_classification'),
+  certification: text('certification'),
+  usageInstructions: text('usage_instructions'),
+  warning: text('warning'),
+
+  hsnCode: text('hsn_code'),
+  taxRateBps: integer('tax_rate_bps'),
+  shippingClass: text('shipping_class'),
+
   // ── Not reviewable ────────────────────────────────────────────────────────
+  //
+  // `stockQty` is retained as the ROLL-UP of the listing's variants, kept for
+  // the surfaces that only need "is anything left?". The authoritative count
+  // per variant per location lives in stock_items — see src/db/inventory.ts,
+  // and note that nothing decrements this column to make a sale.
   stockQty: integer('stock_qty').notNull().default(0),
 
+  /** Lowest live variant price, maintained by the catalogue module for sorting. */
+  variantCount: integer('variant_count').notNull().default(0),
+
   status: listingStatus('status').notNull().default('draft'),
+
+  // ── Quarantine: a THIRD axis, not a status ────────────────────────────────
+  //
+  // Deliberately NOT a value of listingStatus. A quarantined listing has to
+  // remember what it was — approved, or submitted, or already delisted —
+  // because quarantine is lifted as often as it is upheld, and a status that
+  // overwrote the previous one would leave the federation with no idea what to
+  // restore the item to. It is also the state that must survive a counterfeit
+  // investigation without deleting the order history attached to it.
+  //
+  // publicListingPredicate() below requires quarantinedAt IS NULL, so setting
+  // this one column removes the item from every public surface at once.
+  quarantinedAt: timestamp('quarantined_at', { withTimezone: true }),
+  quarantinedByUserId: integer('quarantined_by_user_id').references(() => users.id),
+  quarantineReason: text('quarantine_reason'),
+  quarantineLiftedAt: timestamp('quarantine_lifted_at', { withTimezone: true }),
 
   /** Hash of the current reviewable content. Recomputed on every content write. */
   contentHash: text('content_hash').notNull(),
@@ -431,7 +681,7 @@ export const listingRevisions = pgTable('listing_revisions', {
 /**
  * What the public may see, expressed once, as SQL.
  *
- * THREE CONDITIONS, ALL IN THE QUERY, NEVER AFTER IT:
+ * FIVE CONDITIONS, ALL IN THE QUERY, NEVER AFTER IT:
  *
  *   1. the LISTING has been approved;
  *   2. the SELLER is currently approved — which is what makes suspending a
@@ -439,7 +689,14 @@ export const listingRevisions = pgTable('listing_revisions', {
  *      instant, without deleting a single row;
  *   3. the approved content is still the current content — the belt-and-braces
  *      half of rule 6, so an edit removes the item from the shop even if a
- *      future refactor drops the status change.
+ *      future refactor drops the status change;
+ *   4. the listing is NOT QUARANTINED (added by 0025) — one column set during a
+ *      counterfeit or safety investigation withdraws the item from every public
+ *      surface at once while every order, review and revision attached to it
+ *      survives, which is the whole point of quarantining rather than deleting;
+ *   5. the seller's STORE IS OPEN (added by 0025). A seller who closes their
+ *      shop for a fortnight must not have to be suspended to stop selling, and
+ *      a suspension is a governance record that would follow them for ever.
  *
  * A post-query `.filter()` doing this work would be one refactor away from
  * being deleted, and by the time it was, the unapproved rows would already be
@@ -448,11 +705,19 @@ export const listingRevisions = pgTable('listing_revisions', {
  * Callers MUST join `listings` to `sellers` for this predicate to mean anything;
  * `publicListings()` in src/db/marketplace.ts is the intended caller and the
  * only one that should need to build it by hand.
+ *
+ * NOTE ON THE 0025 BACKFILL: condition 5 would have emptied the shop on deploy,
+ * because `store_status` defaults to 'not_created' and every existing approved
+ * seller was trading without one. The migration therefore opens a store for
+ * every already-approved seller. A default that silently hides live listings is
+ * not a safe default; it is an outage with a plausible explanation.
  */
 export function publicListingPredicate() {
   return and(
     eq(listings.status, 'approved'),
     eq(sellers.status, 'approved'),
     eq(listings.contentHash, listings.approvedContentHash),
+    sql`${listings.quarantinedAt} is null`,
+    eq(sellers.storeStatus, 'open'),
   );
 }

@@ -159,6 +159,74 @@ and one page that should never have shipped was removed.
 
 ---
 
+## BUILT — the fourth wave: the location engine and the identity foundation
+
+**17 August 2026.** Migration `0025_identity_and_geography.sql` plus its lockdown
+`0026_data_api_lockdown.sql`; `src/db/geography.ts`, `src/db/identity.ts`;
+99 tests in `tests/geography.test.ts` and `tests/identity.test.ts`, all passing
+against a real Postgres (PGlite) with every migration applied.
+
+### The gap this closed
+
+Before it, the federation recorded WHERE somebody is in exactly two ways, and
+both were the same way: `persons.state_unit_id`, `persons.district_unit_id` and
+a free-text `persons.city`. That trio is repeated on `coach_profiles`, `venues`,
+`institutions` and `routing_rules`.
+
+**That is not geography.** `state_units` is the register of CHARTERED MMAKF
+BODIES — a row exists when the federation has chartered a unit, and not
+otherwise. So the register **could not record the residence of anybody living
+outside the chartered hierarchy**, which is precisely the population a national
+federation is trying to recruit. For everybody else, "where do you live"
+collapsed to a free-text city with no postal code, no locality, no country and
+no canonical id: two members in the same town were `Guwahati` and `Gauhati`, and
+nothing could tell they were neighbours.
+
+There was also **no relationship model at all** — no parent, no guardian, no
+dependant. A federation whose own published programmes start at age 5 could not
+name a child's guardian.
+
+| Work | Where | What it changes |
+|---|---|---|
+| **Civil geography** | `countries`, `admin_areas`, `geo_aliases`, `postal_codes` | One self-referencing ladder with a `level`, a `depth` and a materialised `path`, so depth is not fixed by DDL. **No foreign key joins it to `state_units` in either direction** — that absence is the feature, and `tests/geography.test.ts` asserts it structurally. |
+| **Resolution that refuses to guess** | `resolveArea()` | Returns `resolved` / **`ambiguous`** / `unknown`. A best-match resolver picks whichever row the index returned first, files the member one level off, and emits no signal. Ambiguity is a return value, narrowed by `within` (the state a form already collected) or `level`. |
+| **Addresses** | `addresses`, `person_addresses` | Immutable content plus a validity window. An unresolved address is **stored, not refused** — with `localityText` kept verbatim so it re-resolves the day the district is loaded. `unresolvedAddresses()` is that backlog. |
+| **Verified contacts** | `person_contacts` | `persons.email` stays the primary string; **whether anybody proved it lives only here.** `addContact()` has no `verified` parameter — verification is a separate act taking a method and a reference. |
+| **Guardianship** | `person_relationships`, `guardian_authorizations` | An assertion confers nothing; a **verified** relationship still confers nothing until a capability is granted one at a time. `view_medical` and `view_safeguarding` are **gated twice** — a FEDERATION_ADMIN can attach a parent to a child and still cannot hand over the safeguarding file. |
+| **Consent as a record** | `consent_records` | Append-only, carries the policy VERSION, and a withdrawal is a new row. Consent to version 1 is not consent to version 4, and a test asserts no function in the module UPDATEs the table. |
+| **Duplicates** | `duplicate_candidates` | Raised on index lookups only (never a scan or a fuzzy compare), stored once per pair via a `left_id < right_id` CHECK, and **never merged** — see below. |
+| **Governed changes** | `profile_change_requests` | `dob`, `gender`, `nationality` and the name fields move through request → decision → apply. The apply step re-reads the record and **refuses if it moved underneath the decision**; the decider may not be the requester. |
+| **Four new actions** | `src/lib/rbac.ts` | `geo:write`, `guardian:verify`, `duplicate:review`, `profilechange:decide`. There is deliberately **no `geo:read`** — resolving an address happens on the public intake path where the caller holds nothing. |
+
+### What this deliberately does NOT do
+
+- **It ships EMPTY.** Not one country, state, district or postal code is seeded,
+  for the reason the fee, tax and currency tables ship empty: a plausible seeded
+  row is indistinguishable six months later from one somebody verified. Rows
+  arrive through `upsertCountry()` / `upsertArea()`, which **require a `source`**.
+- **It does not merge two people.** `decideDuplicate()` accepts `merged` as a
+  decision and performs no merge — there is no such code path, and a test asserts
+  both records survive. What a merge means for rank history, membership numbers
+  and certificates already issued is MMAKF's to decide, and writing it now would
+  invent that policy at the least visible moment.
+- **It does not back-derive name parts.** `given_name` / `family_name` are added
+  and left NULL on existing rows. Splitting `Shihan Pramod Kumar Pathak` on
+  spaces yields a family name of `Kumar`, and a wrong parse is worse than an
+  absent one because nothing downstream can tell it was guessed. Only
+  `match_key` — which is order-independent — is derived.
+- **It does not define the age of majority, what proves a guardianship, which
+  policies need consent, or what score means two records are one person.** Each
+  is MMAKF's; each has a place to arrive and no invented default.
+- **THERE IS NO SURFACE YET.** This is the honest limitation and the largest one:
+  the engines have a service layer, RBAC gating, audit writes and 99 tests, and
+  **no page in `src/pages` calls them.** No registration step collects a
+  structured address, no admin screen works the duplicate or change-request
+  queues, and no parent dashboard exists. By this file's own standard that makes
+  the wave BUILT at the domain layer and UNWIRED at the surface — see
+  IMPLEMENTATION-QUEUE.md items 0a–0c, which are now first.
+
+---
+
 ## SCAFFOLDED — model and domain logic, still no surface
 
 | Capability | Model | Missing |
@@ -260,3 +328,31 @@ other document keeps its own list; they link to it.
 > `--radius: 2px`, and the token is now `10px` within a seven-step scale.
 > `domains/design-system.md` supersedes it on values. Its argument about
 > institutional intent still stands, but its findings were not re-verified.
+
+---
+
+## Technical knowledge library (migration 0031)
+
+The Shotokan technical library — provenance, movement-level kata, bunkai,
+sport-kumite regulation, terminology search and the media↔technique review
+pipeline. Full account in
+[technical/TECHNICAL-LIBRARY.md](technical/TECHNICAL-LIBRARY.md); conflicts with
+work running in parallel in
+[parallel/PATCH-CONFLICTS.md](parallel/PATCH-CONFLICTS.md).
+
+| Area | State | Note |
+|---|---|---|
+| Schema, migration, constraints | **Built and verified** | 14 tables, 6 enums. All 31 migrations apply to a fresh Postgres; every CHECK refuses what it should, proven by raw SQL in tests |
+| Rights engine | **Built and verified** | `mediaUse()` is the single decision point; enforced on the write path *and* again on the read path |
+| Review workflow + audit | **Built and verified** | `technical:review` gated, append-only trail in `technical_reviews`, decider resolved from session not form |
+| Admin review queue | **Built** | `/admin/technical-library`. Rights blocker shown before the technical question; approve control absent where rights forbid |
+| Terminology search | **Built and verified** | Alias-aware: `oi-zuki` / `oi zuki` / `oizuki` / `oi tsuki` reach one canonical term |
+| Reference sources + JKA curriculum + WKF rules | **Seeded from primary sources** | Verbatim, cited, idempotent. JKA guideline is unreachable from the grading engine by construction |
+| Heian movement data (P05) | **Not populated** | Deliberate. Per-kata movement counts could not be verified from a primary source — the JKA instructor manual requires an accurate count but does not publish one |
+| Bunkai applications (P16) | **Not populated** | Deliberate. Table and approval constraint exist; no attributable interpretation was verified |
+| Learner-facing pages | **Not built** | Blocked on an architecture decision — the `learn` surface is the client/sales surface in this repository |
+| YouTube ingestion (P41) | **Interface exists, not run** | `src/lib/youtube.ts` predates this patch; no credentials on this deployment, and nothing was faked |
+
+Two RBAC actions added, additively: `technical:read`, `technical:review`. Gate on
+these rather than `content:*` — reviewing what MMAKF teaches is a different
+authority from publishing what MMAKF says.
