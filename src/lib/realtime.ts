@@ -218,7 +218,11 @@ export const ADMIN_SCOPES = {
     action: 'result:read',
     upTo: 'official',
     eventTypes: [
-      'COMPETITION_SANCTIONED', 'ENTRY_CREATED', 'ENTRY_ACCEPTED', 'ENTRY_REJECTED',
+      // ENTRY_CONFIRMED, not ENTRY_ACCEPTED. The registry was renamed at the
+      // definition — see the note on ENTRY_CONFIRMED in domain-events.ts — and
+      // this channel was the one site left on the old name, so it subscribed to
+      // an event that is never emitted.
+      'COMPETITION_SANCTIONED', 'ENTRY_CREATED', 'ENTRY_CONFIRMED', 'ENTRY_REJECTED',
       'DRAW_PUBLISHED', 'MATCH_STARTED', 'MATCH_COMPLETED',
       'RESULT_FINALIZED', 'RESULT_CORRECTED', 'PROTEST_LODGED', 'PROTEST_DECIDED',
     ],

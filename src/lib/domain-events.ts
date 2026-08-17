@@ -47,6 +47,7 @@ import * as s from '@/db/schema';
 import { writeAudit, type AuditContext } from '@/db/federation';
 import { assertCan, can, canAnywhere, type Principal } from '@/lib/rbac';
 import { isUniqueViolation } from '@/db/pgerror';
+import { log } from '@/lib/observability';
 
 type DB = any; // drizzle client (postgres.js in prod, PGlite in tests)
 
@@ -131,9 +132,51 @@ export interface EventTypeSpec {
    * Empty means the event has NO public form at all.
    */
   publicFields: readonly string[];
+  /**
+   * The payload keys a CONSUMER is entitled to rely on.
+   *
+   * Not a validator and not a schema — the payload may carry more, and often
+   * should. This is the contract between a producer and the consumers named
+   * below: if `notifications` resolves a recipient from `personId`, then
+   * `personId` is declared here and a producer that stops sending it has broken
+   * something a test can name. Declared only where a consumer actually reads
+   * the payload; an event nothing consumes has no contract to keep.
+   *
+   * WHY THIS EXISTS AT ALL. The whole defect this registry was extended to fix
+   * was three modules using three names for one fact. Naming the fact was not
+   * enough — `APPROVAL_REQUESTED` matched by name while the consumer read
+   * `requestedByUserId` from a payload whose producer wrote `requester.userId`,
+   * so the requester was notified of their own request. A name agreement with
+   * no payload agreement is still a mismatch, just a quieter one.
+   */
+  payload?: readonly string[];
+  /**
+   * The consumers that act on this event, by name.
+   *
+   * A consumer name here is the same string its cursor is kept under, so
+   * `cursorReport()` and this table can be read against each other. An empty or
+   * absent list means the event is on the feed for the record and for the
+   * generic feed readers, and nothing acts on it — which is a legitimate state
+   * and is different from a consumer that was meant to exist and does not.
+   */
+  consumers?: readonly string[];
   /** What the event means, one line — this is the feed's documentation. */
   means: string;
 }
+
+/**
+ * Every consumer that owns a cursor on this feed.
+ *
+ * Declared here so `catalogueDefects()` can reject an event that names a
+ * consumer nobody runs — the failure mode being an event type wired to a
+ * consumer that was renamed or never written, which looks exactly like a
+ * working link until somebody checks.
+ */
+export const CONSUMERS = {
+  notifications: 'Turns a domain event into notification rows — src/lib/notifications.ts.',
+} as const;
+
+export type ConsumerName = keyof typeof CONSUMERS;
 
 /**
  * Every event the federation publishes.
@@ -166,6 +209,23 @@ export const EVENT_TYPES = {
     floor: 'official', publicFields: [],
     means: 'A membership was revoked, with a recorded reason.',
   },
+  /**
+   * A membership is approaching its end date.
+   *
+   * On the catalogue because `NOTIFIABLE` has always named it and a name the
+   * allow-list expects but the catalogue refuses is an event that can never be
+   * published — `publish()` rejects an unknown type outright. It has NO
+   * producer yet: the reminder is a scheduled sweep over
+   * `membership.lapsingSoon()`, and how many days before expiry MMAKF writes to
+   * a member is federation policy nobody has set. The vocabulary is fixed here
+   * so that adding the sweep is one function, not another rename.
+   */
+  MEMBERSHIP_EXPIRING: {
+    floor: 'member', publicFields: [],
+    payload: ['personId', 'membershipId', 'expiresOn'],
+    consumers: ['notifications'],
+    means: 'A membership is within its renewal window and has not been renewed.',
+  },
 
   // Grading, ranks and certificates
   GRADING_SCHEDULED: {
@@ -174,6 +234,8 @@ export const EVENT_TYPES = {
   },
   GRADING_APPROVED: {
     floor: 'official', publicFields: [],
+    payload: ['personId', 'candidateId', 'outcome'],
+    consumers: ['notifications'],
     means: 'A panel decision was recorded for a candidate.',
   },
   GRADING_LOCKED: {
@@ -190,6 +252,8 @@ export const EVENT_TYPES = {
   CERTIFICATE_ISSUED: {
     floor: 'member',
     publicFields: ['certificateNo', 'grade', 'awardedOn', 'issuingAuthority', 'provenance'],
+    payload: ['personId', 'certificateId', 'certificateNo'],
+    consumers: ['notifications'],
     means: 'A certificate was issued against a recorded pass.',
   },
   CERTIFICATE_REVOKED: {
@@ -206,6 +270,8 @@ export const EVENT_TYPES = {
     // revocation is what protects the person checking the credential, and that
     // is what travels. When the federation decides, it adds the path here.
     publicFields: ['certificateNo', 'revokedOn'],
+    payload: ['personId', 'certificateId', 'certificateNo'],
+    consumers: ['notifications'],
     means: 'A certificate was revoked, with a recorded reason.',
   },
 
@@ -219,9 +285,21 @@ export const EVENT_TYPES = {
     floor: 'member', publicFields: [],
     means: 'An entry was lodged for a competitor or team in a category.',
   },
-  ENTRY_ACCEPTED: {
+  /**
+   * Named ENTRY_CONFIRMED, not ENTRY_ACCEPTED.
+   *
+   * The entry table's own terminal state for a clean entry is `confirmed`, and
+   * `NOTIFIABLE` has always listed ENTRY_CONFIRMED. The catalogue said
+   * ENTRY_ACCEPTED, so the producer, the store and the notification allow-list
+   * were three vocabularies for one fact and no message could ever be matched
+   * to it. Renamed at the definition rather than bridged by a translation
+   * table: a second name for a fact is how the mismatch comes back.
+   */
+  ENTRY_CONFIRMED: {
     floor: 'member', publicFields: [],
-    means: 'An entry was accepted after eligibility review.',
+    payload: ['entryId', 'personId', 'competitionId', 'categoryId'],
+    consumers: ['notifications'],
+    means: 'An entry was confirmed after eligibility review and any fee due.',
   },
   ENTRY_REJECTED: {
     floor: 'member', publicFields: [],
@@ -232,6 +310,8 @@ export const EVENT_TYPES = {
     // The seed travels with the public form on purpose: a draw nobody can
     // reproduce is a draw nobody can challenge.
     publicFields: ['drawId', 'competitionId', 'categoryId', 'publishedAt', 'randomSeed'],
+    payload: ['drawId', 'competitionId', 'categoryId'],
+    consumers: ['notifications'],
     means: 'A draw was published and is reproducible from its seed.',
   },
   MATCH_STARTED: {
@@ -247,6 +327,8 @@ export const EVENT_TYPES = {
   RESULT_FINALIZED: {
     floor: 'member',
     publicFields: ['competitionId', 'categoryId', 'placings', 'finalizedAt'],
+    payload: ['competitionId', 'categoryId'],
+    consumers: ['notifications'],
     means: 'A category result was finalised. From this point the record is locked.',
   },
   RESULT_CORRECTED: {
@@ -267,6 +349,8 @@ export const EVENT_TYPES = {
   RANKING_UPDATED: {
     floor: 'member',
     publicFields: ['rankingPeriodId', 'rulesetId', 'categoryId', 'publishedAt'],
+    payload: ['rankingPeriodId'],
+    consumers: ['notifications'],
     means: 'A ranking period was recalculated and published.',
   },
   SQUAD_SELECTED: {
@@ -289,11 +373,24 @@ export const EVENT_TYPES = {
     publicFields: ['unitType', 'code', 'lapsedOn'],
     means: 'An affiliation or charter lapsed or was withdrawn.',
   },
+  /**
+   * The warning before AFFILIATION_LAPSED. Same standing as
+   * MEMBERSHIP_EXPIRING: named by `NOTIFIABLE`, no producer yet, and the
+   * catalogue entry is what makes writing one a single change.
+   */
+  AFFILIATION_EXPIRING: {
+    floor: 'official', publicFields: [],
+    payload: ['unitId', 'unitType', 'expiresOn'],
+    consumers: ['notifications'],
+    means: 'A unit affiliation is within its renewal window and has not been renewed.',
+  },
 
   // Broadcast, live and education
   LIVE_STARTED: {
     floor: 'member',
     publicFields: ['channel', 'title', 'startedAt', 'watchUrl'],
+    payload: ['courseId'],
+    consumers: ['notifications'],
     means: 'A live broadcast or live class went on air.',
   },
   LIVE_ENDED: {
@@ -464,6 +561,62 @@ export const EVENT_TYPES = {
     floor: 'highly_restricted', publicFields: [],
     means: 'A safeguarding case changed state.',
   },
+
+  /**
+   * A report was received and the person who made it is being told so.
+   *
+   * DELIBERATELY NOT a safeguarding event, and deliberately at 'member'. It
+   * carries the reporter's own person id and a reference — nothing about the
+   * concern, the subject or the case. That separation is what lets the
+   * notification consumer read it at all: SAFEGUARDING_CASE_OPENED is
+   * highly_restricted and no message about it may ever leave the case file.
+   *
+   * NO PRODUCER YET, and the reason is a real gap rather than an oversight:
+   * `reportConcern()` stores a reporter's NAME and CONTACT as free text and no
+   * person id, so there is nobody on the record to address. Acknowledgement is
+   * returned to the reporter in the response instead. Wiring this needs the
+   * report form to identify a signed-in reporter, which is a product decision.
+   */
+  CASE_ACKNOWLEDGED: {
+    floor: 'member', publicFields: [],
+    payload: ['personId', 'caseRef'],
+    consumers: ['notifications'],
+    means: 'Receipt of a report was acknowledged to the person who made it.',
+  },
+
+  // ── Two-person control (src/lib/approvals.ts) ──
+  //
+  // These were already being appended straight into `domain_events` with no
+  // catalogue entry, so they had no floor the module enforced, no public-form
+  // declaration, and `publish()` would have refused them. APPROVAL_REQUESTED in
+  // particular was listed in `NOTIFIABLE` with a recipient resolver already
+  // written for it, and could never have matched.
+  //
+  // The floor is 'official' — the same floor approvals.ts applies itself — and
+  // a request raised more sensitively than that keeps its own higher
+  // classification, because every event for a request inherits the request's.
+  APPROVAL_REQUESTED: {
+    floor: 'official', publicFields: [],
+    payload: ['requestId', 'action', 'requester'],
+    consumers: ['notifications'],
+    means: 'A consequential act was requested and is waiting for a second person.',
+  },
+  APPROVAL_GRANTED: {
+    floor: 'official', publicFields: [],
+    means: 'One person agreed to a request under two-person control.',
+  },
+  APPROVAL_REJECTED: {
+    floor: 'official', publicFields: [],
+    means: 'A request under two-person control was refused, or withdrawn by its requester.',
+  },
+  APPROVAL_EXECUTED: {
+    floor: 'official', publicFields: [],
+    means: 'An approved request was carried out, with its outcome recorded.',
+  },
+  APPROVAL_EXECUTION_FAILED: {
+    floor: 'official', publicFields: [],
+    means: 'An approved request was attempted and the handler failed.',
+  },
 } as const satisfies Record<string, EventTypeSpec>;
 
 export type DomainEventType = keyof typeof EVENT_TYPES;
@@ -516,9 +669,33 @@ export function catalogueDefects(): string[] {
         defects.push(`${name}: '${root}' is declared both as a whole value and as a path prefix`);
       }
     }
+    // A consumer name that no consumer answers to is a wire drawn on a diagram
+    // and nowhere else. It reads as a working link right up until somebody asks
+    // why nothing happened.
+    for (const consumer of spec.consumers ?? []) {
+      if (!Object.prototype.hasOwnProperty.call(CONSUMERS, consumer)) {
+        defects.push(`${name}: names consumer '${consumer}', which is not in CONSUMERS`);
+      }
+    }
+    // A consumer reads the payload. If nothing is declared, the producer and
+    // the consumer have agreed on nothing and the next rename breaks them
+    // silently — which is the defect this registry was extended to end.
+    if (spec.consumers?.length && !spec.payload?.length) {
+      defects.push(`${name}: has consumers but declares no payload keys for them to rely on`);
+    }
+    for (const key of spec.payload ?? []) {
+      if (!key.trim()) defects.push(`${name}: blank payload key`);
+    }
     if (!spec.means?.trim()) defects.push(`${name}: no description`);
   }
   return defects;
+}
+
+/** Every event type a named consumer is registered against, in catalogue order. */
+export function eventsFor(consumer: string): DomainEventType[] {
+  return (Object.entries(EVENT_TYPES) as Array<[DomainEventType, EventTypeSpec]>)
+    .filter(([, spec]) => (spec.consumers ?? []).includes(consumer))
+    .map(([name]) => name);
 }
 
 // ─── Rows ───────────────────────────────────────────────────────────────────

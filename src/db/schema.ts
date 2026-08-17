@@ -129,10 +129,19 @@ export const persons = pgTable('persons', {
   districtUnitId: integer('district_unit_id').references(() => districtUnits.id),
   dojoId: integer('dojo_id').references(() => dojos.id),
   status: personStatus('status').notNull().default('pending'),
+  // The intake record this person was created from — see the note on
+  // memberships.sourceRef below. Null for anyone entered by another path.
+  sourceRef: text('source_ref'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   fedIdx: uniqueIndex('persons_federation_id_uk').on(t.federationId),
+  // At most one person per intake record. Approving the same application twice
+  // must not produce two people, and only the database can settle that when the
+  // two approvals race — see migration 0013.
+  sourceUk: uniqueIndex('persons_source_ref_uk')
+    .on(t.sourceRef)
+    .where(sql`source_ref is not null`),
   stateIdx: index('persons_state_idx').on(t.stateUnitId),
   dojoIdx: index('persons_dojo_idx').on(t.dojoId),
   nameIdx: index('persons_name_idx').on(t.fullName),
@@ -147,11 +156,25 @@ export const memberships = pgTable('memberships', {
   status: membershipStatus('status').notNull().default('pending'),
   issuedByUserId: integer('issued_by_user_id'),
   revokedReason: text('revoked_reason'),
+  /**
+   * The intake record this register entry was issued from — the id of the row
+   * in the public membership-application queue.
+   *
+   * It exists so an approval can be REPEATED safely. The queue lives in Redis
+   * and the register lives here; a decision that reaches one and not the other
+   * has to be retriable, and a retry must find the membership it already made
+   * rather than making a second one. Null for a membership issued by any other
+   * route, which is why the unique index below is partial.
+   */
+  sourceRef: text('source_ref'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   personIdx: index('memberships_person_idx').on(t.personId),
   statusIdx: index('memberships_status_idx').on(t.status),
+  sourceUk: uniqueIndex('memberships_source_ref_uk')
+    .on(t.sourceRef)
+    .where(sql`source_ref is not null`),
 }));
 
 // ─── Credentials (independent of one another — §33) ─────────────────────────

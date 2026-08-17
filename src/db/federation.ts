@@ -211,6 +211,21 @@ export interface NewPerson {
   phone?: string | null;
   dob?: string | null;
   gender?: string | null;
+  /**
+   * The intake record this person came from, when they came from one.
+   *
+   * Unique in the database where it is set, so the same application cannot
+   * produce two people however many times it is approved.
+   */
+  sourceRef?: string | null;
+  /**
+   * Defaults to 'pending', which is what a person entered by hand ahead of any
+   * decision is. A path that creates the person AS THE RESULT of a decision —
+   * an approved membership application — states 'active' instead, because
+   * leaving them pending would have /verify report an approved member as
+   * pending for ever.
+   */
+  status?: (typeof s.personStatus.enumValues)[number];
 }
 
 export async function createPerson(
@@ -226,7 +241,7 @@ export async function createPerson(
   const federationId = await allocateFederationId(db, 'MEM');
   const rows = await db
     .insert(s.persons)
-    .values({ ...input, federationId, status: 'pending' })
+    .values({ ...input, federationId, status: input.status ?? 'pending' })
     .returning({ id: s.persons.id, federationId: s.persons.federationId });
 
   await writeAudit(db, ctx, {
@@ -236,6 +251,49 @@ export async function createPerson(
     newValue: { federationId, fullName: input.fullName },
   });
   return rows[0];
+}
+
+/**
+ * The person an intake record has already produced, or one created now.
+ *
+ * This is how a public application becomes a register entry without becoming
+ * two of them. The read comes first because it is the ordinary case — an
+ * approval being retried, or a button pressed twice — and the unique-violation
+ * arm below is for the case the read cannot cover: two approvals in flight at
+ * once, both seeing no person, both inserting. Only the database can settle
+ * that, and the loser reads the winner's row rather than failing the approval.
+ *
+ * A federation ID is allocated before the insert, so the losing side of that
+ * race BURNS one. A gap in the sequence is not a defect; issuing the same
+ * number to two people would be, and that is what the allocator prevents.
+ */
+export async function createPersonForSource(
+  db: DB,
+  ctx: AuditContext,
+  input: NewPerson & { sourceRef: string }
+): Promise<{ id: number; federationId: string; created: boolean }> {
+  const find = async () => {
+    const rows = await db
+      .select({ id: s.persons.id, federationId: s.persons.federationId })
+      .from(s.persons)
+      .where(eq(s.persons.sourceRef, input.sourceRef))
+      .limit(1);
+    return rows[0] ?? null;
+  };
+
+  const existing = await find();
+  if (existing) return { ...existing, created: false };
+
+  try {
+    const created = await createPerson(db, ctx, input);
+    return { ...created, created: true };
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    const raced = await find();
+    // A unique violation on some OTHER constraint is not ours to swallow.
+    if (!raced) throw err;
+    return { ...raced, created: false };
+  }
 }
 
 /** List people the principal is allowed to see, scope-filtered in SQL. */

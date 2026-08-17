@@ -850,6 +850,16 @@ export async function enterEvent(
     members?: Array<{ personId: number; role?: string | null; position?: number | null }>;
     dojoId?: number | null;
     orderId?: number | null;
+    /**
+     * Hold an otherwise-confirmable entry at `submitted` for a human decision.
+     *
+     * An officer entering an athlete they administer has already made the
+     * decision; a member of the public entering themselves has not, and the
+     * federation says so on the entry form — the Tournament Commission confirms
+     * the category before the event. The flag is set by the intake path, never
+     * by a request body, so a public submission cannot confirm itself.
+     */
+    reviewRequired?: boolean;
   },
   now: Date = new Date()
 ) {
@@ -1007,7 +1017,13 @@ export async function enterEvent(
   };
 
   const feeOutstanding = Boolean(category.feeCode) && input.orderId == null;
-  const status: EntryStatus = !eligible ? 'ineligible' : feeOutstanding ? 'fee_pending' : 'confirmed';
+  const status: EntryStatus = !eligible
+    ? 'ineligible'
+    : feeOutstanding
+      ? 'fee_pending'
+      : input.reviewRequired
+        ? 'submitted'
+        : 'confirmed';
 
   const entryNo = await allocateFederationId(db, 'ENT');
   let row;
@@ -1091,6 +1107,250 @@ export async function enterEvent(
   });
 
   return { ...row, eligibility };
+}
+
+// ─── Public entry intake ────────────────────────────────────────────────────
+
+/**
+ * Who the federation is acting as when it accepts an entry from the public.
+ *
+ * The same device src/db/applications.ts uses, and for the same reason. A
+ * competitor filling in the form on /events is not signed in and holds no
+ * authority, but writing to the entry register demands 'competition:write'.
+ * Rather than loosening that check — which would leave the endpoint writing
+ * federation records on an anonymous caller's say-so — the intake path acts
+ * explicitly AS THE FEDERATION, under a label that says so in every audit row.
+ *
+ * The important property: this principal is constructed here and is never
+ * derived from a request. No header, cookie or body field can cause a caller to
+ * be treated as the system.
+ */
+export function systemEntryIntakePrincipal(): Principal {
+  return {
+    userId: null,
+    label: 'system:event-entry-intake',
+    bindings: [{ role: 'FEDERATION_ADMIN', scopeType: 'national', scopeId: null }],
+  };
+}
+
+export function systemEntryIntakeContext(opts: { ip?: string | null; requestId?: string | null } = {}): AuditContext {
+  return {
+    principal: systemEntryIntakePrincipal(),
+    ip: opts.ip ?? null,
+    requestId: opts.requestId ?? null,
+    reason: 'Entry submitted by the competitor through the public entry form.',
+    authority: 'MMAKF event entry intake',
+  };
+}
+
+export interface PublicEntryInput {
+  /** The event's immutable code, never its display title. */
+  eventCode: string;
+  /** The category's code within that event. */
+  categoryCode: string;
+  /** The competitor's own federation membership number. */
+  federationId: string;
+  /** Their date of birth, YYYY-MM-DD — proof they hold that number. */
+  dob: string;
+}
+
+export interface PublicEntryResult {
+  entryId: number;
+  entryNo: string;
+  status: EntryStatus;
+  eventCode: string;
+  eventTitle: string;
+  categoryCode: string;
+  categoryLabel: string;
+  eligible: boolean;
+  /** Why an entry was refused, in the competitor's own terms. */
+  reasons: string[];
+  /** True when this submission matched an entry that already existed. */
+  duplicate: boolean;
+}
+
+/** Trim, cap and normalise one field of a public submission. */
+function intakeField(value: unknown, max: number): string {
+  return typeof value === 'string' ? value.trim().slice(0, max) : '';
+}
+
+function publicEntryResult(entry: any, event: any, category: any, duplicate: boolean): PublicEntryResult {
+  const snapshot = (entry.eligibilitySnapshot ?? {}) as any;
+  return {
+    entryId: entry.id,
+    entryNo: entry.entryNo,
+    status: entry.status as EntryStatus,
+    eventCode: event.code,
+    eventTitle: event.title,
+    categoryCode: category.code,
+    categoryLabel: category.label,
+    eligible: entry.status !== 'ineligible',
+    reasons: Array.isArray(snapshot.reasons) ? snapshot.reasons.map(String) : [],
+    duplicate,
+  };
+}
+
+/**
+ * Accept an entry submitted by a competitor from the public site.
+ *
+ * THIS IS THE ONLY WAY A PUBLIC ENTRY ENTERS THE FEDERATION'S RECORDS, and it
+ * writes to the same `event_entries` table that draws, results and the annual
+ * report read. Before this existed the public form appended to a Redis list
+ * that no register, no draw and no report ever read: an entry was submitted, a
+ * reference was issued, and the entry reached nothing.
+ *
+ * WHAT THE CLIENT MAY SAY, and what it may not:
+ *
+ *  · it names an EVENT and a CATEGORY by code, and both are looked up here — a
+ *    code that is not published, not sanctioned or not open is refused;
+ *  · it names a COMPETITOR by federation membership number and date of birth,
+ *    and the person is resolved from the register. The two must agree, and a
+ *    mismatch is reported identically to an unknown number so the endpoint
+ *    cannot be used to test whether a membership number exists;
+ *  · it says NOTHING about eligibility, scope, dojo, state or status. Every one
+ *    of those is derived here from the competitor's own record.
+ *
+ * IDEMPOTENT. The same competitor entering the same category twice gets the
+ * same entry back, not a second one. Two guards, because they fail at different
+ * moments: the read below catches the double-clicked button, and the unique
+ * index (category_id, person_id) catches two requests that raced past it.
+ */
+export async function submitPublicEntry(
+  db: DB,
+  input: PublicEntryInput,
+  now: Date = new Date(),
+  audit: { ip?: string | null; requestId?: string | null } = {}
+): Promise<PublicEntryResult> {
+  const ctx = systemEntryIntakeContext(audit);
+
+  const eventCode = intakeField(input.eventCode, 64).toUpperCase();
+  const categoryCode = intakeField(input.categoryCode, 64).toUpperCase();
+  const federationId = intakeField(input.federationId, 64).toUpperCase();
+  const dob = intakeField(input.dob, 10);
+
+  if (!eventCode || !categoryCode) {
+    throw new CompetitionError('unknown_category', 'Choose the event and the category you are entering.');
+  }
+  if (!federationId) {
+    throw new CompetitionError('unknown_competitor', 'Your federation membership number is required.');
+  }
+  // Checked before the lookup so a malformed date is a clear message rather
+  // than an unhelpful "no member matches".
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dob) || Number.isNaN(Date.parse(`${dob}T00:00:00Z`))) {
+    throw new CompetitionError('bad_date_of_birth', 'Give the date of birth as YYYY-MM-DD.');
+  }
+
+  // The event, by its immutable code. Only an event the federation has
+  // published exists as far as this endpoint is concerned; the sanction and
+  // registration-window checks are enterEvent's, and are not repeated here.
+  const event = (await db.select().from(s.competitionEvents)
+    .where(eq(s.competitionEvents.code, eventCode)).limit(1))[0];
+  if (!event || !PUBLIC_STATUSES.includes(event.status)) {
+    throw new CompetitionError('unknown_event', 'That event is not open for entries.');
+  }
+
+  const category = (await db.select().from(s.eventCategories)
+    .where(and(eq(s.eventCategories.eventId, event.id), eq(s.eventCategories.code, categoryCode)))
+    .limit(1))[0];
+  if (!category) {
+    throw new CompetitionError('unknown_category', 'That category is not part of this event.');
+  }
+
+  // A team entry names competitors this form cannot verify, and the members are
+  // rows of their own. Refused by name rather than half-created.
+  if (TEAM_DISCIPLINES.includes(category.discipline)) {
+    throw new CompetitionError(
+      'team_entry_not_public',
+      'Team entries are made by the unit rather than through this form. Ask your dojo to enter the team.'
+    );
+  }
+
+  // The competitor, from the register. Membership number AND date of birth, so
+  // a number quoted on a certificate is not on its own enough to enter somebody
+  // else. One message for both failures — see the note above.
+  const person = (await db.select().from(s.persons)
+    .where(and(eq(s.persons.federationId, federationId), eq(s.persons.dob, dob)))
+    .limit(1))[0];
+  if (!person) {
+    throw new CompetitionError(
+      'unknown_competitor',
+      'No federation member matches that membership number and date of birth.'
+    );
+  }
+
+  /** The existing entry for this competitor in this category, if there is one. */
+  const findExisting = async () =>
+    (await db.select().from(s.eventEntries)
+      .where(and(eq(s.eventEntries.categoryId, category.id), eq(s.eventEntries.personId, person.id)))
+      .limit(1))[0];
+
+  const existing = await findExisting();
+  if (existing) {
+    // A withdrawn entry is not a duplicate submission — it is a competitor
+    // trying to re-enter a category they were taken out of. The unique index
+    // does not exclude withdrawn rows, so this cannot be granted here; say so
+    // plainly rather than returning the withdrawn entry as though it were live.
+    if (existing.status === 'withdrawn') {
+      throw new CompetitionError(
+        'already_entered',
+        `Entry ${existing.entryNo} for this category was withdrawn. Ask the Tournament Commission to reinstate it; a second entry cannot be created.`
+      );
+    }
+    // A replay is still an event worth recording: it is evidence that the
+    // competitor tried again, and it must be visible that no second entry was
+    // created as a result.
+    await writeAudit(db, ctx, {
+      entityType: 'event_entry',
+      entityId: existing.id,
+      action: 'create',
+      newValue: {
+        channel: 'public_intake',
+        outcome: 'duplicate_ignored',
+        entryNo: existing.entryNo,
+        eventCode: event.code,
+        categoryCode: category.code,
+        federationId: person.federationId,
+        status: existing.status,
+      },
+    });
+    return publicEntryResult(existing, event, category, true);
+  }
+
+  let row: any;
+  try {
+    row = await enterEvent(
+      db,
+      ctx,
+      { categoryId: category.id, personId: person.id, reviewRequired: true },
+      now
+    );
+  } catch (err) {
+    // Two requests raced past the read above and the database refused the
+    // second. The entry the winner created is the answer to both.
+    if (err instanceof CompetitionError && err.code === 'already_entered') {
+      const raced = await findExisting();
+      if (raced && raced.status !== 'withdrawn') return publicEntryResult(raced, event, category, true);
+    }
+    throw err;
+  }
+
+  await writeAudit(db, ctx, {
+    entityType: 'event_entry',
+    entityId: row.id,
+    action: 'create',
+    newValue: {
+      channel: 'public_intake',
+      outcome: 'entered',
+      entryNo: row.entryNo,
+      eventCode: event.code,
+      categoryCode: category.code,
+      federationId: person.federationId,
+      status: row.status,
+      eligible: row.status !== 'ineligible',
+    },
+  });
+
+  return publicEntryResult(row, event, category, false);
 }
 
 async function loadEntry(db: DB, entryId: number) {
@@ -1296,6 +1556,111 @@ export async function withdraw(
   return row;
 }
 
+/** The statuses an entry can sit in while it is still waiting on the office. */
+export const ENTRY_AWAITING_DECISION: readonly EntryStatus[] = [
+  'draft', 'submitted', 'eligibility_check', 'fee_pending', 'ineligible',
+];
+
+export interface EntryDecision {
+  entryId: number;
+  decision: 'confirm' | 'reject';
+  /** Required to reject: a refusal the federation cannot explain is not a decision. */
+  reason?: string;
+}
+
+export interface EntryDecisionResult {
+  entryId: number;
+  entryNo: string;
+  from: EntryStatus;
+  to: EntryStatus;
+  /** False when the entry was already in the decided state — a replay, not an error. */
+  changed: boolean;
+}
+
+/**
+ * Decide one entry in the register.
+ *
+ * The counterpart to submitPublicEntry: an entry that arrives from the public
+ * form is held at `submitted` and somebody with authority over that competitor
+ * has to move it. Without this the register filled up and nothing in it could
+ * ever be worked.
+ *
+ * IDEMPOTENT BY DESIGN. Confirming an entry that is already confirmed, or
+ * rejecting one already withdrawn, reports `changed: false` and writes nothing
+ * — a double-clicked button is not an error and must not append a second
+ * decision to the trail.
+ *
+ * WHAT IT REFUSES, AND WHY:
+ *
+ *  · `fee_pending` — the category carries a fee code and no order is attached.
+ *    Confirming would assert a payment nobody recorded. The fee has to be
+ *    recorded against the entry first.
+ *  · `ineligible` — the stored eligibility decision says this competitor does
+ *    not meet the category's own rules. Overriding it here would leave a record
+ *    whose evidence contradicts its status.
+ *  · anything past confirmation — checked in, weighed in, disqualified — is
+ *    match-day history, not a queue item.
+ */
+export async function decideEntry(
+  db: DB,
+  ctx: AuditContext,
+  input: EntryDecision,
+  now: Date = new Date()
+): Promise<EntryDecisionResult> {
+  const { entry, event } = await loadEntry(db, input.entryId);
+  assertEntryWritable(ctx.principal, entry, event);
+
+  const from = entry.status as EntryStatus;
+  const reason = (input.reason ?? '').trim();
+
+  if (input.decision === 'reject') {
+    if (from === 'withdrawn') {
+      return { entryId: entry.id, entryNo: entry.entryNo, from, to: 'withdrawn', changed: false };
+    }
+    // withdraw() holds the reason rule, the results lock and the audit row.
+    await withdraw(db, ctx, { entryId: entry.id, reason }, now);
+    return { entryId: entry.id, entryNo: entry.entryNo, from, to: 'withdrawn', changed: true };
+  }
+
+  if (from === 'confirmed') {
+    return { entryId: entry.id, entryNo: entry.entryNo, from, to: 'confirmed', changed: false };
+  }
+  assertEntriesUnlocked(event, 'an entry decision');
+
+  if (from === 'fee_pending') {
+    throw new CompetitionError(
+      'fee_outstanding',
+      `Entry ${entry.entryNo} carries an entry fee that has not been recorded against it. Record the payment before confirming; confirming now would assert a fee the federation has no record of.`
+    );
+  }
+  if (from === 'ineligible') {
+    throw new CompetitionError(
+      'ineligible_entry',
+      `Entry ${entry.entryNo} was refused on eligibility and cannot be confirmed. ${entry.ineligibleReason ?? ''}`.trim()
+    );
+  }
+  if (!ENTRY_AWAITING_DECISION.includes(from)) {
+    throw new CompetitionError(
+      'not_decidable',
+      `Entry ${entry.entryNo} is ${from.replace(/_/g, ' ')} and is no longer waiting on a decision.`
+    );
+  }
+
+  await db.update(s.eventEntries)
+    .set({ status: 'confirmed', updatedAt: now })
+    .where(eq(s.eventEntries.id, entry.id));
+
+  await writeAudit(db, reason ? { ...ctx, reason } : ctx, {
+    entityType: 'event_entry',
+    entityId: entry.id,
+    action: 'approve',
+    oldValue: { status: from },
+    newValue: { status: 'confirmed', entryNo: entry.entryNo },
+  });
+
+  return { entryId: entry.id, entryNo: entry.entryNo, from, to: 'confirmed', changed: true };
+}
+
 // ─── Reads ──────────────────────────────────────────────────────────────────
 
 /**
@@ -1409,4 +1774,120 @@ export async function categoryEntries(db: DB, principal: Principal, categoryId: 
   });
 
   return { category, entries };
+}
+
+/**
+ * What the public may enter, right now.
+ *
+ * ONE definition of "open for entries", so the form and the endpoint cannot
+ * disagree about it — a form offering an event submitPublicEntry then refuses is
+ * how a competitor concludes the federation is broken. Everything here is a
+ * fact on the event row: published status, a recorded sanction, and a
+ * registration window that is either unset or currently open.
+ *
+ * Takes no principal deliberately. It is a public read and discloses only what
+ * an entrant needs in order to enter: codes and labels, no entry counts, no
+ * competitor names, no contact details.
+ */
+export async function entryOpenCatalogue(db: DB, now: Date = new Date()) {
+  const events = await db.select({
+    code: s.competitionEvents.code,
+    title: s.competitionEvents.title,
+    kind: s.competitionEvents.kind,
+    startsOn: s.competitionEvents.startsOn,
+    endsOn: s.competitionEvents.endsOn,
+    venue: s.competitionEvents.venue,
+    city: s.competitionEvents.city,
+    id: s.competitionEvents.id,
+    registrationClosesAt: s.competitionEvents.registrationClosesAt,
+  })
+    .from(s.competitionEvents)
+    .where(and(
+      eq(s.competitionEvents.status, 'registration_open'),
+      sql`${s.competitionEvents.sanctionedAt} IS NOT NULL`,
+      or(
+        isNull(s.competitionEvents.registrationOpensAt),
+        sql`${s.competitionEvents.registrationOpensAt} <= ${now}`
+      ),
+      or(
+        isNull(s.competitionEvents.registrationClosesAt),
+        sql`${s.competitionEvents.registrationClosesAt} >= ${now}`
+      )
+    ))
+    .orderBy(asc(s.competitionEvents.startsOn), asc(s.competitionEvents.id));
+
+  const ids = (events as any[]).map((e) => e.id);
+  const categories = ids.length
+    ? await db.select({
+        eventId: s.eventCategories.eventId,
+        code: s.eventCategories.code,
+        label: s.eventCategories.label,
+        discipline: s.eventCategories.discipline,
+        displayOrder: s.eventCategories.displayOrder,
+      })
+        .from(s.eventCategories)
+        .where(inArray(s.eventCategories.eventId, ids))
+        .orderBy(asc(s.eventCategories.displayOrder), asc(s.eventCategories.code))
+    : [];
+
+  return (events as any[]).map((e) => ({
+    code: e.code,
+    title: e.title,
+    kind: e.kind,
+    startsOn: e.startsOn,
+    endsOn: e.endsOn,
+    venue: e.venue,
+    city: e.city,
+    registrationClosesAt: e.registrationClosesAt,
+    // Team categories are omitted: submitPublicEntry refuses them, so offering
+    // one here would be an invitation the server declines.
+    categories: (categories as any[])
+      .filter((c) => c.eventId === e.id && !TEAM_DISCIPLINES.includes(c.discipline))
+      .map((c) => ({ code: c.code, label: c.label, discipline: c.discipline })),
+  })).filter((e) => e.categories.length > 0);
+}
+
+/**
+ * Entries waiting on a decision, scoped IN SQL.
+ *
+ * The scope filter is a predicate on the query rather than a filter applied to
+ * the rows afterwards (§53): knowing an entry id must never be enough to read
+ * it. A principal with no `competition:write` binding anywhere gets `false` and
+ * therefore no rows, not an exception — this feeds a panel that other queues
+ * share, and an operator who may work one queue and not another should see the
+ * one they may work.
+ */
+export async function pendingEntryRegister(db: DB, principal: Principal, limit = 100) {
+  const scopes = visibleScopes(principal, 'competition:write');
+  const conds: any[] = [inArray(s.eventEntries.status, ENTRY_AWAITING_DECISION as any)];
+
+  if (scopes.kind === 'none') {
+    conds.push(sql`false`);
+  } else if (scopes.kind === 'scoped') {
+    const clauses: any[] = [];
+    if (scopes.states.length) clauses.push(inArray(s.eventEntries.stateUnitId, scopes.states));
+    if (scopes.dojos.length) clauses.push(inArray(s.eventEntries.dojoId, scopes.dojos));
+    conds.push(clauses.length ? (clauses.length === 1 ? clauses[0] : or(...clauses)) : sql`false`);
+  }
+
+  return db.select({
+    entryId: s.eventEntries.id,
+    entryNo: s.eventEntries.entryNo,
+    status: s.eventEntries.status,
+    createdAt: s.eventEntries.createdAt,
+    ineligibleReason: s.eventEntries.ineligibleReason,
+    eventTitle: s.competitionEvents.title,
+    eventCode: s.competitionEvents.code,
+    categoryLabel: s.eventCategories.label,
+    categoryCode: s.eventCategories.code,
+    competitor: s.persons.fullName,
+    federationId: s.persons.federationId,
+  })
+    .from(s.eventEntries)
+    .innerJoin(s.competitionEvents, eq(s.eventEntries.eventId, s.competitionEvents.id))
+    .innerJoin(s.eventCategories, eq(s.eventEntries.categoryId, s.eventCategories.id))
+    .leftJoin(s.persons, eq(s.eventEntries.personId, s.persons.id))
+    .where(and(...conds))
+    .orderBy(asc(s.eventEntries.createdAt), asc(s.eventEntries.id))
+    .limit(Math.min(Math.max(limit, 1), 500));
 }

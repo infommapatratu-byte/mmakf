@@ -20,8 +20,18 @@ export const QUEUES = {
     terminal: ['Approved', 'Rejected', 'Withdrawn'],
   },
   eventEntries: {
-    label: 'Event entries',
+    // Named for what it now is. The live entry register is the Postgres table
+    // `event_entries`, worked from the entry-register panel on /admin/queue;
+    // this queue is the Redis list the retired public form wrote to.
+    label: 'Event entries — legacy intake',
     action: 'competition:write' as Action,
+    // THE NAME MISMATCH, FIXED. The retired public form appended to a list
+    // called `eventRegs` while this engine read one called `eventEntries`, so
+    // every entry ever submitted from /events was unreachable by the only
+    // screen that could decide it. Pointing the queue at the list the intake
+    // actually wrote is the safe direction: the other — rewriting the intake to
+    // a new key — would have stranded everything already stored.
+    storageKey: 'eventRegs',
     states: ['Received', 'Under review', 'Accepted', 'Rejected', 'Withdrawn'],
     terminal: ['Accepted', 'Rejected', 'Withdrawn'],
   },
@@ -34,6 +44,18 @@ export const QUEUES = {
 } as const;
 
 export type QueueName = keyof typeof QUEUES;
+
+/**
+ * The storage key a queue's rows actually live under.
+ *
+ * Defaults to the queue's own name, which is what every queue but one wants.
+ * The exception is declared on the queue rather than special-cased at each read
+ * site, because a key that only two of the three readers know about is how the
+ * original mismatch survived for as long as it did.
+ */
+export function storageKeyFor(queue: QueueName): string {
+  return (QUEUES[queue] as { storageKey?: string }).storageKey ?? queue;
+}
 
 export function isQueue(name: string): name is QueueName {
   return Object.prototype.hasOwnProperty.call(QUEUES, name);
@@ -101,7 +123,10 @@ export async function decide(
     throw new QueueError('reason_required', 'A reason is required when rejecting or returning an item');
   }
 
-  const rows = (await getList<any>(decision.queue, 5000)) || [];
+  // storageKeyFor(), not the queue name. eventEntries reads the list the
+  // retired intake actually wrote (`eventRegs`); using the queue name here was
+  // the original bug wearing a fix.
+  const rows = (await getList<any>(storageKeyFor(decision.queue), 5000)) || [];
   const index = rows.findIndex((r: any) => String(r?.id) === String(decision.recordId));
   if (index === -1) throw new QueueError('not_found', 'That item is no longer in the queue');
 
@@ -141,14 +166,20 @@ export async function decide(
   // The list is stored whole because these are Redis JSON lists, not rows. The
   // read-modify-write is why decisions are serialised through this one function
   // rather than being done ad hoc in each surface.
-  await storageSet(decision.queue, rows);
+  // AND THE WRITE MUST USE THE SAME KEY AS THE READ. It did not: the read was
+  // corrected to storageKeyFor() and this line was left on the queue name, so a
+  // decision on a legacy event entry was read from `eventRegs` and written to
+  // `eventEntries` — the decision vanished and the original row kept its old
+  // status for ever. A half-applied fix is worse than none, because the comment
+  // above says it is handled.
+  await storageSet(storageKeyFor(decision.queue), rows);
 
   return { ok: true, recordId: String(decision.recordId), from, to: toStatus };
 }
 
 /** Counts per status, for the dashboard. */
 export async function queueSummary(queue: QueueName): Promise<Record<string, number>> {
-  const rows = (await getList<any>(queue, 5000)) || [];
+  const rows = (await getList<any>(storageKeyFor(queue), 5000)) || [];
   const counts: Record<string, number> = {};
   for (const state of QUEUES[queue].states) counts[state] = 0;
   for (const r of rows) {
@@ -160,7 +191,7 @@ export async function queueSummary(queue: QueueName): Promise<Record<string, num
 
 /** Items still needing a decision — what the office actually has to work. */
 export async function openItems(queue: QueueName, limit = 200): Promise<any[]> {
-  const rows = (await getList<any>(queue, 5000)) || [];
+  const rows = (await getList<any>(storageKeyFor(queue), 5000)) || [];
   const terminal = QUEUES[queue].terminal as readonly string[];
   return rows
     .filter((r: any) => !terminal.includes(String(r?.status ?? '')))
