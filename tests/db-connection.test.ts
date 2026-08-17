@@ -93,6 +93,41 @@ describe('TLS is requested in code, not left to a query parameter', () => {
     expect(opts.ssl).toEqual({ rejectUnauthorized: true });
   });
 
+  it('a private root is trusted by supplying it, never by lowering the bar', () => {
+    // Managed Postgres is routinely fronted by the vendor's own CA: Supabase's
+    // pooler chains to `Supabase Root 2021 CA`, which no Node trust store
+    // carries, so rule 1 alone fails closed with SELF_SIGNED_CERT_IN_CHAIN.
+    // The repair keeps verification ON and teaches it the root. It must never
+    // become rejectUnauthorized:false, which encrypts and authenticates nobody.
+    const PEM = '-----BEGIN CERTIFICATE-----\nnot-a-real-certificate\n-----END CERTIFICATE-----';
+    const prior = process.env.DATABASE_CA_CERT;
+    process.env.DATABASE_CA_CERT = `  ${PEM}  `;
+    try {
+      const opts: any = dbm.connectionOptions(REMOTE);
+      expect(opts.ssl).toEqual({ rejectUnauthorized: true, ca: PEM });
+    } finally {
+      if (prior === undefined) delete process.env.DATABASE_CA_CERT;
+      else process.env.DATABASE_CA_CERT = prior;
+    }
+  });
+
+  it('a supplied root changes only WHO is trusted, never WHETHER TLS is used', () => {
+    // The variable must not become a second switch. Loopback stays exempt and
+    // an unparseable URL still fails closed — the CA answers "trusted by whom",
+    // and nothing else.
+    const prior = process.env.DATABASE_CA_CERT;
+    process.env.DATABASE_CA_CERT = '-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----';
+    try {
+      const local: any = dbm.connectionOptions('postgresql://postgres:postgres@127.0.0.1:5433/postgres');
+      expect(local.ssl).toBe(false);
+      const broken: any = dbm.connectionOptions('not-a-url');
+      expect(broken.ssl.rejectUnauthorized).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.DATABASE_CA_CERT;
+      else process.env.DATABASE_CA_CERT = prior;
+    }
+  });
+
   it('the pooler settings survive: max 1 and prepare false', () => {
     // prepare:false is what keeps a transaction-mode pooler from producing
     // "prepared statement does not exist" under load. A rewrite of this block

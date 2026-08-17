@@ -125,12 +125,36 @@ export function connectionOptions(url: string): Record<string, unknown> {
   // Rule 2 — before anything else, because it overrides the other two.
   if (/[?&]sslmode=/i.test(url)) return base;
 
+  // ── RULE 4: A PRIVATE ROOT IS SUPPLIED, NOT SURRENDERED TO ─────────────────
+  //
+  // Managed Postgres is routinely fronted by a certificate chaining to the
+  // VENDOR'S OWN root rather than a public CA. Supabase's pooler serves
+  // `*.pooler.supabase.com` under `Supabase Intermediate 2021 CA` and
+  // `Supabase Root 2021 CA`, and that root is in no trust store Node ships —
+  // so rule 1 fails closed with SELF_SIGNED_CERT_IN_CHAIN and the federation
+  // register is unreachable. Measured against the live pooler, both ports.
+  //
+  // That failure is CORRECT, and the tempting repair is the wrong one: falling
+  // back to rejectUnauthorized:false converts an outage into a channel any
+  // active intermediary can read and rewrite — the whole register, in the
+  // clear, to anyone positioned to take it. The repair is to TEACH THE CLIENT
+  // THE ROOT. Set DATABASE_CA_CERT to the provider's CA in PEM and
+  // verification passes with the guarantee intact rather than discarded.
+  //
+  // Named for the job and not for the vendor, so any provider with a private
+  // root works — the same neutrality DATABASE_URL buys everywhere else here.
+  // Absent the variable nothing changes: rule 1 still demands a publicly
+  // verifiable certificate, which is the right default for a provider that has
+  // one.
+  const ca = process.env.DATABASE_CA_CERT?.trim();
+  const verified = ca ? { rejectUnauthorized: true, ca } : { rejectUnauthorized: true };
+
   let host = '';
   try {
     host = new URL(url).hostname.toLowerCase();
   } catch {
     // Rule: fail closed.
-    return { ...base, ssl: { rejectUnauthorized: true } };
+    return { ...base, ssl: verified };
   }
 
   // `new URL()` keeps IPv6 literals in their brackets; strip them so the
@@ -138,7 +162,7 @@ export function connectionOptions(url: string): Record<string, unknown> {
   const bare = host.replace(/^\[|\]$/g, '');
   const loopback = bare === '127.0.0.1' || bare === 'localhost' || bare === '::1';
 
-  return loopback ? { ...base, ssl: false } : { ...base, ssl: { rejectUnauthorized: true } };
+  return loopback ? { ...base, ssl: false } : { ...base, ssl: verified };
 }
 
 /**
