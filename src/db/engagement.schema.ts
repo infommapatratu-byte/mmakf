@@ -743,6 +743,21 @@ export const bookings = pgTable('bookings', {
   notes: text('notes'),
   cancelledReason: text('cancelled_reason'),
 
+  /**
+   * The class occurrence this booking holds a place in (migration 0032).
+   *
+   * ONE COLUMN, NOT A SECOND BOOKING TABLE. This row already allocates a
+   * federation reference, records who created it, holds travel buffers either
+   * side and is cancelled through an audited path. A class seat is one of those
+   * with a session attached — a separate table would mean two cancellation
+   * paths, and the second one would be the one that forgets the audit row.
+   *
+   * No drizzle `.references()`: `class_sessions` lives in scheduling.schema.ts,
+   * which imports THIS file, and a type-level reference back would be a cycle.
+   * The foreign key is real and is created by migration 0032.
+   */
+  classSessionId: integer('class_session_id'),
+
   createdByUserId: integer('created_by_user_id').references(() => users.id),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -751,6 +766,7 @@ export const bookings = pgTable('bookings', {
   coachIdx: index('bookings_coach_idx').on(t.coachPersonId, t.startsAt),
   statusIdx: index('bookings_status_idx').on(t.status),
   windowIdx: index('bookings_window_idx').on(t.startsAt, t.endsAt),
+  classSessionIdx: index('bookings_class_session_idx').on(t.classSessionId),
 }));
 
 /**

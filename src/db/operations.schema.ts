@@ -35,11 +35,15 @@
 // must be replayable, and a replay must not create a second institution.
 
 import {
-  pgTable, serial, text, integer, boolean, timestamp, date,
+  pgTable, serial, text, integer, boolean, timestamp, date, numeric,
   uniqueIndex, index, jsonb, pgEnum,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 import { persons, users, stateUnits, districtUnits, dojos } from './schema';
+// Civil geography. `venues.areaId` carries a real foreign key onto it for the
+// same reason `persons.residenceAreaId` does — see migration 0025.
+import { adminAreas } from './geography.schema';
 import {
   institutions, leads, trainingRequests, trainingPrograms, bookings,
   proposals, quoteVersions, services, programParticipants,
@@ -811,11 +815,39 @@ export const venues = pgTable('venues', {
   contactPhone: text('contact_phone'),
   active: boolean('active').notNull().default(true),
   notes: text('notes'),
+
+  // ── The location engine (migration 0032) ────────────────────────────────
+  //
+  // A ROOM NEEDS A CLOCK. Before this, a venue had an address and no timezone,
+  // which is fine while every venue is in one country and wrong the moment one
+  // is not — and the scheduling engine stores WALL-CLOCK rules ("the dojo opens
+  // at six"), which mean nothing without one. The default is Asia/Kolkata
+  // because MMAKF is in India today; it is a COLUMN precisely so that "assume
+  // IST" is never again a line of code.
+  timezone: text('timezone').notNull().default('Asia/Kolkata'),
+  /** A stable public address for this room. Unique when set; null = unpublished. */
+  slug: text('slug'),
+  /** For "find a club near me". numeric, not float: a rounded coordinate is a different building. */
+  latitude: numeric('latitude', { precision: 9, scale: 6 }),
+  longitude: numeric('longitude', { precision: 9, scale: 6 }),
+  /**
+   * Civil geography, BESIDE `stateUnitId` rather than instead of it: that
+   * column says which chartered MMAKF body administers this room, this one says
+   * where on the map it is. The same distinction migration 0025 drew for
+   * `persons.residenceAreaId`.
+   */
+  areaId: integer('area_id').references(() => adminAreas.id),
+  parking: text('parking'),
+  transport: text('transport'),
+
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   codeUk: uniqueIndex('venues_code_uk').on(t.code),
   geoIdx: index('venues_geo_idx').on(t.stateUnitId, t.districtUnitId),
   instIdx: index('venues_institution_idx').on(t.institutionId),
+  slugUk: uniqueIndex('venues_slug_uk').on(t.slug).where(sql`slug is not null`),
+  areaIdx: index('venues_area_idx').on(t.areaId),
+  pointIdx: index('venues_geo_point_idx').on(t.latitude, t.longitude),
 }));
 
 /** Maintenance, exams, holidays — periods the venue cannot be booked. */

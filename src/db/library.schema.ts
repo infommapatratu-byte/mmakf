@@ -547,3 +547,30 @@ export const referenceCurriculumItems = pgTable('reference_curriculum_items', {
   curriculumIdx: index('reference_curriculum_items_curriculum_idx').on(t.curriculumId, t.displayOrder),
   gradeIdx: index('reference_curriculum_items_grade_idx').on(t.curriculumId, t.gradeLabel),
 }));
+
+/**
+ * "This technique appears in this kata", where the movement number is unknown.
+ *
+ * A WEAKER CLAIM THAN kata_movements, DELIBERATELY. `kataMovements` says
+ * "movement 17 of Heian Nidan is a chudan gyaku-zuki in zenkutsu-dachi" and
+ * requires a source that counted. This says only "gyaku-zuki appears in Heian
+ * Nidan", which the repository's Shotokan corpus records for every technique and
+ * which is enough to answer the question the knowledge graph exists for.
+ *
+ * Keeping the two apart is what stops the weaker claim from being read as the
+ * stronger one. `kata_movements.ordinal` is NOT NULL; putting an appearance
+ * there would mean inventing a count, and an invented count is indistinguishable
+ * from a researched one the moment it is stored.
+ */
+export const techniqueKataAppearances = pgTable('technique_kata_appearances', {
+  id: serial('id').primaryKey(),
+  techniqueId: integer('technique_id').notNull().references(() => techniques.id),
+  kataId: integer('kata_id').notNull().references(() => kata.id),
+  movementOrdinal: integer('movement_ordinal'),
+  note: text('note'),
+  verification: technicalVerification('verification').notNull().default('unverified'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  pairIdx: uniqueIndex('technique_kata_appearances_uk').on(t.techniqueId, t.kataId),
+  kataIdx: index('technique_kata_appearances_kata_idx').on(t.kataId),
+}));

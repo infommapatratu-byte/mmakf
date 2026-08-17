@@ -178,7 +178,20 @@ describe('the payload an operator and a monitor read', () => {
     // `String(body.redis)` and `String(body.database)`, so a HealthCheck object
     // in either field renders as '[object Object]' with no meaning beside it.
     const { body } = await health();
-    expect(Object.keys(body).sort()).toEqual(['database', 'ok', 'redis', 'version']);
+    // THE CONTRACT IS ABOUT THE FOUR NAMED FIELDS AND THEIR TYPES, not about
+    // the payload never growing. `dbVars` and `env` were added after five
+    // deployments reported not_configured with no way to tell whether the
+    // variable was missing or merely named POSTGRES_URL — which is what
+    // Vercel Supabase integration provisions, and a completely different fix.
+    //
+    // What must not change: redis stays a boolean and database stays a string,
+    // because command.astro keys its explanations off String() of each and an
+    // object there renders as [object Object].
+    for (const k of ['database', 'ok', 'redis', 'version']) {
+      expect(Object.keys(body), `the contracted field ${k} is missing`).toContain(k);
+    }
+    // And no VALUE ever leaves: dbVars reports names as booleans, nothing more.
+    for (const v of Object.values(body.dbVars ?? {})) expect(typeof v).toBe('boolean');
     expect(typeof body.ok).toBe('boolean');
     expect(typeof body.redis).toBe('boolean');
     expect(typeof body.database).toBe('string');

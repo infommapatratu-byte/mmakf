@@ -1,15 +1,77 @@
 ---
+/**
+ * THE HOMBU DOJO'S WEEK — /schedule
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT THIS PAGE USED TO CLAIM, AND WHY IT WAS WRONG
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * It published one timetable under the heading "The weekly timetable" and
+ * called it MMAKF's. It is the HEADQUARTERS' timetable. An affiliated club in
+ * Bokaro that trains Monday to Friday, 18:00 to 21:00, was being represented on
+ * the federation's own site as training at six in the morning — and a parent
+ * who read this page and turned up at a club sixty miles away found a locked
+ * door, with the federation's name over it.
+ *
+ * So the framing on this page is now explicit in three places: the title, the
+ * lead, and a line above the table. This is ONE dojo's week. Every other club
+ * publishes its own, and /dojos is how you find it.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * TWO SOURCES, AND THE ORDER MATTERS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The federation's opening hours are moving out of two English sentences on the
+ * editorial record and into the scheduling engine (migration 0032), where they
+ * are days, windows, named seasons with dates, and versions nobody overwrites.
+ * That migration is performed by an administrator, per club, and until it has
+ * been done for a club the strings are still what the federation publishes.
+ *
+ * This page therefore reads the ENGINE FIRST and falls back to the editorial
+ * strings, and it renders whichever it used without pretending. The alternative
+ * — switching the page over on the day the migration ships — would blank the
+ * timings of every club that has not been migrated yet, which is the failure
+ * mode this project treats as unforgivable: a page that goes quiet rather than
+ * one that says it does not know.
+ *
+ * Nothing here computes an hour. Every time on screen comes from a row.
+ */
 import Base from '@/layouts/Base.astro';
 import Icon from '@/components/Icon.astro';
 import PageHero from '@/components/PageHero.astro';
 import EnrollCTA from '@/components/EnrollCTA.astro';
+import OpeningHours from '@/components/OpeningHours.astro';
 import { get } from '@/lib/storage';
+import { isConfigured, db } from '@/db';
+import { headquartersDojo, publishedWeek, todayIso, addDays, type PublishedWeek } from '@/db/scheduling';
 
 export const prerender = false;
 
 const fed = await get('federation');
 const schedule = await get<any[]>('schedule');
 const programs = await get<any[]>('programs');
+
+// ── The engine, when it has an answer ──────────────────────────────────────
+//
+// Wrapped because a public page must not 500 on a database that is unreachable
+// or unmigrated: the editorial strings below are a complete answer on their own,
+// and losing the register must not take the timetable off the internet.
+let hqWeek: PublishedWeek | null = null;
+let hqName = '';
+if (isConfigured()) {
+  try {
+    const database = db();
+    const hq = await headquartersDojo(database);
+    if (hq) {
+      hqName = hq.name;
+      const from = todayIso();
+      hqWeek = await publishedWeek(database, { dojoId: hq.id }, from, addDays(from, 6));
+    }
+  } catch (err) {
+    console.warn('/schedule: the scheduling engine was unreachable; falling back to the published strings', err);
+  }
+}
+const usingEngine = Boolean(hqWeek?.configured);
 
 // HOW MANY DAYS THE DOJO IS OPEN IS A FACT ABOUT THE TIMETABLE, so it is counted
 // from the schedule the federation edits at /admin and never typed here. The
@@ -40,16 +102,56 @@ const etiquette = [
 ---
 
 <Base
-  title="Class Schedule — MMAKF"
-  description="The MMAKF weekly class timetable — dojo and online batches for kids, beginners, women, competitors and black belts."
+  title="Headquarters Class Schedule — MMAKF"
+  description="The weekly class timetable at the MMAKF headquarters dojo in Patratu — dojo and online batches. Affiliated clubs publish their own timings."
 >
   <PageHero
     image="https://images.unsplash.com/photo-1599058917212-d750089bc07e?auto=format&fit=crop&w=1800&q=70"
-    eyebrow="Class Calendar"
-    title={`The weekly <em>timetable</em>.`}
-    lead={`${schedule.length} batches a week across dojo and online, ${openDaysLabel} days. ${hoursLine}.`}
+    eyebrow="Headquarters Timetable"
+    title={`The <em>hombu dojo</em> week.`}
+    lead={`${schedule.length} batches a week across dojo and online, ${openDaysLabel} days. ${hoursLine}. Affiliated clubs set their own timings — find yours in the club directory.`}
     pills={['Dojo · Patratu', 'Online · Worldwide']}
   />
+
+  {/* ═══════ WHOSE WEEK THIS IS ═══════
+      Stated before the table, not after it. A reader who scrolls past a note at
+      the foot has already decided what time to arrive. */}
+  <section style="padding-bottom:0">
+    <div class="container">
+      <div class="whose fade">
+        <div>
+          <strong>These are the headquarters&rsquo; timings.</strong>
+          They are not a federation-wide timetable and they are not the timings of any affiliated club.
+          Every MMAKF club, dojo and training centre publishes its own — an evening club does not train
+          when the hombu trains.
+        </div>
+        <a href="/dojos" class="btn btn-ghost">Find your club</a>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ PUBLISHED OPENING HOURS ═══════
+      From the scheduling engine when the headquarters has been migrated into
+      it. Absent, this section does not render at all and the editorial strings
+      below carry the answer, as they did before. */}
+  {hqWeek && (
+    <section>
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">This week</div>
+          <h2 class="display-2">When the <em class="r">mat</em> is open.</h2>
+          <div class="rule"></div>
+        </div>
+        <div class="fade">
+          <OpeningHours
+            week={hqWeek}
+            subject={hqName || 'The headquarters dojo'}
+            unconfiguredNote="The headquarters' timings are published as the lines below until an administrator moves them into the schedule editor."
+          />
+        </div>
+      </div>
+    </section>
+  )}
 
   {/* ═══════ TIMETABLE ═══════ */}
   <section>

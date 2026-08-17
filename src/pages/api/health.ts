@@ -63,6 +63,37 @@ export const GET: APIRoute = async () => {
       redis: redis.status !== 'down',
       database: asRegisterState(database),
       version: process.env.VERCEL_GIT_COMMIT_SHA || 'dev',
+
+      // ── WHICH CONNECTION-STRING NAMES THIS RUNTIME CAN SEE ─────────────────
+      //
+      // Added after FIVE deployments reported "not_configured" while the
+      // operator was certain the variable was set. Every one of those rounds
+      // ended the same way: we could tell that DATABASE_URL was empty, and
+      // nothing about WHY, so the next step was always another guess.
+      //
+      // The distinction that actually matters is whether the variable is
+      // missing or merely NAMED SOMETHING ELSE. Vercel's Supabase integration
+      // provisions POSTGRES_URL — not DATABASE_URL — so a project connected
+      // through the integration rather than by hand has a perfectly good
+      // connection string under a name this application does not read. That is
+      // indistinguishable from "unlinked" through the old payload, and it is a
+      // completely different fix.
+      //
+      // ONLY NAMES AND BOOLEANS LEAVE. No value, no length, no substring, no
+      // host. Knowing that a variable called POSTGRES_URL exists tells an
+      // attacker nothing they could not assume about any Postgres application,
+      // and it tells the operator exactly which of two problems they have.
+      //
+      // `env` names the deployment environment, because "is it ticked for
+      // Production?" was the other question nobody could answer from outside.
+      env: process.env.VERCEL_ENV || 'local',
+      dbVars: {
+        DATABASE_URL: Boolean(process.env.DATABASE_URL),
+        POSTGRES_URL: Boolean(process.env.POSTGRES_URL),
+        POSTGRES_URL_NON_POOLING: Boolean(process.env.POSTGRES_URL_NON_POOLING),
+        POSTGRES_PRISMA_URL: Boolean(process.env.POSTGRES_PRISMA_URL),
+        SUPABASE_DB_URL: Boolean(process.env.SUPABASE_DB_URL),
+      },
     }),
     {
       status: 200,

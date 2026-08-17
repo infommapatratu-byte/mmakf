@@ -1,0 +1,177 @@
+---
+/**
+ * A published week, rendered.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE THREE STATES THIS COMPONENT KEEPS APART
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * There is exactly one reason this is a component and not a loop written twice:
+ * three different situations look identical if you render them carelessly, and
+ * a parent acts differently on each.
+ *
+ *   OPEN      — hours, and the reader comes.
+ *   CLOSED    — a statement. The reader comes back another day.
+ *   NOT SAID  — this unit has published nothing. The reader TELEPHONES. Showing
+ *               them a blank row instead says "closed all week", which is a
+ *               claim the federation has not made and cannot stand behind.
+ *
+ * `week.configured === false` is the third state and it renders as a sentence,
+ * never as an empty table.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHOSE HOURS THESE ARE IS ALWAYS ON SCREEN
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `inheritedFromLabel` is printed whenever the answer did not come from the
+ * unit itself. A club showing the district's hours must say so, because the
+ * alternative is a club appearing to have confirmed timings it has never seen.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * NO REASONS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Exception KINDS are shown ('holiday', 'grading'); the free-text reason an
+ * administrator typed is not, and the engine has already redacted it on a
+ * public read. See the privacy note at the head of src/db/scheduling.ts.
+ */
+import type { PublishedWeek } from '@/db/scheduling';
+
+interface Props {
+  week: PublishedWeek;
+  /** Whose week this is, in words — 'MMAKF Hombu Dojo'. */
+  subject: string;
+  /** Rendered when nothing is configured. Should tell the reader what to do. */
+  unconfiguredNote?: string;
+  compact?: boolean;
+}
+
+const { week, subject, unconfiguredNote, compact = false } = Astro.props as Props;
+
+const EXCEPTION_WORDS: Record<string, string> = {
+  holiday: 'Holiday',
+  closure: 'Closed',
+  extended_hours: 'Extended hours',
+  reduced_hours: 'Reduced hours',
+  competition: 'Competition',
+  seminar: 'Seminar',
+  camp: 'Training camp',
+  maintenance: 'Maintenance',
+  private_booking: 'Private booking',
+  examination: 'Examination',
+  grading: 'Grading',
+  special_training: 'Special training',
+};
+---
+
+{!week.configured ? (
+  <div class="oh-empty">
+    <strong>{subject} has not published its timings.</strong>
+    <span>{unconfiguredNote ?? 'This is not the same as being closed — the federation simply has no hours on record for this location. Contact the club before travelling.'}</span>
+  </div>
+) : (
+  <div class={`oh ${compact ? 'oh-compact' : ''}`}>
+    <table class="oh-tbl">
+      <caption class="sr-only">Published timings for {subject}</caption>
+      <thead>
+        <tr><th scope="col">Day</th><th scope="col">Open</th><th scope="col">Notes</th></tr>
+      </thead>
+      <tbody>
+        {week.days.map((day) => (
+          <tr class={day.open ? '' : 'oh-shut'}>
+            <th scope="row"><strong>{day.dayName}</strong></th>
+            <td>
+              {day.open ? (
+                <span class="oh-windows">
+                  {day.windows.map((w) => (
+                    <span class="oh-window">
+                      <span class="oh-time">{w.opensAt}–{w.closesAt}</span>
+                      {w.seasonName && <span class="oh-season">{w.seasonName}</span>}
+                      {w.label && !w.seasonName && <span class="oh-label">{w.label}</span>}
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <span class="text-muted">Closed</span>
+              )}
+            </td>
+            <td class="text-muted oh-note">
+              {day.exceptions.map((e) => (
+                <span class="pill">{EXCEPTION_WORDS[e.kind] ?? e.kind}</span>
+              ))}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+
+    <p class="oh-foot text-muted">
+      Times are local to {week.timezone.replace('_', ' ')}.
+      {week.seasons.length > 0 && (
+        <> Seasonal timings in force: {week.seasons.map((s) => `${s.name} (${s.startsOn} to ${s.endsOn})`).join(', ')}.</>
+      )}
+      {!week.isOwnSchedule && week.inheritedFromLabel && (
+        <> These are {week.inheritedFromLabel}&rsquo;s published hours — {subject} has not recorded its own.</>
+      )}
+    </p>
+  </div>
+)}
+
+<style>
+  .oh-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .oh-tbl th, .oh-tbl td {
+    padding: 12px 16px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+    vertical-align: top;
+  }
+  .oh-tbl thead th {
+    background: var(--bg-2);
+    font-family: var(--font-display);
+    font-size: 0.66rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-weight: 500;
+  }
+  .oh-tbl tbody th { font-weight: 600; }
+  .oh-tbl tr:last-child td, .oh-tbl tr:last-child th { border-bottom: 0; }
+  .oh-shut th, .oh-shut td { opacity: 0.72; }
+
+  .oh-windows { display: flex; flex-direction: column; gap: 6px; }
+  .oh-window { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .oh-time {
+    font-family: var(--font-display);
+    color: var(--gold);
+    letter-spacing: 0.02em;
+  }
+  .oh-season, .oh-label {
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted, #9a9a9a);
+  }
+  .oh-note { display: flex; gap: 6px; flex-wrap: wrap; }
+  .oh-foot { margin-top: 12px; font-size: 0.78rem; line-height: 1.6; }
+
+  .oh-compact .oh-tbl th, .oh-compact .oh-tbl td { padding: 8px 12px; font-size: 0.82rem; }
+
+  .oh-empty {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    font-size: 0.88rem;
+    line-height: 1.6;
+  }
+</style>

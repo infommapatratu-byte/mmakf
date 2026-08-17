@@ -26,7 +26,7 @@ import {
   registerSource, cite, mediaFor, getKata, searchTerms, reviewQueue, technicalLookup,
   LibraryError, canReviewLibrary,
 } from '../src/db/library';
-import { seedTechnicalLibrary, importTerminology } from '../src/db/library-seed';
+import { seedTechnicalLibrary, importTerminology, importVideoRegister } from '../src/db/library-seed';
 import { JKA_GRADING_GUIDELINE, WKF_KUMITE_PROVISIONS, REFERENCE_SOURCES } from '../src/data/technical-reference';
 import { ForbiddenError, type Principal } from '../src/lib/rbac';
 import type { AuditContext } from '../src/db/federation';
@@ -559,5 +559,99 @@ describe('provenance', () => {
       sourceType: 'organisation',
       authorityTier: 'discovery',
     })).rejects.toThrow(ForbiddenError);
+  });
+});
+
+// ─── The verified video register enters the queue, not the library ──────────
+
+describe('video register import', () => {
+  it('imports verified videos as UNKNOWN rights, never as cleared', async () => {
+    const result = await importVideoRegister(db);
+    expect(result.assets).toBeGreaterThan(0);
+    expect(result.sources).toBeGreaterThan(0);
+
+    const assets = await db.select().from(s.mediaAssets);
+    const imported = assets.filter((a: any) => a.rightsNote?.includes('No licence has been sought'));
+    expect(imported.length).toBeGreaterThan(0);
+
+    // THE POINT OF THIS TEST. The register proved every one of these videos is
+    // live and embeddable on YouTube — oEmbed 200, playabilityStatus OK, a real
+    // iframe, and a negative control that failed as expected. None of that is a
+    // licence, and the import must not quietly upgrade technical embeddability
+    // into permission.
+    for (const asset of imported) {
+      expect(asset.rights).toBe('unknown');
+      expect(asset.published).toBe(false);
+      expect(asset.classification).toBe('pending_review');
+    }
+  });
+
+  it('records provenance strength without letting it decide rights', async () => {
+    await importVideoRegister(db);
+    const assets = await db.select().from(s.mediaAssets);
+    const onOwnChannel = assets.filter((a: any) =>
+      a.rightsNote?.includes('sits on the channel of the organisation'));
+    const possibleReupload = assets.filter((a: any) =>
+      a.rightsNote?.includes('possible re-upload'));
+
+    // Both kinds exist in the register and both arrive at the same rights
+    // standing. The difference is recorded for the reviewer, not acted on.
+    expect(onOwnChannel.length).toBeGreaterThan(0);
+    for (const a of [...onOwnChannel, ...possibleReupload]) {
+      expect(a.rights).toBe('unknown');
+    }
+  });
+
+  it('proposes kata links at "new", attributed to the import', async () => {
+    // The register tags 59 videos with a kata slug. Links only appear for kata
+    // that exist in the register — an unmatched slug is reported, not invented.
+    await makeKata('heian-nidan');
+    await makeKata('bassai-dai');
+
+    const result = await importVideoRegister(db);
+    expect(result.links).toBeGreaterThan(0);
+
+    const links = await db.select().from(s.mediaTechnicalLinks)
+      .where(eq(s.mediaTechnicalLinks.proposedBy, 'import'));
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) {
+      expect(link.state).toBe('new');
+      expect(link.reviewedByPersonId).toBeNull();
+    }
+  });
+
+  it('reports kata it could not match instead of dropping them silently', async () => {
+    const result = await importVideoRegister(db);
+    // The register tags kata this database may not carry yet. Those are named
+    // in the return value so somebody can act on them; a silent skip would read
+    // as "the register had nothing for those kata".
+    expect(Array.isArray(result.unmatchedKata)).toBe(true);
+    for (const slug of result.unmatchedKata) {
+      expect(typeof slug).toBe('string');
+    }
+  });
+
+  it('shows a learner none of it, because none of it is cleared', async () => {
+    const kata = await makeKata('unsu');
+    await importVideoRegister(db);
+
+    // Everything imported is unknown-rights, so the learner-facing read returns
+    // nothing at all — even for a kata the register has several videos for.
+    expect(await mediaFor(db, 'kata', kata.id)).toHaveLength(0);
+  });
+
+  it('runs twice without duplicating an asset or a link', async () => {
+    await makeKata('jion');
+    await importVideoRegister(db);
+    const firstAssets = await db.select({ n: sql<number>`count(*)::int` }).from(s.mediaAssets);
+    const firstLinks = await db.select({ n: sql<number>`count(*)::int` }).from(s.mediaTechnicalLinks);
+
+    const second = await importVideoRegister(db);
+    const afterAssets = await db.select({ n: sql<number>`count(*)::int` }).from(s.mediaAssets);
+    const afterLinks = await db.select({ n: sql<number>`count(*)::int` }).from(s.mediaTechnicalLinks);
+
+    expect(second.assets).toBe(0);
+    expect(afterAssets[0].n).toBe(firstAssets[0].n);
+    expect(afterLinks[0].n).toBe(firstLinks[0].n);
   });
 });

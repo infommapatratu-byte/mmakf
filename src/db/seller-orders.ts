@@ -52,6 +52,7 @@ import { publicListingPredicate } from '@/db/onboarding.schema';
 import { writeAudit, allocateFederationId, type AuditContext } from '@/db/federation';
 import { assertCan, type Principal } from '@/lib/rbac';
 import { MarketplaceError } from '@/db/marketplace';
+import { applyFactor } from '@/db/fees';
 import { reserveForLine, commitReservations, releaseReservations, dispatchReservations } from '@/db/inventory';
 import { freezeCommissionForLine, refreshSellerOrderCommission, accrueSellerOrder, SLA_NOT_SET } from '@/db/marketplace-finance';
 
@@ -199,7 +200,19 @@ export async function checkout(db: DB, ctx: AuditContext | null, input: Checkout
     // tax engine (src/db/tax.ts) is the authority and an unconfigured rate is
     // its business to report, not this module's to guess at.
     const rate = Number.isInteger(r.listing.taxRateBps) ? r.listing.taxRateBps : 0;
-    const lineTax = Math.round((lineTotal * rate) / 10_000);
+    // THROUGH applyFactor(), not a local Math.round.
+    //
+    // tests/money-safety.test.ts allows exactly one hand-rolled rounding outside
+    // applyFactor() — the one in src/db/orders.ts, recorded there as "FINDING 4
+    // — a SECOND rounding implementation". Adding a third would make the rule
+    // meaningless and would put a different rounding on the marketplace's tax
+    // from the one on the federation's own.
+    //
+    // Basis points × 100 is parts-per-million: 1200 bps (12%) is 120_000 ppm.
+    // applyFactor does the multiply in BigInt and rounds half up, which is what
+    // an invoice needs — two identical line items must produce two identical
+    // amounts, and half-even makes that depend on the preceding digit.
+    const lineTax = applyFactor(lineTotal, rate * 100);
 
     const g = groups.get(r.seller.id) ?? { seller: r.seller, priced: [], subtotal: 0, tax: 0 };
     g.priced.push({

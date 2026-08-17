@@ -1562,6 +1562,73 @@ export async function publicTimetable(
   return await timetable(db, target, fromIso, toIso, { principal: null });
 }
 
+export interface PublishedWeek {
+  /** Empty when nothing is configured. Never a placeholder week. */
+  days: ResolvedDay[];
+  /** Which question the answer came from: when the mat is free, or when the door is open. */
+  purpose: SchedulePurpose | null;
+  configured: boolean;
+  timezone: string;
+  inheritedFromLabel: string | null;
+  isOwnSchedule: boolean;
+  seasons: SeasonRecord[];
+}
+
+/**
+ * What one unit or room publishes for a run of days — the read a PAGE wants.
+ *
+ * TRAINING HOURS FIRST, THEN OPERATING. "When can I train here" is the question
+ * a visitor is actually asking, and a unit that has answered it specifically
+ * should not have its answer widened to the building's opening hours. Most
+ * units publish only one of the two; falling back rather than requiring both is
+ * what stops the site demanding a distinction the federation has not drawn.
+ *
+ * `configured: false` is a FIRST-CLASS RESULT and must be rendered as such. A
+ * page that turns it into an empty timetable is telling a parent the club never
+ * opens, which is a different and much worse statement than "this club has not
+ * published its hours — telephone them".
+ */
+export async function publishedWeek(
+  db: DB, target: Omit<ScheduleTarget, 'purpose'>, fromIso: IsoDate, toIso: IsoDate
+): Promise<PublishedWeek> {
+  for (const purpose of ['training', 'operating'] as SchedulePurpose[]) {
+    const days = await publicTimetable(db, { ...target, purpose }, fromIso, toIso);
+    if (days.some((d) => !d.unconfigured)) {
+      const first = days.find((d) => !d.unconfigured)!;
+      return {
+        days, purpose, configured: true,
+        timezone: first.timezone,
+        inheritedFromLabel: first.inheritedFromLabel,
+        isOwnSchedule: first.isOwnSchedule,
+        seasons: first.seasons,
+      };
+    }
+  }
+  return {
+    days: [], purpose: null, configured: false,
+    timezone: 'Asia/Kolkata',
+    inheritedFromLabel: null, isOwnSchedule: false, seasons: [],
+  };
+}
+
+/**
+ * The dojo the federation runs from, if the register identifies one.
+ *
+ * Matched on NAME rather than by a flag column, for the reason
+ * src/lib/timings.ts already gives about the editorial register: there is no
+ * headquarters flag on `dojos`, the list is administrator-editable, and rows
+ * get reordered — so "the first one" is not an answer. Returns null when
+ * nothing matches, and the caller renders the federation's published strings
+ * rather than guessing at a club.
+ */
+export async function headquartersDojo(db: DB): Promise<{ id: number; name: string; slug: string | null } | null> {
+  const rows = await db.select({
+    id: s.dojos.id, name: s.dojos.name, slug: s.dojos.slug, status: s.dojos.status,
+  }).from(s.dojos);
+  const hit = rows.find((d: any) => /hombu|headquarters/i.test(String(d.name ?? '')));
+  return hit ? { id: hit.id, name: hit.name, slug: hit.slug ?? null } : null;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // CLASSES AND THEIR OCCURRENCES
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1707,7 +1774,16 @@ export async function generateSessions(
     // An online class consumes no room, so the room's hours do not gate it.
     let facilityDay: ResolvedDay | null = null;
     if (klass.mode !== 'online') {
+      // TRAINING HOURS FIRST, THEN OPERATING. A unit that has published when the
+      // mat is available is answering a narrower question than "when is the
+      // building open", and the narrower answer is the one a class must fit
+      // inside. Most units publish only one; falling back rather than requiring
+      // both is what stops the engine demanding a distinction the federation has
+      // not drawn.
       facilityDay = await openingHoursOn(db, facilityTarget, day, { asOf: day });
+      if (facilityDay.unconfigured) {
+        facilityDay = await openingHoursOn(db, { ...facilityTarget, purpose: 'operating' }, day, { asOf: day });
+      }
       if (facilityDay.unconfigured) {
         throw new SchedulingError(
           'facility_unscheduled',
@@ -1740,6 +1816,21 @@ export async function generateSessions(
       const startsAt = zonedInstant(day, w.opensAt, tz);
       const endsAt = zonedInstant(day, w.closesAt, tz);
       const coachPersonId = opts.coachPersonId ?? klass.defaultCoachPersonId ?? null;
+
+      // ALREADY THERE? Asked BEFORE the conflict check, and that order is the
+      // whole of idempotency. A second run over the same fortnight would
+      // otherwise find its own previous output sitting in the room and report
+      // every session as a venue double-booking — a regeneration that looks
+      // like a catastrophe, which is how administrators learn to ignore the
+      // conflict list.
+      const alreadyThere = await db.select({ id: sch.classSessions.id })
+        .from(sch.classSessions)
+        .where(and(eq(sch.classSessions.classId, classId), eq(sch.classSessions.startsAt, startsAt)))
+        .limit(1);
+      if (alreadyThere.length) {
+        result.skippedExisting++;
+        continue;
+      }
 
       const conflicts = await detectConflicts(db, {
         startsAt, endsAt,

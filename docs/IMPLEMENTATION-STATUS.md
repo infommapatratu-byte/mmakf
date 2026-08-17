@@ -356,3 +356,62 @@ work running in parallel in
 Two RBAC actions added, additively: `technical:read`, `technical:review`. Gate on
 these rather than `content:*` — reviewing what MMAKF teaches is a different
 authority from publishing what MMAKF says.
+
+---
+
+# Addendum — the marketplace platform (migration 0029)
+
+Added 17 August 2026. Counted by running the code, not by reading a plan.
+
+The shop became a multi-seller marketplace. What follows is the honest split
+between what has tests and has been exercised against a real Postgres, what
+exists as schema with no surface, and what is not started.
+
+## BUILT — schema, logic and tests
+
+| Area | Module | Evidence |
+|---|---|---|
+| Seller registration, verification, brands, badges, 360 | `src/db/seller-registry.ts` | badge derivation and expiry asserted; `grantBadge()` refuses derived badges |
+| Governed taxonomy, product policy, variants, quarantine, counterfeit cases | `src/db/catalogue.ts` | strictest-ancestor policy, union of requirement flags, brand-authorisation gating, expiry — all asserted |
+| Inventory: five buckets, movement ledger, race-safe reservation | `src/db/inventory.ts` | oversell refused by conditional UPDATE **and** by CHECK constraint, both asserted |
+| Multi-seller checkout and split | `src/db/seller-orders.ts` | the brief's critical test, in full, including refund isolation |
+| Fulfilment lifecycle, shipments | `src/db/seller-orders.ts` | accept → pack → ship → deliver with stock movement asserted; `paid → delivered` refused |
+| Commission: rules, versions, resolution, freezing, gaps | `src/db/marketplace-finance.ts` | draft-not-applied, specificity ordering, basis-on-shipping, unresolved blocks close |
+| Settlement, payouts, adjustments, statements | `src/db/marketplace-finance.ts` | accrual, refund commission reversal, idempotency key |
+| Returns, refunds, disputes, buyer reports | `src/db/returns.ts` | policy reconciliation and the inspection arithmetic are enforced in code; **not yet under test** |
+
+`tests/marketplace-platform.test.ts` — 44 tests, all passing, against PGlite with
+all 31 migrations applied. `tests/marketplace.test.ts` — 89 pre-existing tests,
+still passing after the schema change.
+
+Migration `0029_marketplace_platform.sql` adds 54 tables and 64 columns;
+`0030_data_api_lockdown.sql` puts every one behind row-level security. Verified:
+261 tables, 0 without RLS.
+
+## BUILT AS SCHEMA — no surface, no computation yet
+
+| Area | State |
+|---|---|
+| `marketplace-trust.schema.ts` — reviews, performance snapshots, fraud signals, promotions, featured placements, event merchandise | Tables, constraints and indexes exist. `fraud_signals` is written by seller registration. **Review moderation, performance computation and the promotion consent flow are not implemented.** |
+| Bulk product import | `product_imports` / `product_import_rows` staging tables exist. **The pipeline is not implemented.** |
+| Shipping zones and methods | Tables exist and `checkout()` resolves carriage from them. **No seller surface to configure them**, so every seller currently resolves to zero carriage. |
+| Policy documents and acceptance | Tables exist and ship empty, by design. **No authoring surface.** |
+| Payout provider adapter | `seller_payouts` records the instruction with an idempotency key. **No provider call** — `markPayoutPaid()` is operated by hand. |
+
+## NOT STARTED
+
+- **Surfaces.** No `.astro` pages were added. `/seller/apply`, the seller portal
+  (dashboard, products, inventory, orders, returns, settlements, shipping), the
+  admin marketplace console (sellers, Seller 360, commissions, settlements,
+  disputes, brands, moderation) and the public storefront routes
+  (`/shop/seller/…`, `/shop/category/…`, `/shop/brand/…`) are **not built**. The
+  functions every one of them needs are built, tested and named in
+  `docs/marketplace/`.
+- **Seller API and webhooks.** The brief says "eventually support"; deferred
+  deliberately. No tables, no routes.
+- **Marketplace search and SEO surfaces** for the new taxonomy.
+- **Notifications** for the new marketplace events.
+
+Recorded here rather than implied, because the gap between "the engine is built
+and tested" and "a seller can use it" is the whole of the remaining work, and a
+status file that blurred it would be the thing this document exists to prevent.

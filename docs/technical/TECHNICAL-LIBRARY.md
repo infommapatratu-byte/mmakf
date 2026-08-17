@@ -167,7 +167,7 @@ UI → workflow → search → rights → admin → audit → tests are connecte
 ### Foundation — COMPLETE
 
 Schema, migration, rights engine, review workflow, audit trail, admin queue,
-search, seed, 32 tests. Verified: all 31 migrations apply to a fresh Postgres and
+search, seed, 38 tests. Verified: all 31 migrations apply to a fresh Postgres and
 every constraint refuses what it should.
 
 ### P20 — WKF sport kumite — DATA COMPLETE, NO PUBLIC PAGE
@@ -178,14 +178,21 @@ see conflict 4 in PATCH-CONFLICTS: which surface owns technical content is an
 open architecture question and guessing would create a route somebody has to
 un-pick.
 
-### P41 — Master teacher channel — SOURCE REGISTERED, PIPELINE NOT RUN
+### P41 — Master teacher channel — SOURCE REGISTERED, LIVE PIPELINE NOT RUN
 
 The channel is in the source registry with its rights recorded as unknown.
 `src/lib/youtube.ts` (pre-existing, 687 lines) already implements OAuth, channel
 authorisation, broadcast sync, live detection and classification. **No YouTube
-credentials are configured on this deployment**, so nothing has been ingested and
-no link exists to review. The path from an ingested `media_assets` row into the
-review queue is `proposeLink()`, which is written and tested.
+credentials are configured on this deployment**, so no live ingestion has run and
+nothing was faked.
+
+What DOES flow end to end today is the offline register:
+`importVideoRegister()` takes the 125 verified videos and 7 sources in
+`src/data/shotokan/video-register.ts` into `media_assets`, `technical_sources`
+and `media_technical_links` at state `new` — 59 of them carrying a kata
+classification. Every one arrives at `rights: 'unknown'`, so the queue has real
+work in it and the learner surface shows none of it. That is the pipeline
+working, not the pipeline waiting.
 
 ### P05 — Heian kata — SCHEMA ONLY, NO MOVEMENT DATA
 
@@ -213,7 +220,7 @@ to make impossible.
 
 ## Tests
 
-`tests/technical-library.test.ts` — 32 tests, all passing.
+`tests/technical-library.test.ts` — 38 tests, all passing.
 
 - **Rights** — every enum value maps to exactly one use; unknown values refuse;
   attribution labels never present third-party video as MMAKF content.
@@ -231,6 +238,10 @@ to make impossible.
 - **Search** — `oi-zuki` / `oi zuki` / `oizuki` / `oi tsuki` all reach one term;
   zuki⇄tsuki in both directions; exact match ranked first.
 - **Provenance** — a citation citing nothing refused, in code and in SQL.
+- **Video register import** — verified videos arrive `unknown`, never cleared;
+  provenance strength recorded without deciding rights; links land at `new`;
+  unmatched kata reported rather than dropped; learners see none of it;
+  idempotent.
 
 ---
 
@@ -240,11 +251,11 @@ to make impossible.
 ```
 src/db/library.schema.ts                    14 tables, 6 enums
 src/db/library.ts                           rights, reads, review, search
-src/db/library-seed.ts                      idempotent seed + terminology import
+src/db/library-seed.ts                      idempotent seed, terminology + video-register imports
 src/data/technical-reference.ts             the researched primary-source data
 src/pages/admin/technical-library.astro     the review queue
 drizzle/0031_technical_library.sql          migration
-tests/technical-library.test.ts             32 tests
+tests/technical-library.test.ts             38 tests
 docs/technical/TECHNICAL-LIBRARY.md         this file
 docs/parallel/PATCH-CONFLICTS.md            conflicts with parallel agents
 ```
@@ -267,5 +278,6 @@ src/lib/surface.ts           one admin nav entry
 - **No fabricated transcripts or chapters.** `media_chapters` is empty; the
   directive says not to fabricate a transcript when none is available.
 - **No learner route.** Pending the surface decision.
-- **No YouTube ingestion run.** No credentials on this deployment; the provider
-  interface already exists and is not faked.
+- **No LIVE YouTube ingestion run.** No credentials on this deployment; the
+  provider interface already exists and is not faked. The offline register import
+  does run.

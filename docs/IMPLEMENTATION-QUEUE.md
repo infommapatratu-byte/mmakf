@@ -241,3 +241,97 @@ after pages that do not exist.
   outside `src/pages`, so they are not routes and `tests/layout-guards.test.ts`
   does not fail on them, but they are not part of the product either. Either
   move them under `scripts/` with a purpose stated, or delete them.
+
+---
+
+# Addendum — the marketplace queue
+
+Added 17 August 2026, after migration 0029. Read the addendum in
+[IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md) first: the marketplace
+engine is built and tested, and **no surface was added**. That is the shape of
+everything below.
+
+Order matters. Each item unblocks the next.
+
+## 1 — `/seller/apply` and the seller portal
+
+**Why first.** `registerAsSeller()` is built, tested and unreachable. Until
+there is a form, the marketplace has no sellers, and every item below has
+nothing to operate on.
+
+Needs: `/seller/apply`, then `/portal/seller/` — dashboard, products (with
+variants), inventory, orders, returns, settlements, store profile, documents.
+Every function is named in `docs/marketplace/`.
+
+**Unblocks:** everything.
+
+## 2 — The admin marketplace console
+
+`sellerDossier()` returns the whole Seller 360 and nothing renders it.
+
+Needs: `/admin/marketplace` (hub), `/marketplace/sellers`, `/sellers/[id]`
+(the 360), `/commissions`, `/settlements`, `/disputes`, `/brands`,
+`/moderation`.
+
+**Unblocks:** approval, verification and every federation control. Without this
+the federation cannot govern the marketplace at all, whatever the engine does.
+
+## 3 — Commission configuration, then the first settlement
+
+Once (2) exists: adopt the taxonomy, publish a commission schedule, set the SLA
+windows, publish the seller agreement. Until then **every sale accrues a
+`commission_gaps` row and no settlement can close** — which is correct, and
+which is also a growing backlog.
+
+See [MARKETPLACE-POLICY.md](marketplace/MARKETPLACE-POLICY.md) — ten decisions,
+each with the exact function that records it.
+
+## 4 — Public storefront and category routes
+
+`publicStorefront()` and `publicListings()` are built. Needs
+`/shop/seller/[slug]`, `/shop/category/[...path]`, `/shop/brand/[slug]`,
+`/shop/product/[ref]`, with structured data and canonical URLs. Draft, rejected
+and quarantined items must not be indexed — the predicate already excludes them
+from the query, so this is a routing and metadata task, not a filtering one.
+
+## 5 — Shipping configuration
+
+Zones and methods exist and `checkout()` reads them. With no surface, every
+seller resolves to **zero carriage** — they are absorbing it silently. This is
+the highest-priority item that is quietly costing sellers money.
+
+## 6 — Trust computation
+
+`marketplace-trust.schema.ts` has the tables. Needs: review moderation queue,
+`computeSellerPerformance()` writing snapshots, and the seller/product rating
+roll-ups onto `sellers.ratingAvgBps`.
+
+Note the constraint already in the schema: a score is **null** below a minimum
+order count. A seller with two orders and one return does not have a 50% return
+rate in any sense a human would defend.
+
+## 7 — Payout provider adapter
+
+`createPayout()` writes the instruction with a database-enforced idempotency
+key; `markPayoutPaid()` is currently operated by hand. A provider adapter goes
+behind the same abstraction as `src/lib/payments/`.
+
+## 8 — Bulk product import pipeline
+
+Staging tables exist. Needs the validate → preview → dedupe → category-map →
+moderate → publish pipeline. Deliberately after (1) and (2): importing five
+hundred products into a marketplace with no moderation console is how five
+hundred unreviewed listings go live.
+
+## 9 — Returns test coverage
+
+`src/db/returns.ts` is the one module in 0029 with no test file. The inspection
+arithmetic, the frozen eligibility and the refund ceiling are all enforced in
+code and none is asserted. Should arrive with (1), since the flows become
+reachable then.
+
+## Deferred deliberately
+
+**Seller API and webhooks.** The brief says "eventually support". Building a
+catalogue/inventory/order API before any seller has used the portal would be
+designing an integration surface against no usage at all.

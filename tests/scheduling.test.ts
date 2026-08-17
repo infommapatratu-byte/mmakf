@@ -1018,9 +1018,13 @@ describe('booking a place in a class', () => {
   });
 
   it('does not offer a session that has already started', async () => {
-    await generateSessions(db, ctx(clubAdminA), klassId, '2020-01-06', '2020-01-06');
-    const offered = await bookableSessions(db, { classId: klassId }, '2020-01-01', '2020-01-31');
-    expect(offered).toHaveLength(0);
+    await generateSessions(db, ctx(clubAdminA), klassId, '2026-09-14', '2026-09-14');
+    // `now` is passed rather than taken from the clock, so this test asserts the
+    // rule and not the date it happens to be run on.
+    const before = await bookableSessions(db, { classId: klassId }, '2026-09-01', '2026-09-30', { now: new Date('2026-09-01T00:00:00Z') });
+    const after = await bookableSessions(db, { classId: klassId }, '2026-09-01', '2026-09-30', { now: new Date('2026-09-30T00:00:00Z') });
+    expect(before).toHaveLength(1);
+    expect(after).toHaveLength(0);
   });
 });
 
@@ -1029,30 +1033,63 @@ describe('booking a place in a class', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('no hard-coded hours anywhere in the engine', () => {
-  it('contains no clock time at all in the scheduling source', () => {
-    // The point of the entire wave. A single '06:00' in here would mean some
-    // club's timetable is a coincidence rather than a record — and it is
-    // exactly the line a future change would add "just for the default".
-    const engine = readFileSync('src/db/scheduling.ts', 'utf8');
-    const schema = readFileSync('src/db/scheduling.schema.ts', 'utf8');
-    const code = (src: string) =>
-      src
-        .split('\n')
-        .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))   // prose may cite examples
-        .join('\n');
+  /**
+   * Executable lines only. The prose around them cites real examples on
+   * purpose — the schema's own comment says a season code looks like
+   * 'summer-2026', which is documentation, not a decision.
+   */
+  const codeOf = (path: string) =>
+    readFileSync(path, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')            // block comments, including JSDoc
+      .replace(/(^|[^:])\/\/.*$/gm, '$1')          // line and trailing comments, sparing '://'
+      .split('\n')
+      .join('\n');
 
-    expect(code(engine)).not.toMatch(/['"`]([01]\d|2[0-3]):[0-5]\d['"`]/);
-    expect(code(schema)).not.toMatch(/['"`]([01]\d|2[0-3]):[0-5]\d['"`]/);
+  it('carries no opening time of its own', () => {
+    // THE POINT OF THE ENTIRE WAVE. A single '06:00' in here would mean some
+    // club's timetable is a coincidence rather than a record — and it is exactly
+    // the line a future change adds "just as a sensible default".
+    //
+    // '00:00' is permitted and is the ONLY permitted literal: it is the boundary
+    // of a calendar day, used to turn a date into the instant it begins, and it
+    // is not an hour anybody opens at. The assertion is written as an exact set
+    // rather than as an exclusion so that a second carve-out cannot be smuggled
+    // in beside it.
+    for (const path of ['src/db/scheduling.ts', 'src/db/scheduling.schema.ts']) {
+      const found = new Set(
+        [...codeOf(path).matchAll(/['"`](([01]\d|2[0-3]):[0-5]\d)['"`]/g)].map((m) => m[1])
+      );
+      expect([...found].sort(), `${path} should carry no opening time`).toEqual(
+        path.endsWith('scheduling.ts') ? ['00:00'] : []
+      );
+    }
   });
 
-  it('names no day of the week as a decision', () => {
-    const engine = readFileSync('src/db/scheduling.ts', 'utf8');
-    // DAY_NAMES is a rendering table, so it is allowed to contain them once.
-    const withoutTheTable = engine.replace(/export const DAY_NAMES[\s\S]*?\n/, '').replace(/export const DAY_SHORT[\s\S]*?\n/, '');
-    const codeOnly = withoutTheTable
-      .split('\n')
-      .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
-      .join('\n');
-    expect(codeOnly).not.toMatch(/\b(Sunday|Saturday|Monday)\b/);
+  /**
+   * Executable code with every quoted string removed as well.
+   *
+   * A weekday inside a string is a MESSAGE — "dayOfWeek must be 1 (Monday) to 7
+   * (Sunday)" is the engine explaining itself to an administrator, and forbidding
+   * it would only make the error worse. What must not exist is a weekday or a
+   * season name the code BRANCHES on, and after the strings are gone anything
+   * left is exactly that.
+   */
+  const logicOf = (path: string) =>
+    codeOf(path)
+      .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+      .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+      .replace(/`(?:[^`\\]|\\.)*`/g, '``');
+
+  it('branches on no day of the week', () => {
+    expect(logicOf('src/db/scheduling.ts'))
+      .not.toMatch(/\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b/);
+  });
+
+  it('branches on no season', () => {
+    // 'Summer' and 'Winter' are rows in `seasons` with dates an administrator
+    // chose. If either word reaches the logic, something is deciding in code
+    // what a season means.
+    expect(logicOf('src/db/scheduling.ts')).not.toMatch(/\b[Ss]ummer|[Ww]inter\b/);
+    expect(logicOf('src/db/scheduling.schema.ts')).not.toMatch(/\b[Ss]ummer|[Ww]inter\b/);
   });
 });

@@ -1,4 +1,4 @@
--- Supabase Data API lockdown, seventh pass — for the tables added by 0031.
+-- Supabase Data API lockdown, eighth pass — belt and braces over 0031's tables.
 --
 -- 0010_data_api_lockdown.sql states the rule this file obeys:
 --
@@ -8,12 +8,38 @@
 -- 0031_technical_library.sql adds FOURTEEN tables, and `ENABLE ROW LEVEL
 -- SECURITY` can only secure tables that exist when it runs. 0031 sorts after
 -- 0030_data_api_lockdown.sql, so the loop in 0030 had already finished before a
--- single one of these tables existed. Without this file all fourteen sit
+-- single one of these tables existed. Left uncovered those fourteen would sit
 -- outside the lockdown with RLS off — and worse than merely unprotected: a
 -- pre-cutover Supabase project carries `ALTER DEFAULT PRIVILEGES ... GRANT ALL
 -- ON TABLES TO anon`, which attaches to everything created AFTER it, so 0031's
 -- tables are granted to the anon role at the moment they are created. Open and
 -- granted is the full breach, not half of one.
+--
+-- BUT SAY PLAINLY WHAT THIS FILE ACTUALLY DOES TODAY, because the version of
+-- this comment that shipped first did not. This file was written when it was
+-- numbered to run BETWEEN 0031 and the scheduling engine. It no longer does.
+-- It is now the LAST migration in the directory, and 0033_data_api_lockdown.sql
+-- — which already runs after both 0031 and 0032 — has covered every one of
+-- these fourteen tables before this file is reached. Its loop therefore finds
+-- nothing left to enable and its revoke nothing left to take away: applied
+-- against the current directory it is a verified no-op.
+--
+-- It is kept, rather than deleted, for two reasons and neither of them is
+-- protection that is missing without it. First, the prose below is the only
+-- written record of WHY the technical library's tables are not as harmless as
+-- their subject matter suggests, and that record belongs next to the lockdown
+-- that answers for them. Second, the discipline this subsystem runs on is that
+-- a table-creating migration is followed by a lockdown; a redundant lockdown
+-- costs one no-op and keeps the rule unbroken, whereas a missing one is a
+-- breach. Do not read this file as evidence that a second pass is required.
+--
+-- SUCCESSOR NOTE: the `0033b` prefix is a collision fix, not a convention. It
+-- exists only because 0033 was already taken when the number clash with
+-- 0032_scheduling_engine.sql was resolved. Nothing reads it by name — the
+-- runner and tests both sort filenames — so it can be renumbered to 0034
+-- whenever the parallel tracks that added 0031 and 0032 have settled. The
+-- thing to preserve when renumbering is the SEQUENCE — tables, then a
+-- lockdown — not the digits.
 --
 -- BE HONEST ABOUT WHAT IS BEHIND THIS PARTICULAR DOOR. Most of the technical
 -- library is public material and is meant to be. The movement list of Heian
@@ -81,16 +107,21 @@
 -- The loop is written against the catalogue rather than a list of fourteen
 -- names, so it also secures anything an earlier migration added and forgot.
 --
--- ORDERING NOTE, because the 0032 prefix is shared. A sibling migration —
--- 0032_scheduling_engine.sql — was written in parallel with this one and landed
--- on the same number. That is survivable and the order is right, but it is
--- right by an implicit rule rather than an obvious one: scripts/migrate.mjs and
--- the test both apply files in plain filename order, and 'd' sorts before 's',
--- so this lockdown runs after 0031's tables exist and before the scheduling
--- engine creates its own. The scheduling engine is followed by its own lockdown
--- in turn, which is the discipline working as intended. If anyone renumbers
--- either file, the thing to preserve is the sequence — tables, then a lockdown,
--- then tables, then a lockdown — not the digits.
+-- ORDERING, AS IT ACTUALLY STANDS. scripts/migrate.mjs and
+-- tests/data-api-lockdown.test.ts both apply files in plain filename order, and
+-- '_' sorts before 'b', so the real sequence at the tail of the directory is:
+--
+--     0031_technical_library.sql      14 tables
+--     0032_scheduling_engine.sql       7 tables
+--     0033_data_api_lockdown.sql       covers both of the above
+--     0033b_data_api_lockdown.sql      this file — nothing left to cover
+--
+-- Note what that ordering means and does not mean. It is NOT "tables, lockdown,
+-- tables, lockdown": 0031's tables are secured by 0033, not by this file, and
+-- they are secured correctly, because every lockdown loops over the catalogue
+-- rather than over a list of names and so sweeps up anything an earlier
+-- migration created and left open. That property is what makes the sequence
+-- above safe, and it is the property to keep if these files are ever reordered.
 
 DO $$
 DECLARE

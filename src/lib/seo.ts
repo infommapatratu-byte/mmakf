@@ -47,7 +47,7 @@ export const PRIVATE_PREFIXES = ['/admin', '/api', '/my', '/portal'] as const;
  * Directories under src/pages whose contents are public. Declaring these is
  * what makes an undeclared directory an error rather than a silent publication.
  */
-export const PUBLIC_SECTIONS = ['/athlete', '/people', '/learn', '/training', '/kata', '/start'] as const;
+export const PUBLIC_SECTIONS = ['/athlete', '/people', '/learn', '/training', '/kata', '/start', '/shotokan'] as const;
 
 /**
  * Public URLs that exist and are deliberately NOT advertised, with the reason.
@@ -84,6 +84,8 @@ export const DYNAMIC_ROUTE_POLICY: Record<string, string> = {
   '/people/[slug]': 'Expanded from the leadership register. These profiles are published content and are already linked from /governance.',
   '/athlete/[id]': 'NOT expanded. The public register is a LOOKUP — one identifier, one person. Many of its subjects are children (docs/PRIVACY.md), and turning it into a bulk crawl of every athlete is a decision for the federation, not for this endpoint. The profiles remain reachable and linked from /athletes.',
   '/learn/[audience]': 'Expanded from AUDIENCES in src/data/audiences.ts. These are the six substantive pages describing what MMAKF does for schools, corporates, universities, government bodies, communities and individuals — they are how an institution finds the federation at all, and PART AN is explicit that discovery content must not sit behind a login or out of the index. The set is small, fixed and editorial, which is what makes expanding it safe: unlike /athlete/[id] there is no register of real people behind it.',
+  '/shotokan/techniques/[slug]': 'Expanded from TECHNIQUES in src/data/shotokan. These are the technique reference pages — substantive editorial content about public martial-arts knowledge, and exactly the kind of page §45 asks to be indexable. The set is small, fixed and editorial, with no register of real people behind it, which is what makes expanding it safe.',
+  '/shotokan/kumite/[slug]': 'Expanded from SYSTEMS and CONCEPTS in src/data/shotokan, for the same reason as the technique pages: fixed, editorial, and about the sport rather than about any person.',
   '/learn/applications/[ref]': 'NOT expanded, and never should be. Each URL is one institution\'s own submission, reachable only with the private token issued to it. Listing these would publish the reference numbers of every applicant.',
 };
 

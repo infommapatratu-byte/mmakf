@@ -33,6 +33,7 @@ import { get } from '@/lib/storage';
 import { slugify } from '@/lib/people';
 import { classifyRoute, renderSitemap, routeFromPageFile, SITE_ORIGIN } from '@/lib/seo';
 import { AUDIENCES } from '@/data/audiences';
+import { TECHNIQUES, SYSTEMS, CONCEPTS } from '@/data/shotokan';
 
 export const prerender = false;
 
@@ -90,6 +91,26 @@ function audienceRoutes(): string[] {
   return AUDIENCES.map((a) => `/learn/${a.slug}`);
 }
 
+/**
+ * The Shotokan technical library.
+ *
+ * Expanded from the SAME arrays the pages render from, for the same reason as
+ * the audience pages: a sitemap that computes slugs its own way advertises URLs
+ * that 404. These are the pages §45 asks to be genuinely indexable — real
+ * educational content about public martial-arts knowledge, not keyword-stuffed
+ * doorways — and a dynamic route contributes nothing without an expansion
+ * policy, which is the safe default and the wrong outcome here.
+ *
+ * Compiled in. No store, no database, no failure mode.
+ */
+function techniqueRoutes(): string[] {
+  return TECHNIQUES.map((t) => `/shotokan/techniques/${t.slug}`);
+}
+
+function kumiteRoutes(): string[] {
+  return [...SYSTEMS, ...CONCEPTS].map((k) => `/shotokan/kumite/${k.slug}`);
+}
+
 export const GET: APIRoute = async ({ site }) => {
   const origin = (site?.href || SITE_ORIGIN).replace(/\/$/, '');
 
@@ -98,6 +119,8 @@ export const GET: APIRoute = async ({ site }) => {
 
   if (routes.includes('/people/[slug]')) paths.push(...(await peopleRoutes()));
   if (routes.includes('/learn/[audience]')) paths.push(...audienceRoutes());
+  if (routes.includes('/shotokan/techniques/[slug]')) paths.push(...techniqueRoutes());
+  if (routes.includes('/shotokan/kumite/[slug]')) paths.push(...kumiteRoutes());
 
   const body = renderSitemap(paths, origin);
   return new Response(body, {

@@ -1072,3 +1072,59 @@ Stated so that no reader takes silence for confirmation.
 register in `src/data/shotokan/video-register.ts` is not yet imported into
 `media_assets`; that importer is the next dependency-safe step and is described
 in the same document.
+
+---
+
+# Addendum — the marketplace platform (migration 0029)
+
+Traced 17 August 2026 by reading the code.
+
+**The headline finding, stated plainly: the marketplace engine is REAL and the
+SURFACES DO NOT EXIST.** Every row below is honest about which links are joined.
+
+| Feature | PUBLIC UI | AUTH | API | VALIDATION | DB | AUDIT | TEST |
+|---|---|---|---|---|---|---|---|
+| Seller registration | ✗ none | ✓ | ✗ | ✓ `registerAsSeller` | ✓ | ✓ | ✓ |
+| Seller verification | ✗ none | ✓ `marketplace:verify` | ✗ | ✓ reason required on refusal | ✓ | ✓ | partial |
+| Brand authorisation | ✗ none | ✓ `marketplace:brand` | ✗ | ✓ claim ≠ verified | ✓ | ✓ | ✓ |
+| Badges | ✗ none | ✓ `marketplace:review` | ✗ | ✓ derived cannot be granted | ✓ | ✓ | ✓ |
+| Taxonomy + product policy | ✗ none | ✓ `marketplace:review` | ✗ | ✓ strictest ancestor | ✓ | ✓ | ✓ |
+| Variants | ✗ none | ✓ owner-only | ✗ | ✓ returns listing to review | ✓ | ✓ | ✓ |
+| Inventory | ✗ none | ✓ owner-only | ✗ | ✓ CHECK + conditional UPDATE | ✓ | ✓ | ✓ |
+| Multi-seller checkout | ✗ none | ✓ | ✗ | ✓ server-priced, public predicate | ✓ | ✓ | ✓ |
+| Fulfilment lifecycle | ✗ none | ✓ owner-only | ✗ | ✓ transition table | ✓ | ✓ | ✓ |
+| Commission | ✗ none | ✓ `marketplace:commission` | ✗ | ✓ basis required, publish separate | ✓ | ✓ | ✓ |
+| Settlement + payout | ✗ none | ✓ `marketplace:settle` | ✗ | ✓ blocked on unresolved commission | ✓ | ✓ | ✓ |
+| Returns | ✗ none | ✓ buyer / owner | ✗ | ✓ frozen eligibility, refund ceiling | ✓ | ✓ | ✗ |
+| Disputes | ✗ none | ✓ `marketplace:dispute` | ✗ | ✓ reasons required | ✓ | ✓ | ✗ |
+| Quarantine | ✗ n/a — removal | ✓ `marketplace:suspend` | ✗ | ✓ reason required | ✓ | ✓ | ✓ |
+| Reviews / performance | ✗ none | — | ✗ | schema only | ✓ tables | — | ✗ |
+| Public storefront | ✗ none | n/a | ✗ | ✓ allow-list, not redaction | ✓ | n/a | ✗ |
+
+## The links that ARE joined, and are worth recording
+
+**Public visibility is one SQL predicate, used by both the shop and checkout.**
+`publicListingPredicate()` has five conditions and `checkout()` resolves the
+cart against it — not against a re-implementation. An item that cannot be seen
+cannot be bought by guessing its id, and the two rules cannot drift apart
+because there is only one of them. Asserted for both suspension and quarantine.
+
+**Seller isolation is a SQL filter on a denormalised column**, applied twice on
+the order path (`seller_orders.seller_id` and `order_lines.seller_id`). No
+seller-facing function takes a `sellerId`.
+
+**The oversell guard is in the engine, not the application.** A CHECK constraint
+plus a conditional UPDATE. The test bypasses every function in the module,
+writes the bad state directly, and asserts the database refuses it.
+
+**Money that nobody has priced does not move.** An unresolved commission leaves
+`commission_minor` NULL — not 0 — and `closeSettlement()` refuses. Asserted.
+
+## The links that are NOT joined
+
+**PUBLIC UI is absent for every row.** No `.astro` page, no API route. The
+engine is reachable only from tests. This is recorded as a finding, not as a
+plan: at the time of writing, a seller cannot apply and an administrator cannot
+approve one through any surface that exists.
+
+**`src/db/returns.ts` has no test file.** The only 0029 module without one.

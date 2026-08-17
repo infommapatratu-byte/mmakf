@@ -114,6 +114,26 @@ const OK_ROUTES = [
 
   // ── Public pages added or rebuilt ──
   '/shotokan',
+
+  // ── The Shotokan technical library ──
+  //
+  // Every one of these renders from src/data/shotokan in its frontmatter, so a
+  // bad slug reference or a null dereference is a 500 at request time and a
+  // perfectly clean build. The detail routes are also fetched with nonsense
+  // slugs further down: "renders something" and "refuses what does not exist"
+  // are different claims, and only the second stops an empty, indexable page
+  // appearing for every typo anybody makes.
+  '/shotokan/kihon',
+  '/shotokan/kumite',
+  '/shotokan/terminology',
+  '/shotokan/videos',
+  '/shotokan/techniques/gyaku-zuki',
+  '/shotokan/techniques/zenkutsu-dachi',
+  '/shotokan/techniques/mae-geri',
+  '/shotokan/kumite/sen-no-sen',
+  '/shotokan/kumite/gohon-kumite',
+  '/shotokan/kumite/shiai-kumite',
+
   '/people',
   '/network',
   '/documents',
@@ -234,6 +254,75 @@ describe('the wizard renders from the one definition', () => {
   it('carries the audience through from an audience page', async () => {
     const { body } = await load('/learn/apply?audience=school');
     expect(body).toMatch(/name="audience"\s+value="school"/);
+  }, 60_000);
+});
+
+describe('the Shotokan technical library, over HTTP', () => {
+  it('refuses an unknown technique rather than rendering an empty one', async () => {
+    // An empty page for every typo is an indexable URL for every typo. The
+    // prototype-shaped slugs are here because a plain object lookup answers
+    // them truthily, and this library uses a Map precisely so it does not.
+    for (const slug of ['not-a-technique', '__proto__', 'constructor']) {
+      const res = await fetch(`${base}/shotokan/techniques/${slug}`, { signal: AbortSignal.timeout(40_000) });
+      expect(res.status, `/shotokan/techniques/${slug}`).toBe(404);
+    }
+  }, 90_000);
+
+  it('refuses an unknown kumite record', async () => {
+    const res = await fetch(`${base}/shotokan/kumite/not-a-thing`, { signal: AbortSignal.timeout(40_000) });
+    expect(res.status).toBe(404);
+  }, 60_000);
+
+  it('states the syllabus gap on a technique page rather than omitting it', async () => {
+    // The absence must be VISIBLE. A page that silently omitted the grade would
+    // read as an oversight; one that names it is honest and is also correct.
+    const { body } = await load('/shotokan/techniques/gyaku-zuki');
+    expect(body).toMatch(/has not published its grading syllabus/i);
+    expect(body).toMatch(/Not placed at a grade/i);
+  }, 60_000);
+
+  it('never states a grade for a technique', async () => {
+    for (const path of ['/shotokan/techniques/gyaku-zuki', '/shotokan/techniques/mae-geri', '/shotokan/kihon']) {
+      const text = (await load(path)).body.replace(/<[^>]+>/g, ' ');
+      expect(text, `${path} placed a technique at a grade`)
+        .not.toMatch(/\b\d+(st|nd|rd|th)\s+kyu\b/i);
+    }
+  }, 90_000);
+
+  it('states no competition rule value on the sport pages', async () => {
+    // §20. The principle survives a rule change; the value does not.
+    for (const path of ['/shotokan/kumite', '/shotokan/kumite/shiai-kumite']) {
+      const text = (await load(path)).body.replace(/<[^>]+>/g, ' ');
+      expect(text, `${path} stated a scoring value`).not.toMatch(/\bworth\s+(one|two|three|\d)\s+points?\b/i);
+      expect(text, `${path} stated a bout length`).not.toMatch(/\bbout\s+(is|lasts)\s+\w+\s+minutes?\b/i);
+    }
+  }, 60_000);
+
+  it('embeds no third-party video player anywhere in the library', async () => {
+    // §23 and §49. The register attributes and links; it does not embed a
+    // recording whose rights nobody has cleared, and an <iframe> to YouTube is
+    // exactly what "embedding it anyway" would look like in the markup.
+    for (const path of ['/shotokan/videos', '/shotokan/techniques/gyaku-zuki', '/shotokan/kihon']) {
+      const { body } = await load(path);
+      expect(body, `${path} embedded a video player`).not.toMatch(/<iframe[^>]+youtube/i);
+    }
+  }, 90_000);
+
+  it('shows the rights position on the source register', async () => {
+    const { body } = await load('/shotokan/videos');
+    expect(body).toMatch(/Third-party upload/i);
+    expect(body).toMatch(/rights/i);
+    // The Yale finding is the page's own evidence for why link health is
+    // checked per recording. If it ever stops being rendered, the argument
+    // for the whole check has quietly disappeared from the site.
+    expect(body).toMatch(/ALL EIGHT ARE DEAD/i);
+  }, 60_000);
+
+  it('links kihon, kata and kumite to one another', async () => {
+    const { body } = await load('/shotokan/techniques/gyaku-zuki');
+    expect(body).toMatch(/href="[^"]*\/kata\/bassai-dai"/);
+    expect(body).toMatch(/href="[^"]*\/shotokan\/kumite\/[a-z-]+"/);
+    expect(body).toMatch(/href="[^"]*\/shotokan\/terminology#/);
   }, 60_000);
 });
 

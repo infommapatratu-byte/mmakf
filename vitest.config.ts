@@ -37,9 +37,27 @@ export default defineConfig({
     // test run that cannot finish is a test run nobody performs, and the guards
     // in this repository are the only thing standing between the federation and
     // the class of defect it has been finding all week.
-    poolOptions: {
-      threads: { minThreads: 1, maxThreads: 4 },
-      forks: { minForks: 1, maxForks: 4 },
-    },
+    // AND THE CAP ABOVE WAS NOT IN FORCE, WHICH IS WHY THIS KEPT MOVING.
+    //
+    // What lived here was a poolOptions block capping threads and forks at
+    // four, written against Vitest 3. VITEST 4 REMOVED poolOptions. This
+    // project is on 4.1.9, which prints one DEPRECATED line, discards the
+    // block, and falls back to availableParallelism() - 1. On a 16-CPU
+    // machine that is FIFTEEN workers, not four. The limit everyone believed
+    // was protecting this suite had never once applied.
+    //
+    // It did not fail loudly, which is why it survived. Three suites boot a
+    // real `astro dev`; with fifteen files starting at once their readiness
+    // probes time out with "astro dev never came up", and vitest reports
+    // those tests as SKIPPED rather than failed. Two runs of an identical
+    // tree gave 47 failures and then 7, and every one of those suites passes
+    // when it is run on its own.
+    //
+    // Related, and still true: ASTRO_CACHE_DIR does NOT isolate the content
+    // store for `astro dev`. Astro honours cacheDir on build, but in dev it
+    // writes <root>/.astro/data-store.json unconditionally, so concurrent
+    // dev servers still share one file. Capping the workers is what actually
+    // holds them apart today.
+    maxWorkers: 4,
   },
 });

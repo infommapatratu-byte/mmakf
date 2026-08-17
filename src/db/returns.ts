@@ -41,8 +41,24 @@ import { MarketplaceError } from '@/db/marketplace';
 import { restockReturn } from '@/db/inventory';
 import { accrueRefund } from '@/db/marketplace-finance';
 import { slaFor, ownSellerRecord } from '@/db/seller-orders';
+import { applyFactor } from '@/db/fees';
 
 type DB = any;
+
+/**
+ * What a buyer is owed for a number of units of an order line.
+ *
+ * NO DIVISION OF MONEY. `unit` is an integer price and `qty` is bounded to
+ * 1..99 by the caller, so the goods figure is exact; the tax is re-derived
+ * through applyFactor() from the same rate the sale used, so a refund and the
+ * sale it reverses can never disagree by a paisa.
+ */
+function refundableFor(line: any, qty: number): number {
+  const unit = line.unitPricePaise;
+  const rateBps = Number.isInteger(line.taxRateBps) ? line.taxRateBps : 0;
+  const goods = unit * qty;
+  return goods + applyFactor(goods, rateBps * 100);
+}
 
 export const RETURN_FLOOR_NOT_SET =
   'MMAKF has published no marketplace-wide minimum return window. Until it does, ' +
@@ -291,7 +307,20 @@ export async function requestReturn(
       buyerStatedCondition: item.condition ?? null,
       // The value attributable to this item, frozen from the line so a later
       // repricing cannot change what a buyer is owed.
-      refundableMinor: Math.round((line.totalPaise / line.quantity) * qty),
+      //
+      // COMPUTED FROM THE UNIT PRICE, NOT BY DIVIDING THE LINE TOTAL.
+      //
+      // The obvious form — round(totalPaise / quantity) * qty — divides money
+      // and then multiplies, which loses paise on every partial return: two of
+      // three units of a ₹100.00 line gives round(10000/3) × 2 = 6666, where
+      // the buyer is owed 6667. One paisa per return, against a real person,
+      // silently. tests/money-safety.test.ts flagged it.
+      //
+      // The line already carries its own unit price and rate, so there is no
+      // division at all: an integer unit price times a quantity bounded to
+      // 1..99, and the tax re-derived through applyFactor() exactly as the sale
+      // derived it. Same inputs, same function, same answer.
+      refundableMinor: refundableFor(line, qty),
     });
   }
 

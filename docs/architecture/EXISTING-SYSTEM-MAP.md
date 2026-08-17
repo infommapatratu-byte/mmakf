@@ -22,6 +22,22 @@ can be re-run rather than believed.
 
 ## 0. THE FINDING THAT BLOCKS EVERY OTHER PATCH
 
+> **UPDATE, 2026-08-17 10:43 — partially resolved.** The other session
+> committed its work as `e685c7b` ("wip: finance, payments, identity, policy and
+> technical library — from stopped workflows") and `fbc814f`, moved to `main`,
+> and the tree went from ~70 dirty paths to 15. Migrations now run to `0033b`.
+>
+> It is **still writing** — `src/db/engagement.schema.ts`, `src/db/schema.ts`
+> and `src/db/seller-registry.ts` were all touched within ten minutes of that
+> timestamp — so the rule below still holds for the main tree. What changed is
+> that its work is now recoverable from git rather than living only on disk.
+>
+> That session also left `docs/parallel/PATCH-CONFLICTS.md`, which records the
+> same class of problem from the other side. A collision it did **not** catch —
+> two definitions of the `source_tier` enum — is described in
+> [PATCH-003-DISCIPLINE-REGISTRY.md](./PATCH-003-DISCIPLINE-REGISTRY.md) §4a,
+> along with its fix.
+
 **A second process is writing to `src/db` in this working tree right now.**
 
 This is not the ordinary "uncommitted work" the directive's MIGRATION SAFETY

@@ -370,7 +370,7 @@ const headerDescription =
                   <td class="mono">{r.version?.version ?? '—'}</td>
                   <td>
                     {r.version
-                      ? <Status value={r.version.state} />
+                      ? <Status value={r.version.state} domain="instrument" />
                       : <span class="none">no version drafted</span>}
                   </td>
                   <td>{day(r.version?.effectiveFrom)}</td>

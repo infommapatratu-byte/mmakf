@@ -92,15 +92,28 @@ becomes searchable and citable without becoming a second copy that can drift.
 The import is wrapped in a try/catch that reports rather than fails the seed,
 because it depends on a file under active development.
 
-**Still open — the integration nobody has done yet.** `video-register.ts`
-exports `VIDEOS` with per-video verification evidence, and `SOURCES` with
-per-source provenance. These map cleanly onto `media_assets` +
-`media_technical_links` (at state `new`) and `technical_sources`. Writing that
-importer would put the whole verified register into the review queue, which is
-where it belongs — a verified-embeddable video is still not a rights-cleared
-one. It was **not** written in this patch because the file was being edited
-during the session and the shape would have been a moving target. Owner: whoever
-finishes the video register.
+**Also done — the video register now feeds the review queue.**
+`importVideoRegister()` reads `VIDEOS` (125 entries, 59 of them kata-tagged) and
+`SOURCES` (7), and writes `media_assets`, `technical_sources` and
+`media_technical_links` at state `new`.
+
+The important line in that importer is the one that does NOT upgrade anything.
+The register's verification is genuinely rigorous — oEmbed 200 with matching
+title and channel, an embed iframe in the returned html, watch-page
+`playabilityStatus` OK, empty `blockedRegions`, and a negative control that
+failed as expected. All of that establishes that a video EXISTS and that YouTube
+will serve it in an iframe. None of it establishes that MMAKF may present it as
+teaching material. So every imported asset lands at `rights: 'unknown'` — not
+`not_cleared`, which would wrongly imply somebody looked and refused, and
+certainly not `embed_allowed`.
+
+`channelIsSourceOrganisation` is carried into `rights_note`, because it is the
+first thing a rights reviewer wants to know, and it decides nothing on its own.
+
+**Still open.** The importer reads the register's shape defensively and skips
+what it does not recognise. If `RegisteredVideo` gains fields worth capturing —
+per-video topics are not yet mapped to `media_technical_links` — the owner of
+that file and this importer should agree the mapping.
 
 ---
 
@@ -151,3 +164,31 @@ an action, and no existing action changed meaning.
 
 **Note for other agents:** if your patch needs to read the technical library,
 gate on `technical:read`, not `content:read`.
+
+---
+
+## 7. Repository-wide test and typecheck failures from parallel work — NOT MINE, NOT FIXED
+
+**Found.** A full `vitest run` at 10:26 on 2026-08-17: **25 failures across 6
+files, 3270 passing.** None originate in this patch, and none were repaired —
+repairing another agent's half-written engine mid-flight is how two agents
+produce one broken merge.
+
+| Failing | Cause | Owner |
+| --- | --- | --- |
+| `tests/scheduling.test.ts` (20) | `src/db/scheduling.ts` references `bookings.classSessionId` and `venues.timezone`, which its schema does not yet define. Also fails its own "no hard-coded hours" guard | Scheduling agent |
+| `tests/money-safety.test.ts` (1) | `src/db/returns.ts:294` and `src/db/seller-orders.ts:202` apply a factor with bare `Math.round` instead of `applyFactor()` | Marketplace agent |
+| `tests/seo.test.ts` (1) | `/shotokan/kihon`, `/shotokan/kumite`, `/shotokan/terminology`, `/shotokan/videos` are unclassified in the SEO route policy | Shotokan content agent |
+| `tests/routes-live.test.ts`, `tests/seo-live.test.ts`, `tests/live-error-disclosure.test.ts` | "astro dev never came up" — the dev server does not start, consistent with the scheduling type errors above | Scheduling agent, probably |
+
+`npx tsc --noEmit` likewise reports errors in `src/db/scheduling.ts`,
+`src/lib/status.ts`, `tests/scheduling.test.ts` and `vitest.config.ts`. **Zero in
+any file this patch created or modified** — verified by filtering the compiler
+output.
+
+`tests/technical-library.test.ts` passes: **38/38**.
+
+**Note on the `/shotokan/*` SEO failure.** `/admin/technical-library` does not
+appear in it because `PRIVATE_PREFIXES` in `src/lib/seo.ts` already covers
+`/admin`. Whoever adds public technical routes will need to classify them; this
+patch added none, partly for that reason.

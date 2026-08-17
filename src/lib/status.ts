@@ -499,14 +499,13 @@ const DICTIONARY: Record<string, StatusMeaning> = {
   // never 'bad', because rendering "no rule exists" in the same red as
   // "ineligible" is precisely how an unwritten policy comes to look like a
   // refusal on a screen.
-  eligible: {
-    label: 'Eligible', tone: 'good',
-    meaning: 'Every condition of the rule in force on that date was met.',
-  },
-  ineligible: {
-    label: 'Ineligible', tone: 'bad',
-    meaning: 'A rule was in force and the subject did not meet it. The failed condition is recorded, and the decision is appealable.',
-  },
+  // `eligible` and `ineligible` are NOT redefined here, and the omission is the
+  // point. They are already in the dictionary from grading, the database is
+  // right to reuse the words, and a second entry under the same key would not
+  // have added a policy meaning — a duplicate key in an object literal is not a
+  // merge, the later one simply wins, so redefining them here silently took the
+  // grading sentence away from grading. The policy sentences are in BY_DOMAIN
+  // below, under `policy`, where they apply to policy and to nothing else.
   requires_review: {
     label: 'Requires review', tone: 'warn',
     meaning: 'Routed to a person. Nobody is sanctioned on an automatic flag.', actionable: true,
@@ -529,10 +528,9 @@ const DICTIONARY: Record<string, StatusMeaning> = {
   // is separate from `published` on purpose: a version can be published in
   // March and take effect in April, and a member refused in between was
   // refused under the previous one.
-  technical_review: {
-    label: 'Technical review', tone: 'progress',
-    meaning: 'With the technical committee. Not approved and not in force.',
-  },
+  // `technical_review` is likewise already here, from the coach pipeline, and
+  // is used by affiliation stages and competition events as well. Its
+  // instrument sentence is in BY_DOMAIN under `instrument`.
   legal_review: {
     label: 'Legal review', tone: 'progress',
     meaning: 'With legal review. Not approved and not in force.',
@@ -1420,6 +1418,89 @@ const BY_DOMAIN: Record<string, Record<string, Partial<StatusMeaning>>> = {
       meaning: 'Two credible sources disagree and the record says so rather than choosing between them. Not federation instruction.',
       actionable: false,
     },
+  },
+
+  // ── The words that mean "trading" and "in use" ───────────────────────────
+  //
+  // `open` and `active` were both already here carrying the sentence of
+  // whichever domain needed them first: a task assigned to somebody and not
+  // started, and a coach available for assignment. Neither is wrong where it
+  // came from, and both are wrong on a shop.
+  //
+  // `open` is much the more expensive of the two. `store_status.open` IS A
+  // SHOP THAT IS TRADING, so without this override every open storefront in the
+  // marketplace is marked actionable and counted by needsAction() as work
+  // nobody has begun. The §19 dashboard question — "what needs my
+  // attention?" — is only worth asking if the ordinary is not in the answer.
+  store: {
+    open: {
+      label: 'Open',
+      tone: 'good',
+      meaning: 'Trading. Buyers can see the shop and place orders with it.',
+      actionable: false,
+    },
+    draft: { meaning: 'Being built by the seller. Nothing in it is on sale and no buyer can see it.' },
+  },
+
+  // A brand MMAKF has blocked is a decision about the BRAND — a counterfeit
+  // problem, an impersonation, a trade-mark dispute — and it is not a finding
+  // against any one seller who happened to list under it. The base `blocked`
+  // belongs to the task board and reads "Cannot proceed until something else
+  // does", which invites a reader to wait for a dependency that does not exist.
+  brand: {
+    active: { meaning: 'Listings may name this brand, subject to any authorisation the brand itself requires.' },
+    restricted: { meaning: 'A listing naming this brand needs a verified authorisation from its seller.' },
+    blocked: {
+      tone: 'stopped',
+      meaning: 'No listing may name this brand at all. A decision about the brand, not a finding against a seller.',
+      actionable: false,
+    },
+  },
+  listing_variant: {
+    active: { label: 'On sale', meaning: 'Buyable, subject to stock.' },
+  },
+
+  // ── Timetables (migration 0032) ──────────────────────────────────────────
+  //
+  // ONE active schedule per owner, purpose and room is enforced by a partial
+  // unique index in scheduling.schema.ts, because two would make resolution a
+  // coin toss and the loser would be somebody's Sunday. "Approved and available
+  // for assignment" says none of that, and a second schedule that looks equally
+  // "active" on screen is how somebody comes to create one.
+  schedule: {
+    active: { label: 'In force', meaning: 'The one the resolver reads for this owner and purpose. Only one may be in force at a time.' },
+    draft: { meaning: 'Editable, and invisible to every read. No day resolves against it.' },
+  },
+  season: {
+    active: { label: 'Current', meaning: 'The stretch of the calendar being worked in now.' },
+  },
+  dojo_class: {
+    active: { meaning: 'Running to its timetable. Members may be enrolled in it.' },
+  },
+
+  // ── The regulatory engine (migration 0027) ───────────────────────────────
+  //
+  // Three words the engine needed were already spoken for, and the database is
+  // right to reuse them. What cannot be reused is the sentence: grading's "May
+  // sit the examination" says nothing about a rule applied to a date.
+  //
+  // `ineligible` is the one that matters. In grading it is terminal — the
+  // candidate did not meet the requirement and that sitting is over. An engine
+  // answer is NOT terminal, because a rule applied to a person is appealable,
+  // and a terminal status greys out the actions a surface offers. Marking an
+  // appealable refusal as the end of the road is how somebody comes to believe
+  // there is nothing they can do.
+  policy: {
+    eligible: { meaning: 'Every condition of the rule in force on that date was met.' },
+    ineligible: {
+      meaning: 'A rule was in force and the subject did not meet it. The failed condition is recorded, and the decision is appealable.',
+      terminal: false,
+    },
+  },
+  instrument: {
+    technical_review: { meaning: 'With the technical committee. Not approved, and not in force.' },
+    approved: { meaning: 'Approved, and not necessarily in force — a version can be approved in March and take effect in April.' },
+    published: { meaning: 'Published. It binds only inside its effective window.' },
   },
 };
 

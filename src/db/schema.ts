@@ -110,10 +110,25 @@ export const dojos = pgTable('dojos', {
   status: unitStatus('status').notNull().default('draft'),
   affiliatedOn: date('affiliated_on'),
   affiliationExpiresOn: date('affiliation_expires_on'),
+
+  // ── Added by migration 0032 (the scheduling engine) ─────────────────────
+  //
+  // A club needs a stable public address of its own — /clubs/[slug] — and a
+  // clock of its own, because the schedule engine stores wall-clock rules and
+  // "the dojo opens at six" is meaningless without one.
+  //
+  // `slug` is NULLABLE and unique-when-set, deliberately. A club with no slug
+  // is NOT published, rather than published under a slug guessed from its name
+  // that changes the next time somebody corrects a spelling — a public URL that
+  // moves is a link somebody's parent had bookmarked.
+  slug: text('slug'),
+  timezone: text('timezone').notNull().default('Asia/Kolkata'),
+
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   codeIdx: uniqueIndex('dojos_code_uk').on(t.code),
+  slugIdx: uniqueIndex('dojos_slug_uk').on(t.slug).where(sql`slug is not null`),
   stateIdx: index('dojos_state_idx').on(t.stateUnitId),
   districtIdx: index('dojos_district_idx').on(t.districtUnitId),
 }));

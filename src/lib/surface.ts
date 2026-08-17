@@ -207,7 +207,10 @@ export const PUBLIC_NAV: NavItem[] = [
     href: '/shotokan', label: 'The sport', primary: true,
     children: [
       { href: '/shotokan', label: 'Shotokan' },
+      { href: '/shotokan/kihon', label: 'Kihon library', note: 'Stances, punches, blocks, strikes and kicks' },
       { href: '/kata', label: 'Kata library' },
+      { href: '/shotokan/kumite', label: 'Kumite library', note: 'Partner practice, tactics and competition' },
+      { href: '/shotokan/terminology', label: 'Terminology' },
       { href: '/belt-system', label: 'Grades and belts' },
       { href: '/regulations', label: 'Regulations' },
     ],

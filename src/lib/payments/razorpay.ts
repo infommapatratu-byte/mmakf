@@ -244,7 +244,11 @@ function paiseOrNaN(v: unknown): number {
   if (typeof v === 'number') return Number.isSafeInteger(v) ? v : NaN;
   // A numeric string is accepted because a proxy or a re-encoder in the chain
   // may have stringified the JSON number. Anything else is not a number.
-  if (typeof v === 'string' && /^-?d{1,15}$/.test(v.trim())) return Number(v.trim());
+  // The digit class needs its backslash: /d/ matches the LETTER d, so every
+  // real numeric string was rejected and the documented tolerance below did
+  // not exist. Fifteen digits is the deliberate bound — it cannot overflow a
+  // safe integer, which is why this branch may skip the isSafeInteger check.
+  if (typeof v === 'string' && /^-?\d{1,15}$/.test(v.trim())) return Number(v.trim());
   return NaN;
 }
 
