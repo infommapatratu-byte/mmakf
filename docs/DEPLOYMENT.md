@@ -170,10 +170,32 @@ An untested backup is a file, not a backup.
 application (`:40-41`), so it runs over whatever `DATABASE_URL` holds — the session string still in
 the shell from step 2 needs no change.
 
-### Step 4 — Set `DATABASE_URL` in Vercel
+### Step 4 — Set `DATABASE_URL` **and `DATABASE_CA_CERT`** in Vercel
 
-The **pooler** string, applied to Production, Preview and Development. Redeploy so functions pick it
-up.
+The **transaction pooler** string (`6543`), and the provider's CA. Redeploy so functions pick both
+up — a variable added after a deployment is not visible to it.
+
+> **First, confirm which account you are in: `vercel whoami` must print the identity that owns the
+> project.** A second Vercel login with no MMAKF project reports an empty environment that looks
+> exactly like an unset variable, and `vercel projects ls` then shows the project missing rather than
+> saying anything about permissions. This cost five rounds of "redeploy to pick up the variable"
+> against a project that never had it.
+
+**`DATABASE_CA_CERT` is not optional against Supabase, and omitting it fails in a way that reads
+like a credentials problem.** The pooler serves `*.pooler.supabase.com` under `Supabase Intermediate
+2021 CA` and `Supabase Root 2021 CA`, and that root is in no trust store Node ships. `src/db/index.ts`
+requires a verified certificate, so without the CA the handshake dies with
+`SELF_SIGNED_CERT_IN_CHAIN` *before authentication* and `/api/health` reports `"database": "error"`
+with `DATABASE_URL` perfectly correct.
+
+Take the PEM from **Settings → Database → Download certificate**. It is a public certificate, not a
+secret. Do not "fix" this with `sslmode=require` or `rejectUnauthorized: false`: those encrypt and
+authenticate nobody, which hands the whole register to anyone able to answer in the pooler's place.
+
+> `scripts/migrate.mjs` reads `DATABASE_CA_CERT` too, and applies the same three TLS rules as the
+> application. Export it alongside `DATABASE_URL` for steps 2, 3 and 6 — otherwise those commands
+> fail closed as well. They used to connect in **plaintext**, which is how the whole schema was once
+> shipped across the open internet without anybody noticing.
 
 ### Step 5 — Verify
 
@@ -181,8 +203,9 @@ up.
 curl https://www.mmakf.in/api/health     # database must read "ok"
 ```
 
-`"not_configured"` means step 4 has not taken effect. `"error"` means the URL is set but unreachable
-— check the pooler string and that the password is URL-encoded.
+`"not_configured"` means step 4 has not taken effect — or that the variable was set on a different
+project. `"error"` means the URL is set but the connection fails: check `DATABASE_CA_CERT` first
+(see above), then the pooler string and that the password is URL-encoded.
 
 **`ENOTFOUND` or `ENETUNREACH` from any command in this section is a different fault**, and not a
 credentials one: the host did not resolve, or there is no route to it, and the failure happens before
