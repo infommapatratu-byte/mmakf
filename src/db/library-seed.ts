@@ -306,6 +306,169 @@ function aliasesFor(romaji: string, english: string | null, key: string) {
   return out;
 }
 
+/**
+ * Bring the repository's verified video register into the review queue.
+ *
+ * WHAT THE REGISTER ALREADY PROVED, AND WHAT IT DID NOT.
+ * src/data/shotokan/video-register.ts is unusually rigorous: for every id it
+ * recorded an oEmbed 200 with the exact title and channel, an embed iframe in
+ * the returned html, a watch-page playabilityStatus of OK, an empty
+ * blockedRegions list, and a negative control that failed as expected. That is
+ * real evidence and this import does not repeat it.
+ *
+ * It is evidence about EXISTENCE AND TECHNICAL EMBEDDABILITY. It is not
+ * evidence about RIGHTS. "YouTube will serve this in an iframe" and "MMAKF may
+ * lawfully present this as its teaching material" are different claims, and the
+ * first is made by a server while the second can only be made by a person. So
+ * every asset imported here lands at `rights: 'unknown'` — not 'not_cleared',
+ * which would wrongly imply somebody looked and refused, and emphatically not
+ * 'embed_allowed', which the oEmbed check does not establish.
+ *
+ * `channelIsSourceOrganisation` is the register's strongest provenance signal:
+ * the video sits on the channel of the organisation whose page embedded it,
+ * rather than on a re-uploader's. It is recorded in the rights note because it
+ * is exactly what a rights reviewer wants to know first — but it decides
+ * nothing on its own.
+ *
+ * Every link lands at state 'new'. 125 verified videos become 125 rows for a
+ * human to work through, which is the honest size of the job.
+ */
+export async function importVideoRegister(db: DB): Promise<{
+  sources: number; assets: number; links: number; unmatchedKata: string[];
+}> {
+  const mod: any = await import('@/data/shotokan/video-register');
+  const SOURCES: any[] = mod.SOURCES ?? [];
+  const VIDEOS: any[] = mod.VIDEOS ?? [];
+  const checkMethod: string = mod.CHECK_METHOD ?? '';
+  const checkedOn: string = mod.REGISTER_CHECKED_ON ?? RETRIEVED_ON;
+
+  // The register's own `kind` maps onto the directive's tiers. A university
+  // club is a real Shotokan club and still Tier D — the tier describes standing
+  // as a reference, not the quality of the karate.
+  const TIER: Record<string, string> = {
+    federation_own: 'mmakf_official',
+    national_organisation: 'primary_reference',
+    institutional_shotokan: 'educational',
+    university_club: 'educational',
+  };
+
+  // The instructional view a video offers. The register's contentType is
+  // coarser than the directive's video-type list, so this maps only what it
+  // actually knows and leaves the finer roles to a reviewer.
+  const ROLE: Record<string, string> = {
+    kata_demonstration: 'full_performance',
+    kihon_reference: 'kihon_reference',
+    kumite_reference: 'kumite_reference',
+    teaching_breakdown: 'breakdown',
+    competition_performance: 'competition_view',
+    seminar: 'seminar',
+    technical_demonstration: 'demonstration',
+  };
+
+  let sources = 0;
+  for (const src of SOURCES) {
+    if (!src?.key) continue;
+    await upsertBySlug(db, s.technicalSources, `register-${src.key}`, {
+      organisation: src.organisation ?? src.key,
+      sourceType: 'organisation',
+      authorityTier: TIER[src.kind] ?? 'discovery',
+      websiteUrl: src.url ?? null,
+      style: 'shotokan',
+      rightsPolicy:
+        'UNKNOWN. The discovery pass verified that videos from this source are playable and ' +
+        'embeddable on YouTube. It did not establish any licence to present them as MMAKF ' +
+        'material. Rights are decided per asset.',
+      notes: `${src.note ?? ''} Discovery pass fetched ${src.url ?? 'the source page'} on ${src.fetchedOn ?? 'an unrecorded date'}; ` +
+        `${src.candidatesFound ?? 0} candidates found, ${src.candidatesVerified ?? 0} verified.`,
+      lastReviewedOn: src.fetchedOn ?? checkedOn,
+    });
+    sources++;
+  }
+
+  let assets = 0;
+  let links = 0;
+  const unmatchedKata = new Set<string>();
+
+  for (const video of VIDEOS) {
+    if (!video?.id) continue;
+
+    const existing = await db.select().from(s.mediaAssets)
+      .where(and(eq(s.mediaAssets.platform, 'youtube'), eq(s.mediaAssets.externalId, video.id)))
+      .limit(1);
+
+    let asset = existing[0];
+    if (!asset) {
+      const inserted = await db.insert(s.mediaAssets).values({
+        platform: 'youtube',
+        externalId: video.id,
+        url: `https://www.youtube.com/watch?v=${video.id}`,
+        title: video.title ?? video.id,
+        thumbnailUrl: video.thumbnailUrl ?? null,
+        durationSeconds: video.durationSeconds ?? null,
+        publishedAt: video.publishedOn ? new Date(video.publishedOn) : null,
+        classification: 'pending_review',
+        rights: 'unknown',
+        rightsHolder: video.channel ?? null,
+        rightsNote:
+          (video.channelIsSourceOrganisation
+            ? 'The video sits on the channel of the organisation whose page embedded it, which is ' +
+              'the strongest provenance the discovery pass could establish. '
+            : 'The video does NOT sit on the channel of the organisation whose page embedded it. ' +
+              'Treat as a possible re-upload until the rights holder is identified. ') +
+          'No licence has been sought or granted.',
+        consentEvidence: null,
+        published: false,
+      }).returning();
+      asset = inserted[0];
+      assets++;
+    }
+
+    // The register only claims a kata where it matched one from the platform
+    // title, so this is the only classification carried over. Everything else a
+    // reviewer decides.
+    if (!video.kata) continue;
+    const kataRow = await db.select().from(s.kata)
+      .where(eq(s.kata.slug, video.kata)).limit(1);
+    if (!kataRow[0]) { unmatchedKata.add(video.kata); continue; }
+
+    const linked = await db.select().from(s.mediaTechnicalLinks)
+      .where(and(
+        eq(s.mediaTechnicalLinks.mediaAssetId, asset.id),
+        eq(s.mediaTechnicalLinks.subjectKind, 'kata'),
+        eq(s.mediaTechnicalLinks.subjectId, kataRow[0].id),
+      )).limit(1);
+    if (linked[0]) continue;
+
+    await db.insert(s.mediaTechnicalLinks).values({
+      mediaAssetId: asset.id,
+      subjectKind: 'kata',
+      subjectId: kataRow[0].id,
+      role: ROLE[video.contentType] ?? 'reference',
+      domain: 'kata',
+      proposedBy: 'import',
+      state: 'new',
+    });
+    links++;
+
+    await citeOnce(db, {
+      subjectKind: 'media_asset',
+      subjectId: asset.id,
+      sourceUrl: `https://www.youtube.com/watch?v=${video.id}`,
+      sourceTitle: video.title ?? null,
+      sourceAuthor: video.channel ?? null,
+      sourceType: 'video',
+      publicationDate: video.publishedOn ?? null,
+      retrievedOn: checkedOn,
+      quote: checkMethod.slice(0, 500),
+      domain: 'kata',
+      verification: 'source_documented',
+      notes: `Discovered via source "${video.discoveredVia}".`,
+    });
+  }
+
+  return { sources, assets, links, unmatchedKata: Array.from(unmatchedKata) };
+}
+
 /** Insert a citation only if an identical one is not already recorded. */
 async function citeOnce(db: DB, values: Record<string, any>) {
   const existing = await db.select().from(s.technicalCitations)

@@ -1,0 +1,380 @@
+---
+/**
+ * The video source register. §21, §22, §23, §41, §42 and §50.
+ *
+ * This page is the one that could most easily have been a lie, so it is the one
+ * written most carefully.
+ *
+ * WHAT IT PUBLISHES IS THE RESEARCH, NOT A PLAYLIST. Every source page named in
+ * the federation's technical directive was fetched; every YouTube id embedded
+ * on those pages was extracted and then checked one at a time against the
+ * platform. The register records what came back — including the sources that
+ * yielded nothing, and including the one whose videos are all dead.
+ *
+ * AND IT DOES NOT PRETEND THE RIGHTS QUESTION IS SETTLED. The single most
+ * important distinction on the page is between a recording an organisation
+ * uploaded to its own channel, and a recording a third party uploaded that an
+ * organisation then embedded. The second group contains the best technical
+ * material found — and MMAKF has no standing to republish it under its own
+ * banner, so it is listed as awaiting a technical-committee rights decision and
+ * is not embedded here.
+ *
+ * §42 is honoured explicitly: competition footage is labelled COMPETITION
+ * REFERENCE, and the page states that a winning performance is not a teaching
+ * standard.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import {
+  SOURCES, BARREN_SOURCES, VIDEOS, CHECK_METHOD, REGISTER_CHECKED_ON,
+  researchMatrix, libraryStats, sourceByKey,
+} from '@/data/shotokan';
+import { FEDERATION_KATA_FOOTAGE, VIDEO_POSITION } from '@/data/kata';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const stats = libraryStats();
+const matrix = researchMatrix();
+
+/** Sources ordered by the seed authority rank, most authoritative first. */
+const sources = [...SOURCES].sort((a, b) => a.authorityRank - b.authorityRank);
+
+const CONTENT_LABELS: Record<string, string> = {
+  kata_demonstration: 'Kata demonstration',
+  kihon_reference: 'Kihon reference',
+  kumite_reference: 'Kumite reference',
+  teaching_breakdown: 'Teaching breakdown',
+  competition_performance: 'Competition reference',
+  seminar: 'Seminar or camp',
+  technical_demonstration: 'Technical demonstration',
+};
+
+const byType = Object.entries(
+  VIDEOS.reduce<Record<string, number>>((acc, v) => {
+    acc[v.contentType] = (acc[v.contentType] ?? 0) + 1;
+    return acc;
+  }, {})
+).sort((a, b) => b[1] - a[1]);
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'WebPage',
+  name: 'Shotokan video source register',
+  url: canonicalFor(surface, '/shotokan/videos'),
+  description:
+    'Every external Shotokan recording the MMAKF technical library knows about, with the source it was found through, the check that was performed on it, and its rights standing.',
+  isPartOf: { '@type': 'WebSite', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
+};
+---
+
+<Base
+  title="Shotokan video source register — MMAKF technical library"
+  description={`${stats.videosRegistered} external Shotokan recordings, each checked against the platform and recorded with its source, its rights standing and its technical classification. ${stats.videosAwaitingRights} are held pending a technical-committee rights decision.`}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Video source register', url: '/shotokan/videos' },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow="Source register"
+    title={`<em class="r">${stats.videosRegistered}</em> recordings, and the evidence for each.`}
+    lead="What the federation has looked at, where it found it, what the check returned, and whether MMAKF has any right to show it."
+    pills={[
+      `${sources.length} sources searched`,
+      `${stats.videosPublishable} citable`,
+      `${stats.videosAwaitingRights} awaiting rights review`,
+    ]}
+  />
+
+  {/* ═══════ THE POSITION ═══════ */}
+  <section>
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">What this register is</div>
+          <h2 class="display-2" style="margin-top:16px">Not a playlist. <em class="r">A record.</em></h2>
+          <div class="rule"></div>
+          <p class="body-txt">
+            Every source page named in the federation&rsquo;s technical directive was fetched. Every YouTube
+            id embedded on those pages was extracted and then checked individually against the platform: the
+            title, the channel and the channel address were taken from YouTube rather than from the caption
+            on the page, and the duration, the upload date and the playability were read from the watch page.
+          </p>
+          <p class="body-txt">
+            A negative control was run in the same pass &mdash; an id of eleven <code>A</code> characters
+            &mdash; and nothing was written unless that control failed as it should. A check that cannot fail
+            is not a check, and this project has published a link with fabricated evidence once already.
+          </p>
+          <p class="body-txt text-muted" style="font-size:.9rem">
+            <strong>Method.</strong> {CHECK_METHOD} Last run {REGISTER_CHECKED_ON}.
+          </p>
+        </div>
+
+        <aside class="fade panel" aria-labelledby="rights-position">
+          <div class="eyebrow">The rights position</div>
+          <h3 id="rights-position" class="panel-h">Finding it is not permission to show it.</h3>
+          <p class="panel-p">
+            {stats.videosAwaitingRights} of the {stats.videosRegistered} recordings were uploaded by a
+            <strong> third party</strong> and then embedded by the organisation whose page they were found
+            on. That includes the best technical material in the whole register.
+          </p>
+          <p class="panel-p">
+            Another organisation&rsquo;s editorial judgement is not a rights clearance, and it is certainly
+            not MMAKF&rsquo;s. Those recordings are listed here with full attribution and are
+            <strong> not embedded</strong>, pending a technical-committee decision. Nothing is downloaded and
+            nothing is rehosted.
+          </p>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ MMAKF'S OWN ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">MMAKF material</div>
+        <h2 class="display-2">The federation&rsquo;s <em class="r">own</em> footage.</h2>
+        <div class="rule"></div>
+        <p class="lead">{VIDEO_POSITION}</p>
+      </div>
+      {FEDERATION_KATA_FOOTAGE.length === 0 ? (
+        <div class="panel fade"><p class="panel-p">No federation footage has been checked and published yet.</p></div>
+      ) : (
+        <div class="grid grid-2">
+          {FEDERATION_KATA_FOOTAGE.map((f) => (
+            <div class="card fade">
+              <div class="card-eyebrow">MMAKF &mdash; training footage, not a named kata</div>
+              <div class="card-title" style="font-size:1rem">{f.title}</div>
+              <div class="card-body">
+                <a href={f.channelUrl} rel="noopener">{f.channel}</a> &middot;
+                {' '}{Math.round(f.durationSeconds / 60)} min &middot; published {f.publishedOn}
+              </div>
+              <div class="card-body">
+                <a href={`https://www.youtube.com/watch?v=${f.youtubeId}`} rel="noopener">Watch on YouTube &rarr;</a>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ SOURCES SEARCHED ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">{sources.length} productive, {BARREN_SOURCES.length} empty</div>
+        <h2 class="display-2">Where the federation <em class="r">looked</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          The authority order below is a starting position, not a doctrine. It is administrator-configurable,
+          because a permanent hierarchy of other organisations is not something to encode in software.
+        </p>
+      </div>
+
+      <div class="grid grid-2">
+        {sources.map((s) => (
+          <div class="card fade">
+            <div class="card-eyebrow">{s.kind.replace(/_/g, ' ')}</div>
+            <div class="card-title" style="font-size:1rem">{s.organisation}</div>
+            <div class="card-body">{s.note}</div>
+            <div class="card-body">
+              <a href={s.url} rel="noopener nofollow">{s.url.replace(/^https?:\/\//, '')}</a>
+            </div>
+            <div class="kata-card-foot">
+              <span class="text-muted">
+                {s.candidatesVerified} of {s.candidatesFound} verified &middot; fetched {s.fetchedOn}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div class="section-head fade" style="margin-top:48px">
+        <div class="eyebrow">Checked, and empty</div>
+        <h3 class="display-2" style="font-size:1.4rem">Sources that yielded nothing</h3>
+        <div class="rule"></div>
+        <p class="lead">
+          Kept and published, because &ldquo;we looked there&rdquo; is information &mdash; and because one of
+          these is the best argument on this page for why link health is checked per recording rather than
+          per page.
+        </p>
+      </div>
+      <div class="grid grid-2">
+        {BARREN_SOURCES.map((b) => (
+          <div class="card fade">
+            <div class="card-eyebrow">No usable recordings</div>
+            <div class="card-title" style="font-size:1rem">{b.organisation}</div>
+            <div class="card-body">{b.outcome}</div>
+            <div class="card-body">
+              <a href={b.url} rel="noopener nofollow">{b.url.replace(/^https?:\/\//, '')}</a>
+              <span class="text-muted"> &middot; fetched {b.fetchedOn}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE RESEARCH MATRIX ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Coverage</div>
+        <h2 class="display-2">The research matrix</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          §50 of the directive asks for coverage to be tracked rather than assumed. Every kata in the canon
+          has at least one registered recording; almost none of them has one MMAKF may show.
+        </p>
+      </div>
+
+      <div class="tablewrap fade">
+        <table class="matrix">
+          <caption class="sr-only">
+            Registered recordings for each kata, by source, with how many are citable without a rights decision.
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Kata</th>
+              {sources.map((s) => <th scope="col">{s.key}</th>)}
+              <th scope="col">Total</th>
+              <th scope="col">Citable</th>
+              <th scope="col">Techniques linked</th>
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.map((row) => (
+              <tr>
+                <th scope="row"><a href={h(`/kata/${row.kataSlug}`)}>{row.kataName}</a></th>
+                {sources.map((s) => (
+                  <td class={row.bySource[s.key] ? '' : 'zero'}>{row.bySource[s.key] ?? '—'}</td>
+                ))}
+                <td>{row.total}</td>
+                <td class={row.publishable ? '' : 'zero'}>{row.publishable || '—'}</td>
+                <td class={row.techniques ? '' : 'zero'}>{row.techniques || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ WHAT WAS FOUND ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">By kind</div>
+        <h2 class="display-2">What the search <em class="r">turned up</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {byType.map(([kind, count]) => (
+          <div class="card fade">
+            <div class="card-eyebrow">{count} {count === 1 ? 'recording' : 'recordings'}</div>
+            <div class="card-title" style="font-size:1rem">{CONTENT_LABELS[kind] ?? kind}</div>
+            {kind === 'competition_performance' && (
+              <div class="card-body">
+                Labelled as reference, never as a teaching standard. A winning performance shows what won on
+                that day under those rules; it is not automatically the canonical version of the form.
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE FULL REGISTER ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">{VIDEOS.length} entries</div>
+        <h2 class="display-2">The register in full</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Every recording, its source, its rights standing and its classification. Titles and channels are
+          as the platform reports them, not as the source page captioned them.
+        </p>
+      </div>
+
+      <div class="tablewrap fade">
+        <table class="matrix reg">
+          <caption class="sr-only">The full video source register.</caption>
+          <thead>
+            <tr>
+              <th scope="col">Title</th>
+              <th scope="col">Channel</th>
+              <th scope="col">Found via</th>
+              <th scope="col">Kind</th>
+              <th scope="col">Kata</th>
+              <th scope="col">Length</th>
+              <th scope="col">Published</th>
+              <th scope="col">Standing</th>
+            </tr>
+          </thead>
+          <tbody>
+            {VIDEOS.map((v) => (
+              <tr>
+                <th scope="row" class="reg-title">
+                  <a href={`https://www.youtube.com/watch?v=${v.id}`} rel="noopener nofollow">{v.title}</a>
+                </th>
+                <td><a href={v.channelUrl} rel="noopener nofollow">{v.channel}</a></td>
+                <td>{sourceByKey(v.discoveredVia)?.organisation ?? v.discoveredVia}</td>
+                <td>{CONTENT_LABELS[v.contentType] ?? v.contentType}</td>
+                <td>{v.kata ? <a href={h(`/kata/${v.kata}`)}>{v.kata}</a> : '—'}</td>
+                <td>{v.durationSeconds ? `${Math.floor(v.durationSeconds / 60)}:${String(v.durationSeconds % 60).padStart(2, '0')}` : '—'}</td>
+                <td>{v.publishedOn ?? '—'}</td>
+                <td class={v.channelIsSourceOrganisation ? 'ok' : 'held'}>
+                  {v.channelIsSourceOrganisation ? 'Source’s own channel' : 'Third-party upload — rights review'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <div class="flex flex-wrap gap-3">
+        <a class="btn btn-ghost" href={h('/shotokan')}>&larr; The technical library</a>
+        <a class="btn btn-ghost" href={h('/kata')}>Kata library</a>
+        <a class="btn btn-ghost" href={h('/shotokan/kihon')}>Kihon</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  /* Wide tables scroll inside their own box; the page body never does. */
+  .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .matrix { border-collapse: collapse; width: 100%; font-size: .88rem; }
+  .matrix th, .matrix td {
+    text-align: left;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--line, rgba(0, 0, 0, .1));
+    white-space: nowrap;
+  }
+  .matrix thead th {
+    font-weight: 600;
+    border-bottom-width: 2px;
+    position: sticky;
+    top: 0;
+    background: var(--bg, #fff);
+  }
+  .matrix tbody th { font-weight: 500; }
+  .matrix td.zero { opacity: .4; }
+  .matrix td.ok { color: var(--gold, #8a6d1f); }
+  .matrix td.held { opacity: .7; }
+  .reg-title { max-width: 34ch; overflow: hidden; text-overflow: ellipsis; }
+</style>

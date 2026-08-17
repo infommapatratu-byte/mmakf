@@ -1,0 +1,189 @@
+---
+/**
+ * The glossary. §32.
+ *
+ * One definition per term, anchored by key so every other page in the library
+ * can link straight to it — /shotokan/terminology#hikite. That is the whole
+ * reason the terms are defined once and referenced rather than restated: forty
+ * technique pages each explaining hikite in their own words would explain it
+ * forty ways, and the student learning from the library is the one who pays.
+ *
+ * WHERE HINDI IS ABSENT, THE PAGE SAYS SO. §32 asks for Hindi and for future
+ * Indian-language translations. Most of these terms have no natural Hindi
+ * rendering — the Japanese word is what is actually used on the floor in Indian
+ * dojos — and printing a machine translation no instructor would recognise
+ * would be worse than printing nothing, because students would learn it. So the
+ * page states the position once, at the top, instead of leaving a column of
+ * blanks for the reader to interpret.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { allTerms, termsWithHindi, TECHNIQUES, techniqueBySlug } from '@/data/shotokan';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const terms = allTerms();
+const hindiCount = termsWithHindi().length;
+
+/**
+ * A term that is also a technique gets a link to its page.
+ *
+ * Built as a Set rather than calling techniqueBySlug() inside the template, so
+ * the lookup happens once per term rather than once per render pass.
+ */
+const TECHNIQUE_SLUGS = new Set(TECHNIQUES.map((t) => t.slug));
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'DefinedTermSet',
+  name: 'Shotokan karate terminology',
+  url: canonicalFor(surface, '/shotokan/terminology'),
+  description: `${terms.length} Japanese karate terms used in Shotokan practice, each translated and then explained.`,
+  hasDefinedTerm: terms.map((t) => ({
+    '@type': 'DefinedTerm',
+    name: t.romaji,
+    alternateName: t.kanji ?? undefined,
+    description: t.explain,
+    inDefinedTermSet: canonicalFor(surface, '/shotokan/terminology'),
+  })),
+};
+---
+
+<Base
+  title="Shotokan karate terminology — Japanese terms explained — MMAKF"
+  description={`${terms.length} Japanese terms used in Shotokan karate — stances, techniques, levels, contact surfaces and tactical concepts — each translated into English and then explained properly, with the kanji where it is certain.`}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Terminology', url: '/shotokan/terminology' },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow="Terminology"
+    title={`<em class="r">${terms.length}</em> words a student meets on the floor.`}
+    lead="Translated, and then explained — because &ldquo;kokutsu-dachi = back stance&rdquo; tells a beginner nothing about where the weight goes or what the stance is for."
+    pills={[`${terms.length} terms`, `${hindiCount} with Hindi`, 'Kanji where it is certain']}
+  />
+
+  {/* ═══════ THE TWO RULES ═══════ */}
+  <section>
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">How to read this</div>
+          <h2 class="display-2" style="margin-top:16px">A translation is not <em class="r">an explanation</em>.</h2>
+          <div class="rule"></div>
+          <p class="body-txt">
+            Every entry carries both. The short English rendering is the translation &mdash; useful for
+            recognising the word when an instructor calls it. The paragraph underneath is what the word
+            actually names: where the weight sits, what the hand is doing, why the concept exists at all.
+          </p>
+          <p class="body-txt">
+            The kanji is given where the characters are certain, and left out where they are not. Romaji
+            printed in a kanji column would be a false claim dressed as scholarship.
+          </p>
+        </div>
+
+        <aside class="fade panel" aria-labelledby="hindi-note">
+          <div class="eyebrow">On Hindi</div>
+          <h3 id="hindi-note" class="panel-h">{hindiCount} of {terms.length} carry a Hindi rendering.</h3>
+          <p class="panel-p">
+            The rest do not, and that is deliberate. For most technique names the honest answer is that the
+            <em>Japanese term is the one used on the floor</em> in Indian dojos &mdash; an instructor calls
+            gyaku-zuki, and every student in the room knows what is meant.
+          </p>
+          <p class="panel-p">
+            A machine translation would fill the gap and no instructor would recognise it. In a
+            federation&rsquo;s own glossary that is worse than an absence, because students would learn it.
+            Where MMAKF publishes approved Hindi and other Indian-language renderings, they go here.
+          </p>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE GLOSSARY ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">A&ndash;Z</div>
+        <h2 class="display-2">The glossary</h2>
+        <div class="rule"></div>
+      </div>
+
+      <dl class="gloss fade">
+        {terms.map((t) => (
+          <div class="gloss-row" id={t.key}>
+            <dt class="gloss-k">
+              <span class="gloss-romaji">{t.romaji}</span>
+              {t.kanji && <span class="gloss-kanji" lang="ja">{t.kanji}</span>}
+              {t.hindi && <span class="gloss-hindi" lang="hi">{t.hindi}</span>}
+            </dt>
+            <dd class="gloss-v">
+              <p class="gloss-en"><strong>{t.english}</strong></p>
+              <p class="gloss-ex">{t.explain}</p>
+              <p class="gloss-see">
+                {TECHNIQUE_SLUGS.has(t.key) && (
+                  <a href={h(`/shotokan/techniques/${t.key}`)}>Technique page &rarr;</a>
+                )}
+                {t.see.length > 0 && (
+                  <span class="text-muted">
+                    {TECHNIQUE_SLUGS.has(t.key) ? ' · ' : ''}See also:{' '}
+                    {t.see.map((k, i) => (
+                      <>
+                        {i > 0 && ', '}
+                        <a href={`#${k}`}>{k}</a>
+                      </>
+                    ))}
+                  </span>
+                )}
+              </p>
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <div class="flex flex-wrap gap-3">
+        <a class="btn btn-ghost" href={h('/shotokan/kihon')}>Kihon &mdash; the technique library</a>
+        <a class="btn btn-ghost" href={h('/shotokan/kumite')}>Kumite</a>
+        <a class="btn btn-ghost" href={h('/kata')}>The kata library</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .gloss { margin: 0; }
+  .gloss-row {
+    display: grid;
+    grid-template-columns: minmax(180px, 24%) 1fr;
+    gap: 24px;
+    padding: 20px 0;
+    border-top: 1px solid var(--line, rgba(0, 0, 0, .1));
+    /* So an anchor jump does not land the heading under a sticky header. */
+    scroll-margin-top: 90px;
+  }
+  .gloss-row:last-child { border-bottom: 1px solid var(--line, rgba(0, 0, 0, .1)); }
+  .gloss-k { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+  .gloss-romaji { font-weight: 600; font-size: 1.05rem; }
+  .gloss-kanji { opacity: .75; }
+  .gloss-hindi { opacity: .75; font-size: .95rem; }
+  .gloss-v { margin: 0; max-width: 76ch; }
+  .gloss-en { margin: 0 0 6px; }
+  .gloss-ex { margin: 0 0 8px; }
+  .gloss-see { margin: 0; font-size: .9rem; }
+
+  @media (max-width: 720px) {
+    .gloss-row { grid-template-columns: 1fr; gap: 8px; }
+    .gloss-k { flex-direction: row; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  }
+</style>

@@ -61,3 +61,8 @@ src/pages/*sandbox*
 .verify-cache/
 astro.config.verify.mjs
 .astro-smoke/
+
+# Agent worktrees. EMBEDDED GIT REPOSITORIES — committing one stores a
+# gitlink that no clone can resolve, so the outer repo ends up referencing a
+# commit nobody else has.
+.claude/worktrees/
