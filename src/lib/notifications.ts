@@ -61,6 +61,11 @@ export const NOTIFIABLE = {
   AFFILIATION_EXPIRING:{ audience: 'unit',    essential: true,  title: 'Your affiliation is due for renewal' },
   CASE_ACKNOWLEDGED:   { audience: 'subject', essential: true,  title: 'Your report has been received' },
   APPROVAL_REQUESTED:  { audience: 'approvers', essential: true, title: 'An approval is waiting for you' },
+  // ESSENTIAL, and not a preference anybody may switch off: somebody is
+  // otherwise going to a dojo for a class that is not happening. The audience
+  // is 'booked' — the people who actually hold a place on that occurrence,
+  // which is a query this system can answer exactly rather than approximately.
+  CLASS_SESSION_CANCELLED: { audience: 'booked', essential: true, title: 'A class has been cancelled' },
 } as const;
 
 export type NotifiableEvent = keyof typeof NOTIFIABLE;
@@ -459,6 +464,29 @@ async function resolveRecipients(db: DB, event: any, audience: string): Promise<
         .where(and(eq(s.enrolments.courseId, courseId), eq(s.enrolments.status, 'active')));
       return rows.map((r: any) => r.personId).filter(Boolean);
     }
+    case 'booked': {
+      // The people holding a live place on that occurrence. Read from
+      // `bookings` rather than from an attendance list, because attendance is
+      // recorded after the fact and this message has to arrive before it.
+      const sessionId = Number(event.payload?.sessionId ?? event.entityId);
+      if (!Number.isFinite(sessionId)) return [];
+      const rows = await db
+        .select({ personId: s.bookings.personId })
+        .from(s.bookings)
+        .where(and(
+          eq(s.bookings.classSessionId, sessionId),
+          // 'cancelled' IS included: cancelSession() releases every place in the
+          // same transaction that cancels the session, so by the time this runs
+          // the bookings it must tell about are already cancelled. Filtering
+          // them out would notify nobody, which is the failure this exists to
+          // prevent.
+          inArray(s.bookings.status, ['requested', 'proposed', 'confirmed', 'rescheduled', 'cancelled'])
+        ));
+      // Set<number>, stated rather than inferred: `filter(Boolean)` has already
+      // dropped every null personId, but the inference through the spread lands
+      // on unknown[] and the function promises number[].
+      return [...new Set<number>(rows.map((r: any) => r.personId).filter(Boolean))];
+    }
     case 'approvers': {
       // Resolved from role bindings, and the REQUESTER is excluded — they cannot
       // approve their own request, so telling them one is waiting is noise.
@@ -512,6 +540,11 @@ function describe(event: { eventType: string; payload: any }): string {
       return 'The draw has been published for a category you entered.';
     case 'RANKING_UPDATED':
       return 'The national rankings have been updated.';
+    case 'CLASS_SESSION_CANCELLED':
+      // Names the class and the time, because "a class has been cancelled" sends
+      // somebody to open the app to find out which one — and the person most
+      // likely to miss the message is the one already on their way.
+      return `${event.payload?.className ?? 'A class'} on ${String(event.payload?.startsAt ?? '').slice(0, 16).replace('T', ' ')} has been cancelled. Your place has been released; no fee applies.`;
     case 'LIVE_STARTED':
       return 'A live class has started on a course you are enrolled on.';
     case 'AFFILIATION_EXPIRING':
@@ -541,6 +574,8 @@ function linkFor(event: { eventType: string; payload: any }): string {
       return '/live';
     case 'APPROVAL_REQUESTED':
       return '/admin/approvals';
+    case 'CLASS_SESSION_CANCELLED':
+      return '/schedule';
     default:
       return '/my';
   }

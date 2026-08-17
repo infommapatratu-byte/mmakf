@@ -22,7 +22,9 @@
     "links:check": "node scripts/check-links.mjs",
     "backup": "node scripts/backup.mjs",
     "content:check": "node scripts/reseed.mjs",
-    "content:push": "node scripts/reseed.mjs --write"
+    "content:push": "node scripts/reseed.mjs --write",
+    "videos:discover": "node scripts/discover-videos.mjs",
+    "videos:check": "node scripts/check-video-links.mjs"
   },
   "dependencies": {
     "@astrojs/vercel": "^8.2.11",

@@ -192,3 +192,68 @@ output.
 appear in it because `PRIVATE_PREFIXES` in `src/lib/seo.ts` already covers
 `/admin`. Whoever adds public technical routes will need to classify them; this
 patch added none, partly for that reason.
+
+---
+
+## 8. Two agents disagree about kata movement counts — RECORDED, NOT RESOLVED
+
+This is the substantive one. The others are naming and numbering; this is a
+disagreement about a fact members plan their grading around.
+
+**The disagreement.**
+
+`src/data/kata.ts` (Shotokan content agent) asserts a movement count for **all
+26 kata** — 21 for Heian Shodan, 26 for Nidan, 20 for Sandan, and so on — under
+a stated policy of publishing "the JKA-line figure where it is the one everybody
+prints" and nulling it "where it is genuinely disputed". Fifteen kata also carry
+kiai positions.
+
+The research behind migration `0031` (this patch) fetched and read the JKA's own
+*Technical Manual for the Instructor*. It requires an examiner to "verify that
+there is an accurate number of movements" and states that "one count is equal to
+one movement" — but it **does not publish per-kata counts**. On that basis `0031`
+recorded none.
+
+Both positions are defensible. The counts genuinely are what everybody prints;
+they also genuinely could not be traced to the primary source they are usually
+attributed to.
+
+**How it is handled, and why not by picking a side.**
+
+Neither agent's data was overwritten. The directive's own rule for this case is
+explicit — *if different Shotokan organisations teach a movement differently, DO
+NOT silently combine them; store Source, Variant, Organization, Explanation* —
+and the same rule applies when the disagreement is internal.
+
+So `importShotokanCorpus()`:
+
+1. **Imports the count.** Suppressing it would discard work somebody did
+   deliberately, and would leave the kata pages worse than they are.
+2. **Attaches its provenance and its strength.** Every kata gets a
+   `technical_citations` row. With no verification determination the row says
+   `verification = 'unverified'`, names the in-repository corpus as the source,
+   and carries the note *"No primary source was verified for this figure; the
+   JKA instructor manual requires an accurate count but does not publish one."*
+3. **Accepts a determination that changes this.** A verification pass can supply
+   `CorpusDetermination` to raise a count to `source_documented` with a quote and
+   URL, or mark it `disputed`.
+4. **Refuses to adjudicate a genuine dispute.** Where authoritative sources
+   verifiably differ, `kata.movement_count` is set to `NULL` and each competing
+   figure is stored as its own `disputed` citation. A single stored number would
+   make this system the thing that settled a disagreement it has no standing to
+   settle.
+
+A test asserts that no Heian kata citation may claim `committee_verified`, and
+that a count present without a determination always has an `unverified` citation
+beside it.
+
+**Still open — for the MMAKF technical committee, not for either agent.** The
+counts are conventions the committee can adopt, in which case the citations move
+to `committee_verified` and MMAKF owns the figure. Until it does, the honest
+state is: the number is shown, its provenance travels with it, and nothing
+claims the federation checked it.
+
+**Note for the Shotokan content agent.** Nothing in `src/data/kata.ts` was
+changed and nothing needs to be. If you want the static pages to carry the same
+caveat the database now carries, the sentence is in
+`technical_citations.notes` for every kata.

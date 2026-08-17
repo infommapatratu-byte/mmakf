@@ -610,6 +610,34 @@ export const EVENT_TYPES = {
     means: 'Receipt of a report was acknowledged to the person who made it.',
   },
 
+  // ── Scheduling (src/db/scheduling.ts) ──
+  //
+  // A TIMETABLE CHANGE IS AN EVENT BECAUSE SOMEBODY HAS TO BE TOLD. The
+  // federation's instruction is explicit: when a Sunday class moves from 08:00
+  // to 09:00, the students, the parents, the coach and the club administrator
+  // are notified, and none of that should need a developer.
+  SCHEDULE_PUBLISHED: {
+    floor: 'member', publicFields: [],
+    payload: ['scheduleId', 'versionId', 'ownerScope', 'ownerId', 'effectiveFrom'],
+    means: 'A new edition of a schedule was put in force, superseding the one before it.',
+  },
+  /**
+   * One occurrence called off.
+   *
+   * This is the one with a named audience, and the reason is that it is the one
+   * with a KNOWN audience: the people holding a place on that session are rows
+   * in `bookings`. A schedule change at club level affects everyone who trains
+   * there, and "everyone who trains there" is not a query this system can
+   * answer honestly yet — so SCHEDULE_PUBLISHED above carries no consumer
+   * rather than fanning out to a list somebody guessed at.
+   */
+  CLASS_SESSION_CANCELLED: {
+    floor: 'member', publicFields: [],
+    payload: ['sessionId', 'classId', 'className', 'startsAt'],
+    consumers: ['notifications'],
+    means: 'A class occurrence was cancelled and every place held on it was released.',
+  },
+
   // ── Two-person control (src/lib/approvals.ts) ──
   //
   // These were already being appended straight into `domain_events` with no

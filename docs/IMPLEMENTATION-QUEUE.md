@@ -205,6 +205,50 @@ after pages that do not exist.
 
 ---
 
+## 9 — Seed the video register into the review queue
+
+The technical library shipped 121 verified external recordings as a static
+register (`src/data/shotokan/video-register.ts`) and the review board shipped as
+`/admin/technical-library`. **They are not joined.** The queue has a schema, a
+rights gate and an audit trail, and nothing in it.
+
+The seeder is small and the shape is already decided:
+
+1. `registerSource()` for the four productive sources, seeded from `SOURCES`
+   with `authorityRank` as the starting `authority_tier` — an administrator
+   changes it afterwards, per §41.
+2. One `media_assets` row per recording, keyed on `(platform, external_id)` so
+   re-running is idempotent. `rights: 'not_cleared'` on all of them.
+3. `proposeLink()` per recording with `proposed_by: 'import'` — **not `'ai'` and
+   not `'human'`** — so a reviewer can see exactly where the classification came
+   from.
+4. Review state: `rights_review` for the 51 third-party uploads, `technical_review`
+   for the 70 on a source's own channel. Neither is `approved`; the database
+   refuses that without a named approver anyway.
+
+**Do not let the seeder publish anything.** The whole point of the split is that
+a script establishes provenance and a committee decides.
+
+Once seeded, `/shotokan/videos` and `/shotokan/techniques/[slug]` should read
+approved links from the database and fall back to the static register for what
+has not been reviewed — the register stays as the evidence of the research, not
+as the publication mechanism.
+
+---
+
+## 10 — Rights decisions on the 51 held recordings
+
+Not an engineering task. The complete 26-kata collection on skif.co.nz and the
+Enoeda/Ohta demonstrations on colchesterjka.co.uk are the best technical
+material the discovery pass found, and every one of them is a third-party
+upload. The technical committee decides whether MMAKF cites them, embeds them,
+or approaches the rights holders.
+
+Queued here so it does not sit as an unowned data state forever. See
+[technical/VIDEO-RIGHTS.md](technical/VIDEO-RIGHTS.md).
+
+---
+
 ## Not queued, and why
 
 | | |

@@ -906,6 +906,53 @@ notification. Items 0a–0c in IMPLEMENTATION-QUEUE.md are these four.
 
 ---
 
+## 2.23 The Shotokan technical library — curriculum browser
+
+**Added 17 August 2026. Classification: REAL+WIRED at the public surface,
+DELIBERATELY UNWIRED at the database.**
+
+Stated first because it is the unusual thing about this feature: the learner
+surfaces read **static source files**, not Postgres, and that is a decision
+rather than an omission. The content is public martial-arts knowledge, identical
+in every deployment, with no per-tenant variation — and it must render when
+`DATABASE_URL` is unset, which is the current production state. Putting it in
+the database would take the kata library dark during an outage to gain nothing.
+
+What *is* a claim — an endorsement, a rights decision, a reviewed application, a
+curriculum placement — lives in the database and goes through §2.24's pipeline.
+
+| Link | State |
+|---|---|
+| PUBLIC UI | REAL — `/shotokan/kihon`, `/shotokan/techniques/[slug]`, `/shotokan/kumite`, `/shotokan/kumite/[slug]`, `/shotokan/terminology`, `/shotokan/videos`, and the hub section on `/shotokan`. All six fetched over HTTP by `tests/routes-live.test.ts`. |
+| AUTH | n/a — public educational content, deliberately not behind a login. |
+| API | **ABSENT**, and correctly so. The pages render server-side from compiled-in data; there is nothing for an endpoint to serve that a page does not already have. |
+| VALIDATION | REAL — an unknown slug returns 404 rather than an empty page. `techniqueBySlug()` and the kumite lookups use a `Map`, so `__proto__` and `constructor` 404 too; asserted over HTTP. |
+| SERVICE | REAL — `src/data/shotokan/index.ts`: `techniqueGraph()`, `kataGraph()`, `searchTechnical()`, `researchMatrix()`, `libraryStats()`. |
+| DATABASE | **ABSENT BY DESIGN.** See above. The register's 121 recordings are **not yet seeded** into `media_assets` / `media_technical_links` — that is a real gap, named in IMPLEMENTATION-STATUS.md. |
+| EVENT | n/a — nothing mutates. |
+| WORKFLOW | n/a. |
+| AUTOMATION | REAL — `scripts/discover-videos.mjs` (the §40 pipeline) and `scripts/check-video-links.mjs` (the §55 link health check). Both run; neither writes. |
+| NOTIFICATION | n/a. |
+| CALENDAR | n/a. |
+| AUDIT | n/a — no mutation. |
+| ADMIN UI | REAL, but for §2.24's tables, not these: `/admin/technical-library`. |
+| USER UI | REAL — the six public routes above, reachable from `PUBLIC_NAV` under "The sport". |
+| SEO | REAL — `PUBLIC_SECTIONS` includes `/shotokan`; both dynamic routes carry a written expansion policy in `DYNAMIC_ROUTE_POLICY` and are expanded into `/sitemap.xml` **from the same arrays the pages render from**, so the sitemap cannot advertise a slug that 404s. |
+| TEST | REAL — `tests/shotokan-library.test.ts` (61), plus 10 routes and 8 assertions added to `tests/routes-live.test.ts`. |
+
+### The link that matters most, and it is a refusal
+
+**No page in this library emits a YouTube `<iframe>`.** 51 of the 121 registered
+recordings are third-party uploads that an institutional Shotokan page embeds;
+MMAKF has no standing to republish them, and `tests/routes-live.test.ts` asserts
+the absence of an embed rather than trusting the template.
+
+*Missing links, named:* no database seed for the register; no technical player,
+chapters or timeline (§29, §30); no multi-angle playback (§28); no rights
+decisions recorded against the 51 held recordings.
+
+---
+
 ## 3.1 Unreachable production code
 
 Real, tested modules and functions with **no caller in `src/`**:

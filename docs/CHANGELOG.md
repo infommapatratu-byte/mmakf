@@ -2,6 +2,72 @@
 
 Content-key and schema migrations are recorded here (MASTER-SPEC §5.5).
 
+## 2.0.0 — 2026-08-17 — The federation scheduling engine (migration 0032)
+
+**The defect.** MMAKF's opening hours lived in two English sentences on the
+editorial record, and `/schedule` published them under the heading "The weekly
+timetable" as though they were the federation's. They are the **hombu dojo's**.
+Every affiliated club in the country was represented on the federation's own
+site as training at six in the morning because Patratu does — and a parent who
+read that page and travelled to a club sixty miles away found a locked door with
+the federation's name over it. The season was in the prose (`Summer … Winter …`)
+with the changeover date recorded nowhere at all, and changing any of it needed a
+developer editing TypeScript behind a deploy.
+
+**Schema** — `drizzle/0032_scheduling_engine.sql`, seven new tables:
+`seasons`, `schedules`, `schedule_versions`, `schedule_rules`,
+`schedule_exceptions`, `dojo_classes`, `class_sessions`. Plus a timezone, slug,
+coordinates and civil area on `venues`; a slug and timezone on `dojos`; and ONE
+column on `bookings` (`class_session_id`) rather than a second booking table.
+`drizzle/0033_data_api_lockdown.sql` puts all seven behind row-level security.
+
+Reused rather than rebuilt: `state_units` / `district_units` / `dojos` for the
+hierarchy, `venues` for facilities, `coach_availability` for instructor
+availability, `bookings` + `booking_resources` for booking, `venue_blackouts` for
+room closures, and `audit_events` for who-changed-what-when-why.
+
+**Engine** — `src/db/scheduling.ts`. A schedule belongs to a SCOPE (the same
+`scope_type` RBAC already uses). Inheritance is RESOLVED, never copied: the
+resolver walks room → club → district → state → federation and stops at the
+first level with a version in force, so an unconfigured club inherits visibly
+and a configured one overrides without the federation's rows being touched.
+Seasons are rows with dates an administrator chose — nothing in the engine knows
+the words 'summer' or 'winter', and a test greps the source to keep it that way.
+Versions are effective-dated and superseded, never edited, so a March attendance
+record still renders against March's timetable. Facility hours and class times
+are different objects, and a class outside its room's open hours is refused and
+REPORTED rather than silently dropped.
+
+**Authority** — three new actions: `schedule:read` (the private half — why a day
+is closed), `schedule:write`, `schedule:publish`. A `DOJO_ADMIN` holds all three
+for its own club, which is the whole point: a club sets its own hours, seasons,
+class times and holidays without the federation and without a developer.
+
+**Surfaces**
+- `/schedule` and `/facilities` now read the engine and fall back to the
+  editorial strings, and both state in words that the timings are the
+  headquarters' and not any club's.
+- `/admin/schedules` — the editor: owner picker, resolved week, seasons,
+  versions, a seven-day × four-session grid, special days, and a dry-run
+  migration panel for the published headquarters hours.
+
+**Migration of the existing values** — `src/db/schedule-bootstrap.ts`, run as an
+audited admin action. It carries the exact published values across and refuses
+four things: to store them at national scope (which would publish one dojo's
+clock as every club's default), to touch the editorial record, to overwrite a
+club that has already configured hours, and to guess a class length — the
+editorial timetable records a start and no finish, so those thirteen rows are
+reported and left where they are.
+
+**Notification** — `SCHEDULE_PUBLISHED` and `CLASS_SESSION_CANCELLED` join the
+domain-event catalogue. The second fans out to everyone holding a place on the
+session, carrying the class and the time and NOT the reason.
+
+**Tests** — `tests/scheduling.test.ts` (58) and `tests/schedule-bootstrap.test.ts`
+(16). Documented in `docs/domains/scheduling.md`, including what was
+deliberately not built: calendar adapters, club-level change notification,
+nearby-club search, `/clubs/[slug]`, and rescheduling.
+
 ## 1.9.0 — 2026-08-11 — Real transactions + multi-agent audit remediation
 
 **Real functionality replacing placeholder affordances**

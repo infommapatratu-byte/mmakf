@@ -27,11 +27,12 @@ believed.
 Every figure below came from one of these, run just now:
 
 ```
-ls tests/*.test.ts | wc -l          79 files
-npx vitest run                      2,670 passing
-ls drizzle/*.sql | wc -l            12 migrations
-grep -c 'CREATE TABLE' drizzle/*    144 tables
-find src/pages -type f | wc -l      130 route files
+ls tests/*.test.ts | wc -l              96 files
+npx vitest run                          3,319 passing, 2 expected fail
+ls drizzle/*.sql | wc -l                35 migrations
+grep -h 'CREATE TABLE' drizzle/* | wc -l  269 tables
+find src/pages -type f | wc -l          142 route files
+find src/pages/admin -name '*.astro'    33 admin surfaces
 ```
 
 Re-run them before citing a number from here.
@@ -350,8 +351,31 @@ work running in parallel in
 | Reference sources + JKA curriculum + WKF rules | **Seeded from primary sources** | Verbatim, cited, idempotent. JKA guideline is unreachable from the grading engine by construction |
 | Heian movement data (P05) | **Not populated** | Deliberate. Per-kata movement counts could not be verified from a primary source — the JKA instructor manual requires an accurate count but does not publish one |
 | Bunkai applications (P16) | **Not populated** | Deliberate. Table and approval constraint exist; no attributable interpretation was verified |
-| Learner-facing pages | **Not built** | Blocked on an architecture decision — the `learn` surface is the client/sales surface in this repository |
+| Learner-facing pages | **Built** — see the addendum below | The architecture decision was resolved: `/learn` is the institutional-engagement surface, so the technical library went to the **public** surface at `/shotokan/*` alongside the existing `/shotokan` and `/kata` |
 | YouTube ingestion (P41) | **Interface exists, not run** | `src/lib/youtube.ts` predates this patch; no credentials on this deployment, and nothing was faked |
+
+### Addendum — the curriculum browser and the video source register
+
+Added 17 August 2026, in parallel with the rows above. Full account in
+[technical/SHOTOKAN-KNOWLEDGE-MODEL.md](technical/SHOTOKAN-KNOWLEDGE-MODEL.md).
+
+| Area | State | Note |
+|---|---|---|
+| Kihon library — 40 techniques | **Built and verified** | 10 stances, 8 punches, 8 blocks, 6 strikes, 8 kicks, 2 movement categories. Every technique §7–§11 names, asserted by slug |
+| Kumite library | **Built and verified** | 6 systems, 16 principles, 8 combination families. Traditional and sport separated at the record level |
+| Terminology | **Built and verified** | 83 terms, translated *and* explained. 8 carry Hindi; the rest are null by policy, not by omission |
+| Video source register | **Built and verified** | 121 recordings, all checked against the platform with a negative control. All 26 kata covered |
+| Public routes | **Built and verified** | `/shotokan/kihon`, `/shotokan/techniques/[slug]`, `/shotokan/kumite`, `/shotokan/kumite/[slug]`, `/shotokan/terminology`, `/shotokan/videos`. In the nav, in the sitemap, fetched over HTTP by `tests/routes-live.test.ts` |
+| Alias-aware search | **Built and verified** | `searchTechnical()` — `gyaku zuki` / `gyaku-zuki` / `gyakuzuki` / `reverse punch` all resolve; `sen no sen`, `bassai dai`, `enpi`/`empi` too |
+| Discovery pipeline | **Built and runs** | `scripts/discover-videos.mjs` reproduces the register end to end. Never writes; every classification labelled a machine guess |
+| Link health | **Built and runs** | `scripts/check-video-links.mjs` — per id, never per page. Last run 121/121 OK |
+| Rights decisions on the 51 held recordings | **Not made** | Deliberate. They are third-party uploads; a committee decides, not a script |
+| Technical player, chapters, timeline (§29, §30) | **Not built** | `media_chapters` exists; nothing consumes it, and there is no reviewed media to generate timestamps from |
+| Multi-angle synchronised playback (§28) | **Not built** | MMAKF has recorded no multi-angle material |
+
+**The 121 recordings are not in the database.** They are a verified static
+register that the review queue can be seeded from; seeding them into
+`media_assets` + `media_technical_links` is the next step and is not done.
 
 Two RBAC actions added, additively: `technical:read`, `technical:review`. Gate on
 these rather than `content:*` — reviewing what MMAKF teaches is a different
@@ -415,3 +439,22 @@ Migration `0029_marketplace_platform.sql` adds 54 tables and 64 columns;
 Recorded here rather than implied, because the gap between "the engine is built
 and tested" and "a seller can use it" is the whole of the remaining work, and a
 status file that blurred it would be the thing this document exists to prevent.
+
+### Shotokan corpus in the database (migration 0034)
+
+The repository held two Shotokan libraries that could not see each other: a
+static corpus rendered at `/shotokan/*` and `/kata/*`, and database tables that
+make a corpus reviewable but were **empty** — nothing anywhere inserted into
+`kata`, `techniques` or `kumite_forms`. `importShotokanCorpus()` bridges them.
+
+| Area | State | Note |
+|---|---|---|
+| Kata, techniques, kumite systems in the database | **Built and verified** | 26 kata, 42 techniques, 6 kumite systems. Files stay canonical; the database is a projection, not a second copy |
+| Knowledge graph | **Built and verified** | `technique_kata_appearances` answers "which kata contain gyaku-zuki". `technicalLookup()` tags every answer with its `precision` — `movement` where researched, `kata` where only the appearance is documented |
+| Video register unblocked | **Verified** | Before the corpus, all 59 kata-tagged videos were skipped for want of a kata row. After it, they enter the review queue at `new` with rights `unknown` |
+| Movement counts | **Imported with provenance, not as fact** | Every count carries a citation stating its strength. See conflict 8 in [parallel/PATCH-CONFLICTS.md](parallel/PATCH-CONFLICTS.md) |
+| Sport vs traditional kumite | **Separated** | Sport systems import but do not publish as Shotokan teaching progression; competition rules live in `sport_kumite_rulesets` with a version and an effective date |
+
+Tests: 50 passing in `tests/technical-library.test.ts`. A test asserts that every
+`technique_kata_appearances.movement_ordinal` written by the importer is null —
+an invented ordinal would be indistinguishable from a researched one.

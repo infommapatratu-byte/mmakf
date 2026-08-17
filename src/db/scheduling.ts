@@ -86,6 +86,7 @@ import * as ops from '@/db/operations.schema';
 import * as sch from '@/db/scheduling.schema';
 import { allocateFederationId, writeAudit, type AuditContext } from '@/db/federation';
 import { assertCan, can, type Principal, type Resource } from '@/lib/rbac';
+import { publish } from '@/lib/domain-events';
 
 type DB = any;
 
@@ -998,6 +999,26 @@ export async function publishVersion(
       newValue: { scheduleId: version.scheduleId, versionNo: version.versionNo, effectiveFrom: version.effectiveFrom, reason: why },
     });
 
+    // On the feed, INSIDE the transaction that put it in force — so a published
+    // timetable and the record that it was published cannot come apart. No
+    // consumer acts on it yet and the catalogue entry says why: "everyone who
+    // trains at this club" is not a query this system can answer honestly, and
+    // fanning out to a list somebody guessed at is worse than not fanning out.
+    await publish(tx, {
+      eventType: 'SCHEDULE_PUBLISHED',
+      entityType: 'schedule_version',
+      entityId: versionId,
+      payload: {
+        scheduleId: version.scheduleId,
+        versionId,
+        ownerScope: schedule.ownerScope,
+        ownerId: schedule.ownerId,
+        effectiveFrom: version.effectiveFrom,
+      },
+      correlationId: `schedule:version:${versionId}`,
+      actor: ctx.principal,
+    });
+
     return { version: toVersion(rows[0]), superseded: superseded ? toVersion(superseded) : null };
   });
 }
@@ -1592,6 +1613,13 @@ export async function publishedWeek(
   db: DB, target: Omit<ScheduleTarget, 'purpose'>, fromIso: IsoDate, toIso: IsoDate
 ): Promise<PublishedWeek> {
   for (const purpose of ['training', 'operating'] as SchedulePurpose[]) {
+    // Probe with ONE resolution before expanding the whole run. Without this a
+    // unit that publishes only operating hours pays for fourteen day
+    // resolutions on every page view instead of seven — the sort of cost that
+    // is invisible in a test and obvious on a Sunday evening.
+    const probe = await resolveSchedule(db, { ...target, purpose }, { asOf: fromIso });
+    if (!probe) continue;
+
     const days = await publicTimetable(db, { ...target, purpose }, fromIso, toIso);
     if (days.some((d) => !d.unconfigured)) {
       const first = days.find((d) => !d.unconfigured)!;
@@ -2334,6 +2362,30 @@ export async function cancelSession(
       entityType: 'class_session', entityId: sessionId, action: 'update',
       oldValue: { status: session.status, bookedCount: session.bookedCount },
       newValue: { status: 'cancelled', reason: why, bookingsCancelled: held.length },
+    });
+
+    // THE MESSAGE THAT HAS TO GO OUT. src/lib/notifications.ts resolves the
+    // audience from `bookings` on this session, which is why this is published
+    // in the SAME transaction that cancelled them: an event emitted afterwards
+    // could be emitted after a failure, and the people it was for would be on
+    // their way to a dojo for a class that is not happening.
+    //
+    // The REASON is deliberately not in the payload. It travels to the audit
+    // trail and to the administrator's screen; a notification goes through
+    // channels the federation does not control, and "cancelled — instructor
+    // bereavement" is not a sentence to put in an SMS to two hundred families.
+    await publish(tx, {
+      eventType: 'CLASS_SESSION_CANCELLED',
+      entityType: 'class_session',
+      entityId: sessionId,
+      payload: {
+        sessionId,
+        classId: session.classId,
+        className: klass.name,
+        startsAt: new Date(session.startsAt).toISOString(),
+      },
+      correlationId: `class_session:cancelled:${sessionId}`,
+      actor: ctx.principal,
     });
 
     return { sessionId, bookingsCancelled: held.length };

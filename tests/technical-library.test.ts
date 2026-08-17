@@ -26,8 +26,9 @@ import {
   registerSource, cite, mediaFor, getKata, searchTerms, reviewQueue, technicalLookup,
   LibraryError, canReviewLibrary,
 } from '../src/db/library';
-import { seedTechnicalLibrary, importTerminology, importVideoRegister } from '../src/db/library-seed';
+import { seedTechnicalLibrary, importTerminology, importVideoRegister, importShotokanCorpus } from '../src/db/library-seed';
 import { JKA_GRADING_GUIDELINE, WKF_KUMITE_PROVISIONS, REFERENCE_SOURCES } from '../src/data/technical-reference';
+import { KATA_DETERMINATIONS } from '../src/data/kata-verification';
 import { ForbiddenError, type Principal } from '../src/lib/rbac';
 import type { AuditContext } from '../src/db/federation';
 
@@ -65,7 +66,18 @@ async function makeAsset(over: Record<string, unknown> = {}) {
   return row;
 }
 
+// Find-or-create. The seed imports the real 26-kata corpus, so a test asking
+// for 'heian-nidan' may find it already present — that is the system working,
+// not a collision to route around.
 async function makeKata(slug: string, over: Record<string, unknown> = {}) {
+  const existing = await db.select().from(s.kata).where(eq(s.kata.slug, slug)).limit(1);
+  if (existing[0]) {
+    if (Object.keys(over).length) {
+      const [updated] = await db.update(s.kata).set(over).where(eq(s.kata.slug, slug)).returning();
+      return updated;
+    }
+    return existing[0];
+  }
   const [row] = await db.insert(s.kata).values({
     slug, nameRomaji: slug.replace(/-/g, ' '), published: true, ...over,
   }).returning();
@@ -381,10 +393,22 @@ describe('seed', () => {
   it('loads the researched sources, curriculum and rules', async () => {
     const report = await seedTechnicalLibrary(db);
 
-    expect(report.sources).toBe(REFERENCE_SOURCES.length);
+    // `sources` aggregates the researched primary sources AND the video
+    // register's own source pages, so it is at least the researched count.
+    expect(report.sources).toBeGreaterThanOrEqual(REFERENCE_SOURCES.length);
     expect(report.curriculumItems).toBe(JKA_GRADING_GUIDELINE.length);
     expect(report.provisions).toBe(WKF_KUMITE_PROVISIONS.length);
     expect(report.citations).toBeGreaterThan(0);
+
+    // The full seed now brings the Shotokan corpus with it, which is what gives
+    // every other table something to point at.
+    expect(report.kata).toBe(26);
+    expect(report.techniques).toBeGreaterThanOrEqual(40);
+    expect(report.appearances).toBeGreaterThan(0);
+    expect(report.mediaAssets).toBeGreaterThan(0);
+
+    const slugs = (await db.select().from(s.technicalSources)).map((x: any) => x.slug);
+    for (const src of REFERENCE_SOURCES) expect(slugs).toContain(src.slug);
   });
 
   it('runs twice without duplicating anything', async () => {
@@ -434,17 +458,44 @@ describe('seed', () => {
     expect(labels.has('3 Kyu')).toBe(true);
   });
 
-  it('asserts no movement count that the cited source does not contain', async () => {
+  it('never presents a movement count as verified when the source does not state it', async () => {
     await seedTechnicalLibrary(db);
+
     // The widely-repeated Heian counts (21/26/20/27/23) are attributed to the
-    // JKA instructor manual. The manual was read and does not publish them, so
-    // nothing in this system claims them.
-    const kata = await db.select().from(s.kata);
-    for (const k of kata) {
-      if (/heian/i.test(k.nameRomaji ?? '')) expect(k.movementCount).toBeNull();
+    // JKA instructor manual. The manual was read and does not publish them.
+    //
+    // The corpus in this repository asserts them anyway, so the counts DO reach
+    // the database — suppressing them would discard work somebody did
+    // deliberately. What must never happen is the number arriving without its
+    // provenance, looking like something the federation verified.
+    const heian = (await db.select().from(s.kata))
+      .filter((k: any) => /heian/i.test(k.nameRomaji ?? ''));
+    expect(heian.length).toBe(5);
+
+    for (const k of heian) {
+      const citations = await db.select().from(s.technicalCitations)
+        .where(and(
+          eq(s.technicalCitations.subjectKind, 'kata'),
+          eq(s.technicalCitations.subjectId, k.id),
+        ));
+      expect(citations.length, `${k.slug} has no provenance`).toBeGreaterThan(0);
+      // Not one of them may claim committee verification.
+      for (const c of citations) {
+        expect(c.verification).not.toBe('committee_verified');
+      }
+      // A stored count must be backed by a citation that actually documents it.
+      // Before the verification pass these were all 'unverified'; the pass
+      // corroborated them against a published JKA table, so they are now
+      // 'source_documented' — and either way the rule is the same: the number
+      // never appears without provenance, and never claims more than it has.
+      if (k.movementCount != null) {
+        expect(citations.some((c: any) =>
+          c.verification === 'source_documented' || c.verification === 'unverified')).toBe(true);
+      }
     }
+
     const report = await seedTechnicalLibrary(db);
-    expect(report.notes.join(' ')).toMatch(/movement counts were NOT seeded/i);
+    expect(report.notes.join(' ')).toMatch(/cited as UNVERIFIED/i);
   });
 
   it('does not promote the master teacher channel on an unverified claim', async () => {
@@ -469,9 +520,19 @@ describe('seed', () => {
     const scoring = provisions.find((p: any) => p.clause === '8.6');
     expect(scoring.sourceQuote).toMatch(/IPPON \(3 points\)/);
 
-    // Traditional kumite lives in kumite_forms and is untouched by loading
-    // sport regulation.
-    expect(await db.select().from(s.kumiteForms)).toHaveLength(0);
+    // Traditional kumite lives in kumite_forms, and loading sport regulation
+    // does not put a single WKF article into it. The two vocabularies never
+    // meet: no kumite_forms row carries a rules version or an effective date,
+    // because those are properties of regulation and not of a teaching drill.
+    const forms = await db.select().from(s.kumiteForms);
+    expect(forms.length).toBeGreaterThan(0);
+    expect(Object.keys(forms[0])).not.toContain('version');
+    expect(Object.keys(forms[0])).not.toContain('effectiveFrom');
+
+    // And competition kumite, which exists in both worlds by name, is not
+    // published as traditional teaching material.
+    const shiai = forms.find((f: any) => f.slug === 'shiai-kumite');
+    if (shiai) expect(shiai.published).toBe(false);
   });
 });
 
@@ -565,6 +626,14 @@ describe('provenance', () => {
 // ─── The verified video register enters the queue, not the library ──────────
 
 describe('video register import', () => {
+  // The full seed now imports the register itself, so these tests start from a
+  // clean media slate to measure what one import actually does.
+  beforeEach(async () => {
+    await client.exec('DELETE FROM media_technical_links');
+    await client.exec('DELETE FROM media_chapters');
+    await client.exec('DELETE FROM media_assets');
+  });
+
   it('imports verified videos as UNKNOWN rights, never as cleared', async () => {
     const result = await importVideoRegister(db);
     expect(result.assets).toBeGreaterThan(0);
@@ -653,5 +722,369 @@ describe('video register import', () => {
     expect(second.assets).toBe(0);
     expect(afterAssets[0].n).toBe(firstAssets[0].n);
     expect(afterLinks[0].n).toBe(firstLinks[0].n);
+  });
+});
+
+// ─── The Shotokan corpus enters the database ────────────────────────────────
+//
+// The repository had two Shotokan libraries that could not see each other: a
+// static corpus rendered as pages, and a set of database tables that make a
+// corpus reviewable but held nothing. These tests are about the bridge between
+// them, and above all about what the bridge REFUSES to upgrade on the way
+// across — a number the corpus asserts does not become a verified fact by being
+// SELECTed.
+
+describe('shotokan corpus import', () => {
+  beforeEach(async () => {
+    await client.exec('DELETE FROM technique_kata_appearances');
+    await client.exec('DELETE FROM media_technical_links');
+    await client.exec('DELETE FROM technical_term_aliases');
+    await client.exec('DELETE FROM technical_terms');
+    await client.exec('DELETE FROM technical_citations');
+    await client.exec('DELETE FROM kata_movements');
+    await client.exec('DELETE FROM kata_applications');
+    await client.exec('DELETE FROM kata');
+    await client.exec('DELETE FROM techniques');
+    await client.exec('DELETE FROM kumite_forms');
+  });
+
+  it('imports the whole corpus — kata, techniques and kumite systems', async () => {
+    const result = await importShotokanCorpus(db);
+
+    expect(result.kata).toBe(26);
+    expect(result.techniques).toBeGreaterThanOrEqual(40);
+    expect(result.kumiteForms).toBeGreaterThanOrEqual(6);
+
+    const kata = await db.select().from(s.kata);
+    expect(kata.map((k: any) => k.slug)).toContain('heian-shodan');
+    expect(kata.map((k: any) => k.slug)).toContain('gojushiho-sho');
+
+    // Kanji come across as kanji, never as romaji wearing a Japanese label.
+    const [shodan] = kata.filter((k: any) => k.slug === 'heian-shodan');
+    expect(shodan.nameJa).toBe('平安初段');
+    expect(shodan.nameRomaji).toBe('Heian Shodan');
+    expect(shodan.family).toBe('Heian');
+  });
+
+  it('does not turn an asserted movement count into a verified one', async () => {
+    await importShotokanCorpus(db);
+    const [shodan] = await db.select().from(s.kata).where(eq(s.kata.slug, 'heian-shodan'));
+
+    // The corpus says 21, and the value is carried across — hiding it would be
+    // its own kind of dishonesty, since somebody wrote it deliberately.
+    expect(shodan.movementCount).toBe(21);
+
+    // But the claim travels with its strength attached. This is the whole
+    // point: the JKA instructor manual requires an accurate count and does not
+    // publish one, so nothing here may present 21 as federation-verified.
+    const citations = await db.select().from(s.technicalCitations)
+      .where(and(
+        eq(s.technicalCitations.subjectKind, 'kata'),
+        eq(s.technicalCitations.subjectId, shodan.id),
+      ));
+    expect(citations.length).toBeGreaterThan(0);
+    expect(citations[0].verification).toBe('unverified');
+    expect(citations[0].notes).toMatch(/does not publish one/i);
+  });
+
+  it('leaves the count NULL when sources verifiably disagree, and keeps both figures', async () => {
+    await importShotokanCorpus(db, [{
+      slug: 'heian-shodan',
+      verification: 'disputed',
+      variants: [
+        { count: 21, organisation: 'Organisation A', url: 'https://example.org/a' },
+        { count: 20, organisation: 'Organisation B', url: 'https://example.org/b' },
+      ],
+      reason: 'Two authoritative bodies count the opening sequence differently.',
+    }]);
+
+    const [shodan] = await db.select().from(s.kata).where(eq(s.kata.slug, 'heian-shodan'));
+
+    // NULL rather than a winner. Storing either number would make this system
+    // the thing that decided a disagreement it has no authority to settle.
+    expect(shodan.movementCount).toBeNull();
+
+    const citations = await db.select().from(s.technicalCitations)
+      .where(and(
+        eq(s.technicalCitations.subjectKind, 'kata'),
+        eq(s.technicalCitations.subjectId, shodan.id),
+      ));
+    const counts = citations
+      .map((c: any) => c.sourceTitle)
+      .filter((t: string) => /movements per/.test(t));
+    expect(counts).toHaveLength(2);
+    for (const c of citations.filter((x: any) => /movements per/.test(x.sourceTitle))) {
+      expect(c.verification).toBe('disputed');
+    }
+  });
+
+  it('stores a count as fact only when a determination brings evidence', async () => {
+    await importShotokanCorpus(db, [{
+      slug: 'heian-nidan',
+      verification: 'source_documented',
+      movementCount: 26,
+      citation: {
+        organisation: 'A recognised Shotokan body',
+        url: 'https://example.org/heian-nidan',
+        quote: 'Heian Nidan consists of 26 movements.',
+      },
+      reason: 'Stated on the organisation published syllabus page.',
+    }]);
+
+    const [nidan] = await db.select().from(s.kata).where(eq(s.kata.slug, 'heian-nidan'));
+    expect(nidan.movementCount).toBe(26);
+
+    const [citation] = await db.select().from(s.technicalCitations)
+      .where(and(
+        eq(s.technicalCitations.subjectKind, 'kata'),
+        eq(s.technicalCitations.subjectId, nidan.id),
+      ));
+    expect(citation.verification).toBe('source_documented');
+    expect(citation.quote).toMatch(/26 movements/);
+  });
+
+  it('keeps sport kumite out of the traditional teaching material', async () => {
+    await importShotokanCorpus(db);
+    const forms = await db.select().from(s.kumiteForms);
+
+    const traditional = forms.filter((f: any) => f.published);
+    const sport = forms.filter((f: any) => !f.published);
+
+    expect(traditional.length).toBeGreaterThan(0);
+    // Shiai kumite exists in the corpus and is imported, but not published as
+    // Shotokan teaching progression — it belongs with the WKF ruleset, which
+    // carries an effective date and a governing authority.
+    expect(sport.map((f: any) => f.slug)).toContain('shiai-kumite');
+    expect(traditional.map((f: any) => f.slug)).toContain('gohon-kumite');
+  });
+
+  it('records where a technique appears without inventing where in', async () => {
+    const result = await importShotokanCorpus(db);
+    expect(result.appearances).toBeGreaterThan(0);
+
+    const rows = await db.select().from(s.techniqueKataAppearances);
+    expect(rows.length).toBeGreaterThan(0);
+
+    // THE LINE THAT MATTERS. The corpus knows a technique appears in a kata; it
+    // does not know at which count. Every ordinal is null, so nothing here can
+    // ever be mistaken for researched movement-level data.
+    for (const row of rows) {
+      expect(row.movementOrdinal).toBeNull();
+      expect(row.verification).toBe('unverified');
+    }
+
+    // And the stronger table stays empty, because no movement-level source was
+    // verified. Two tables, two strengths, no blurring.
+    expect(await db.select().from(s.kataMovements)).toHaveLength(0);
+  });
+
+  it('carries a technique the corpus flags as contested into a disputed citation', async () => {
+    await importShotokanCorpus(db);
+    const disputedCitations = await db.select().from(s.technicalCitations)
+      .where(and(
+        eq(s.technicalCitations.subjectKind, 'technique'),
+        eq(s.technicalCitations.verification, 'disputed'),
+      ));
+    // The corpus marks genuine disagreements between Shotokan organisations in
+    // its `contested` field. Those must not flatten into house style on import.
+    expect(disputedCitations.length).toBeGreaterThan(0);
+    expect(disputedCitations[0].quote).toBeTruthy();
+  });
+
+  it('answers the knowledge-graph question, and says how strong the answer is', async () => {
+    await importShotokanCorpus(db);
+
+    const result = await technicalLookup(db, 'gyaku-zuki');
+    expect(result.terms.length).toBeGreaterThan(0);
+    expect(result.appearances.length).toBeGreaterThan(0);
+
+    // Everything available today is kata-level, and is labelled as such rather
+    // than dressed up with a movement number.
+    for (const appearance of result.appearances) {
+      expect(appearance.precision).toBe('kata');
+      expect(appearance.ordinal).toBeNull();
+      expect(appearance.kata.nameRomaji).toBeTruthy();
+    }
+  });
+
+  it('prefers the movement-level answer and does not repeat the weaker one', async () => {
+    await importShotokanCorpus(db);
+
+    const [technique] = await db.select().from(s.techniques)
+      .where(eq(s.techniques.slug, 'gyaku-zuki'));
+    const [appearance] = await db.select().from(s.techniqueKataAppearances)
+      .where(eq(s.techniqueKataAppearances.techniqueId, technique.id)).limit(1);
+
+    // Research a single movement, and that kata should now answer precisely
+    // rather than twice.
+    await db.insert(s.kataMovements).values({
+      kataId: appearance.kataId, ordinal: 17, techniqueId: technique.id,
+      verification: 'source_documented',
+    });
+
+    const result = await technicalLookup(db, 'gyaku-zuki');
+    const forThatKata = result.appearances.filter((a: any) => a.kata.id === appearance.kataId);
+    expect(forThatKata).toHaveLength(1);
+    expect(forThatKata[0].precision).toBe('movement');
+    expect(forThatKata[0].ordinal).toBe(17);
+  });
+
+  it('finds a technique by the aliases the corpus authored', async () => {
+    await importShotokanCorpus(db);
+    // These are hand-written by somebody who knows the art, and are better than
+    // anything a generator produces.
+    const results = await searchTerms(db, 'gyaku zuki');
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0].techniqueId).toBeTruthy();
+  });
+
+  it('unblocks the video register: kata links now resolve', async () => {
+    // Before the corpus exists, every kata-tagged video in the register is
+    // skipped because there is no kata row to point at.
+    await client.exec("DELETE FROM media_technical_links");
+    await client.exec("DELETE FROM media_assets");
+    const before = await importVideoRegister(db);
+    expect(before.links).toBe(0);
+    expect(before.unmatchedKata.length).toBeGreaterThan(0);
+
+    // After it exists, they land in the review queue at 'new'.
+    await importShotokanCorpus(db);
+    await client.exec("DELETE FROM media_technical_links");
+    await client.exec("DELETE FROM media_assets");
+    const after = await importVideoRegister(db);
+    expect(after.links).toBeGreaterThan(0);
+    expect(after.unmatchedKata).toHaveLength(0);
+
+    const links = await db.select().from(s.mediaTechnicalLinks);
+    for (const link of links) expect(link.state).toBe('new');
+  });
+
+  it('runs twice without duplicating a kata, a technique or an appearance', async () => {
+    await importShotokanCorpus(db);
+    const first = await Promise.all([
+      db.select({ n: sql`count(*)::int` }).from(s.kata),
+      db.select({ n: sql`count(*)::int` }).from(s.techniques),
+      db.select({ n: sql`count(*)::int` }).from(s.techniqueKataAppearances),
+    ]);
+
+    await importShotokanCorpus(db);
+    const second = await Promise.all([
+      db.select({ n: sql`count(*)::int` }).from(s.kata),
+      db.select({ n: sql`count(*)::int` }).from(s.techniques),
+      db.select({ n: sql`count(*)::int` }).from(s.techniqueKataAppearances),
+    ]);
+
+    expect(second[0][0].n).toBe(first[0][0].n);
+    expect(second[1][0].n).toBe(first[1][0].n);
+    expect(second[2][0].n).toBe(first[2][0].n);
+  });
+});
+
+// ─── The verification pass, and the error it caught ─────────────────────────
+//
+// A parallel research pass checked all 26 asserted movement counts against a
+// published JKA affiliate table. Twenty-four were corroborated exactly, which
+// is a good result for the corpus. One was not, and these tests are mostly
+// about that one — because a system that only records agreement is not a
+// verification system.
+
+describe('kata count verification', () => {
+  beforeEach(async () => {
+    await client.exec('DELETE FROM technique_kata_appearances');
+    await client.exec('DELETE FROM technical_citations');
+    await client.exec('DELETE FROM kata_movements');
+    await client.exec('DELETE FROM kata_applications');
+    await client.exec('DELETE FROM kata');
+  });
+
+  it('stores a corroborated count as documented, with the source that says so', async () => {
+    await importShotokanCorpus(db, KATA_DETERMINATIONS);
+    const [shodan] = await db.select().from(s.kata).where(eq(s.kata.slug, 'heian-shodan'));
+    expect(shodan.movementCount).toBe(21);
+
+    const citations = await db.select().from(s.technicalCitations)
+      .where(and(
+        eq(s.technicalCitations.subjectKind, 'kata'),
+        eq(s.technicalCitations.subjectId, shodan.id),
+      ));
+    const documented = citations.find((c: any) => c.verification === 'source_documented');
+    expect(documented, 'heian-shodan should carry a documented citation').toBeTruthy();
+    expect(documented.sourceOrganisation).toMatch(/Japan Karate Association/i);
+    expect(documented.sourceUrl).toBeTruthy();
+    // The quote is the table row itself, so a later reader can find it again.
+    expect(documented.quote).toMatch(/21/);
+  });
+
+  it('refuses to store a count the sources disagree about', async () => {
+    await importShotokanCorpus(db, KATA_DETERMINATIONS);
+    const [nijushiho] = await db.select().from(s.kata).where(eq(s.kata.slug, 'nijushiho'));
+
+    // THE FINDING. The repository corpus records 24 — which is what the kata's
+    // NAME means (nijushiho = "24 steps"). The JKA's published movement-count
+    // table gives 34. A name is not a count, and this is exactly the kind of
+    // plausible-looking error that survives review by looking obvious.
+    //
+    // The system does not pick a winner. It stores neither and keeps both.
+    expect(nijushiho.movementCount).toBeNull();
+
+    const citations = await db.select().from(s.technicalCitations)
+      .where(and(
+        eq(s.technicalCitations.subjectKind, 'kata'),
+        eq(s.technicalCitations.subjectId, nijushiho.id),
+      ));
+    const variants = citations.filter((c: any) => c.verification === 'disputed');
+    expect(variants.length).toBe(2);
+    const titles = variants.map((c: any) => c.sourceTitle).join(' ');
+    expect(titles).toMatch(/34 movements/);
+    expect(titles).toMatch(/24 movements/);
+  });
+
+  it('asserts nothing about a kata the source does not list', async () => {
+    await importShotokanCorpus(db, KATA_DETERMINATIONS);
+    const [jiin] = await db.select().from(s.kata).where(eq(s.kata.slug, 'jiin'));
+    // Jiin is absent from the JKA table. The corpus's 38 therefore has no
+    // corroboration, and no count is stored rather than one being carried over
+    // on the strength of the kata next to it having been checked.
+    expect(jiin.movementCount).toBeNull();
+  });
+
+  it('flags a kiai the source contradicts, without silently changing it', async () => {
+    await importShotokanCorpus(db, KATA_DETERMINATIONS);
+    const [kanku] = await db.select().from(s.kata).where(eq(s.kata.slug, 'kanku-dai'));
+
+    // Kanku Dai's COUNT is corroborated at 65. Its second kiai is not: the
+    // corpus records 45, the table says 65 — an apparent digit transposition.
+    // Kiai are not stored in a column here, so the contradiction is recorded in
+    // the citation for a reviewer rather than quietly corrected in passing.
+    expect(kanku.movementCount).toBe(65);
+    const [citation] = await db.select().from(s.technicalCitations)
+      .where(and(
+        eq(s.technicalCitations.subjectKind, 'kata'),
+        eq(s.technicalCitations.subjectId, kanku.id),
+      ));
+    expect(citation.notes).toMatch(/kiai/i);
+    expect(citation.notes).toMatch(/not/i);
+  });
+
+  it('covers every kata in the corpus, agreement or not', async () => {
+    // A determination per kata. A missing one would silently fall back to
+    // 'unverified', which is safe but would hide that the kata was never
+    // checked at all.
+    const slugs = new Set(KATA_DETERMINATIONS.map((d: any) => d.slug));
+    expect(slugs.size).toBe(26);
+
+    const byVerification = KATA_DETERMINATIONS.reduce((acc: any, d: any) => {
+      acc[d.verification] = (acc[d.verification] ?? 0) + 1;
+      return acc;
+    }, {});
+    expect(byVerification.source_documented).toBe(24);
+    expect(byVerification.disputed).toBe(1);
+    expect(byVerification.unverified).toBe(1);
+  });
+
+  it('reports the disputed kata in the seed report rather than burying it', async () => {
+    const report = await seedTechnicalLibrary(db);
+    expect(report.disputed).toContain('nijushiho');
+    expect(report.notes.join(' ')).toMatch(/DISPUTED movement count/i);
   });
 });

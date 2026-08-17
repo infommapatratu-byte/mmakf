@@ -281,3 +281,92 @@ src/lib/surface.ts           one admin nav entry
 - **No LIVE YouTube ingestion run.** No credentials on this deployment; the
   provider interface already exists and is not faked. The offline register import
   does run.
+
+---
+
+## The Shotokan corpus (migration 0034)
+
+### The problem this solved
+
+The federation had **two Shotokan libraries that could not see each other**.
+
+`src/data/shotokan/` and `src/data/kata.ts` hold a substantial, carefully
+written corpus — 26 kata, 42 techniques, 6 kumite systems, 16 kumite concepts,
+a terminology set and a 125-video verified register — rendered as static pages
+at `/shotokan/*` and `/kata/*`.
+
+The database held the tables that make a corpus *reviewable*: provenance,
+movement-level detail, bunkai with attributed authorship, the media graph, the
+approval queue. **Every one of them was empty.** Nothing anywhere inserted into
+`kata`, `techniques` or `kumite_forms`.
+
+The consequence was concrete rather than theoretical:
+
+- `kata_movements.kata_id` had nowhere to point.
+- `technicalLookup('gyaku-zuki')` returned a definition and no appearances.
+- `importVideoRegister()` skipped **all 59** of its kata-tagged videos, because
+  no kata row existed to link them to.
+
+`importShotokanCorpus()` is the bridge. The data files stay canonical and are
+not modified; the database becomes a queryable, citable, reviewable projection.
+
+### What crosses, and at what strength
+
+| Corpus | Table | Rows |
+| --- | --- | --- |
+| `KATA` | `kata` | 26 |
+| `TECHNIQUES` (stances, punches, blocks, strikes, kicks) | `techniques` | 42 |
+| `SYSTEMS` | `kumite_forms` | 6 |
+| `Technique.relatedKata` | `technique_kata_appearances` | the knowledge-graph edge |
+| `Technique.aliases` | `technical_term_aliases` | hand-authored, better than generated |
+| `Technique.contested` | `technical_citations` at `disputed` | the corpus already noticed these |
+
+### The two-strengths rule
+
+`kata_movements` says *"movement 17 of Heian Nidan is a chudan gyaku-zuki in
+zenkutsu-dachi"* and needs a source that counted.
+`technique_kata_appearances` says only *"gyaku-zuki appears in Heian Nidan"* —
+which is exactly what the corpus documents.
+
+Forcing the weaker claim into `kata_movements` would mean inventing an
+`ordinal`, because that column is `NOT NULL` and unique per kata. **One invented
+ordinal is indistinguishable from a researched one the moment it is stored**,
+and the whole discipline of migration 0031 would be undone by a convenience.
+
+So there are two tables, and `technicalLookup()` returns both — each tagged with
+its `precision` (`'movement'` or `'kata'`), and a kata already answered
+precisely is not repeated at the weaker strength. A test enforces that every
+`movement_ordinal` written by the importer is null.
+
+### The movement-count disagreement, recorded rather than resolved
+
+`src/data/kata.ts` asserts a movement count for **all 26 kata**. The research
+behind migration 0031 found the JKA instructor manual requires an accurate count
+and *does not publish one*.
+
+Two agents, one repository, one fact that members plan their grading around. The
+directive is explicit: do not silently combine; store the source, the variant,
+the explanation.
+
+What the importer does:
+
+- The count **is** imported. Suppressing it would discard deliberate work.
+- A citation is written beside it recording where it came from and how strong
+  the claim is. With no verification determination, that is `unverified`,
+  attributed to the in-repository corpus, with the note *"No primary source was
+  verified for this figure; the JKA instructor manual requires an accurate count
+  but does not publish one."*
+- A verification pass can supply a `CorpusDetermination` to raise a count to
+  `source_documented` with a real quote and URL.
+- Where authoritative sources **verifiably disagree**, `movementCount` is set to
+  `NULL` and every competing figure is stored as its own `disputed` citation.
+  Storing either number would make this system the thing that settled a
+  disagreement it has no authority to settle.
+
+### Sport kumite stays out of the traditional material
+
+`KumiteSystem.world` distinguishes `'traditional'` from `'sport'`. Sport systems
+are imported but **not published** as Shotokan teaching progression — competition
+kumite has its own home in `sport_kumite_rulesets`, where it carries a rules
+version, an effective date and a governing authority. Publishing it in both
+places is how a learner ends up reading a competition convention as doctrine.

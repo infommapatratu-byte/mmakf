@@ -1,9 +1,25 @@
 ---
+/**
+ * THE HEADQUARTERS DOJO — /facilities
+ *
+ * Everything on this page describes ONE BUILDING: the hombu dojo at Patratu.
+ * The hours in the card at the foot are that building's hours, and they are
+ * labelled as such — an affiliated club's facilities and opening times are its
+ * own, and this page has never had them.
+ *
+ * The hours are read from the scheduling engine (migration 0032) when the
+ * headquarters has been migrated into it, and from the editorial record when it
+ * has not. See the long note in src/pages/schedule.astro for why the fallback
+ * exists and why it is in that order.
+ */
 import Base from '@/layouts/Base.astro';
 import Icon from '@/components/Icon.astro';
 import PageHero from '@/components/PageHero.astro';
 import EnrollCTA from '@/components/EnrollCTA.astro';
+import OpeningHours from '@/components/OpeningHours.astro';
 import { get } from '@/lib/storage';
+import { isConfigured, db } from '@/db';
+import { headquartersDojo, publishedWeek, todayIso, addDays, type PublishedWeek } from '@/db/scheduling';
 
 export const prerender = false;
 
@@ -11,6 +27,23 @@ const fed = await get('federation');
 const facilities = await get<any[]>('facilities');
 const programs = await get<any[]>('programs');
 const schedule = (await get<any[]>('schedule')) || [];
+
+let hqWeek: PublishedWeek | null = null;
+let hqName = '';
+if (isConfigured()) {
+  try {
+    const database = db();
+    const hq = await headquartersDojo(database);
+    if (hq) {
+      hqName = hq.name;
+      const from = todayIso();
+      hqWeek = await publishedWeek(database, { dojoId: hq.id }, from, addDays(from, 6));
+    }
+  } catch (err) {
+    console.warn('/facilities: the scheduling engine was unreachable; falling back to the published strings', err);
+  }
+}
+const usingEngine = Boolean(hqWeek?.configured);
 
 // The pill sits beside the headquarters address, so it is a claim about the
 // PHYSICAL dojo — online batches are excluded or a worldwide Zoom room would
@@ -97,10 +130,24 @@ const openPill = dojoDays ? `Open ${DAY_WORDS[dojoDays] ?? dojoDays} day${dojoDa
           <div class="card-eyebrow">Headquarters</div>
           <div class="card-title" style="font-size:1.05rem">{fed.shortName} Hombu Dojo</div>
           <div class="card-body">{fed.contact.address}</div>
-          <div class="card-body" style="margin-top:12px"><span class="text-gold">{fed.contact.hours}</span></div>
-          {fed.contact.hoursSunday && (
-            <div class="card-body" style="margin-top:6px"><span class="text-gold">{fed.contact.hoursSunday}</span></div>
+          {/* The engine when it has these hours as data, the published strings
+              when it does not. Never both — two renderings of the same fact are
+              two places for it to drift. */}
+          {usingEngine ? (
+            <div style="margin-top:14px">
+              <OpeningHours week={hqWeek!} subject={hqName || 'The hombu dojo'} compact={true} />
+            </div>
+          ) : (
+            <>
+              <div class="card-body" style="margin-top:12px"><span class="text-gold">{fed.contact.hours}</span></div>
+              {fed.contact.hoursSunday && (
+                <div class="card-body" style="margin-top:6px"><span class="text-gold">{fed.contact.hoursSunday}</span></div>
+              )}
+            </>
           )}
+          <div class="card-body" style="margin-top:12px;font-size:.8rem">
+            These are this building&rsquo;s hours. <a href="/dojos" class="text-gold">Affiliated clubs</a> publish their own.
+          </div>
         </div>
       </div>
     </div>

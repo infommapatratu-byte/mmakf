@@ -1,0 +1,833 @@
+---
+// /admin/schedules — the schedule editor.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHY THIS SCREEN EXISTS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Until migration 0032 the federation's opening hours were two English
+// sentences in a seed file behind a deploy. MMAKF could not move a Sunday class
+// by half an hour without a developer editing TypeScript, and an affiliated club
+// had no way at all to say that it trains on weekday evenings rather than at six
+// in the morning.
+//
+// This page is the answer to that, and the test of whether the answer worked is
+// simple: an administrator can change a club's Tuesday here, and nobody
+// deploys anything.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHAT THIS SCREEN REFUSES TO BE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// NOT ONE TEXT BOX MARKED "SUNDAY HOURS". The federation asked for a schedule
+// editor, and the difference is not cosmetic: a free-text field cannot be
+// checked for a window that ends before it starts, cannot be compared against a
+// coach's diary, cannot be searched for "which clubs are open on a Sunday
+// morning", and cannot be versioned — because there is nothing in it a machine
+// can read. Every control here writes a ROW.
+//
+// NOT AN EDITOR OF PUBLISHED HOURS. A version that has been in force is not
+// editable from this screen, because src/db/scheduling.ts refuses to edit one
+// and this page must not offer a control the module will reject. Changing hours
+// means drafting a successor, which is one more click and is the reason an
+// attendance record from March still makes sense.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTHORITY
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 'schedule:read' to look — which gates the REASONS on exceptions, not the
+// hours, since the hours are public. 'schedule:write' to draft. 'schedule:publish'
+// to put a draft in force. All three are re-checked inside the module against
+// the OWNER of the thing being changed, so a club administrator seeing this
+// page cannot post their way into another club's Tuesday.
+//
+// The rendered page is never evidence of authority: every act re-identifies the
+// session and re-checks, because the page may be minutes old and the request
+// may not have come from it at all.
+
+import AdminShell from '@/components/AdminShell.astro';
+import OpeningHours from '@/components/OpeningHours.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import * as s from '@/db/schema';
+import * as sch from '@/db/scheduling.schema';
+import {
+  addException, createSchedule, defineSeason, draftVersion, moveSeason,
+  publishVersion, removeException, timetable, todayIso, addDays,
+  versionInForce, isSchedulingError, DAY_NAMES,
+  type ScheduleOwner, type RuleInput, type PublishedWeek,
+} from '@/db/scheduling';
+import { planMigration, applyMigration } from '@/db/schedule-bootstrap';
+import { get as editorial } from '@/lib/storage';
+import { and, asc, desc, eq, isNull } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/schedules');
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const configured = isConfigured();
+
+const mayRead = Boolean(principal) && canAnywhere(principal, 'schedule:read');
+const mayWrite = Boolean(principal) && canAnywhere(principal, 'schedule:write');
+const mayPublish = Boolean(principal) && canAnywhere(principal, 'schedule:publish');
+
+const url = new URL(Astro.request.url);
+const scopeParam = (url.searchParams.get('scope') ?? 'national') as ScheduleOwner['scope'];
+const ownerIdParam = url.searchParams.get('owner');
+const purposeParam = url.searchParams.get('purpose') ?? 'operating';
+const owner: ScheduleOwner = {
+  scope: scopeParam,
+  id: scopeParam === 'national' ? null : (ownerIdParam ? Number(ownerIdParam) : null),
+};
+
+const EXCEPTION_KINDS = [
+  'holiday', 'closure', 'extended_hours', 'reduced_hours', 'competition',
+  'seminar', 'camp', 'maintenance', 'private_booking', 'examination',
+  'grading', 'special_training',
+] as const;
+const EXCEPTION_EFFECTS = [
+  { value: 'closed', label: 'Closed all day', help: 'The day is shut, whatever the weekly pattern says.' },
+  { value: 'replace', label: 'These hours instead', help: 'The window below replaces the normal hours for that date.' },
+  { value: 'add', label: 'Extra window', help: 'An additional window on top of the normal hours.' },
+  { value: 'remove', label: 'Cut this window out', help: 'Subtract a period from an otherwise ordinary day — a two-hour maintenance slot.' },
+] as const;
+
+let error: string | null = null;
+let done: string | null = null;
+
+// ─── The acts ───────────────────────────────────────────────────────────────
+//
+// Posts to this page, not to /api/. src/middleware.ts requires application/json
+// on /api/ paths and a form with JavaScript off cannot send one; CSRF is
+// already handled, because the middleware refuses a mutating request that is
+// not same-origin before any of this runs.
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const field = (k: string) => String(form.get(k) ?? '').trim();
+  const action = field('action');
+  const rl = await rateLimit(Astro.request, 'admin-schedules', 60, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so there is no schedule to change.';
+  } else if (!mayWrite) {
+    Astro.response.status = 403;
+    error = 'Changing a timetable requires schedule:write, which this account does not hold in any scope.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: field('reason') || null,
+    };
+    const database = db();
+    const back = `${SELF}?scope=${owner.scope}${owner.id ? `&owner=${owner.id}` : ''}&purpose=${purposeParam}`;
+
+    try {
+      if (action === 'define-season') {
+        await defineSeason(database, ctx, {
+          code: field('code'), name: field('name'), owner,
+          startsOn: field('startsOn'), endsOn: field('endsOn'),
+          activate: field('activate') === 'yes',
+        });
+        return Astro.redirect(`${back}&done=season`, 303);
+      }
+
+      if (action === 'move-season') {
+        await moveSeason(database, ctx, Number(field('seasonId')), {
+          startsOn: field('startsOn'), endsOn: field('endsOn'),
+        });
+        return Astro.redirect(`${back}&done=season-moved`, 303);
+      }
+
+      if (action === 'create-schedule') {
+        await createSchedule(database, ctx, {
+          name: field('name'),
+          purpose: field('purpose') as any,
+          owner,
+          timezone: field('timezone') || undefined,
+        });
+        return Astro.redirect(`${back}&done=schedule`, 303);
+      }
+
+      if (action === 'draft-week') {
+        // THE GRID. Seven days, up to four sessions each, each with an optional
+        // season. A day with no session and no "closed" box is simply absent
+        // from the version, which the engine reads as closed — but the box is
+        // offered so an administrator can STATE a closure rather than leaving a
+        // gap that reads to the next person as an oversight.
+        const rules: RuleInput[] = [];
+        for (let day = 1; day <= 7; day++) {
+          if (field(`closed-${day}`) === 'yes') {
+            rules.push({ dayOfWeek: day, kind: 'closed' });
+            continue;
+          }
+          for (let slot = 0; slot < 4; slot++) {
+            const opensAt = field(`open-${day}-${slot}`);
+            const closesAt = field(`close-${day}-${slot}`);
+            if (!opensAt && !closesAt) continue;
+            const seasonRaw = field(`season-${day}-${slot}`);
+            rules.push({
+              dayOfWeek: day,
+              opensAt, closesAt,
+              seasonId: seasonRaw ? Number(seasonRaw) : null,
+              label: field(`label-${day}-${slot}`) || null,
+              displayOrder: slot,
+            });
+          }
+        }
+        const version = await draftVersion(database, ctx, Number(field('scheduleId')), {
+          effectiveFrom: field('effectiveFrom'),
+          reason: field('reason') || null,
+          rules,
+        });
+        if (field('publish') === 'yes') {
+          if (!mayPublish) {
+            error = 'Saved as a draft. Putting a timetable in front of members requires schedule:publish, which this account does not hold.';
+          } else {
+            await publishVersion(database, ctx, version.id, field('reason'));
+            return Astro.redirect(`${back}&done=published`, 303);
+          }
+        } else {
+          return Astro.redirect(`${back}&done=drafted`, 303);
+        }
+      }
+
+      if (action === 'publish-version') {
+        if (!mayPublish) {
+          Astro.response.status = 403;
+          error = 'Publishing a timetable requires schedule:publish, which this account does not hold.';
+        } else {
+          await publishVersion(database, ctx, Number(field('versionId')), field('reason'));
+          return Astro.redirect(`${back}&done=published`, 303);
+        }
+      }
+
+      if (action === 'add-exception') {
+        const effect = field('effect') as any;
+        await addException(database, ctx, {
+          scheduleId: Number(field('scheduleId')),
+          onDate: field('onDate'),
+          kind: field('kind') as any,
+          effect,
+          opensAt: effect === 'closed' ? null : field('opensAt'),
+          closesAt: effect === 'closed' ? null : field('closesAt'),
+          reason: field('reason'),
+        });
+        return Astro.redirect(`${back}&done=exception`, 303);
+      }
+
+      if (action === 'remove-exception') {
+        await removeException(database, ctx, Number(field('exceptionId')), field('reason'));
+        return Astro.redirect(`${back}&done=exception-removed`, 303);
+      }
+
+      if (action === 'migrate-hq') {
+        if (!mayPublish) {
+          Astro.response.status = 403;
+          error = 'This migration publishes a timetable, so it requires schedule:publish.';
+        } else {
+          const fed = await editorial('federation');
+          const table = await editorial<any[]>('schedule');
+          const result = await applyMigration(database, ctx, {
+            federation: fed, timetable: table, dojoId: Number(field('dojoId')),
+          });
+          return Astro.redirect(`${SELF}?scope=dojo&owner=${field('dojoId')}&done=migrated&code=${result.scheduleCode}`, 303);
+        }
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = `The schedule engine refused this: it requires ${err.action}, which this account does not hold for that unit. Nothing was changed.`;
+      } else if (isSchedulingError(err)) {
+        // The engine's refusals are already written for a person to read — the
+        // overlap and reason-required messages in particular say what to do
+        // instead — so they are shown as they are rather than translated.
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        Astro.response.status = 500;
+        error = 'The change could not be saved. Nothing was changed.';
+        console.error('/admin/schedules', err);
+      }
+    }
+  }
+}
+
+const DONE_MESSAGES: Record<string, string> = {
+  season: 'The season is defined. Every rule bound to it moves when its dates move.',
+  'season-moved': 'The season moved. Every rule bound to it followed.',
+  schedule: 'The schedule exists. It says nothing yet — draft a week below.',
+  drafted: 'Saved as a draft. Nothing has changed for members until it is published.',
+  published: 'Published. The previous version was kept and end-dated, not overwritten.',
+  exception: 'The date is recorded. It overrides the weekly pattern.',
+  'exception-removed': 'The exception is removed. That date follows the weekly pattern again.',
+  migrated: 'The published headquarters hours are now rows in the engine. The editorial strings were left exactly as they were.',
+};
+done = DONE_MESSAGES[url.searchParams.get('done') ?? ''] ?? null;
+
+// ─── What to show ───────────────────────────────────────────────────────────
+
+let stateUnits: any[] = [];
+let districtUnits: any[] = [];
+let dojos: any[] = [];
+let schedules: any[] = [];
+let versions: any[] = [];
+let seasons: any[] = [];
+let exceptions: any[] = [];
+let week: any[] = [];
+let inForce: any = null;
+let hqPlan: any = null;
+let loadError: string | null = null;
+
+if (configured && mayRead) {
+  try {
+    const database = db();
+    [stateUnits, districtUnits, dojos] = await Promise.all([
+      database.select({ id: s.stateUnits.id, name: s.stateUnits.name }).from(s.stateUnits).orderBy(asc(s.stateUnits.name)),
+      database.select({ id: s.districtUnits.id, name: s.districtUnits.name }).from(s.districtUnits).orderBy(asc(s.districtUnits.name)),
+      database.select({ id: s.dojos.id, name: s.dojos.name, code: s.dojos.code }).from(s.dojos).orderBy(asc(s.dojos.name)),
+    ]);
+
+    const ownerFilter = and(
+      eq(sch.schedules.ownerScope, owner.scope as any),
+      owner.id == null ? isNull(sch.schedules.ownerId) : eq(sch.schedules.ownerId, owner.id)
+    );
+    schedules = await database.select().from(sch.schedules).where(ownerFilter).orderBy(asc(sch.schedules.purpose));
+    seasons = await database.select().from(sch.seasons).where(and(
+      eq(sch.seasons.ownerScope, owner.scope as any),
+      owner.id == null ? isNull(sch.seasons.ownerId) : eq(sch.seasons.ownerId, owner.id)
+    )).orderBy(asc(sch.seasons.startsOn));
+
+    const current = schedules.find((x: any) => x.purpose === purposeParam) ?? schedules[0] ?? null;
+    if (current) {
+      versions = await database.select().from(sch.scheduleVersions)
+        .where(eq(sch.scheduleVersions.scheduleId, current.id))
+        .orderBy(desc(sch.scheduleVersions.versionNo));
+      exceptions = await database.select().from(sch.scheduleExceptions)
+        .where(eq(sch.scheduleExceptions.scheduleId, current.id))
+        .orderBy(asc(sch.scheduleExceptions.onDate));
+      inForce = await versionInForce(database, current.id, todayIso());
+
+      const from = todayIso();
+      week = await timetable(
+        database,
+        {
+          purpose: current.purpose,
+          dojoId: owner.scope === 'dojo' ? owner.id : null,
+          districtUnitId: owner.scope === 'district' ? owner.id : null,
+          stateUnitId: owner.scope === 'state' ? owner.id : null,
+          institutionId: owner.scope === 'institution' ? owner.id : null,
+        },
+        from, addDays(from, 6),
+        { principal }
+      );
+    }
+
+    // The migration panel, shown only where it can actually be used.
+    if (owner.scope === 'dojo' && owner.id && mayPublish) {
+      const fed = await editorial('federation');
+      const table = await editorial<any[]>('schedule');
+      hqPlan = await planMigration(database, { federation: fed, timetable: table, dojoId: owner.id });
+    }
+  } catch (err: any) {
+    console.error('/admin/schedules load', err);
+    loadError = 'The schedule register could not be read.';
+  }
+}
+
+const currentSchedule = schedules.find((x: any) => x.purpose === purposeParam) ?? schedules[0] ?? null;
+const activeSeasons = seasons.filter((x: any) => x.status === 'active');
+const ownerLabel =
+  owner.scope === 'national' ? 'MMAKF National Federation'
+  : owner.scope === 'state' ? (stateUnits.find((x: any) => x.id === owner.id)?.name ?? `State ${owner.id}`)
+  : owner.scope === 'district' ? (districtUnits.find((x: any) => x.id === owner.id)?.name ?? `District ${owner.id}`)
+  : owner.scope === 'dojo' ? (dojos.find((x: any) => x.id === owner.id)?.name ?? `Club ${owner.id}`)
+  : `Institution ${owner.id}`;
+
+const weekAsPublished: PublishedWeek | null = week.length && !week[0].unconfigured
+  ? {
+      days: week,
+      purpose: (currentSchedule?.purpose ?? null) as any,
+      configured: true,
+      timezone: week[0].timezone,
+      inheritedFromLabel: week[0].inheritedFromLabel,
+      isOwnSchedule: week[0].isOwnSchedule,
+      seasons: week[0].seasons,
+    }
+  : null;
+
+const SLOTS = [0, 1, 2, 3];
+---
+
+<AdminShell
+  title="Schedules and seasons"
+  requires="schedule:read"
+  intro="Opening hours, training hours, seasons and special days — per unit, per room, per class."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin/dashboard') },
+      { name: 'Training and engagement', url: h('/admin/bookings') },
+      { name: 'Schedules and seasons', url: SELF },
+    ],
+    description:
+      'Every unit of the federation keeps its own week. The national hours are a DEFAULT that a unit ' +
+      'inherits only while it has published nothing of its own — never copied down, and a club that sets ' +
+      'its own overrides them without the federation record being touched.',
+  }}
+>
+  {error && <ErrorState title="Nothing was changed" safe={error!} />}
+  {done && <div class="ok-note">{done}</div>}
+
+  {!configured ? (
+    <EmptyState
+      title="No federation database is configured"
+      body="Schedules live in Postgres. Set DATABASE_URL for this deployment and run the migrations."
+    />
+  ) : !mayRead ? (
+    <EmptyState
+      title="You do not hold schedule:read"
+      body="Reading a timetable in full — including why a day is closed — needs schedule:read in some scope. The public timings themselves are on the club pages and need nothing."
+    />
+  ) : loadError ? (
+    <ErrorState title="Could not read the schedule register" safe="Nothing was changed. Reload, or contact the federation office." detail={loadError} />
+  ) : (
+    <>
+      {/* ═══════ WHOSE SCHEDULE ═══════ */}
+      <section class="panel">
+        <h2 class="panel-h">Whose week</h2>
+        <form method="get" action={SELF} class="row-form">
+          <label class="fld">
+            <span class="input-label">Level</span>
+            <select class="input" name="scope">
+              {(['national', 'state', 'district', 'dojo'] as const).map((v) => (
+                <option value={v} selected={v === owner.scope}>{
+                  v === 'national' ? 'National federation'
+                  : v === 'state' ? 'State association'
+                  : v === 'district' ? 'District association'
+                  : 'Club / dojo'
+                }</option>
+              ))}
+            </select>
+          </label>
+          <label class="fld">
+            <span class="input-label">Unit</span>
+            <select class="input" name="owner">
+              <option value="">— none (national) —</option>
+              {stateUnits.map((u: any) => <option value={u.id} selected={owner.scope === 'state' && owner.id === u.id}>State · {u.name}</option>)}
+              {districtUnits.map((u: any) => <option value={u.id} selected={owner.scope === 'district' && owner.id === u.id}>District · {u.name}</option>)}
+              {dojos.map((u: any) => <option value={u.id} selected={owner.scope === 'dojo' && owner.id === u.id}>Club · {u.name}</option>)}
+            </select>
+          </label>
+          <label class="fld">
+            <span class="input-label">Schedule</span>
+            <select class="input" name="purpose">
+              {(['operating', 'training', 'office', 'administrative'] as const).map((v) => (
+                <option value={v} selected={v === purposeParam}>{v}</option>
+              ))}
+            </select>
+          </label>
+          <button class="btn btn-ghost" type="submit">Show</button>
+        </form>
+        <p class="hint">
+          <strong>Operating</strong> is when the door is open. <strong>Training</strong> is when the mat is
+          available, which is narrower and is what a class must fit inside. <strong>Office</strong> and
+          <strong>administrative</strong> are the staffed hours. A unit that publishes only one is not
+          asked for the others.
+        </p>
+      </section>
+
+      {/* ═══════ THE WEEK AS IT RESOLVES ═══════ */}
+      <section class="panel">
+        <h2 class="panel-h">{ownerLabel} — the next seven days, as a member sees them</h2>
+        {weekAsPublished ? (
+          <OpeningHours week={weekAsPublished} subject={ownerLabel} />
+        ) : (
+          <EmptyState
+            title="Nothing is published for this unit"
+            body="Not the same as closed. Until a version is published here, this unit inherits from the level above it — and if nothing above it has published either, the site says the timings are not recorded rather than showing an empty week."
+          />
+        )}
+      </section>
+
+      {/* ═══════ SEASONS ═══════ */}
+      <section class="panel">
+        <h2 class="panel-h">Seasons</h2>
+        <p class="hint">
+          &lsquo;Summer&rsquo; and &lsquo;Winter&rsquo; are not built into this system anywhere. They are rows with dates
+          somebody chose, and moving a date here moves every rule bound to it. A club that defines its own
+          seasons replaces the federation&rsquo;s for that club only.
+        </p>
+        {seasons.length === 0 ? (
+          <p class="text-muted">No seasons defined at this level. Rules written without one apply all year.</p>
+        ) : (
+          <table class="tbl">
+            <thead><tr><th scope="col">Season</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Status</th><th scope="col">Move</th></tr></thead>
+            <tbody>
+              {seasons.map((season: any) => (
+                <tr>
+                  <td><strong>{season.name}</strong> <span class="text-muted">{season.code}</span></td>
+                  <td>{season.startsOn}</td>
+                  <td>{season.endsOn}</td>
+                  <td><span class="pill">{season.status}</span></td>
+                  <td>
+                    {mayWrite && (
+                      <form method="post" class="inline-form">
+                        <input type="hidden" name="action" value="move-season" />
+                        <input type="hidden" name="seasonId" value={season.id} />
+                        <input class="input input-sm" type="date" name="startsOn" value={season.startsOn} required />
+                        <input class="input input-sm" type="date" name="endsOn" value={season.endsOn} required />
+                        <input class="input input-sm" type="text" name="reason" placeholder="Why" required />
+                        <button class="btn btn-ghost btn-sm" type="submit">Move</button>
+                      </form>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        {mayWrite && (
+          <details class="drawer">
+            <summary>Define a season</summary>
+            <form method="post" class="grid-form">
+              <input type="hidden" name="action" value="define-season" />
+              <label class="fld"><span class="input-label">Code</span><input class="input" name="code" placeholder="summer-2027" required /></label>
+              <label class="fld"><span class="input-label">Name</span><input class="input" name="name" placeholder="Summer 2027" required /></label>
+              <label class="fld"><span class="input-label">Starts</span><input class="input" type="date" name="startsOn" required /></label>
+              <label class="fld"><span class="input-label">Ends</span><input class="input" type="date" name="endsOn" required /></label>
+              <label class="fld"><span class="input-label">Reason</span><input class="input" name="reason" placeholder="Recorded on the change" required /></label>
+              <label class="fld chk"><input type="checkbox" name="activate" value="yes" checked /> <span>Bring into force now</span></label>
+              <button class="btn btn-primary" type="submit">Define</button>
+            </form>
+            <p class="hint">Two seasons in force at this level may not cover the same date — a rule bound to one of them would be ambiguous, so the engine refuses it and names the season it clashed with.</p>
+          </details>
+        )}
+      </section>
+
+      {/* ═══════ SCHEDULES AND VERSIONS ═══════ */}
+      <section class="panel">
+        <h2 class="panel-h">Schedules at this level</h2>
+        {schedules.length === 0 ? (
+          <p class="text-muted">None. This unit inherits from the level above it until one is created here.</p>
+        ) : (
+          <table class="tbl">
+            <thead><tr><th scope="col">Schedule</th><th scope="col">Purpose</th><th scope="col">Timezone</th><th scope="col">Status</th><th scope="col">In force</th></tr></thead>
+            <tbody>
+              {schedules.map((x: any) => (
+                <tr class={x.id === currentSchedule?.id ? 'sel' : ''}>
+                  <td><strong>{x.name}</strong><br /><span class="text-muted">{x.code}</span></td>
+                  <td>{x.purpose}</td>
+                  <td>{x.timezone}</td>
+                  <td><span class="pill">{x.status}</span></td>
+                  <td>{x.id === currentSchedule?.id && inForce ? `v${inForce.versionNo} from ${inForce.effectiveFrom}` : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        {mayWrite && (
+          <details class="drawer">
+            <summary>Create a schedule for {ownerLabel}</summary>
+            <form method="post" class="grid-form">
+              <input type="hidden" name="action" value="create-schedule" />
+              <label class="fld"><span class="input-label">Name</span><input class="input" name="name" placeholder={`${ownerLabel} — opening hours`} required /></label>
+              <label class="fld">
+                <span class="input-label">Purpose</span>
+                <select class="input" name="purpose">
+                  {(['operating', 'training', 'office', 'administrative'] as const).map((v) => <option value={v}>{v}</option>)}
+                </select>
+              </label>
+              <label class="fld"><span class="input-label">Timezone</span><input class="input" name="timezone" value="Asia/Kolkata" /></label>
+              <label class="fld"><span class="input-label">Reason</span><input class="input" name="reason" required /></label>
+              <button class="btn btn-primary" type="submit">Create</button>
+            </form>
+          </details>
+        )}
+
+        {versions.length > 0 && (
+          <>
+            <h3 class="panel-sub">Versions of {currentSchedule?.name}</h3>
+            <table class="tbl">
+              <thead><tr><th scope="col">#</th><th scope="col">Status</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Reason</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody>
+                {versions.map((v: any) => (
+                  <tr>
+                    <td>v{v.versionNo}</td>
+                    <td><span class="pill">{v.status}</span></td>
+                    <td>{v.effectiveFrom}</td>
+                    <td>{v.effectiveTo ?? 'until further notice'}</td>
+                    <td class="text-muted">{v.reason ?? v.withdrawnReason ?? '—'}</td>
+                    <td>
+                      {v.status === 'draft' && mayPublish && (
+                        <form method="post" class="inline-form">
+                          <input type="hidden" name="action" value="publish-version" />
+                          <input type="hidden" name="versionId" value={v.id} />
+                          <input class="input input-sm" name="reason" placeholder="Why this changes" required />
+                          <button class="btn btn-primary btn-sm" type="submit">Publish</button>
+                        </form>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p class="hint">
+              A published version is never edited and never deleted. Publishing a successor end-dates the
+              incumbent the day before the new one starts, so an attendance record from last term still
+              renders against the timetable that was actually in force then.
+            </p>
+          </>
+        )}
+      </section>
+
+      {/* ═══════ THE GRID ═══════ */}
+      {currentSchedule && mayWrite && (
+        <section class="panel">
+          <h2 class="panel-h">Draft a week for {currentSchedule.name}</h2>
+          <p class="hint">
+            Up to four sessions a day. Leave a day empty for closed, or tick <em>Closed</em> to state it —
+            the engine reads both the same way, and the tick is there so the next administrator can tell a
+            decision from an omission. Bind a session to a season to make it seasonal; leave the season
+            blank and it applies all year. A season session REPLACES the all-year sessions for that day.
+          </p>
+          <form method="post">
+            <input type="hidden" name="action" value="draft-week" />
+            <input type="hidden" name="scheduleId" value={currentSchedule.id} />
+            <div class="tbl-scroll">
+              <table class="tbl grid-tbl">
+                <thead>
+                  <tr>
+                    <th scope="col">Day</th>
+                    <th scope="col">Closed</th>
+                    {SLOTS.map((i) => <th scope="col">Session {i + 1}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {DAY_NAMES.map((name, i) => {
+                    const day = i + 1;
+                    return (
+                      <tr>
+                        <th scope="row">{name}</th>
+                        <td><input type="checkbox" name={`closed-${day}`} value="yes" aria-label={`${name} closed`} /></td>
+                        {SLOTS.map((slot) => (
+                          <td class="slot">
+                            <div class="slot-times">
+                              <input class="input input-sm" type="time" name={`open-${day}-${slot}`} aria-label={`${name} session ${slot + 1} opens`} />
+                              <input class="input input-sm" type="time" name={`close-${day}-${slot}`} aria-label={`${name} session ${slot + 1} closes`} />
+                            </div>
+                            <input class="input input-sm" type="text" name={`label-${day}-${slot}`} placeholder="Label" aria-label={`${name} session ${slot + 1} label`} />
+                            {activeSeasons.length > 0 && (
+                              <select class="input input-sm" name={`season-${day}-${slot}`} aria-label={`${name} session ${slot + 1} season`}>
+                                <option value="">All year</option>
+                                {activeSeasons.map((season: any) => <option value={season.id}>{season.name}</option>)}
+                              </select>
+                            )}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div class="row-form">
+              <label class="fld"><span class="input-label">Effective from</span><input class="input" type="date" name="effectiveFrom" required /></label>
+              <label class="fld grow"><span class="input-label">Reason — members are told this</span><input class="input" name="reason" placeholder="Winter evening extension agreed at the September committee" required /></label>
+              <label class="fld chk"><input type="checkbox" name="publish" value="yes" /> <span>Publish immediately</span></label>
+              <button class="btn btn-primary" type="submit">Save</button>
+            </div>
+          </form>
+        </section>
+      )}
+
+      {/* ═══════ EXCEPTIONS ═══════ */}
+      {currentSchedule && (
+        <section class="panel">
+          <h2 class="panel-h">Special days</h2>
+          <p class="hint">
+            A holiday, a grading, a maintenance window, a camp. These attach to the schedule and not to a
+            version, so publishing new hours does not lose the calendar. The REASON is shown to
+            administrators and instructors and is never published to the public timetable — the public sees
+            that a day is closed and what kind of day it is, and nothing else.
+          </p>
+          {exceptions.length === 0 ? (
+            <p class="text-muted">None recorded.</p>
+          ) : (
+            <table class="tbl">
+              <thead><tr><th scope="col">Date</th><th scope="col">Kind</th><th scope="col">Effect</th><th scope="col">Window</th><th scope="col">Reason</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody>
+                {exceptions.map((e: any) => (
+                  <tr>
+                    <td>{e.onDate}</td>
+                    <td><span class="pill">{String(e.kind).replace(/_/g, ' ')}</span></td>
+                    <td>{String(e.effect).replace(/_/g, ' ')}</td>
+                    <td>{e.opensAt ? `${e.opensAt}–${e.closesAt}` : 'all day'}</td>
+                    <td class="text-muted">{e.reason}</td>
+                    <td>
+                      {mayWrite && (
+                        <form method="post" class="inline-form">
+                          <input type="hidden" name="action" value="remove-exception" />
+                          <input type="hidden" name="exceptionId" value={e.id} />
+                          <input class="input input-sm" name="reason" placeholder="Why" required />
+                          <button class="btn btn-ghost btn-sm" type="submit">Remove</button>
+                        </form>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {mayWrite && (
+            <details class="drawer">
+              <summary>Record a special day</summary>
+              <form method="post" class="grid-form">
+                <input type="hidden" name="action" value="add-exception" />
+                <input type="hidden" name="scheduleId" value={currentSchedule.id} />
+                <label class="fld"><span class="input-label">Date</span><input class="input" type="date" name="onDate" required /></label>
+                <label class="fld">
+                  <span class="input-label">Kind</span>
+                  <select class="input" name="kind">
+                    {EXCEPTION_KINDS.map((k) => <option value={k}>{k.replace(/_/g, ' ')}</option>)}
+                  </select>
+                </label>
+                <label class="fld">
+                  <span class="input-label">Effect</span>
+                  <select class="input" name="effect">
+                    {EXCEPTION_EFFECTS.map((e) => <option value={e.value}>{e.label}</option>)}
+                  </select>
+                </label>
+                <label class="fld"><span class="input-label">Opens (blank if closed)</span><input class="input" type="time" name="opensAt" /></label>
+                <label class="fld"><span class="input-label">Closes</span><input class="input" type="time" name="closesAt" /></label>
+                <label class="fld grow"><span class="input-label">Reason</span><input class="input" name="reason" required /></label>
+                <button class="btn btn-primary" type="submit">Record</button>
+              </form>
+              <ul class="hint-list">
+                {EXCEPTION_EFFECTS.map((e) => <li><strong>{e.label}</strong> — {e.help}</li>)}
+              </ul>
+            </details>
+          )}
+        </section>
+      )}
+
+      {/* ═══════ MIGRATION ═══════ */}
+      {hqPlan && (
+        <section class="panel">
+          <h2 class="panel-h">Move the published hours into the engine</h2>
+          <p class="hint">
+            The federation&rsquo;s opening hours have lived as two sentences on the editorial record since the
+            site was built. This carries those exact values across — it does not change them, and it does
+            not delete the sentences. The pages fall back to them anywhere the engine has no answer, so
+            nothing goes dark between this step and somebody checking the rendering.
+          </p>
+
+          {hqPlan.sources.map((src: any) => (
+            <p class="src"><code>{src.field}</code> <span class="text-muted">{src.value}</span></p>
+          ))}
+
+          {hqPlan.blocked.length > 0 ? (
+            <ul class="blocked">
+              {hqPlan.blocked.map((b: string) => <li>{b}</li>)}
+            </ul>
+          ) : (
+            <>
+              <p>
+                Would create <strong>{hqPlan.rules.length} rules</strong> on a new
+                <strong> operating </strong> schedule for <strong>{hqPlan.dojoName}</strong>, effective from
+                {' '}{hqPlan.effectiveFrom}, in {hqPlan.timezone}.
+              </p>
+              <p class="hint">
+                Seasons: {hqPlan.seasons.map((x: any) => `${x.name} ${x.startsOn}…${x.endsOn}`).join(', ')}.
+                These dates are the ones stated as an EXAMPLE in the federation&rsquo;s instruction — they are
+                not a fact this system established, and they are editable above the moment this is done.
+              </p>
+              <form method="post" class="row-form">
+                <input type="hidden" name="action" value="migrate-hq" />
+                <input type="hidden" name="dojoId" value={hqPlan.dojoId} />
+                <label class="fld grow"><span class="input-label">Reason</span><input class="input" name="reason" value="Migrating the published headquarters hours into the scheduling engine" required /></label>
+                <button class="btn btn-primary" type="submit">Migrate these hours</button>
+              </form>
+            </>
+          )}
+
+          {hqPlan.classesNotMigrated.length > 0 && (
+            <>
+              <h3 class="panel-sub">Not migrated — the class timetable records no finish times</h3>
+              <p class="hint">
+                {hqPlan.classesNotMigrated.length} rows on the editorial timetable give a start time and no
+                finish. A class record needs both, and how long a class runs is federation policy nobody has
+                set — so they are left where they are rather than being given an invented duration that
+                would then read as the federation&rsquo;s decision. Enter each class with its finish time, or
+                add end times to the timetable rows.
+              </p>
+              <table class="tbl">
+                <thead><tr><th scope="col">Day</th><th scope="col">Time</th><th scope="col">Class</th><th scope="col">Instructor</th><th scope="col">Mode</th></tr></thead>
+                <tbody>
+                  {hqPlan.classesNotMigrated.map((r: any) => (
+                    <tr><td>{r.day}</td><td>{r.time}</td><td>{r.description}</td><td>{r.instructor}</td><td>{r.mode}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+        </section>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .pg-head { display: flex; flex-direction: column; gap: 14px; margin-bottom: 28px; }
+  .pg-lead { max-width: 74ch; color: var(--muted, #9a9a9a); line-height: 1.7; font-size: .92rem; }
+  .panel { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); padding: 22px; margin-bottom: 24px; }
+  .panel-h { font-family: var(--font-display); font-size: 1.02rem; margin-bottom: 12px; }
+  .panel-sub { font-family: var(--font-display); font-size: .9rem; margin: 22px 0 10px; color: var(--gold); }
+  .hint { font-size: .82rem; line-height: 1.65; color: var(--muted, #9a9a9a); margin: 10px 0; max-width: 82ch; }
+  .hint-list { font-size: .8rem; line-height: 1.6; color: var(--muted, #9a9a9a); margin-top: 10px; padding-left: 18px; }
+  .ok-note { border: 1px solid var(--border); border-left: 3px solid var(--gold); border-radius: var(--radius); padding: 12px 16px; margin-bottom: 20px; font-size: .86rem; }
+  .row-form { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; }
+  .fld { display: flex; flex-direction: column; gap: 4px; }
+  .fld.grow { flex: 1 1 320px; }
+  .fld.chk { flex-direction: row; align-items: center; gap: 8px; font-size: .84rem; }
+  .input-label { font-size: .68rem; letter-spacing: .16em; text-transform: uppercase; color: var(--gold); }
+  .input-sm { padding: 5px 8px; font-size: .78rem; }
+  .btn-sm { padding: 5px 10px; font-size: .76rem; }
+  .inline-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .drawer { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .drawer summary { cursor: pointer; font-size: .84rem; color: var(--gold); }
+  .drawer > form { margin-top: 14px; }
+  .tbl { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  .tbl th, .tbl td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: .84rem; vertical-align: top; }
+  .tbl thead th { font-family: var(--font-display); font-size: .64rem; letter-spacing: .18em; text-transform: uppercase; color: var(--gold); }
+  .tbl tr.sel td { background: var(--bg-2); }
+  .tbl-scroll { overflow-x: auto; }
+  .grid-tbl { min-width: 900px; }
+  .slot { min-width: 160px; }
+  .slot-times { display: flex; gap: 6px; margin-bottom: 5px; }
+  .src { font-size: .8rem; margin: 4px 0; }
+  .blocked { font-size: .84rem; line-height: 1.65; padding-left: 18px; }
+  .blocked li { margin-bottom: 8px; }
+</style>

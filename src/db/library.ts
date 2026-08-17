@@ -293,7 +293,16 @@ export async function technicalLookup(db: DB, query: string) {
   if (!terms.length) return { terms: [], appearances: [], media: [] };
 
   const techniqueIds = terms.map((t: any) => t.techniqueId).filter(Boolean);
-  const appearances = techniqueIds.length
+
+  // TWO STRENGTHS OF ANSWER, and the caller is told which it is holding.
+  //
+  // `kata_movements` can say "movement 17 of Heian Nidan", and needs a source
+  // that counted. `technique_kata_appearances` can only say "it appears in
+  // Heian Nidan", and that is what the repository's Shotokan corpus actually
+  // documents. Returning both, tagged, means the page can show everything known
+  // without presenting the weaker claim as the stronger one — and without
+  // going silent just because nobody has done the movement-level research yet.
+  const movementLevel = techniqueIds.length
     ? await db.select({
         movement: s.kataMovements,
         kata: s.kata,
@@ -307,6 +316,46 @@ export async function technicalLookup(db: DB, query: string) {
         .orderBy(asc(s.kata.nameRomaji), asc(s.kataMovements.ordinal))
         .limit(100)
     : [];
+
+  const kataLevel = techniqueIds.length
+    ? await db.select({
+        appearance: s.techniqueKataAppearances,
+        kata: s.kata,
+      })
+        .from(s.techniqueKataAppearances)
+        .innerJoin(s.kata, eq(s.techniqueKataAppearances.kataId, s.kata.id))
+        .where(and(
+          inArray(s.techniqueKataAppearances.techniqueId, techniqueIds),
+          eq(s.kata.published, true),
+        ))
+        .orderBy(asc(s.kata.nameRomaji))
+        .limit(100)
+    : [];
+
+  // A kata already answered at movement level is not repeated at the weaker
+  // one: "movement 17" and "appears somewhere in" are the same finding, and
+  // showing both would read as two independent confirmations.
+  const precise = new Set(movementLevel.map((r: any) => r.kata.id));
+
+  const appearances = [
+    ...movementLevel.map((r: any) => ({
+      precision: 'movement' as const,
+      kata: r.kata,
+      ordinal: r.movement.ordinal,
+      movement: r.movement,
+      verification: r.movement.verification,
+    })),
+    ...kataLevel
+      .filter((r: any) => !precise.has(r.kata.id))
+      .map((r: any) => ({
+        precision: 'kata' as const,
+        kata: r.kata,
+        ordinal: r.appearance.movementOrdinal ?? null,
+        movement: null,
+        verification: r.appearance.verification,
+        note: r.appearance.note,
+      })),
+  ];
 
   const media = techniqueIds.length
     ? (await Promise.all(techniqueIds.map((id: number) => mediaFor(db, 'technique', id)))).flat()

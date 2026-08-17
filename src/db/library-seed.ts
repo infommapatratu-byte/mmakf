@@ -33,6 +33,14 @@ export interface SeedReport {
   terms: number;
   aliases: number;
   citations: number;
+  kata: number;
+  techniques: number;
+  kumiteForms: number;
+  appearances: number;
+  mediaAssets: number;
+  mediaLinks: number;
+  /** Kata whose movement count is contested and therefore stored as NULL. */
+  disputed: string[];
   notes: string[];
 }
 
@@ -491,7 +499,10 @@ async function citeOnce(db: DB, values: Record<string, any>) {
  * screen can each present it in their own way — and so a test can assert on the
  * counts instead of scraping stdout.
  */
-export async function seedTechnicalLibrary(db: DB): Promise<SeedReport> {
+export async function seedTechnicalLibrary(
+  db: DB,
+  determinations?: readonly CorpusDetermination[],
+): Promise<SeedReport> {
   const notes: string[] = [];
 
   const sources = await seedSources(db);
@@ -511,8 +522,58 @@ export async function seedTechnicalLibrary(db: DB): Promise<SeedReport> {
     notes.push(`Terminology import skipped: ${err?.message ?? err}`);
   }
 
+  // ORDER MATTERS HERE, and it is the one ordering constraint in this file.
+  // The video register tags 59 of its videos with a kata slug, and can only
+  // turn those into review-queue rows once the kata exist. Run the register
+  // first and those 59 classifications are silently lost — the import reports
+  // them as unmatched, which is honest, but the queue is then missing most of
+  // its actual work.
+  // Default to the generated verification determinations. Loaded dynamically so
+  // that a caller who wants to seed WITHOUT them (a test isolating the
+  // unverified path, say) can pass an empty array and get exactly that.
+  let applied = determinations;
+  if (!applied) {
+    try {
+      const mod: any = await import('@/data/kata-verification');
+      applied = mod.KATA_DETERMINATIONS ?? [];
+    } catch {
+      applied = [];
+      notes.push('No kata verification determinations were available; counts import as unverified.');
+    }
+  }
+
+  let corpus = { kata: 0, techniques: 0, kumiteForms: 0, appearances: 0, terms: 0, disputed: [] as string[] };
+  try {
+    corpus = await importShotokanCorpus(db, applied);
+  } catch (err: any) {
+    notes.push(`Shotokan corpus import skipped: ${err?.message ?? err}`);
+  }
+
+  let videos = { sources: 0, assets: 0, links: 0, unmatchedKata: [] as string[] };
+  try {
+    videos = await importVideoRegister(db);
+  } catch (err: any) {
+    notes.push(`Video register import skipped: ${err?.message ?? err}`);
+  }
+
   notes.push(
-    'Per-kata movement counts were NOT seeded. ' + MOVEMENT_COUNT_EVIDENCE.finding,
+    'Kata movement counts come from the in-repository corpus and are cited as UNVERIFIED unless a ' +
+    'determination was supplied. ' + MOVEMENT_COUNT_EVIDENCE.finding,
+  );
+  if (corpus.disputed.length) {
+    notes.push(
+      `${corpus.disputed.length} kata have a DISPUTED movement count and store none: ` +
+      `${corpus.disputed.join(', ')}. The competing figures are in technical_citations.`,
+    );
+  }
+  if (videos.unmatchedKata.length) {
+    notes.push(
+      `The video register tagged kata not present in the corpus: ${videos.unmatchedKata.join(', ')}.`,
+    );
+  }
+  notes.push(
+    `${videos.assets} videos entered the review queue at rights "unknown". None is visible to a ` +
+    'learner until both its rights and its technique are decided by a named reviewer.',
   );
   notes.push(
     'The Pramod Pathak channel is registered at tier "educational", not "mmakf_official": ' +
@@ -523,12 +584,387 @@ export async function seedTechnicalLibrary(db: DB): Promise<SeedReport> {
     .from(s.technicalCitations);
 
   return {
-    sources,
+    sources: sources + videos.sources,
     curriculumItems,
     provisions,
-    terms,
+    terms: terms + corpus.terms,
     aliases,
     citations: citations[0]?.n ?? 0,
+    kata: corpus.kata,
+    techniques: corpus.techniques,
+    kumiteForms: corpus.kumiteForms,
+    appearances: corpus.appearances,
+    mediaAssets: videos.assets,
+    mediaLinks: videos.links,
+    disputed: corpus.disputed,
     notes,
+  };
+}
+
+/**
+ * A verification determination for one kata's movement count.
+ *
+ * Produced by a research pass, consumed by the importer. Kept as an explicit
+ * input rather than read from a file so that the importer has no opinion of its
+ * own about what is true — it records what it is told, and records the evidence
+ * alongside.
+ */
+export interface CorpusDetermination {
+  slug: string;
+  verification: 'unverified' | 'source_documented' | 'committee_verified' | 'disputed';
+  movementCount?: number | null;
+  variants?: Array<{ count: number; organisation: string; url: string }>;
+  citation?: { organisation: string; url: string; quote: string } | null;
+  reason?: string;
+}
+
+/**
+ * Bring the repository's Shotokan corpus into the database.
+ *
+ * WHY THIS EXISTS. Until now the federation had two Shotokan libraries that
+ * could not see each other. src/data/shotokan/ holds a substantial, carefully
+ * written corpus — 26 kata, ~42 techniques, 6 kumite systems, 16 concepts — and
+ * renders it as static pages. The database held the tables that make a corpus
+ * REVIEWABLE: provenance, movement-level detail, bunkai with attributed
+ * authorship, the media graph, the approval queue. Those tables were empty, so
+ * none of that machinery had anything to act on. `kata_movements.kata_id` had
+ * nowhere to point, and importVideoRegister() skipped every one of its 59
+ * kata-tagged videos because no kata row existed to link them to.
+ *
+ * This function is the bridge. The files stay canonical and are not modified;
+ * the database becomes a queryable, citable, reviewable projection of them.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE MOVEMENT-COUNT PROBLEM, HANDLED RATHER THAN HIDDEN
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * src/data/kata.ts asserts a movement count for all 26 kata. The research
+ * behind migration 0031 reached the opposite conclusion: the JKA instructor
+ * manual requires an accurate count but does not publish one, so no count could
+ * be traced to that primary source.
+ *
+ * Two agents, one repository, and a genuine disagreement about a fact members
+ * plan their grading around. The directive is explicit about this case — do not
+ * silently combine; store the source, the variant and the explanation.
+ *
+ * So the count is imported, and a citation is written beside it recording WHERE
+ * IT CAME FROM and HOW STRONG THE CLAIM IS. `determinations` lets a verification
+ * pass raise a count to 'source_documented' with a real citation, or mark it
+ * 'disputed' and record the competing figures. Absent any determination the
+ * honest default is 'unverified', attributed to the in-repository corpus: the
+ * number is shown, and it is not dressed up as federation-verified fact.
+ */
+export async function importShotokanCorpus(
+  db: DB,
+  determinations: readonly CorpusDetermination[] = [],
+): Promise<{
+  kata: number; techniques: number; kumiteForms: number;
+  appearances: number; terms: number; disputed: string[];
+}> {
+  const kataMod: any = await import('@/data/kata');
+  const shotokanMod: any = await import('@/data/shotokan');
+
+  const KATA: any[] = kataMod.KATA ?? [];
+  const TECHNIQUES: any[] = shotokanMod.TECHNIQUES ?? [];
+  const SYSTEMS: any[] = shotokanMod.SYSTEMS ?? [];
+
+  const bySlug = new Map(determinations.map((d) => [d.slug, d]));
+  const disputed: string[] = [];
+
+  // The in-repository corpus, registered so records imported from it can be
+  // cited to something rather than appearing from nowhere.
+  const { row: corpusSource } = await upsertBySlug(db, s.technicalSources, 'mmakf-shotokan-corpus', {
+    organisation: 'MMAKF technical library (in-repository Shotokan corpus)',
+    sourceType: 'publication',
+    authorityTier: 'educational',
+    style: 'shotokan',
+    language: 'en',
+    rightsPolicy: 'Written for MMAKF within this repository. No third-party material is reproduced.',
+    notes:
+      'src/data/kata.ts and src/data/shotokan/. Authored in-repository and NOT yet reviewed by the '
+      + 'MMAKF technical committee, which is why records imported from it carry verification '
+      + "'unverified' unless a separate verification pass established otherwise.",
+    lastReviewedOn: RETRIEVED_ON,
+  });
+
+  // ── Kata ─────────────────────────────────────────────────────────────────
+  const kataIdBySlug = new Map<string, number>();
+  let kataCount = 0;
+
+  for (const k of KATA) {
+    if (!k || !k.slug) continue;
+    const determination = bySlug.get(k.slug);
+    const verification = determination?.verification ?? 'unverified';
+
+    // A count goes into the kata row only when something stands behind it.
+    //
+    // WHEN A DETERMINATION EXISTS IT IS AUTHORITATIVE, including when it says
+    // null. A verification pass that looked for a source and found none has
+    // made a stronger statement than one that never looked, and falling back to
+    // the corpus figure would erase exactly that distinction — the reader would
+    // see a number and have no way to tell it had been checked and failed.
+    //
+    // Where sources verifiably disagree the column is likewise NULL: a single
+    // number would have to pick a winner, and picking one is the failure the
+    // directive names.
+    const countToStore = determination
+      ? (verification === 'disputed' ? null : (determination.movementCount ?? null))
+      : (k.movements ?? null);
+
+    const { row } = await upsertBySlug(db, s.kata, k.slug, {
+      nameJa: k.kanji ?? null,
+      nameRomaji: k.name,
+      meaning: k.meaning ?? null,
+      family: k.series ?? null,
+      movementCount: countToStore,
+      characteristics: k.character ?? null,
+      history: k.formerName ? `Renamed from ${k.formerName}.` : null,
+      // `sequence` and `bunkai` stay NULL on purpose. They are jsonb blobs, and
+      // kata_movements / kata_applications exist precisely so this knowledge
+      // stops being a blob. Writing both would create two answers to one
+      // question, and the blob is the one nothing can join to.
+      sourceKind: 'reference',
+      published: true,
+    });
+    kataIdBySlug.set(k.slug, row.id);
+    kataCount++;
+
+    if (verification === 'disputed') disputed.push(k.slug);
+
+    if (determination?.citation) {
+      await citeOnce(db, {
+        subjectKind: 'kata', subjectId: row.id,
+        sourceUrl: determination.citation.url,
+        sourceTitle: `Movement count for ${k.name}`,
+        sourceOrganisation: determination.citation.organisation,
+        sourceType: 'organisation',
+        retrievedOn: RETRIEVED_ON,
+        quote: determination.citation.quote,
+        domain: 'kata', language: 'en',
+        verification,
+        notes: determination.reason ?? null,
+      });
+    }
+
+    for (const variant of determination?.variants ?? []) {
+      await citeOnce(db, {
+        subjectKind: 'kata', subjectId: row.id,
+        sourceUrl: variant.url,
+        sourceTitle: `${k.name}: ${variant.count} movements per ${variant.organisation}`,
+        sourceOrganisation: variant.organisation,
+        sourceType: 'organisation',
+        retrievedOn: RETRIEVED_ON,
+        domain: 'kata', language: 'en',
+        verification: 'disputed',
+        notes:
+          'Shotokan organisations count some movements differently. This row records one '
+          + "organisation's figure; it is not MMAKF's determination.",
+      });
+    }
+
+    // A determination that found nothing still records that it looked. Without
+    // this the kata would have no citation at all, which reads as "never
+    // examined" — the opposite of what happened.
+    if (determination && !determination.citation && !(determination.variants ?? []).length) {
+      await citeOnce(db, {
+        subjectKind: 'kata', subjectId: row.id,
+        sourceId: corpusSource.id,
+        sourceUrl: 'repo:src/data/kata-verification.ts',
+        sourceTitle: `${k.name} — verification pass found no corroborating source`,
+        sourceOrganisation: 'MMAKF technical library',
+        sourceType: 'publication',
+        retrievedOn: RETRIEVED_ON,
+        domain: 'kata', language: 'en',
+        verification: 'unverified',
+        notes: determination.reason
+          ?? 'A verification pass looked for a published movement count and found none.',
+      });
+    }
+
+    if (!determination) {
+      await citeOnce(db, {
+        subjectKind: 'kata', subjectId: row.id,
+        sourceId: corpusSource.id,
+        sourceUrl: 'repo:src/data/kata.ts',
+        sourceTitle: `${k.name} — in-repository Shotokan corpus`,
+        sourceOrganisation: 'MMAKF technical library',
+        sourceType: 'publication',
+        retrievedOn: RETRIEVED_ON,
+        domain: 'kata', language: 'en',
+        verification: 'unverified',
+        notes: k.movements != null
+          ? `The corpus states ${k.movements} movements. No primary source was verified for this `
+            + 'figure; the JKA instructor manual requires an accurate count but does not publish one.'
+          : 'The corpus records no movement count for this kata.',
+      });
+    }
+  }
+
+  // ── Techniques ───────────────────────────────────────────────────────────
+  // KihonFamily maps almost exactly onto the existing technique_category enum.
+  // 'ashi_sabaki' and 'combination' have no member and become 'other' rather
+  // than being forced into a neighbouring category they do not belong to.
+  const CATEGORY: Record<string, string> = {
+    dachi: 'dachi', uke: 'uke', tsuki: 'tsuki', uchi: 'uchi', geri: 'geri',
+    tai_sabaki: 'tai_sabaki', ashi_sabaki: 'other', combination: 'other',
+  };
+
+  const techniqueIdBySlug = new Map<string, number>();
+  let techniqueCount = 0;
+
+  for (const t of TECHNIQUES) {
+    if (!t || !t.slug) continue;
+    const m = t.mechanics ?? {};
+    // The mechanical description is split across optional fields. Joining only
+    // the fields actually present keeps an empty label out of the text — "Hips:"
+    // with nothing after it reads as missing data rather than as a field that
+    // does not apply to this technique.
+    const execution = Object.entries(m)
+      .filter(([, v]) => typeof v === 'string' && v.trim())
+      .map(([key, v]) => `${key.charAt(0).toUpperCase()}${key.slice(1)}: ${v}`)
+      .join('\n');
+
+    const { row } = await upsertBySlug(db, s.techniques, t.slug, {
+      nameJa: t.kanji ?? null,
+      nameRomaji: t.name,
+      nameEn: t.english ?? null,
+      category: CATEGORY[t.family] ?? 'other',
+      description: t.summary ?? null,
+      execution: execution || null,
+      purpose: t.application ?? null,
+      breathing: m.breathing ?? null,
+      commonErrors: (t.commonErrors ?? []).map((f: any) => ({ error: f.error, why: f.why })),
+      corrections: (t.commonErrors ?? []).map((f: any) => ({ error: f.error, fix: f.fix })),
+      sourceKind: 'reference',
+      published: true,
+    });
+    techniqueIdBySlug.set(t.slug, row.id);
+    techniqueCount++;
+
+    // A technique the corpus itself flags as contested between organisations is
+    // recorded as disputed. This is the directive's "do not silently combine"
+    // rule, and the corpus already did the hard part by noticing.
+    if (t.contested) {
+      await citeOnce(db, {
+        subjectKind: 'technique', subjectId: row.id,
+        sourceId: corpusSource.id,
+        sourceUrl: `repo:src/data/shotokan#${t.slug}`,
+        sourceTitle: `${t.name} — contested between Shotokan organisations`,
+        sourceOrganisation: 'MMAKF technical library',
+        sourceType: 'publication',
+        retrievedOn: RETRIEVED_ON,
+        quote: t.contested,
+        domain: 'kihon', language: 'en',
+        verification: 'disputed',
+      });
+    }
+  }
+
+  // ── Kumite systems ───────────────────────────────────────────────────────
+  // The slug is the enum member with hyphens swapped for underscores, which is
+  // checked rather than assumed: an unrecognised system becomes 'other' instead
+  // of failing the whole import.
+  const KUMITE_ENUM = new Set([
+    'kihon_kumite', 'yakusoku_kumite', 'gohon_kumite', 'sanbon_kumite',
+    'ippon_kumite', 'jiyu_ippon_kumite', 'jiyu_kumite', 'shiai_kumite', 'other',
+  ]);
+
+  let kumiteCount = 0;
+  for (const sys of SYSTEMS) {
+    if (!sys || !sys.slug) continue;
+    const candidate = String(sys.slug).replace(/-/g, '_');
+    await upsertBySlug(db, s.kumiteForms, sys.slug, {
+      system: KUMITE_ENUM.has(candidate) ? candidate : 'other',
+      nameRomaji: sys.name,
+      purpose: sys.purpose ?? null,
+      progression: sys.progression ?? null,
+      principles: (sys.structure ?? []).join(' ') || null,
+      safetyNotes: (sys.safety ?? []).join(' ') || null,
+      drills: sys.drills ?? null,
+      sourceKind: 'reference',
+      // Sport kumite is NOT published as traditional teaching material here. It
+      // has its own home in sport_kumite_rulesets, where it carries an
+      // effective date and a governing authority. Publishing it in both places
+      // is how a learner ends up reading a competition convention as Shotokan
+      // doctrine.
+      published: sys.world !== 'sport',
+    });
+    kumiteCount++;
+  }
+
+  // ── The knowledge graph edge ─────────────────────────────────────────────
+  let appearances = 0;
+  for (const t of TECHNIQUES) {
+    const techniqueId = techniqueIdBySlug.get(t && t.slug);
+    if (!techniqueId) continue;
+    for (const kataSlug of t.relatedKata ?? []) {
+      const kataId = kataIdBySlug.get(kataSlug);
+      if (!kataId) continue;
+      const exists = await db.select().from(s.techniqueKataAppearances)
+        .where(and(
+          eq(s.techniqueKataAppearances.techniqueId, techniqueId),
+          eq(s.techniqueKataAppearances.kataId, kataId),
+        )).limit(1);
+      if (exists[0]) continue;
+      await db.insert(s.techniqueKataAppearances).values({
+        techniqueId,
+        kataId,
+        // Null: the corpus records THAT it appears, not where. Inventing an
+        // ordinal here would make this indistinguishable from researched
+        // movement data the moment it is stored.
+        movementOrdinal: null,
+        note: 'Recorded by the in-repository Shotokan corpus as appearing uncontroversially.',
+        verification: 'unverified',
+      });
+      appearances++;
+    }
+  }
+
+  // ── Terms, so the corpus is searchable by name ───────────────────────────
+  // Each technique gets a canonical term linked back to it, and the corpus's
+  // own hand-authored aliases become alias rows. Those aliases are better than
+  // anything generated: somebody who knows the art wrote them.
+  let terms = 0;
+  for (const t of TECHNIQUES) {
+    const techniqueId = techniqueIdBySlug.get(t && t.slug);
+    if (!techniqueId) continue;
+
+    const { row } = await upsertBySlug(db, s.technicalTerms, `technique-${t.slug}`, {
+      kanji: t.kanji ?? null,
+      romaji: t.name,
+      english: t.english ?? null,
+      domain: 'kihon',
+      definition: t.summary ?? null,
+      techniqueId,
+      verification: 'unverified',
+      published: true,
+    });
+    terms++;
+
+    const aliasSet = new Set<string>([
+      ...(t.aliases ?? []),
+      ...aliasesFor(t.name, t.english ?? null, t.slug).map((a) => a.alias),
+    ]);
+    for (const alias of aliasSet) {
+      if (!alias || !alias.trim()) continue;
+      const exists = await db.select().from(s.technicalTermAliases)
+        .where(and(
+          eq(s.technicalTermAliases.termId, row.id),
+          eq(s.technicalTermAliases.alias, alias),
+        )).limit(1);
+      if (exists[0]) continue;
+      await db.insert(s.technicalTermAliases).values({
+        termId: row.id, alias, kind: 'romanisation', language: null,
+      });
+    }
+  }
+
+  return {
+    kata: kataCount,
+    techniques: techniqueCount,
+    kumiteForms: kumiteCount,
+    appearances,
+    terms,
+    disputed,
   };
 }

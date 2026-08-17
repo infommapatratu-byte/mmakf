@@ -42,6 +42,7 @@ import {
   bookableSessions, bookClassSession, cancelSessionBooking, cancelSession,
   isSchedulingError,
 } from '../src/db/scheduling';
+import { notifyForEvent } from '../src/lib/notifications';
 import type { Principal } from '../src/lib/rbac';
 import type { AuditContext } from '../src/db/federation';
 
@@ -119,6 +120,8 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   // Order matters: every referent before what it points at.
+  await db.execute?.('DELETE FROM notifications');
+  await db.execute?.('DELETE FROM domain_events');
   await db.execute?.('DELETE FROM bookings');
   await db.execute?.('DELETE FROM class_sessions');
   await db.execute?.('DELETE FROM schedule_rules');
@@ -998,6 +1001,35 @@ describe('booking a place in a class', () => {
 
   it('refuses a cancellation with no reason', async () => {
     await expect(cancelSession(db, ctx(clubAdminA), sessionId, '  ')).rejects.toThrow(/must record why/);
+  });
+
+  it('tells the people who held a place — and does not tell them why', async () => {
+    // The federation's instruction: when a class moves or is called off, the
+    // affected students are notified. This is that path end to end — the event
+    // is published in the same transaction that cancels the bookings, and the
+    // notification consumer resolves the audience from those bookings.
+    await bookClassSession(db, ctx(member), sessionId, student);
+    await cancelSession(db, ctx(clubAdminA), sessionId, 'Instructor bereavement');
+
+    const [event] = await db.select().from(s.domainEvents)
+      .where(eq(s.domainEvents.eventType, 'CLASS_SESSION_CANCELLED'));
+    expect(event).toBeTruthy();
+    // The reason is NOT on the feed. It is in the audit trail and on the
+    // administrator's screen; a notification travels through channels the
+    // federation does not control.
+    expect(JSON.stringify(event.payload)).not.toMatch(/bereavement/i);
+
+    const queued = await notifyForEvent(db, ctx(clubAdminA), {
+      id: event.id, eventType: event.eventType, entityType: event.entityType,
+      entityId: event.entityId, payload: event.payload,
+    });
+    expect(queued).toBe(1);
+
+    const [note] = await db.select().from(s.notifications);
+    expect(note.personId).toBe(student);
+    expect(note.title).toMatch(/cancelled/i);
+    expect(note.body).not.toMatch(/bereavement/i);
+    expect(note.body).toMatch(/Kids Program/);
   });
 
   it('offers only sessions somebody can genuinely take', async () => {

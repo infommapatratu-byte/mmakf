@@ -177,7 +177,14 @@ const etiquette = [
         </table>
       </div>
       <div class="mt-6 text-muted" style="font-size:.82rem">
-        {fed.contact.hoursSunday && <><strong>Sunday runs on seasonal timings.</strong> {fed.contact.hoursSunday}.<br /></>}
+        {/* Once the headquarters is in the schedule engine, the seasonal Sunday
+            is rows with dates and is rendered above with the season named. The
+            string is only repeated here while it is still the only record. */}
+        {!usingEngine && fed.contact.hoursSunday && (
+          <><strong>Sunday runs on seasonal timings.</strong> {fed.contact.hoursSunday}.<br /></>
+        )}
+        This table is the headquarters dojo at Patratu. <a href="/dojos" class="text-gold">Affiliated clubs</a>
+        publish their own timings, which are not these.<br />
         Timings may shift on tournament and grading weekends — changes are posted in the
         <a href="/events" class="text-gold">events calendar</a> and announced in class.
       </div>
@@ -234,6 +241,21 @@ const etiquette = [
 </Base>
 
 <style>
+  .whose {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    padding: 18px 22px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold);
+    border-radius: var(--radius);
+    background: var(--card);
+    font-size: 0.88rem;
+    line-height: 1.65;
+  }
+  .whose > div { flex: 1 1 420px; }
   .bg2 { background: var(--bg-2); }
   .schedule-wrap { overflow-x: auto; }
   .schedule-tbl {

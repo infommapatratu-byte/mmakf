@@ -333,6 +333,11 @@ export const ADMIN_GROUPS: AdminGroup[] = [
       { href: '/admin/quotes', label: 'Quotes and proposals', action: 'quote:read' },
       { href: '/admin/bookings', label: 'Bookings and calendar', action: 'booking:read' },
       { href: '/admin/venues', label: 'Venues', action: 'venue:read' },
+      // WHEN, as opposed to where. Gated on 'schedule:read' rather than
+      // 'venue:read' because a club administrator must reach its own timetable
+      // without holding the venue register — the whole point of the scheduling
+      // wave being that a club sets its own hours without asking the federation.
+      { href: '/admin/schedules', label: 'Schedules and seasons', action: 'schedule:read' },
       { href: '/admin/attendance', label: 'Attendance', action: 'attendance:read' },
     ],
   },
