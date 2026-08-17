@@ -1,0 +1,154 @@
+---
+/**
+ * /shotokan/techniques — the flat A–Z index of every technique. §33.
+ *
+ * DELIBERATELY NOT A SECOND COPY OF /shotokan/kihon. That page groups by family
+ * and reads as a curriculum; this one is a LOOKUP — one alphabetical table, the
+ * Japanese, the English, the family, and whether the record carries a noted
+ * disagreement. It is the page for somebody who already knows the name and
+ * wants the page, which is a different job from browsing.
+ *
+ * The two are generated from the same array, so they cannot disagree about what
+ * exists.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { TECHNIQUES, KIHON_FAMILIES, libraryStats } from '@/data/shotokan';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const stats = libraryStats();
+const FAMILY_LABEL = new Map(KIHON_FAMILIES.map((f) => [f.key, f.english]));
+
+// Alphabetical by romanised name — the order somebody looking a name up expects.
+const sorted = [...TECHNIQUES].sort((a, b) => a.name.localeCompare(b.name));
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'CollectionPage',
+  name: 'Shotokan techniques — A to Z',
+  url: canonicalFor(surface, '/shotokan/techniques'),
+  description: `An alphabetical index of ${stats.techniques} Shotokan techniques, with the Japanese, the English name and the family each belongs to.`,
+  isPartOf: { '@type': 'WebSite', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
+};
+---
+
+<Base
+  title="Shotokan techniques A–Z — MMAKF"
+  description={`An alphabetical index of all ${stats.techniques} Shotokan techniques documented by MMAKF: stances, punches, blocks, strikes, kicks and body movement, each linking to its mechanics, principles, common errors and drills.`}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Techniques', url: '/shotokan/techniques' },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow="Index"
+    title={`Every technique, <em class="r">A to Z</em>.`}
+    lead="The lookup. If you already know the name, this is the shortest way to the page."
+    pills={[`${stats.techniques} techniques`, `${KIHON_FAMILIES.length} families`]}
+  />
+
+  <section>
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">How to use this</div>
+          <h2 class="display-2" style="margin-top:16px">A list, <em class="r">not a ladder</em>.</h2>
+          <div class="rule"></div>
+          <p class="body-txt">
+            This index is alphabetical, which is the one ordering that asserts nothing. It is not ordered by
+            difficulty and not ordered by grade, because MMAKF has published no syllabus and an ordered list
+            of techniques would be read as one whatever the heading said.
+          </p>
+          <p class="body-txt">
+            To browse by what the techniques actually are &mdash; stances, then punches, then blocks, and so
+            on &mdash; use the <a href={h('/shotokan/kihon')}>kihon library</a>, which groups them by family
+            and explains what each family is for.
+          </p>
+        </div>
+        <aside class="fade panel">
+          <div class="eyebrow">Marked &ldquo;not settled&rdquo;</div>
+          <h3 class="panel-h">Where Shotokan disagrees with itself.</h3>
+          <p class="panel-p">
+            A few entries carry a flag. Those are the techniques where organisations genuinely differ &mdash;
+            most notably <a href={h('/shotokan/techniques/soto-uke')}>soto-uke</a> and
+            {' '}<a href={h('/shotokan/techniques/uchi-uke')}>uchi-uke</a>, whose names are swapped in some
+            schools.
+          </p>
+          <p class="panel-p">
+            The library records the disagreement rather than picking a winner quietly, so a student is never
+            told their own instructor is wrong.
+          </p>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">{sorted.length} entries</div>
+        <h2 class="display-2">The index</h2>
+        <div class="rule"></div>
+      </div>
+
+      <div class="tablewrap fade">
+        <table class="idx">
+          <caption class="sr-only">Every Shotokan technique, alphabetically, with its family and English name.</caption>
+          <thead>
+            <tr>
+              <th scope="col">Technique</th>
+              <th scope="col">Japanese</th>
+              <th scope="col">English</th>
+              <th scope="col">Family</th>
+              <th scope="col">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((t) => (
+              <tr>
+                <th scope="row">
+                  <a href={h(`/shotokan/techniques/${t.slug}`)}>{t.name}</a>
+                </th>
+                <td lang="ja">{t.kanji ?? '—'}</td>
+                <td>{t.english}</td>
+                <td>{FAMILY_LABEL.get(t.family) ?? t.family}</td>
+                <td>{t.contested ? <span class="pill">Not settled</span> : ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <div class="flex flex-wrap gap-3">
+        <a class="btn btn-ghost" href={h('/shotokan/kihon')}>Browse by family</a>
+        <a class="btn btn-ghost" href={h('/shotokan/stances')}>Stances</a>
+        <a class="btn btn-ghost" href={h('/shotokan/kumite')}>Kumite</a>
+        <a class="btn btn-ghost" href={h('/shotokan/terminology')}>Terminology</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .idx { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  .idx th, .idx td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line, rgba(0, 0, 0, .1));
+    white-space: nowrap;
+  }
+  .idx thead th { font-weight: 600; border-bottom-width: 2px; }
+  .idx tbody th { font-weight: 500; }
+</style>

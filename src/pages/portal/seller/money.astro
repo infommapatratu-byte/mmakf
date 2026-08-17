@@ -1,0 +1,264 @@
+---
+// /portal/seller/money — the arithmetic the brief says a seller must be able
+// to follow: order → revenue → commission → deductions → net → payout.
+//
+// ─── WHY THE LINES ARE SHOWN, NOT JUST THE TOTAL ────────────────────────────
+//
+// A settlement total that a seller cannot check is a settlement they have to
+// take on trust, and the first time it is wrong they have no way to say where.
+// So the open period's every line is here, signed, with the order it came from
+// — and the total is `sum` of exactly those lines, not a separately stored
+// figure that could disagree with them.
+//
+// ─── AND THE HELD SALES, STATED PLAINLY ─────────────────────────────────────
+//
+// When MMAKF has published no commission covering a sale, that sale is HELD:
+// the goods are sold and the money is captured, and the payout waits. The
+// alternative — settling at a rate this system chose — would take a share of a
+// real person's money on nobody's authority. This page says which sales, how
+// many, and why, in the module's own words.
+
+import Base from '@/layouts/Base.astro';
+import { db } from '@/db';
+import { myAccount, myStatements, COMMISSION_NOT_CONFIGURED } from '@/db/marketplace-finance';
+import { sellerContext, readableError, money, fmtDate, titleCase, SELLER_TABS } from './_gate';
+
+export const prerender = false;
+
+const ctx = await sellerContext(Astro.request.headers.get('cookie'));
+
+let account: any = null;
+let statements: any[] = [];
+let pageError: string | null = ctx.loadError;
+
+if (ctx.gate === 'seller' && ctx.approved && !pageError) {
+  try {
+    // No seller id. Both resolve the caller's shop from the session.
+    account = await myAccount(db(), ctx.identity!.principal);
+    statements = await myStatements(db(), ctx.identity!.principal, 24);
+  } catch (err: any) {
+    pageError = readableError(err, 'Your account');
+  }
+}
+
+/** How each settlement line reads to the person being paid. */
+const LINE_LABEL: Record<string, string> = {
+  sale: 'Sale',
+  shipping: 'Carriage collected',
+  tax_collected: 'Tax collected',
+  commission: 'MMAKF commission',
+  commission_tax: 'Tax on commission',
+  refund: 'Refund to buyer',
+  refund_commission_reversal: 'Commission returned on a refund',
+  gateway_fee: 'Payment provider charge',
+  adjustment: 'Adjustment',
+  penalty: 'Penalty',
+  hold: 'Held back',
+  release: 'Released',
+  carry_forward: 'Brought forward',
+};
+
+const open = account?.open ?? null;
+const lines = account?.openLines ?? [];
+const payouts = account?.payouts ?? [];
+---
+
+<Base
+  title="Your money — MMAKF marketplace"
+  description="What you have sold, what MMAKF has charged, what has been refunded, and what you are owed."
+>
+  <section>
+    <div class="container">
+
+      {ctx.gate !== 'seller' && (
+        <div class="card"><div class="eyebrow">Seller area</div>
+        <h1 class="display-2" style="margin-top:14px">Your money</h1>
+        <p>Sign in with a personal account that holds an approved seller record.</p></div>
+      )}
+
+      {ctx.gate === 'seller' && (
+        <>
+          <div class="eyebrow">MMAKF marketplace</div>
+          <h1 class="display-1" style="margin-top:14px">Money</h1>
+
+          <nav class="tabs" aria-label="Seller area">
+            {SELLER_TABS.map((t) => (
+              <a href={t.href} aria-current={t.href === '/portal/seller/money' ? 'page' : undefined}>{t.label}</a>
+            ))}
+          </nav>
+
+          {pageError && <div class="card" role="alert"><p>{pageError}</p></div>}
+
+          {!ctx.approved && (
+            <div class="card"><p>MMAKF has not approved this seller account, so there is nothing to settle.</p></div>
+          )}
+
+          {ctx.approved && (
+            <>
+              {account?.heldForCommission > 0 && (
+                <div class="card tone-wait" role="status">
+                  <div class="eyebrow">Held</div>
+                  <h2 class="h3">{account.heldForCommission} sale{account.heldForCommission === 1 ? '' : 's'} cannot be settled yet.</h2>
+                  <p>{COMMISSION_NOT_CONFIGURED}</p>
+                  <p class="muted">
+                    Your goods are sold and the buyer has paid. Nothing is at risk — what is waiting is the
+                    payout, and it waits rather than being calculated at a figure nobody approved.
+                  </p>
+                </div>
+              )}
+
+              {/* ── The current period ──────────────────────────────────── */}
+              <div class="card">
+                <div class="eyebrow">This period</div>
+                {!open ? (
+                  <p class="muted">Nothing has accrued yet. A sale reaches your account when it is delivered.</p>
+                ) : (
+                  <>
+                    <h2 class="h3">{fmtDate(open.periodStart)} — {open.status === 'open' ? 'still open' : fmtDate(open.periodEnd)}</h2>
+                    <dl class="sums">
+                      <div><dt>Gross sales</dt><dd>{money(open.grossMinor)}</dd></div>
+                      <div><dt>Carriage collected</dt><dd>{money(open.shippingMinor)}</dd></div>
+                      <div><dt>MMAKF commission</dt><dd>−{money(open.commissionMinor)}</dd></div>
+                      <div><dt>Tax on commission</dt><dd>−{money(open.commissionTaxMinor)}</dd></div>
+                      <div><dt>Refunds</dt><dd>−{money(open.refundMinor)}</dd></div>
+                      <div><dt>Adjustments</dt><dd>{money(open.adjustmentMinor)}</dd></div>
+                      <div class="total"><dt>Net payable</dt><dd>{money(open.netPayableMinor)}</dd></div>
+                    </dl>
+                    {open.hasUnresolvedCommission && (
+                      <p class="warn">
+                        This period contains a sale whose commission MMAKF has not set, so it cannot be
+                        closed. A statement closed over an unknown rate is a wrong figure made final.
+                      </p>
+                    )}
+                    <p class="muted">
+                      {open.orderCount} order{open.orderCount === 1 ? '' : 's'}. Reference <strong>{open.ref}</strong>.
+                    </p>
+                  </>
+                )}
+              </div>
+
+              {/* ── The working ─────────────────────────────────────────── */}
+              {lines.length > 0 && (
+                <div class="card">
+                  <div class="eyebrow">Every movement</div>
+                  <h2 class="h3">The working behind that total</h2>
+                  <p class="muted">
+                    The total above is the sum of exactly these lines. Sales are positive; commission,
+                    refunds and penalties are negative — the sign is the meaning, so the figures cannot
+                    disagree with what they are made of.
+                  </p>
+                  <table>
+                    <caption class="sr-only">Settlement lines for the open period</caption>
+                    <thead><tr>
+                      <th scope="col">Date</th><th scope="col">What</th>
+                      <th scope="col">Description</th><th scope="col" class="num">Amount</th>
+                    </tr></thead>
+                    <tbody>
+                      {lines.map((l: any) => (
+                        <tr>
+                          <td>{fmtDate(l.occurredOn)}</td>
+                          <th scope="row">{LINE_LABEL[l.kind] ?? titleCase(l.kind)}</th>
+                          <td>{l.description}</td>
+                          <td class={`num ${l.amountMinor < 0 ? 'neg' : ''}`}>{money(l.amountMinor)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* ── Payouts ─────────────────────────────────────────────── */}
+              <div class="card">
+                <div class="eyebrow">Payouts</div>
+                <h2 class="h3">Money sent to you</h2>
+                {payouts.length === 0 ? (
+                  <p class="muted">
+                    None yet. A payout is created after MMAKF closes and approves a settlement period, and it
+                    is sent only to a payout account the payment provider has verified.
+                  </p>
+                ) : (
+                  <table>
+                    <caption class="sr-only">Payouts</caption>
+                    <thead><tr>
+                      <th scope="col">Reference</th><th scope="col">Amount</th>
+                      <th scope="col">Status</th><th scope="col">Paid</th><th scope="col">Bank reference</th>
+                    </tr></thead>
+                    <tbody>
+                      {payouts.map((p: any) => (
+                        <tr>
+                          <th scope="row">{p.ref}</th>
+                          <td>{money(p.amountMinor, p.currency)}</td>
+                          <td>{titleCase(p.status)}{p.failureReason ? ` — ${p.failureReason}` : ''}</td>
+                          <td>{fmtDate(p.paidAt)}</td>
+                          <td>{p.utr ? <code>{p.utr}</code> : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {/* ── Statements ──────────────────────────────────────────── */}
+              <div class="card">
+                <div class="eyebrow">Statements</div>
+                <h2 class="h3">Frozen periods</h2>
+                {statements.length === 0 ? (
+                  <p class="muted">
+                    No statement has been issued. A statement is a document — once issued, the figures on it
+                    do not change, even when a refund is processed afterwards.
+                  </p>
+                ) : (
+                  <table>
+                    <caption class="sr-only">Issued statements</caption>
+                    <thead><tr>
+                      <th scope="col">Reference</th><th scope="col">Period</th>
+                      <th scope="col">Gross</th><th scope="col">Commission</th><th scope="col">Net</th>
+                    </tr></thead>
+                    <tbody>
+                      {statements.map((st: any) => (
+                        <tr>
+                          <th scope="row">{st.ref}</th>
+                          <td>{fmtDate(st.periodStart)} — {fmtDate(st.periodEnd)}</td>
+                          <td>{money(st.grossMinor)}</td>
+                          <td>−{money(st.commissionMinor)}</td>
+                          <td>{money(st.netMinor)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              <div class="card">
+                <div class="eyebrow">Where your money goes</div>
+                <p>
+                  MMAKF does not hold your bank account number. Where a payout is sent is arranged through
+                  the payment provider, which keeps the account and returns a reference the federation can
+                  pay to — so a table that never held the number cannot leak it.
+                </p>
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+    </div>
+  </section>
+</Base>
+
+<style>
+  .tabs { display: flex; gap: 16px; margin: 18px 0; flex-wrap: wrap; }
+  .tabs a { padding: 6px 0; border-bottom: 2px solid transparent; text-decoration: none; }
+  .tabs a[aria-current='page'] { border-bottom-color: currentColor; font-weight: 600; }
+  .sums { display: grid; gap: 6px; margin: 12px 0; }
+  .sums > div { display: flex; justify-content: space-between; gap: 16px; padding: 4px 0; border-bottom: 1px solid rgba(128,128,128,0.2); }
+  .sums dt, .sums dd { margin: 0; }
+  .sums .total { font-weight: 700; font-size: 1.15em; border-bottom: none; border-top: 2px solid currentColor; padding-top: 8px; margin-top: 4px; }
+  .muted { opacity: 0.75; }
+  .warn { font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .neg { font-weight: 600; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style>

@@ -53,11 +53,24 @@ export default defineConfig({
     // tree gave 47 failures and then 7, and every one of those suites passes
     // when it is run on its own.
     //
-    // Related, and still true: ASTRO_CACHE_DIR does NOT isolate the content
+    // Related, and it was correct: ASTRO_CACHE_DIR does NOT isolate the content
     // store for `astro dev`. Astro honours cacheDir on build, but in dev it
-    // writes <root>/.astro/data-store.json unconditionally, so concurrent
-    // dev servers still share one file. Capping the workers is what actually
-    // holds them apart today.
+    // writes <root>/.astro/data-store.json unconditionally, so concurrent dev
+    // servers still share one file.
+    //
+    // RESOLVED 17 August 2026, and capping the workers was never enough. With
+    // maxWorkers: 4 in force the race still fired, this time as
+    //
+    //   EPERM: operation not permitted, rename
+    //     '.astro/data-store.json.tmp' -> '.astro/data-store.json'
+    //
+    // which killed one dev server and produced "3357 passed | 144 skipped" —
+    // a green-looking run whose largest suite had verified nothing.
+    //
+    // The three suites that boot a server now take an explicit cross-process
+    // lock and run one at a time: tests/helpers/astro-dev.ts. That is the fix;
+    // this cap remains for the PGlite instances, which is what it was actually
+    // good for.
     maxWorkers: 4,
   },
 });

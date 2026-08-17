@@ -2391,3 +2391,394 @@ export async function cancelSession(
     return { sessionId, bookingsCancelled: held.length };
   });
 }
+
+/**
+ * Move a session, keeping the people who booked it.
+ *
+ * NOT "cancel and let them rebook". A member who booked a Tuesday and is told
+ * the Tuesday is cancelled has lost their place; a member whose Tuesday moved
+ * to a Wednesday still has one, and it is the federation's job to say which
+ * happened. So this creates the successor, carries every live booking onto it,
+ * and links the two rows — `rescheduled_to_session_id` on the original.
+ *
+ * THE NEW TIME IS CHECKED THE SAME WAY A GENERATED ONE IS. A reschedule that
+ * could put a class outside the building's hours, or on top of another class in
+ * the same room, would be a hole straight through everything
+ * `generateSessions()` refuses — so the same checks run here, and `force` is
+ * the only way past them. `force` exists because a reschedule is sometimes
+ * exactly the act of putting a class somewhere unusual with a human deciding;
+ * it is never a default, and what was overridden is written to the audit row.
+ */
+export async function rescheduleSession(
+  db: DB, ctx: AuditContext,
+  sessionId: number,
+  to: { localDate: IsoDate; localStart: Wall; localEnd: Wall; venueId?: number | null; coachPersonId?: number | null },
+  reason: string,
+  opts: { force?: boolean } = {}
+): Promise<{ from: number; to: number; bookingsMoved: number; overridden: ConflictReport[] }> {
+  const why = (reason ?? '').trim();
+  if (!why) {
+    throw new SchedulingError(
+      'reason_required',
+      'Moving a class must record why. Everyone booked on it is told this happened, and the office is asked about it afterwards.'
+    );
+  }
+  const localDate = assertIsoDate(to.localDate, 'localDate');
+  const localStart = assertWall(to.localStart, 'localStart');
+  const localEnd = assertWall(to.localEnd, 'localEnd');
+  if (localEnd <= localStart) {
+    throw new SchedulingError('bad_range', `${localStart}-${localEnd} ends before it starts.`);
+  }
+
+  const rows = await db.select().from(sch.classSessions).where(eq(sch.classSessions.id, sessionId)).limit(1);
+  if (!rows.length) throw new SchedulingError('not_found', `No class session ${sessionId}.`);
+  const session = rows[0];
+  const klass = await loadClass(db, session.classId);
+  await assertMayWriteSchedule(db, ctx.principal, { scope: klass.ownerScope, id: klass.ownerId ?? null });
+
+  if (session.status !== 'scheduled') {
+    throw new SchedulingError('not_reschedulable', `That session is ${String(session.status).replace(/_/g, ' ')} and cannot be moved.`);
+  }
+
+  const tz = session.timezone;
+  const startsAt = zonedInstant(localDate, localStart, tz);
+  const endsAt = zonedInstant(localDate, localEnd, tz);
+  const venueId = to.venueId === undefined ? session.venueId : to.venueId;
+  const coachPersonId = to.coachPersonId === undefined ? session.coachPersonId : to.coachPersonId;
+
+  // The room must be open, exactly as it must be for a generated occurrence.
+  if (klass.mode !== 'online' && venueId) {
+    let facilityDay = await openingHoursOn(db, { purpose: 'training', venueId }, localDate, { asOf: localDate });
+    if (facilityDay.unconfigured) {
+      facilityDay = await openingHoursOn(db, { purpose: 'operating', venueId }, localDate, { asOf: localDate });
+    }
+    if (!facilityDay.unconfigured && !opts.force) {
+      if (!facilityDay.open) {
+        throw new SchedulingError('facility_closed', `The venue is closed on ${localDate}, so a class cannot be placed there.`);
+      }
+      if (!windowContains(facilityDay.windows, localStart, localEnd)) {
+        throw new SchedulingError(
+          'outside_facility_hours',
+          `The venue is open ${mergedMinutes(facilityDay.windows).map((x) => `${x.opensAt}-${x.closesAt}`).join(', ')} on ${localDate}; ${localStart}-${localEnd} falls outside that.`
+        );
+      }
+    }
+  }
+
+  const conflicts = await detectConflicts(db, {
+    startsAt, endsAt,
+    venueId: klass.mode === 'online' ? null : venueId,
+    coachPersonId,
+    excludeSessionId: sessionId,
+  });
+  if (conflicts.length && !opts.force) {
+    throw new SchedulingError('conflict', `${conflicts.map((c) => c.detail).join('; ')}.`);
+  }
+
+  return await db.transaction(async (tx: DB) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${SESSION_LOCK_NAMESPACE}::int4, ${sessionId}::int4)`);
+
+    const ref = await allocateFederationId(tx, 'SES');
+    const created = await tx.insert(sch.classSessions).values({
+      ref,
+      classId: session.classId,
+      scheduleVersionId: session.scheduleVersionId,
+      venueId: klass.mode === 'online' ? null : venueId,
+      coachPersonId,
+      mode: session.mode,
+      onlineUrl: session.onlineUrl,
+      startsAt, endsAt,
+      localDate, localStart, localEnd, timezone: tz,
+      capacity: session.capacity,
+      bookedCount: session.bookedCount,
+      status: 'scheduled',
+      notes: `Rescheduled from ${session.ref} (${session.localDate} ${session.localStart}-${session.localEnd}).`,
+      createdByUserId: ctx.principal.userId ?? null,
+    }).returning();
+    const successor = created[0];
+
+    const held = await tx.select({ id: s.bookings.id }).from(s.bookings).where(and(
+      eq(s.bookings.classSessionId, sessionId),
+      inArray(s.bookings.status, ['requested', 'proposed', 'confirmed'])
+    ));
+    if (held.length) {
+      await tx.update(s.bookings).set({
+        classSessionId: successor.id,
+        startsAt, endsAt,
+        status: 'rescheduled',
+        updatedAt: new Date(),
+      }).where(inArray(s.bookings.id, held.map((x: any) => x.id)));
+    }
+
+    await tx.update(sch.classSessions).set({
+      status: 'rescheduled',
+      rescheduledToSessionId: successor.id,
+      bookedCount: 0,
+    }).where(eq(sch.classSessions.id, sessionId));
+
+    await writeAudit(tx, ctx, {
+      entityType: 'class_session', entityId: sessionId, action: 'update',
+      oldValue: {
+        localDate: session.localDate, localStart: session.localStart, localEnd: session.localEnd,
+        venueId: session.venueId, coachPersonId: session.coachPersonId,
+      },
+      newValue: {
+        movedTo: successor.id, localDate, localStart, localEnd, venueId, coachPersonId,
+        reason: why, forcedOver: conflicts.map((c) => c.kind),
+      },
+    });
+
+    await publish(tx, {
+      eventType: 'CLASS_SESSION_RESCHEDULED',
+      entityType: 'class_session',
+      entityId: successor.id,
+      payload: {
+        sessionId: successor.id,
+        previousSessionId: sessionId,
+        classId: session.classId,
+        className: klass.name,
+        startsAt: startsAt.toISOString(),
+        previousStartsAt: new Date(session.startsAt).toISOString(),
+      },
+      correlationId: `class_session:rescheduled:${sessionId}`,
+      actor: ctx.principal,
+    });
+
+    return { from: sessionId, to: successor.id, bookingsMoved: held.length, overridden: opts.force ? conflicts : [] };
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FINDING A TIME THAT WORKS — schools, corporates, camps
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface DeliverySlot {
+  date: IsoDate;
+  opensAt: Wall;
+  closesAt: Wall;
+  startsAt: Date;
+  endsAt: Date;
+  venueId: number;
+  coachPersonId: number | null;
+  timezone: string;
+}
+
+export interface DeliveryRequest {
+  venueId: number;
+  /** How long one session runs. REQUIRED — see the note below. */
+  durationMinutes: number;
+  fromIso: IsoDate;
+  toIso: IsoDate;
+  /** ISO 1-7. Empty means any day the venue is open. */
+  preferredDays?: number[];
+  /** Wall-clock bounds the client can work within — a school day, an office day. */
+  earliestAt?: Wall;
+  latestAt?: Wall;
+  /** Which coaches may take it. Empty means the room's availability alone. */
+  coachPersonIds?: number[];
+  /** Stop after this many. A quotation needs options, not a year of them. */
+  limit?: number;
+}
+
+/**
+ * Every start time that genuinely works for an institutional programme.
+ *
+ * WHAT MAKES A SLOT REAL, and all of them must hold at once — the federation's
+ * instruction lists exactly these:
+ *
+ *     FACILITY AVAILABLE + INSTRUCTOR AVAILABLE + inside the client's own
+ *     window + nothing else booked on the room + nothing else on the coach.
+ *
+ * `durationMinutes` HAS NO DEFAULT and is required, for the reason
+ * src/db/booking.ts gives about session length: how long MMAKF's school
+ * sessions run is federation policy nobody has set, and a plausible default
+ * here would appear in a quotation as though the federation had decided it.
+ *
+ * Starts are offered on a 15-minute grid inside each open window. Stated rather
+ * than hidden: a finer grid multiplies options without telling a school
+ * anything new, and a coarser one loses the 07:45 start that fits before
+ * assembly.
+ */
+export async function deliveryOptions(db: DB, request: DeliveryRequest): Promise<DeliverySlot[]> {
+  const duration = request.durationMinutes;
+  if (!Number.isInteger(duration) || duration <= 0) {
+    throw new SchedulingError(
+      'duration_required',
+      'How long a session runs must be stated. There is no default — session length is federation policy, and inventing one would put a decision nobody made into a quotation.'
+    );
+  }
+  const fromIso = assertIsoDate(request.fromIso, 'from');
+  const toIso = assertIsoDate(request.toIso, 'to');
+  const earliest = request.earliestAt ? assertWall(request.earliestAt, 'earliestAt') : null;
+  const latest = request.latestAt ? assertWall(request.latestAt, 'latestAt') : null;
+  if (earliest && latest && latest <= earliest) {
+    throw new SchedulingError('bad_range', `The window ${earliest}-${latest} ends before it starts.`);
+  }
+  const limit = request.limit ?? 50;
+  const step = 15;
+
+  const out: DeliverySlot[] = [];
+  const coaches: Array<number | null> = request.coachPersonIds?.length ? request.coachPersonIds : [null];
+
+  for (const date of daysBetween(fromIso, toIso)) {
+    if (out.length >= limit) break;
+    if (request.preferredDays?.length && !request.preferredDays.includes(isoDayOfWeek(date))) continue;
+
+    let day = await openingHoursOn(db, { purpose: 'training', venueId: request.venueId }, date, { asOf: date });
+    if (day.unconfigured) {
+      day = await openingHoursOn(db, { purpose: 'operating', venueId: request.venueId }, date, { asOf: date });
+    }
+    if (day.unconfigured) {
+      throw new SchedulingError(
+        'venue_unscheduled',
+        'That venue has no published hours, so nothing can be offered for it. Offering a slot against a building whose hours nobody has recorded is how a school is sent to a locked door.'
+      );
+    }
+    if (!day.open) continue;
+
+    for (const window of mergedMinutes(day.windows)) {
+      const winOpen = Math.max(toMin(window.opensAt), earliest ? toMin(earliest) : 0);
+      const winClose = Math.min(toMin(window.closesAt), latest ? toMin(latest) : 24 * 60);
+      for (let start = Math.ceil(winOpen / step) * step; start + duration <= winClose; start += step) {
+        if (out.length >= limit) break;
+        const opensAt = toWall(start);
+        const closesAt = toWall(start + duration);
+        const startsAt = zonedInstant(date, opensAt, day.timezone);
+        const endsAt = zonedInstant(date, closesAt, day.timezone);
+
+        for (const coachPersonId of coaches) {
+          const conflicts = await detectConflicts(db, {
+            startsAt, endsAt, venueId: request.venueId, coachPersonId,
+          });
+          if (conflicts.length) continue;
+          out.push({
+            date, opensAt, closesAt, startsAt, endsAt,
+            venueId: request.venueId, coachPersonId, timezone: day.timezone,
+          });
+          break;   // one offer per start time; the first free coach takes it
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Wall clock to minutes past midnight, and back. Exported for the surfaces. */
+export function timeToMinutes(w: Wall): number { return toMin(w); }
+export function minutesToTime(min: number): Wall { return toWall(min); }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A PERSON'S OWN WEEK
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface PersonalSession {
+  sessionId: number;
+  ref: string;
+  className: string;
+  classSlug: string;
+  role: 'attending' | 'teaching';
+  status: string;
+  /** The place this person holds, when they hold one. Needed to release it. */
+  bookingId: number | null;
+  bookingRef: string | null;
+  startsAt: Date;
+  endsAt: Date;
+  localDate: IsoDate;
+  localStart: Wall;
+  localEnd: Wall;
+  timezone: string;
+  venueId: number | null;
+  venueName: string | null;
+  mode: string;
+  onlineUrl: string | null;
+  cancelledReason: string | null;
+  rescheduledToSessionId: number | null;
+}
+
+/**
+ * What one person has on, as attendee and as instructor.
+ *
+ * READ FOR A PERSON ID THE CALLER MUST ALREADY BE ENTITLED TO. This function
+ * checks no authority, because there is no single answer — a member reads their
+ * own, a parent reads a child's through the guardian link, a club administrator
+ * reads a member's through scope — and folding three rules into one flag is how
+ * the wrong one gets applied. Callers gate first; /my/schedule passes the
+ * signed-in person's own id and nothing else.
+ *
+ * CANCELLED AND RESCHEDULED SESSIONS ARE INCLUDED, deliberately. The whole
+ * value of a personal schedule to somebody whose Tuesday moved is that it says
+ * the Tuesday moved. Filtering them out leaves a gap where a class used to be,
+ * which reads as a fault in the timetable rather than as a change.
+ */
+export async function personalSchedule(
+  db: DB, personId: number, fromIso: IsoDate, toIso: IsoDate
+): Promise<PersonalSession[]> {
+  assertIsoDate(fromIso, 'from');
+  assertIsoDate(toIso, 'to');
+
+  const attending = await db.select({
+    session: sch.classSessions,
+    klass: sch.dojoClasses,
+    bookingId: s.bookings.id,
+    bookingRef: s.bookings.ref,
+  }).from(s.bookings)
+    .innerJoin(sch.classSessions, eq(sch.classSessions.id, s.bookings.classSessionId))
+    .innerJoin(sch.dojoClasses, eq(sch.dojoClasses.id, sch.classSessions.classId))
+    .where(and(
+      eq(s.bookings.personId, personId),
+      gte(sch.classSessions.localDate, fromIso),
+      lte(sch.classSessions.localDate, toIso)
+    ));
+
+  const teaching = await db.select({
+    session: sch.classSessions,
+    klass: sch.dojoClasses,
+  }).from(sch.classSessions)
+    .innerJoin(sch.dojoClasses, eq(sch.dojoClasses.id, sch.classSessions.classId))
+    .where(and(
+      eq(sch.classSessions.coachPersonId, personId),
+      gte(sch.classSessions.localDate, fromIso),
+      lte(sch.classSessions.localDate, toIso)
+    ));
+
+  const venueIds = [...new Set(
+    [...attending, ...teaching].map((r: any) => r.session.venueId).filter(Boolean)
+  )] as number[];
+  const venueNames = new Map<number, string>();
+  if (venueIds.length) {
+    const rows = await db.select({ id: ops.venues.id, name: ops.venues.name })
+      .from(ops.venues).where(inArray(ops.venues.id, venueIds));
+    for (const v of rows) venueNames.set(v.id, v.name);
+  }
+
+  const shape = (r: any, role: 'attending' | 'teaching'): PersonalSession => ({
+    sessionId: r.session.id,
+    ref: r.session.ref,
+    className: r.klass.name,
+    classSlug: r.klass.slug,
+    role,
+    status: r.session.status,
+    bookingId: r.bookingId ?? null,
+    bookingRef: r.bookingRef ?? null,
+    startsAt: new Date(r.session.startsAt),
+    endsAt: new Date(r.session.endsAt),
+    localDate: r.session.localDate,
+    localStart: r.session.localStart,
+    localEnd: r.session.localEnd,
+    timezone: r.session.timezone,
+    venueId: r.session.venueId,
+    venueName: r.session.venueId ? (venueNames.get(r.session.venueId) ?? null) : null,
+    mode: r.session.mode,
+    onlineUrl: r.session.onlineUrl,
+    cancelledReason: r.session.cancelledReason,
+    rescheduledToSessionId: r.session.rescheduledToSessionId,
+  });
+
+  const byId = new Map<number, PersonalSession>();
+  // Teaching is applied second, so an instructor who also holds a place sees one
+  // row saying they teach it rather than two rows contradicting each other.
+  for (const r of attending) byId.set(r.session.id, shape(r, 'attending'));
+  for (const r of teaching) byId.set(r.session.id, shape(r, 'teaching'));
+
+  return [...byId.values()].sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime());
+}

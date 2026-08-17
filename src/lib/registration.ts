@@ -22,28 +22,135 @@ export const MEMBERSHIP_TYPES: MembershipType[] = ['Athlete', 'Instructor', 'Doj
 /** Age below which a guardian's consent is required. */
 export const MINOR_AGE = 18;
 
+/**
+ * Where a select's options come from when they do not exist until run time.
+ *
+ * NAMED RATHER THAN INLINED, because the form, the validator and the API must
+ * offer and accept THE SAME list. The previous arrangement hard-coded
+ * `f.name === 'state' ? states : f.options` in the page and re-derived the same
+ * list again in the validator; two derivations of one list is one drift away
+ * from a form that offers a value the server then refuses.
+ *
+ *  · `stateUnits`   — the federation's own register of CHARTERED STATE UNITS.
+ *  · `geoCountries` /
+ *    `geoStates`    /
+ *    `geoDistricts` — civil geography from `admin_areas`. A different ladder
+ *                     entirely; see the note on LOCATION_FIELDS below.
+ *  · `localityCandidates` — the places a typed locality turned out to mean.
+ *                     Non-empty ONLY when resolveArea() said 'ambiguous', which
+ *                     is the moment the applicant has to be asked.
+ */
+export type OptionSource =
+  | 'stateUnits'
+  | 'geoCountries'
+  | 'geoStates'
+  | 'geoDistricts'
+  | 'localityCandidates';
+
+/** One option of a run-time list: a value to submit, and a name to show. */
+export interface AreaChoice {
+  value: string;
+  label: string;
+}
+
 export interface FieldDef {
   name: string;
   label: string;
-  type: 'text' | 'email' | 'tel' | 'date' | 'select' | 'textarea' | 'number' | 'checkbox';
+  type: 'text' | 'email' | 'tel' | 'date' | 'select' | 'textarea' | 'number' | 'checkbox' | 'postal';
   required: boolean;
   options?: string[];
+  /** A list that only exists at run time. See OptionSource. */
+  optionsFrom?: OptionSource;
+  /**
+   * Where the chosen option's DISPLAY NAME is filed alongside its value.
+   *
+   * An area id is the right thing to store and the wrong thing to read: an
+   * approval queue that shows a reviewer "civilDistrictAreaId: 4471" has told
+   * them nothing, and they cannot check it without another system. The name is
+   * recorded beside the id so the record is legible on its own — and the id
+   * remains the thing every later query joins on.
+   */
+  labelKey?: string;
   help?: string;
   maxLength?: number;
   /** Shown only when this predicate passes — e.g. guardian fields for minors. */
   showWhen?: 'minor';
 }
 
-/** Asked of every applicant, whatever they are applying for. */
-export const CORE_FIELDS: FieldDef[] = [
+/** Who the applicant is. Asked of everybody, whatever they are applying for. */
+const APPLICANT_FIELDS: FieldDef[] = [
   { name: 'name', label: 'Full name (as it should appear on the certificate)', type: 'text', required: true, maxLength: 120 },
   { name: 'email', label: 'Email address', type: 'email', required: true, maxLength: 254,
     help: 'Your application reference and all correspondence go here.' },
   { name: 'phone', label: 'Mobile number', type: 'tel', required: true, maxLength: 20 },
-  { name: 'state', label: 'State', type: 'select', required: true },
-  { name: 'district', label: 'District', type: 'text', required: true, maxLength: 60 },
-  { name: 'city', label: 'City / town', type: 'text', required: false, maxLength: 60 },
 ];
+
+/**
+ * Where the applicant lives — the location step.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THERE ARE TWO "STATE" QUESTIONS, AND WHY THEY MUST NOT BE MERGED
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `state` is the federation's own list of CHARTERED STATE UNITS. It decides
+ * which office verifies the application, and the unit portal matches it on
+ * exact equality.
+ *
+ * `civilStateAreaId` is a PLACE, out of `admin_areas`. src/db/geography.ts
+ * explains at length why the two ladders are not joined: a person living in a
+ * state MMAKF has not chartered still has an address, and one select serving
+ * both would make that person unrepresentable. Two questions, because they are
+ * genuinely two questions.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY ALMOST ALL OF THIS IS OPTIONAL
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The civil geography tables SHIP EMPTY — no country, no area, no postal code
+ * is seeded anywhere in this repository. A required country select, on the path
+ * that actually runs today, is a question with no answer. So the register-backed
+ * fields are offered only when the register can answer them (see isOffered()),
+ * and the free-text `district`/`city` below carry the location until it can.
+ *
+ * `postalCode` and the address lines need no register at all, so they are asked
+ * unconditionally. That alone is the defect being closed: the intake used to
+ * collect one free-text city and nothing else, and a postal code is the single
+ * strongest signal resolveArea() has for re-resolving an address later.
+ */
+export const LOCATION_FIELDS: FieldDef[] = [
+  { name: 'state', label: 'State unit you are registering under', type: 'select', required: true,
+    optionsFrom: 'stateUnits',
+    help: 'The MMAKF unit that verifies this application. This is the federation’s register of its own units, not a list of places.' },
+  { name: 'district', label: 'District', type: 'text', required: true, maxLength: 60 },
+  { name: 'city', label: 'City, town or village', type: 'text', required: false, maxLength: 60,
+    help: 'Written down exactly as you type it. If more than one place answers to that name you will be asked which you meant — nothing is guessed on your behalf.' },
+
+  { name: 'country', label: 'Country', type: 'select', required: false,
+    optionsFrom: 'geoCountries', labelKey: 'countryName' },
+  { name: 'civilStateAreaId', label: 'State or region where you live', type: 'select', required: false,
+    optionsFrom: 'geoStates', labelKey: 'civilState' },
+  { name: 'civilDistrictAreaId', label: 'District where you live', type: 'select', required: false,
+    optionsFrom: 'geoDistricts', labelKey: 'civilDistrict' },
+  { name: 'cityAreaId', label: 'Which of these did you mean?', type: 'select', required: false,
+    optionsFrom: 'localityCandidates', labelKey: 'cityArea',
+    help: 'More than one place in the register answers to what you typed. Choosing wrongly files you in the wrong district, so the federation asks rather than picks.' },
+
+  { name: 'postalCode', label: 'PIN / postal code', type: 'postal', required: false, maxLength: 12,
+    help: 'Recorded as given. It is the strongest signal the federation has for placing an address once the place register is loaded.' },
+  { name: 'addressLine1', label: 'Address — house or building, street', type: 'text', required: false, maxLength: 160 },
+  { name: 'addressLine2', label: 'Address — area or locality', type: 'text', required: false, maxLength: 160 },
+  { name: 'landmark', label: 'Landmark', type: 'text', required: false, maxLength: 120 },
+];
+
+/**
+ * Asked of every applicant, whatever they are applying for.
+ *
+ * Composed rather than hand-listed so that the location step is ONE definition
+ * with two render sites: this array feeds the validator and the office's queue
+ * labels (src/components/QueuePanel.astro), while the form draws the location
+ * fields as their own step out of LOCATION_FIELDS.
+ */
+export const CORE_FIELDS: FieldDef[] = [...APPLICANT_FIELDS, ...LOCATION_FIELDS];
 
 /**
  * Fields per membership type.
@@ -138,7 +245,111 @@ export const CONSENTS: FieldDef[] = [
   { name: 'consentPhotography', label: 'I agree that photographs or video taken at MMAKF events may be used by the federation. (Optional — you may leave this unticked.)', type: 'checkbox', required: false },
 ];
 
+// ─── Run-time option lists ──────────────────────────────────────────────────
+
+/**
+ * The civil geography the server is prepared to offer FOR ONE SUBMISSION.
+ *
+ * Narrowed as the applicant descends: `states` is the top rung of the chosen
+ * country, `districts` is what sits under the chosen state, and
+ * `localityCandidates` is non-empty only when a typed locality turned out to
+ * mean more than one place.
+ *
+ * The page renders from this object and the validator checks against the SAME
+ * object, so "the list that was offered" and "the list that is accepted" cannot
+ * be two different things.
+ */
+export interface RegistrationGeography {
+  /**
+   * True when the place register holds at least one country.
+   *
+   * Distinguished from "not configured" by the caller, because they are
+   * different absences: an empty register is a register nobody has loaded yet,
+   * and a missing database is a deployment with no register at all.
+   */
+  loaded: boolean;
+  countries: AreaChoice[];
+  states: AreaChoice[];
+  districts: AreaChoice[];
+  localityCandidates: AreaChoice[];
+}
+
+export const EMPTY_GEOGRAPHY: RegistrationGeography = {
+  loaded: false, countries: [], states: [], districts: [], localityCandidates: [],
+};
+
+/** The value that means "none of these — record the place as I typed it". */
+export const UNRESOLVED_CHOICE = 'unresolved';
+
+/**
+ * The options a field offers right now.
+ *
+ * ONE function, called by the renderer and by the validator. A select is a
+ * suggestion to a browser and nothing more; what makes a submitted value
+ * acceptable is membership of the list THIS returned for THIS submission.
+ */
+export function optionsFor(
+  field: FieldDef,
+  knownStates: string[] = [],
+  geo: RegistrationGeography | null = null
+): AreaChoice[] {
+  switch (field.optionsFrom) {
+    case 'stateUnits': return knownStates.map((s) => ({ value: s, label: s }));
+    case 'geoCountries': return geo?.countries ?? [];
+    case 'geoStates': return geo?.states ?? [];
+    case 'geoDistricts': return geo?.districts ?? [];
+    case 'localityCandidates': return geo?.localityCandidates ?? [];
+    default: return (field.options ?? []).map((o) => ({ value: o, label: o }));
+  }
+}
+
+/**
+ * Is this field asked at all?
+ *
+ * A register-backed select with nothing in it is NOT rendered and NOT
+ * validated. That single rule covers both of the ways the list can be empty —
+ * the place register has never been loaded, and the applicant has not yet
+ * chosen the parent area — and it is what stops the form from showing an empty
+ * dropdown that no answer can satisfy.
+ */
+export function isOffered(
+  field: FieldDef,
+  knownStates: string[] = [],
+  geo: RegistrationGeography | null = null
+): boolean {
+  if (!field.optionsFrom) return true;
+  if (field.optionsFrom === 'stateUnits') return true;
+  return optionsFor(field, knownStates, geo).length > 0;
+}
+
+/**
+ * A postal code as it is stored: uppercase, no spaces.
+ *
+ * THE SAME normalisation linkPostalCode() and resolveArea() apply in
+ * src/db/geography.ts. A second, subtly different one here is a lookup that
+ * silently never matches, and the symptom reads as missing reference data
+ * rather than as a bug.
+ */
+export function normalisePostalCode(input: string): string {
+  return String(input ?? '').trim().toUpperCase().replace(/\s+/g, '');
+}
+
+/**
+ * A shape check, deliberately NOT a national format.
+ *
+ * India's PIN is six digits, but the register is built for a country column and
+ * MMAKF has adopted no list of postal formats. Asserting `\d{6}` here would
+ * refuse a correct code the day the first overseas member applies, and refusing
+ * a real address is worse than storing one nobody has validated.
+ */
+const POSTAL = /^[A-Z0-9][A-Z0-9-]{1,11}$/;
+
 // ─── Validation ─────────────────────────────────────────────────────────────
+
+/** What the server is prepared to accept for one submission. */
+export interface KnownOptions {
+  geo?: RegistrationGeography | null;
+}
 
 export interface ValidationResult {
   ok: boolean;
@@ -178,10 +389,16 @@ function normalisePhone(v: string): string {
 export function validateApplication(
   input: Record<string, unknown>,
   knownStates: string[] = [],
-  now: Date = new Date()
+  now: Date = new Date(),
+  known: KnownOptions = {}
 ): ValidationResult {
   const errors: Record<string, string> = {};
   const cleaned: Record<string, unknown> = {};
+  // Defaults to "no place register", which is the state this deployment is
+  // actually in: nothing seeds countries or admin_areas anywhere in this
+  // repository. A caller that has loaded the map passes it; every caller that
+  // has not gets the free-text location step and no empty selects.
+  const geo = known.geo ?? EMPTY_GEOGRAPHY;
 
   const type = String(input.type ?? '').trim() as MembershipType;
   if (!MEMBERSHIP_TYPES.includes(type)) {
@@ -194,7 +411,7 @@ export function validateApplication(
   const isMinor = age !== null && age < MINOR_AGE;
 
   const applicable = [...CORE_FIELDS, ...TYPE_FIELDS[type], ...CONSENTS].filter(
-    (f) => !f.showWhen || (f.showWhen === 'minor' && isMinor)
+    (f) => (!f.showWhen || (f.showWhen === 'minor' && isMinor)) && isOffered(f, knownStates, geo)
   );
 
   for (const field of applicable) {
@@ -261,15 +478,40 @@ export function validateApplication(
         continue;
       }
 
+      case 'postal': {
+        const code = normalisePostalCode(value);
+        if (!POSTAL.test(code)) {
+          errors[field.name] = 'Enter a postal code using letters, digits and hyphens only.';
+          continue;
+        }
+        cleaned[field.name] = code;
+        continue;
+      }
+
       case 'select':
-        if (field.name === 'state') {
+        if (field.optionsFrom === 'stateUnits') {
           // A free-text state made applications invisible to the unit that had
           // to verify them, because the unit portal matches on exact equality.
           if (knownStates.length && !knownStates.some((s) => s.toLowerCase() === value.toLowerCase())) {
-            errors.state = 'Choose your state from the list.';
+            errors[field.name] = 'Choose your state from the list.';
             continue;
           }
-          cleaned.state = knownStates.find((s) => s.toLowerCase() === value.toLowerCase()) ?? value;
+          cleaned[field.name] = knownStates.find((s) => s.toLowerCase() === value.toLowerCase()) ?? value;
+          continue;
+        }
+        if (field.optionsFrom) {
+          // NEVER trust an id that arrived in the body. `civilDistrictAreaId`
+          // is an admin_areas primary key, and a submitted one is accepted only
+          // because it is in the list this server built for this submission —
+          // not because a select once rendered it. The alternative files a
+          // member under any area in the national register the sender names.
+          const hit = optionsFor(field, knownStates, geo).find((o) => o.value === value);
+          if (!hit) {
+            errors[field.name] = 'Choose one of the options offered. That value is not one of them.';
+            continue;
+          }
+          cleaned[field.name] = hit.value;
+          if (field.labelKey) cleaned[field.labelKey] = hit.label;
           continue;
         }
         if (field.options && !field.options.includes(value)) {
@@ -290,9 +532,21 @@ export function validateApplication(
   return { ok: Object.keys(errors).length === 0, errors, cleaned, isMinor, age };
 }
 
-/** Fields for a type, with minor-only fields included when relevant. */
-export function fieldsFor(type: MembershipType, isMinor: boolean): FieldDef[] {
+/**
+ * Fields for a type, with minor-only fields included when relevant.
+ *
+ * `knownStates` and `geo` default to "nothing offered", which drops every
+ * register-backed select — the same filter validateApplication() applies, so a
+ * progress indicator counting these fields can never count a question the
+ * server would not have asked.
+ */
+export function fieldsFor(
+  type: MembershipType,
+  isMinor: boolean,
+  knownStates: string[] = [],
+  geo: RegistrationGeography | null = null
+): FieldDef[] {
   return [...CORE_FIELDS, ...TYPE_FIELDS[type], ...CONSENTS].filter(
-    (f) => !f.showWhen || (f.showWhen === 'minor' && isMinor)
+    (f) => (!f.showWhen || (f.showWhen === 'minor' && isMinor)) && isOffered(f, knownStates, geo)
   );
 }

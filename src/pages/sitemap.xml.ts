@@ -34,6 +34,9 @@ import { slugify } from '@/lib/people';
 import { classifyRoute, renderSitemap, routeFromPageFile, SITE_ORIGIN } from '@/lib/seo';
 import { AUDIENCES } from '@/data/audiences';
 import { TECHNIQUES, SYSTEMS, CONCEPTS } from '@/data/shotokan';
+import { KATA } from '@/data/kata';
+import { isConfigured, db } from '@/db';
+import { publishableClubs } from '@/db/clubs';
 
 export const prerender = false;
 
@@ -92,14 +95,32 @@ function audienceRoutes(): string[] {
 }
 
 /**
+ * The twenty-six kata of the Shotokan canon.
+ *
+ * Expanded from the same array /kata and /kata/[slug] render from. These are
+ * among the most search-valuable pages the federation has — a student looking
+ * up a form is how a great many people find MMAKF at all — and they were
+ * absent from the sitemap entirely, because /kata/[slug] is dynamic and a
+ * dynamic route contributes nothing without an expansion policy.
+ *
+ * That is the SAME defect, with the same cause, that /learn/[audience] had and
+ * that the note above it describes. It happened twice because nothing checked
+ * that a public dynamic route has a policy AT ALL — only that a policy key
+ * names a real route, which is the other direction. tests/seo.test.ts now
+ * checks both, so there is no third time.
+ */
+function kataRoutes(): string[] {
+  return KATA.map((k) => `/kata/${k.slug}`);
+}
+
+/**
  * The Shotokan technical library.
  *
  * Expanded from the SAME arrays the pages render from, for the same reason as
  * the audience pages: a sitemap that computes slugs its own way advertises URLs
  * that 404. These are the pages §45 asks to be genuinely indexable — real
  * educational content about public martial-arts knowledge, not keyword-stuffed
- * doorways — and a dynamic route contributes nothing without an expansion
- * policy, which is the safe default and the wrong outcome here.
+ * doorways.
  *
  * Compiled in. No store, no database, no failure mode.
  */
@@ -111,6 +132,32 @@ function kumiteRoutes(): string[] {
   return [...SYSTEMS, ...CONCEPTS].map((k) => `/shotokan/kumite/${k.slug}`);
 }
 
+/**
+ * The affiliated clubs that have a public page.
+ *
+ * FROM THE REGISTER, AND ONLY THE VERIFIED PART OF IT. publishableClubs()
+ * returns clubs that are currently affiliated AND carry a slug an administrator
+ * set. The federation's instruction is explicit — "DO NOT generate fake
+ * location pages. Only index real verified locations" — and the two halves of
+ * that filter are the two ways this could go wrong: advertising a lapsed club
+ * as the federation's recommendation, and minting a URL from a name that will
+ * change.
+ *
+ * A database failure returns NOTHING rather than throwing. A sitemap missing
+ * the club pages is a smaller harm than a sitemap that 500s and takes the
+ * hundred static routes down with it — the same reasoning peopleRoutes()
+ * applies to the editorial store.
+ */
+async function clubRoutes(): Promise<string[]> {
+  if (!isConfigured()) return [];
+  try {
+    const clubs = await publishableClubs(db());
+    return clubs.map((c) => `/clubs/${c.slug}`);
+  } catch {
+    return [];
+  }
+}
+
 export const GET: APIRoute = async ({ site }) => {
   const origin = (site?.href || SITE_ORIGIN).replace(/\/$/, '');
 
@@ -119,8 +166,10 @@ export const GET: APIRoute = async ({ site }) => {
 
   if (routes.includes('/people/[slug]')) paths.push(...(await peopleRoutes()));
   if (routes.includes('/learn/[audience]')) paths.push(...audienceRoutes());
+  if (routes.includes('/kata/[slug]')) paths.push(...kataRoutes());
   if (routes.includes('/shotokan/techniques/[slug]')) paths.push(...techniqueRoutes());
   if (routes.includes('/shotokan/kumite/[slug]')) paths.push(...kumiteRoutes());
+  if (routes.includes('/clubs/[slug]')) paths.push(...(await clubRoutes()));
 
   const body = renderSitemap(paths, origin);
   return new Response(body, {

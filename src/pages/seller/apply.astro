@@ -1,0 +1,465 @@
+---
+// /seller/apply — the marketplace application.
+//
+// ─── WHAT THIS PAGE IS CAREFUL ABOUT ────────────────────────────────────────
+//
+// IT TAKES NO IDENTIFIER. The applicant is whoever is signed in. There is no
+// userId, no personId and no sellerId in any field, hidden or otherwise, so
+// applying on somebody else's behalf is not refused — it cannot be expressed.
+//
+// IT PROMISES NOTHING. MMAKF has published no commission, no list of mandatory
+// documents and no review turnaround, so this page states none of the three.
+// The seller modules' own sentences are printed verbatim where a gap exists;
+// paraphrasing them here is how the applicant and the office end up being told
+// two different things.
+//
+// IT COLLECTS STRUCTURED ADDRESSES. Country, state, district, city, locality
+// and postcode as separate fields, and more than one address, because a
+// district that exists only inside a free-text string cannot be matched against
+// the federation's own district units — and a reviewer in Ramgarh cannot then
+// be shown the sellers in Ramgarh.
+//
+// IT DOES NOT ASK FOR A BANK ACCOUNT NUMBER. Payout details are collected
+// through the provider's own onboarding after approval; see payout_accounts in
+// src/db/seller.schema.ts for why this form has no field for one.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { asc, eq } from 'drizzle-orm';
+import { mySellerAccount, SELLER_REQUIREMENTS_NOT_SET, COMMISSION_NOT_SET } from '@/db/marketplace';
+import { VERIFICATION_REQUIREMENTS_NOT_SET, ALL_CHECKS } from '@/db/seller-registry';
+import { categoryTree } from '@/db/catalogue';
+
+export const prerender = false;
+
+type Gate = 'no_database' | 'signed_out' | 'shared_credential' | 'already' | 'apply';
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+let gate: Gate = 'apply';
+let existing: any = null;
+let states: any[] = [];
+let categories: any[] = [];
+let loadError: string | null = null;
+
+if (!configured) gate = 'no_database';
+else if (!identity) gate = 'signed_out';
+else if (identity.userId == null) gate = 'shared_credential';
+else {
+  try {
+    existing = await mySellerAccount(db(), identity.principal);
+    if (existing) gate = 'already';
+    else {
+      states = await db()
+        .select({ id: s.stateUnits.id, name: s.stateUnits.name, state: s.stateUnits.state })
+        .from(s.stateUnits).where(eq(s.stateUnits.status, 'active')).orderBy(asc(s.stateUnits.name));
+      categories = await categoryTree(db());
+    }
+  } catch (err: any) {
+    console.error('[seller/apply]', err);
+    loadError = 'Your account could not be read. The fault has been logged for the federation office; nothing has been changed.';
+  }
+}
+
+/**
+ * The nine seller types, in the brief's own words, with the sentence that tells
+ * an applicant which one they are. A person who picks the wrong type is
+ * verified against the wrong documents and waits weeks for one that was never
+ * going to arrive.
+ */
+const SELLER_TYPES = [
+  { value: 'manufacturer', label: 'Manufacturer', hint: 'You make the goods.' },
+  { value: 'distributor', label: 'Authorised distributor', hint: 'You hold a letter from a manufacturer or brand.' },
+  { value: 'brand', label: 'Sports brand', hint: 'You own the brand the goods carry.' },
+  { value: 'retailer', label: 'Retailer', hint: 'You buy stock and resell it.' },
+  { value: 'dojo', label: 'Dojo or club', hint: 'An affiliated dojo selling to its own members and beyond.' },
+  { value: 'federation', label: 'Federation seller', hint: 'An MMAKF unit selling on the federation’s own behalf.' },
+  { value: 'institutional', label: 'Institutional seller', hint: 'A school, university or corporate body.' },
+  { value: 'individual', label: 'Individual seller', hint: 'One person, selling in their own name.' },
+  { value: 'service_provider', label: 'Service provider', hint: 'You sell a service rather than goods.' },
+];
+
+const BUSINESS_TYPES = [
+  'individual', 'sole_proprietor', 'partnership', 'private_company',
+  'public_company', 'llp', 'trust', 'society', 'federation', 'club', 'dojo', 'other',
+];
+
+const label = (v: string) => v.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+---
+
+<Base
+  title="Apply to sell — MMAKF marketplace"
+  description="Apply to sell through the MMAKF marketplace. Every application is reviewed by the federation; approval to sell is separate from approval of each item you list."
+  breadcrumbs={[{ name: 'Shop', url: '/shop' }, { name: 'Apply to sell', url: '/seller/apply' }]}
+>
+  <section>
+    <div class="container">
+
+      {gate === 'no_database' && (
+        <div class="card">
+          <div class="eyebrow">Marketplace</div>
+          <h1 class="display-2" style="margin-top:14px">Not available on this deployment.</h1>
+          <p>The federation database is not configured here, so an application cannot be recorded. Nothing has been lost — try again from the federation’s own site.</p>
+        </div>
+      )}
+
+      {gate === 'signed_out' && (
+        <div class="card">
+          <div class="eyebrow">Marketplace</div>
+          <h1 class="display-2" style="margin-top:14px">Sign in to apply.</h1>
+          <p>
+            An application belongs to an account, so that MMAKF knows who is asking and so that nobody can
+            apply on somebody else’s behalf. <a href="/join">Create an account</a> or sign in, then come back.
+          </p>
+        </div>
+      )}
+
+      {gate === 'shared_credential' && (
+        <div class="card">
+          <div class="eyebrow">Marketplace</div>
+          <h1 class="display-2" style="margin-top:14px">This credential cannot hold a seller record.</h1>
+          <p>
+            You are signed in with a shared office credential, which is attributable to no one person.
+            A seller record names a responsible person, so it must be created from a personal account.
+          </p>
+        </div>
+      )}
+
+      {gate === 'already' && (
+        <div class="card">
+          <div class="eyebrow">Marketplace</div>
+          <h1 class="display-2" style="margin-top:14px">This account already has a seller record.</h1>
+          <p>
+            <strong>{existing.ref}</strong> — {label(String(existing.status))}.
+            A second record would let a suspension be escaped by re-registering, so there is only ever one.
+          </p>
+          <p><a class="btn" href="/portal/seller">Go to your seller area</a></p>
+        </div>
+      )}
+
+      {gate === 'apply' && (
+        <>
+          <div class="eyebrow">MMAKF marketplace</div>
+          <h1 class="display-1" style="margin-top:14px">Apply to sell.</h1>
+
+          <div class="card" style="margin-top:22px">
+            <h2 class="h3">What happens after you send this</h2>
+            <ol>
+              <li><strong>Review.</strong> A federation officer reads your application. Approving you as a seller is one decision.</li>
+              <li><strong>Verification.</strong> Identity, business, tax and address evidence are recorded separately, each with its own outcome — so “identity confirmed, GST outstanding” is a state the register can actually hold.</li>
+              <li><strong>Your store.</strong> Approval opens a storefront at a public address of your own.</li>
+              <li><strong>Each item.</strong> Every item you list is reviewed <em>separately</em> before the public can see it. Being approved to sell is not permission to publish.</li>
+            </ol>
+            <p class="muted">{VERIFICATION_REQUIREMENTS_NOT_SET}</p>
+            <p class="muted">{SELLER_REQUIREMENTS_NOT_SET}</p>
+            <p class="muted"><strong>Commission:</strong> {COMMISSION_NOT_SET}</p>
+          </div>
+
+          {loadError && <div class="card" role="alert"><p>{loadError}</p></div>}
+
+          <form id="apply-form" class="card" style="margin-top:22px" novalidate>
+            <h2 class="h3">Who is selling</h2>
+
+            <fieldset>
+              <legend>Kind of seller</legend>
+              {SELLER_TYPES.map((t) => (
+                <label class="choice">
+                  <input type="radio" name="sellerType" value={t.value} required />
+                  <span><strong>{t.label}</strong><br /><span class="muted">{t.hint}</span></span>
+                </label>
+              ))}
+            </fieldset>
+
+            <label for="tradingName">Trading name <span class="req">required</span></label>
+            <input id="tradingName" name="tradingName" required maxlength="160" />
+            <p class="hint">What the public will see. It may differ from your legal name.</p>
+
+            <label for="legalName">Legal name</label>
+            <input id="legalName" name="legalName" maxlength="160" />
+            <p class="hint">The name on your registration certificate, if you have one.</p>
+
+            <label for="brandName">Brand name</label>
+            <input id="brandName" name="brandName" maxlength="160" />
+            <p class="hint">The name on the goods, if it is a third thing again. Naming a brand here is a claim, not an authorisation — a verified-brand badge comes only from a document MMAKF has seen.</p>
+
+            <label for="businessType">Legal form <span class="req">required</span></label>
+            <select id="businessType" name="businessType" required>
+              <option value="">Choose…</option>
+              {BUSINESS_TYPES.map((b) => <option value={b}>{label(b)}</option>)}
+            </select>
+            <p class="hint">This decides which registration documents can exist. Choosing the wrong one means being asked for a certificate that was never going to arrive.</p>
+
+            <label for="registrationNumber">Registration number</label>
+            <input id="registrationNumber" name="registrationNumber" maxlength="60" />
+
+            <div class="two-up">
+              <div>
+                <label for="gstin">GSTIN</label>
+                <input id="gstin" name="gstin" maxlength="20" />
+              </div>
+              <div>
+                <label for="pan">PAN</label>
+                <input id="pan" name="pan" maxlength="20" />
+              </div>
+            </div>
+            <p class="hint">Captured, not required. Whether MMAKF demands either before you may sell is a federation decision that has not been made — a reviewer will ask if it matters.</p>
+
+            <div class="two-up">
+              <div>
+                <label for="yearsOperating">Years operating</label>
+                <input id="yearsOperating" name="yearsOperating" type="number" min="0" max="200" />
+              </div>
+              <div>
+                <label for="website">Website</label>
+                <input id="website" name="website" type="url" maxlength="200" />
+              </div>
+            </div>
+
+            <label for="businessDescription">What you sell</label>
+            <textarea id="businessDescription" name="businessDescription" rows="3" maxlength="2000"></textarea>
+
+            <hr />
+            <h2 class="h3">How to reach you</h2>
+
+            <div class="two-up">
+              <div>
+                <label for="email">Email <span class="req">required</span></label>
+                <input id="email" name="email" type="email" required maxlength="254" />
+              </div>
+              <div>
+                <label for="phone">Phone <span class="req">required</span></label>
+                <input id="phone" name="phone" required maxlength="32" />
+              </div>
+            </div>
+            <label for="alternatePhone">Alternate phone</label>
+            <input id="alternatePhone" name="alternatePhone" maxlength="32" />
+
+            <hr />
+            <h2 class="h3">Where you are</h2>
+            <p class="hint">
+              The state places your application in a queue your own state office can see. Left blank, the
+              record is unlocated — and an unlocated record is reachable only from a national binding,
+              which is the slower path.
+            </p>
+
+            <label for="stateUnitId">MMAKF state unit</label>
+            <select id="stateUnitId" name="stateUnitId">
+              <option value="">Not stated</option>
+              {states.map((st: any) => <option value={st.id}>{st.name} — {st.state}</option>)}
+            </select>
+
+            <h3 class="h4" style="margin-top:18px">Registered address</h3>
+            <div class="two-up">
+              <div><label for="reg_line1">Address line 1</label><input id="reg_line1" name="reg_line1" maxlength="160" /></div>
+              <div><label for="reg_line2">Address line 2</label><input id="reg_line2" name="reg_line2" maxlength="160" /></div>
+            </div>
+            <div class="two-up">
+              <div><label for="reg_locality">Locality</label><input id="reg_locality" name="reg_locality" maxlength="120" /></div>
+              <div><label for="reg_city">City</label><input id="reg_city" name="reg_city" maxlength="120" /></div>
+            </div>
+            <div class="two-up">
+              <div><label for="reg_district">District</label><input id="reg_district" name="reg_district" maxlength="120" /></div>
+              <div><label for="reg_state">State</label><input id="reg_state" name="reg_state" maxlength="120" /></div>
+            </div>
+            <div class="two-up">
+              <div><label for="reg_postcode">Postcode</label><input id="reg_postcode" name="reg_postcode" maxlength="16" /></div>
+              <div><label for="reg_country">Country</label><input id="reg_country" name="reg_country" value="IN" maxlength="2" /></div>
+            </div>
+
+            <h3 class="h4" style="margin-top:18px">Return address</h3>
+            <p class="hint">Where a buyer sends goods back to. Frequently not the registered address — tick the box if it is the same.</p>
+            <label class="choice"><input type="checkbox" id="return_same" name="return_same" checked /> <span>Same as the registered address</span></label>
+            <div id="return-fields" hidden>
+              <div class="two-up">
+                <div><label for="ret_line1">Address line 1</label><input id="ret_line1" name="ret_line1" maxlength="160" /></div>
+                <div><label for="ret_city">City</label><input id="ret_city" name="ret_city" maxlength="120" /></div>
+              </div>
+              <div class="two-up">
+                <div><label for="ret_district">District</label><input id="ret_district" name="ret_district" maxlength="120" /></div>
+                <div><label for="ret_postcode">Postcode</label><input id="ret_postcode" name="ret_postcode" maxlength="16" /></div>
+              </div>
+              <div class="two-up">
+                <div><label for="ret_contactName">Contact name</label><input id="ret_contactName" name="ret_contactName" maxlength="120" /></div>
+                <div><label for="ret_contactPhone">Contact phone</label><input id="ret_contactPhone" name="ret_contactPhone" maxlength="32" /></div>
+              </div>
+            </div>
+
+            <hr />
+            <h2 class="h3">What you intend to sell</h2>
+
+            {categories.length > 0 ? (
+              <fieldset>
+                <legend>Categories you are asking for</legend>
+                <div class="checks">
+                  {categories.filter((c: any) => c.depth === 0).map((c: any) => (
+                    <label class="choice">
+                      <input type="checkbox" name="requestedCategories" value={c.slug} />
+                      <span>{c.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+            ) : (
+              <p class="muted">
+                MMAKF has not yet adopted a product taxonomy, so there are no categories to choose from.
+                Describe what you sell above and a reviewer will place you.
+              </p>
+            )}
+
+            <div class="two-up">
+              <div>
+                <label for="expectedMonthlyOrders">Expected orders a month</label>
+                <input id="expectedMonthlyOrders" name="expectedMonthlyOrders" type="number" min="0" max="1000000" />
+              </div>
+              <div>
+                <label for="motivation">Why you want to sell through MMAKF</label>
+                <input id="motivation" name="motivation" maxlength="300" />
+              </div>
+            </div>
+
+            <label class="choice"><input type="checkbox" name="hasWarehouse" /> <span>I hold stock in a warehouse or store of my own</span></label>
+            <label class="choice"><input type="checkbox" name="shipsNationally" /> <span>I can ship across India</span></label>
+
+            <hr />
+            <p class="hint">
+              <strong>Bank details are not collected here.</strong> Where your money is sent is arranged
+              through the payment provider’s own process after approval, so that the federation never holds
+              your account number.
+            </p>
+
+            <p id="apply-error" class="error" role="alert" hidden></p>
+            <p id="apply-ok" class="ok" role="status" hidden></p>
+
+            <button id="apply-submit" class="btn btn-primary" type="submit">Send application</button>
+          </form>
+        </>
+      )}
+
+    </div>
+  </section>
+</Base>
+
+<script>
+  // The form is progressive: the server refuses everything it must refuse, and
+  // this only saves the applicant a round trip. Nothing here is a control.
+  const form = document.getElementById('apply-form') as HTMLFormElement | null;
+  if (form) {
+    const err = document.getElementById('apply-error')!;
+    const ok = document.getElementById('apply-ok')!;
+    const button = document.getElementById('apply-submit') as HTMLButtonElement;
+    const returnSame = document.getElementById('return_same') as HTMLInputElement;
+    const returnFields = document.getElementById('return-fields')!;
+
+    const syncReturn = () => { returnFields.hidden = returnSame.checked; };
+    returnSame.addEventListener('change', syncReturn);
+    syncReturn();
+
+    const show = (el: HTMLElement, msg: string) => { el.textContent = msg; el.hidden = false; };
+    const hide = (el: HTMLElement) => { el.hidden = true; };
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      hide(err); hide(ok);
+      button.disabled = true;
+      button.textContent = 'Sending…';
+
+      const data = new FormData(form);
+      const val = (k: string) => {
+        const v = data.get(k);
+        return typeof v === 'string' && v.trim() ? v.trim() : null;
+      };
+      const num = (k: string) => {
+        const v = val(k);
+        return v && /^\d+$/.test(v) ? Number(v) : null;
+      };
+
+      const addresses: any[] = [];
+      if (val('reg_line1') || val('reg_city')) {
+        addresses.push({
+          kind: 'registered', isPrimary: true,
+          line1: val('reg_line1'), line2: val('reg_line2'), locality: val('reg_locality'),
+          city: val('reg_city'), district: val('reg_district'), state: val('reg_state'),
+          postcode: val('reg_postcode'), country: val('reg_country') || 'IN',
+        });
+      }
+      if (!returnSame.checked && (val('ret_line1') || val('ret_city'))) {
+        addresses.push({
+          kind: 'return', isPrimary: true,
+          line1: val('ret_line1'), city: val('ret_city'), district: val('ret_district'),
+          postcode: val('ret_postcode'), country: 'IN',
+          contactName: val('ret_contactName'), contactPhone: val('ret_contactPhone'),
+        });
+      } else if (returnSame.checked && (val('reg_line1') || val('reg_city'))) {
+        addresses.push({
+          kind: 'return', isPrimary: true,
+          line1: val('reg_line1'), line2: val('reg_line2'), locality: val('reg_locality'),
+          city: val('reg_city'), district: val('reg_district'), state: val('reg_state'),
+          postcode: val('reg_postcode'), country: val('reg_country') || 'IN',
+        });
+      }
+
+      const payload = {
+        sellerType: val('sellerType'),
+        businessType: val('businessType'),
+        tradingName: val('tradingName'),
+        legalName: val('legalName'),
+        brandName: val('brandName'),
+        registrationNumber: val('registrationNumber'),
+        gstin: val('gstin'),
+        pan: val('pan'),
+        email: val('email'),
+        phone: val('phone'),
+        alternatePhone: val('alternatePhone'),
+        website: val('website'),
+        businessDescription: val('businessDescription'),
+        yearsOperating: num('yearsOperating'),
+        stateUnitId: num('stateUnitId'),
+        addresses,
+        requestedCategories: data.getAll('requestedCategories').map(String),
+        expectedMonthlyOrders: num('expectedMonthlyOrders'),
+        hasWarehouse: data.get('hasWarehouse') !== null,
+        shipsNationally: data.get('shipsNationally') !== null,
+        motivation: val('motivation'),
+      };
+
+      try {
+        const response = await fetch('/api/marketplace/seller/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (response.ok && body.ok) {
+          show(ok, `Application ${body.result?.applicationRef ?? ''} received. Taking you to your seller area…`);
+          window.setTimeout(() => { window.location.href = '/portal/seller'; }, 1200);
+          return;
+        }
+        // The module's own sentence, verbatim. It was written to be read by the
+        // person who hit it.
+        show(err, body.error || 'The application could not be sent.');
+      } catch {
+        show(err, 'The application could not be sent. Check your connection and try again — nothing has been recorded.');
+      }
+      button.disabled = false;
+      button.textContent = 'Send application';
+    });
+  }
+</script>
+
+<style>
+  .two-up { display: grid; gap: 12px; grid-template-columns: 1fr; }
+  @media (min-width: 640px) { .two-up { grid-template-columns: 1fr 1fr; } }
+  .choice { display: flex; gap: 10px; align-items: flex-start; margin: 8px 0; }
+  .choice input { margin-top: 4px; }
+  .checks { display: grid; gap: 4px; grid-template-columns: 1fr; }
+  @media (min-width: 640px) { .checks { grid-template-columns: 1fr 1fr; } }
+  .req { font-weight: 400; opacity: 0.7; font-size: 0.85em; }
+  .hint { font-size: 0.9em; opacity: 0.75; margin-top: 4px; }
+  .error { color: #b00020; font-weight: 600; }
+  .ok { font-weight: 600; }
+  fieldset { border: 1px solid currentColor; border-radius: 8px; padding: 12px; margin: 16px 0; opacity: 0.95; }
+  legend { padding: 0 6px; font-weight: 600; }
+</style>

@@ -19,57 +19,27 @@
  * FAIL; they do not skip.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
-import net from 'node:net';
+import { startAstroDev, type DevServer } from './helpers/astro-dev';
 import {
   PUBLIC_NAV, PUBLIC_ACTIONS, LEARN_NAV, LEARN_ACTIONS,
 } from '@/lib/surface';
 import { AUDIENCES } from '@/data/audiences';
 
-let proc: ChildProcess | null = null;
+let server: DevServer | null = null;
 let base = '';
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = net.createServer();
-    s.on('error', reject);
-    s.listen(0, '127.0.0.1', () => {
-      const port = (s.address() as net.AddressInfo).port;
-      s.close(() => resolve(port));
-    });
-  });
-}
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
+// ONE astro dev AT A TIME. Three suites boot one, and in DEV astro writes its
+// content store to <root>/.astro/data-store.json regardless of cacheDir — so
+// concurrent servers race on the rename and the loser dies with EPERM, which
+// vitest then reports as 144 SKIPPED tests rather than as a failure. The lock
+// and the readiness logic both live in ./helpers/astro-dev.ts; the full
+// account, with astro's own source lines, is in that file's header.
 beforeAll(async () => {
-  const port = await freePort();
-  base = `http://127.0.0.1:${port}`;
-  // Its OWN Astro cache — two `astro dev` servers sharing one cacheDir race on
-  // the rename of data-store.json and the loser exits with a message that names
-  // neither the other suite nor the file. See astro.config.mjs.
-  proc = spawn(
-    process.execPath,
-    ['node_modules/astro/astro.js', 'dev', '--port', String(port), '--host', '127.0.0.1'],
-    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ASTRO_CACHE_DIR: '.astro-test-routes' } }
-  );
+  server = await startAstroDev({ label: 'routes-live' });
+  base = server.base;
+}, 600_000);
 
-  let log = '';
-  proc.stdout?.on('data', (d) => (log += d));
-  proc.stderr?.on('data', (d) => (log += d));
-
-  const until = Date.now() + 90_000;
-  while (Date.now() < until) {
-    try {
-      const r = await fetch(base + '/', { signal: AbortSignal.timeout(4000) });
-      if (r.status) return;
-    } catch { /* not up yet */ }
-    await sleep(400);
-  }
-  throw new Error('astro dev never came up:\n' + log.slice(-3000));
-}, 120_000);
-
-afterAll(() => { proc?.kill(); });
+afterAll(async () => { await server?.stop(); });
 
 /** Fetch, and treat an error page served with a 200 as a failure. */
 async function load(path: string) {
@@ -124,8 +94,12 @@ const OK_ROUTES = [
   // are different claims, and only the second stops an empty, indexable page
   // appearing for every typo anybody makes.
   '/shotokan/kihon',
+  '/shotokan/kata',
   '/shotokan/kumite',
+  '/shotokan/techniques',
+  '/shotokan/stances',
   '/shotokan/terminology',
+  '/shotokan/live',
   '/shotokan/videos',
   '/shotokan/techniques/gyaku-zuki',
   '/shotokan/techniques/zenkutsu-dachi',
@@ -316,6 +290,45 @@ describe('the Shotokan technical library, over HTTP', () => {
     // checked per recording. If it ever stops being rendered, the argument
     // for the whole check has quietly disappeared from the site.
     expect(body).toMatch(/ALL EIGHT ARE DEAD/i);
+  }, 60_000);
+
+  it('serves every route §33 of the directive names', async () => {
+    // The directive lists the curriculum browser's sections by path. Four of
+    // them had no file and were reachable from nowhere; this asserts all eight
+    // answer, so a listed section cannot quietly go missing again.
+    for (const path of [
+      '/shotokan', '/shotokan/kihon', '/shotokan/kata', '/shotokan/kumite',
+      '/shotokan/techniques', '/shotokan/stances', '/shotokan/terminology',
+      '/shotokan/live', '/shotokan/videos',
+    ]) {
+      const { status } = await load(path);
+      expect(status, path).toBe(200);
+    }
+  }, 120_000);
+
+  it('finds a technique by name even with no database configured', async () => {
+    // §31, and the reason it was failing in production: /search reads Postgres,
+    // the technical library does not live there, and the dev server this suite
+    // boots has no DATABASE_URL — which is exactly production's state. If the
+    // technical results were behind the database guard, this returns nothing.
+    const { body } = await load('/search?q=gyaku+zuki');
+    expect(body).toMatch(/technical library/i);
+    expect(body).toMatch(/href="[^"]*\/shotokan\/techniques\/gyaku-zuki"/);
+  }, 60_000);
+
+  it('finds a kata and a tactical concept from the same search box', async () => {
+    const kata = await load('/search?q=bassai+dai');
+    expect(kata.body).toMatch(/href="[^"]*\/kata\/bassai-dai"/);
+    const sen = await load('/search?q=sen+no+sen');
+    expect(sen.body).toMatch(/href="[^"]*\/shotokan\/kumite\/sen-no-sen"/);
+  }, 90_000);
+
+  it('the media-sync cron refuses an unauthenticated caller', async () => {
+    // It polls a third party and writes to the media register. An open endpoint
+    // is one an attacker can use to exhaust the day's API quota, which is how
+    // live detection stops working for everybody else.
+    const res = await fetch(`${base}/api/cron/media-sync`, { signal: AbortSignal.timeout(40_000) });
+    expect(res.status).toBe(401);
   }, 60_000);
 
   it('links kihon, kata and kumite to one another', async () => {

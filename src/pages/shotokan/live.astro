@@ -1,0 +1,314 @@
+---
+/**
+ * /shotokan/live — live technical sessions, and how one becomes curriculum. §25, §33.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS IS NOT A SECOND CLASSROOM
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * /live is the classroom, and it is complete: the player, attendance, the
+ * question board, the gating that refuses to list a class the caller may not
+ * read. Rebuilding any of that here would be a second implementation of a rule
+ * that must never drift — most of all the visibility gate, where a copy that
+ * fell behind would list the TITLE of a private class, which is itself the
+ * thing being protected.
+ *
+ * So this page answers the different question the technical library is asked:
+ * WHAT HAPPENS TO A LIVE SESSION AFTERWARDS. A Master Teacher going live is not
+ * curriculum by virtue of having gone live, and §24 says so directly — "do not
+ * automatically classify every channel upload as curriculum". The pipeline
+ * between the two is the subject of this page.
+ *
+ * It shows the live state only as a BANNER, read from the same functions /live
+ * uses, and sends the visitor there to actually attend.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * AND IT MUST RENDER WITH NO DATABASE
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Production currently receives no DATABASE_URL. A page that threw, or that
+ * rendered "no live sessions" when the truth is "nobody asked the database",
+ * would be telling a visitor the opposite of what is happening. Every database
+ * read below is behind isConfigured() and every failure state is named.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { isConfigured, db } from '@/db';
+import { liveNow, upcomingClasses, integrationStatus } from '@/lib/youtube';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const configured = isConfigured();
+const youtube = integrationStatus();
+
+let live: any[] = [];
+let upcoming: any[] = [];
+/** Named rather than swallowed: "we could not ask" is not "there is nothing". */
+let readFailed = false;
+
+if (configured) {
+  try {
+    live = await liveNow(db());
+    upcoming = await upcomingClasses(db(), 6);
+  } catch {
+    // The driver's own words are a fact about the server, not about the
+    // visitor. /live's header sets out this rule at length; this page obeys it.
+    readFailed = true;
+  }
+}
+
+/** The §37 pipeline, stated once and rendered from one place. */
+const PIPELINE = [
+  {
+    step: 'Detected',
+    body: 'The poller finds a broadcast on an authorised channel and records it. Keyed on channel and video id with a unique index, so however often the poller runs — and it will overlap itself the moment one run is slow — the same broadcast cannot be recorded twice.',
+  },
+  {
+    step: 'A class is created',
+    body: 'Every detected broadcast becomes a live class in MMAKF’s own records. It is PUBLISHED only where the federation has explicitly configured that channel to auto-publish; otherwise it waits. A teacher’s channel is not a federation curriculum.',
+  },
+  {
+    step: 'The stream ends',
+    body: 'Disappearing from the live search is the end signal. The broadcast moves to "recording processing" and is retried rather than written off — a recording that had simply not finished processing must not be marked missing on the first look.',
+  },
+  {
+    step: 'The recording is captured',
+    body: 'It enters the media register as pending review, with rights not cleared. Discovery is not publication.',
+  },
+  {
+    step: 'Classified',
+    body: 'A human decides what the session was about. A model may propose the classification and the proposal is stored as a proposal — every approval column names a PERSON, and the database refuses an approved row that names none.',
+  },
+  {
+    step: 'Rights checked',
+    body: 'Separately, and first. A session can be entirely relevant and still not be MMAKF’s to publish. Relevance is not permission.',
+  },
+  {
+    step: 'Mapped to the curriculum',
+    body: 'Only now is the session linked to a technique, a kata or a kumite concept — which is what turns a video into a lesson rather than a link.',
+  },
+];
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'WebPage',
+  name: 'Live technical sessions',
+  url: canonicalFor(surface, '/shotokan/live'),
+  description:
+    'How a live Shotokan session taught by an authorised MMAKF instructor is detected, recorded, reviewed and mapped into the technical curriculum.',
+  isPartOf: { '@type': 'WebSite', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
+};
+---
+
+<Base
+  title="Live technical sessions — MMAKF Shotokan library"
+  description="How a live Shotokan class taught by an authorised MMAKF instructor is detected, recorded, technically reviewed and mapped into the curriculum — and why going live does not by itself make a session curriculum."
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Live sessions', url: '/shotokan/live' },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow="Live"
+    title={`Live sessions, and <em class="r">what becomes of them</em>.`}
+    lead="A class taught live is a class taught live. It becomes part of the technical curriculum only after somebody decides it should."
+    pills={['Detection is automatic', 'Publication is not', 'Rights before technique']}
+  />
+
+  {/* ═══════ CURRENT STATE ═══════ */}
+  <section>
+    <div class="container">
+      {!configured ? (
+        <div class="panel fade" style="max-width:70ch">
+          <div class="eyebrow">Right now</div>
+          <h3 class="panel-h">The federation register is not connected on this deployment.</h3>
+          <p class="panel-p">
+            So this page cannot say whether a class is live. That is different from saying none is, and the
+            distinction matters: the second would be a claim, and only the first is true.
+          </p>
+        </div>
+      ) : readFailed ? (
+        <div class="panel fade" style="max-width:70ch">
+          <div class="eyebrow">Right now</div>
+          <h3 class="panel-h">The live schedule could not be read.</h3>
+          <p class="panel-p">
+            The request to the federation register did not complete, so this page is not able to tell you
+            what is on. It is not reporting that nothing is.
+          </p>
+        </div>
+      ) : live.length > 0 ? (
+        <div class="panel fade" style="max-width:70ch">
+          <div class="eyebrow">Live now</div>
+          <h3 class="panel-h">{live.length === 1 ? 'A class is live.' : `${live.length} classes are live.`}</h3>
+          <ul class="plain">
+            {live.map((c) => <li class="panel-p"><strong>{c.title}</strong></li>)}
+          </ul>
+          <a class="btn btn-ghost" href={h('/live')}>Go to the classroom &rarr;</a>
+        </div>
+      ) : upcoming.length > 0 ? (
+        <div class="panel fade" style="max-width:70ch">
+          <div class="eyebrow">Nothing live at the moment</div>
+          <h3 class="panel-h">{upcoming.length} scheduled.</h3>
+          <ul class="plain">
+            {upcoming.map((c) => (
+              <li class="panel-p">
+                <strong>{c.title}</strong>
+                {c.scheduledStartAt && <span class="text-muted"> — {new Date(c.scheduledStartAt).toUTCString()}</span>}
+              </li>
+            ))}
+          </ul>
+          <a class="btn btn-ghost" href={h('/live')}>The classroom &rarr;</a>
+        </div>
+      ) : (
+        <div class="panel fade" style="max-width:70ch">
+          <div class="eyebrow">Right now</div>
+          <h3 class="panel-h">No class is live, and none is scheduled.</h3>
+          <p class="panel-p">
+            {youtube.ready
+              ? 'Detection is running. When an authorised instructor goes live, the class appears by itself.'
+              : 'Detection is not configured on this deployment, so a class going live would not be noticed automatically. Sessions can still be published by hand.'}
+          </p>
+          <a class="btn btn-ghost" href={h('/live')}>The classroom &rarr;</a>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ THE POINT ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">Why it works this way</div>
+          <h2 class="display-2" style="margin-top:16px">Nobody should have to <em class="r">paste a link</em>.</h2>
+          <div class="rule"></div>
+          <p class="body-txt">
+            When an authorised instructor goes live on their own channel, the class must appear inside MMAKF
+            by itself. Requiring an administrator to paste a URL every time is what makes live classes
+            quietly stop happening &mdash; that workflow survives exactly as long as somebody remembers it,
+            and no longer.
+          </p>
+          <p class="body-txt">
+            YouTube is the transport. MMAKF is the classroom: attendance, the question board, the curriculum
+            link and the record of what was taught live in the federation&rsquo;s own database, not in
+            somebody else&rsquo;s product.
+          </p>
+        </div>
+        <aside class="fade panel" aria-labelledby="not-curriculum">
+          <div class="eyebrow">The line this holds</div>
+          <h3 id="not-curriculum" class="panel-h">A channel is not a curriculum.</h3>
+          <p class="panel-p">
+            An instructor&rsquo;s channel carries family and personal material alongside teaching material.
+            Everything the poller finds arrives <strong>pending review</strong>, with rights
+            <strong> not cleared</strong>, and a human decides what it was.
+          </p>
+          <p class="panel-p">
+            Connecting a channel and authorising it as a federation source are two separate decisions for the
+            same reason: collapsing them would make a teacher&rsquo;s entire upload history federation
+            content the moment they clicked Connect.
+          </p>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE PIPELINE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">{PIPELINE.length} steps</div>
+        <h2 class="display-2">From broadcast to <em class="r">curriculum</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          Detection is automatic. Everything after it is a decision somebody makes and signs.
+        </p>
+      </div>
+      <ol class="pipe fade">
+        {PIPELINE.map((p) => (
+          <li class="pipe-step">
+            <div class="pipe-h">{p.step}</div>
+            <p class="pipe-b">{p.body}</p>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </section>
+
+  {/* ═══════ HONEST STATE ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">What is actually running</div>
+        <h2 class="display-2">Configuration</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-2">
+        <div class="card fade">
+          <div class="card-eyebrow">Broadcast detection</div>
+          <div class="card-title" style="font-size:1rem">
+            {youtube.ready ? 'Configured' : 'Not configured on this deployment'}
+          </div>
+          <div class="card-body">
+            {youtube.ready
+              ? 'The credentials the poller needs are present. Authorised channels are checked on a schedule for live and upcoming broadcasts.'
+              : `Detection needs credentials this deployment does not have: ${youtube.missing.join(', ')}. Until they are set, a class going live is not noticed automatically. Nothing is faked in the meantime — this page says so rather than showing an empty schedule that implies detection ran.`}
+          </div>
+        </div>
+        <div class="card fade">
+          <div class="card-eyebrow">Master Teacher channel</div>
+          <div class="card-title" style="font-size:1rem">Registered as an educational source</div>
+          <div class="card-body">
+            The Pramod Pathak Martial Arts channel is registered at <strong>educational</strong> tier rather
+            than as an MMAKF official source, because the affiliation could not be verified from the channel
+            itself. Promoting it is a federation decision and a one-row change; recording an unverified
+            affiliation as a verified one is not.
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <div class="flex flex-wrap gap-3">
+        <a class="btn btn-ghost" href={h('/live')}>The live classroom</a>
+        <a class="btn btn-ghost" href={h('/shotokan/videos')}>Video source register</a>
+        <a class="btn btn-ghost" href={h('/shotokan')}>The technical library</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .plain { list-style: none; margin: 0 0 14px; padding: 0; }
+  .pipe { list-style: none; margin: 0; padding: 0; counter-reset: step; }
+  .pipe-step {
+    counter-increment: step;
+    padding: 18px 0 18px 52px;
+    border-top: 1px solid var(--line, rgba(0, 0, 0, .1));
+    position: relative;
+    max-width: 78ch;
+  }
+  .pipe-step:last-child { border-bottom: 1px solid var(--line, rgba(0, 0, 0, .1)); }
+  .pipe-step::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 18px;
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--line, rgba(0, 0, 0, .2));
+    border-radius: 50%;
+    font-size: .85rem;
+  }
+  .pipe-h { font-weight: 600; margin-bottom: 6px; }
+  .pipe-b { margin: 0; }
+</style>

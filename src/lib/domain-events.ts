@@ -619,6 +619,7 @@ export const EVENT_TYPES = {
   SCHEDULE_PUBLISHED: {
     floor: 'member', publicFields: [],
     payload: ['scheduleId', 'versionId', 'ownerScope', 'ownerId', 'effectiveFrom'],
+    consumers: ['notifications'],
     means: 'A new edition of a schedule was put in force, superseding the one before it.',
   },
   /**
@@ -636,6 +637,21 @@ export const EVENT_TYPES = {
     payload: ['sessionId', 'classId', 'className', 'startsAt'],
     consumers: ['notifications'],
     means: 'A class occurrence was cancelled and every place held on it was released.',
+  },
+  /**
+   * The same class, at a different time.
+   *
+   * A DIFFERENT EVENT FROM CANCELLATION, and the difference is what the member
+   * is told: a cancelled class is a place lost, a rescheduled one is a place
+   * that moved. `sessionId` is the SUCCESSOR — the session the recipient now
+   * holds — because a notification whose link points at the session that no
+   * longer runs sends the reader to a dead end.
+   */
+  CLASS_SESSION_RESCHEDULED: {
+    floor: 'member', publicFields: [],
+    payload: ['sessionId', 'previousSessionId', 'classId', 'className', 'startsAt', 'previousStartsAt'],
+    consumers: ['notifications'],
+    means: 'A class occurrence was moved to a new time, and every place held on it moved with it.',
   },
 
   // ── Two-person control (src/lib/approvals.ts) ──
@@ -670,6 +686,181 @@ export const EVENT_TYPES = {
   APPROVAL_EXECUTION_FAILED: {
     floor: 'official', publicFields: [],
     means: 'An approved request was attempted and the handler failed.',
+  },
+
+  // ── Identity, guardianship and consent (src/db/identity.ts) ──
+  //
+  // THE FLOORS IN THIS SECTION ARE THE WHOLE OF IT, so the reasoning is written
+  // out once here rather than restated on every line.
+  //
+  // `domain_events` carries no state, district or dojo column. Scope cannot be
+  // applied to the feed row by row, so classification is the ONLY filter a read
+  // passes through — see `clearanceFor()`. That is what makes 'official' the
+  // wrong answer for everything in this section: 'official' is
+  // `canAnywhere('person:read_pii')`, which is every dojo and every state
+  // administrator in the federation, and "who is authorised to act for this
+  // named child" must not become legible to an administrator four states away
+  // with no connection to the child and no reason to be told.
+  //
+  // 'confidential' is national reach, but it also admits the national finance
+  // officer, who holds `finance:read`. A finance officer has no business in a
+  // child's guardianship, in a consent decision taken on a child's behalf, or in
+  // a request to change a gender marker. Those sit at 'restricted': national
+  // `audit:read` only — the same population that already reads the audit trail
+  // every one of these acts writes to, and no wider.
+  //
+  // EVERY ENTRY HERE DECLARES `publicFields: []`, AND ALWAYS WILL. None of this
+  // has a public form; MMAKF has published no editorial policy that would create
+  // one; and an allowlist on a guardianship event is a leak waiting for the
+  // first producer who adds a field. A guardianship event that put a child's
+  // identity onto a public feed is the worst thing this catalogue could ship, so
+  // the answer to "which of these fields are public?" is settled once, here, as
+  // none of them.
+  //
+  // NO ENTRY NAMES A CONSUMER, and that is a statement rather than an omission.
+  // `NOTIFIABLE` in src/lib/notifications.ts lists none of them, and a consumer
+  // named here without a matching allow-list entry is a wire drawn on a diagram
+  // and nowhere else. If a guardian must be TOLD something, the pattern is
+  // CASE_ACKNOWLEDGED above — a SEPARATE event at 'member' carrying the
+  // recipient's own person id and nothing whatever about the subject — never a
+  // lowered floor on one of these.
+  /**
+   * A contact was PROVEN, and the only entry in this section below 'restricted'.
+   *
+   * It carries no relationship, no policy decision and no governed attribute:
+   * only that a named person now has a proven channel of a stated kind. The band
+   * that matches is the one whose holders may already read the contact rows
+   * themselves — national `person:read_pii`. The national finance officer reads
+   * it too, and that is accepted deliberately rather than by oversight: whether
+   * a member can be reached is squarely within chasing an unpaid fee, and no
+   * contact VALUE is on the feed for anybody to read.
+   *
+   * The value, the verification method and the evidence reference all stay off
+   * the feed. Two of those three are free text somebody typed, and no allowlist
+   * can bound what a human put in a free-text field.
+   */
+  PERSON_CONTACT_VERIFIED: {
+    floor: 'confidential', publicFields: [],
+    means: 'A person proved a contact of a stated kind. The value itself is not on the feed.',
+  },
+  /**
+   * Somebody CLAIMED to stand in a relationship to another person.
+   *
+   * A claim, never a fact: `assertRelationship()` writes status 'asserted', and
+   * that confers nothing anywhere in src/db/identity.ts. It is on the feed at
+   * the same floor as the verified form on purpose — a false claim about a child
+   * is at least as interesting as a true one, and reading it must not be easier
+   * than reading the decision that followed.
+   */
+  GUARDIANSHIP_ASSERTED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A relationship to another person was claimed and awaits a decision. A claim confers nothing.',
+  },
+  GUARDIANSHIP_VERIFIED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A claimed relationship was verified. Capabilities may now be granted on it, one at a time.',
+  },
+  /**
+   * A claim was REFUSED.
+   *
+   * Its own type rather than an outcome field on GUARDIANSHIP_VERIFIED,
+   * following APPROVAL_GRANTED / APPROVAL_REJECTED above. Somebody attempted to
+   * attach themselves to another person's record and was turned away; a consumer
+   * that has to react to that must not first have to open a payload to discover
+   * which of two facts it is holding.
+   */
+  GUARDIANSHIP_REJECTED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A claimed relationship was refused. Nothing was granted and nothing may be granted on it.',
+  },
+  GUARDIANSHIP_REVOKED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A relationship was ended, taking every capability granted on it with it.',
+  },
+  GUARDIAN_CAPABILITY_GRANTED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A guardian was granted ONE named capability over the person they are guardian of.',
+  },
+  GUARDIAN_CAPABILITY_REVOKED: {
+    floor: 'restricted', publicFields: [],
+    means: 'One granted guardian capability was withdrawn. The relationship itself may still stand.',
+  },
+  /**
+   * A consent decision was recorded — granted, or refused.
+   *
+   * 'restricted' because ONE type here has to cover the guardian case:
+   * `recordConsent()` accepts capacity 'guardian', which is a parent consenting
+   * on a minor's behalf, so this type inherits the minor's sensitivity on every
+   * instance it will ever carry, and a floor is set for the worst instance
+   * rather than the typical one. Splitting the type so that one half could never
+   * carry a minor would permit a lower floor for that half; that split is
+   * MMAKF's to make, and it is not made here on the federation's behalf.
+   *
+   * The payload names the POLICY and its VERSION and nothing else about what was
+   * agreed. The ip and user-agent hashes the consent row carries never travel.
+   */
+  CONSENT_RECORDED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A consent decision was recorded against a named policy at a named version.',
+  },
+  /**
+   * Consent was WITHDRAWN.
+   *
+   * Its own type because withdrawal is the decision that obliges somebody to
+   * STOP doing something — take the photograph down, drop the mailing — and a
+   * consumer of "stop" must not have to read a decision field to find it among
+   * the grants. Same floor and the same reason: a guardian may withdraw on a
+   * child's behalf, so this type carries the minor case too.
+   */
+  CONSENT_WITHDRAWN: {
+    floor: 'restricted', publicFields: [],
+    means: 'A previously recorded consent was withdrawn. Whatever it permitted is no longer permitted.',
+  },
+  /**
+   * Two records might be one human being, and a person has been asked.
+   *
+   * 'restricted' reads heavily for a data-quality queue until you look at what
+   * the payload must carry to be worth publishing: the SIGNALS that linked the
+   * pair. "These two records share a verified telephone number" is a household
+   * inference about two named people who may both be children, and the feed has
+   * no scope filter that would keep it anywhere near the district that raised it.
+   *
+   * Raised, never merged. Nothing in src/db/identity.ts rewrites one person's
+   * records onto another, and this event does not mean that something did.
+   */
+  DUPLICATE_CANDIDATE_RAISED: {
+    floor: 'restricted', publicFields: [],
+    means: 'Two records scored high enough to be worth a human looking at. A question, not a finding.',
+  },
+  DUPLICATE_DECIDED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A human decided a suspected duplicate. A merge decision is RECORDED; no records are merged.',
+  },
+  /**
+   * A governed field was asked to change.
+   *
+   * The FIELD NAME on its own is the sensitive part, which is why no value ever
+   * goes on the feed and why the floor is where it is: `GOVERNED_FIELDS`
+   * includes `gender`, and "this person has asked to change their gender marker"
+   * is not a fact to make legible to every scoped administrator in the
+   * federation. The old and the new value never travel either — a name and a
+   * date of birth are precisely what the rest of this section keeps off the feed.
+   */
+  PROFILE_CHANGE_REQUESTED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A change to a governed field was requested. The field is named; neither value is on the feed.',
+  },
+  /**
+   * The decision, and whether it actually took effect.
+   *
+   * `applied` is on the payload because approval and application are not the
+   * same event here: `decideProfileChange()` refuses to write over a record that
+   * moved while the request sat in the queue. A consumer told only "approved"
+   * would believe a change happened that did not.
+   */
+  PROFILE_CHANGE_DECIDED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A governed change request was approved or rejected, and either applied or not.',
   },
 } as const satisfies Record<string, EventTypeSpec>;
 

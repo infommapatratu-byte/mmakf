@@ -44,7 +44,7 @@
 // stays taken until a human refunds it. The two unacceptable answers are
 // activating anyway and recording nothing.
 
-import { and, desc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import * as s from './schema';
 import { writeAudit, type AuditContext } from './federation';
 import { isUniqueViolation } from './pgerror';

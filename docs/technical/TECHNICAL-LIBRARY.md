@@ -23,7 +23,14 @@ out of a search-result summary.
 
 ### The finding that shaped the whole patch
 
-**Per-kata movement counts could not be verified, so none were recorded.**
+> **SUPERSEDED — see [CORRECTION: movement counts *are* verifiable](#correction-movement-counts-are-verifiable)
+> at the end of this document.** The conclusion below was right about the instructor manual
+> and wrong about the wider question. A later verification pass found the counts published
+> in JKA affiliate material, corroborated 24 of the 26, and caught one real error. The
+> reasoning is left in place because it is why the schema records verification strength at
+> all — and that machinery is what made the correction cheap.
+
+**Per-kata movement counts could not be verified from the instructor manual, so none were recorded.**
 
 A web search returns, confidently and repeatedly, that the Heian kata have
 21 / 26 / 20 / 27 / 23 movements, attributed to the JKA instructor manual. The
@@ -370,3 +377,86 @@ are imported but **not published** as Shotokan teaching progression — competit
 kumite has its own home in `sport_kumite_rulesets`, where it carries a rules
 version, an effective date and a governing authority. Publishing it in both
 places is how a learner ends up reading a competition convention as doctrine.
+
+---
+
+## CORRECTION: movement counts *are* verifiable
+
+An earlier section of this document said per-kata movement counts could not be
+verified from a primary source. **That was too strong, and it is corrected
+here.** A verification pass over all 26 kata — six parallel researchers, six
+adversarial verifiers, one adjudicator, 447 tool calls — found published counts,
+and they were then re-verified by hand.
+
+### What the counts were checked against
+
+The **Japan Karate Association, Chiba Prefecture Headquarters** publishes a table
+headed 挙動数 ("number of movements") at <https://jkachiba.com/kyodousuu/>, giving
+a movement count and kiai positions for 25 of the 26 kata. It was fetched
+directly (`HTTP 200`, 114,205 bytes), parsed programmatically rather than read by
+eye, and compared against `src/data/kata.ts` by machine.
+
+The result, generated into `src/data/kata-verification.ts`:
+
+| Outcome | Count | Kata |
+| --- | --- | --- |
+| Corroborated exactly | **24** | the Heian series, the Tekki series, Bassai Dai/Sho, Kanku Dai/Sho, Empi, Jion, Jitte, Hangetsu, Gankaku, Chinte, Sochin, Meikyo, Unsu, Wankan, Gojushiho Dai/Sho |
+| **Disagreed** | **1** | **Nijushiho — corpus 24, JKA 34** |
+| Not in the table | 1 | Jiin |
+
+Two kata have a corroborated count but a **kiai** position the table
+contradicts: **Kanku Dai** (corpus 15/45, table 15/65 — an apparent digit
+transposition) and **Sochin** (corpus 28/41, table 30/41).
+
+### The error that was caught
+
+**Nijushiho is recorded in the repository as 24 movements. The JKA's table says
+34.**
+
+24 is what the kata's *name* means — 二十四歩, "twenty-four steps". The performed
+kata has 34 counted movements. This is the most plausible-looking error in the
+whole dataset, and it is plausible precisely because the number appears to be
+self-evident from the name.
+
+The system stores **neither**. `kata.movement_count` is NULL for Nijushiho and
+both figures are kept as `disputed` citations, because settling it is the MMAKF
+technical committee's decision.
+
+### A warning for anyone re-verifying from the JKA instructor manual
+
+The manual *does* contain a table — "Elements to Consider & Movements of KATA",
+page 15 — and the earlier claim that it does not was the mistake. But **the
+table cannot be quoted from a text extraction**. `pdftotext` returns the kata
+names and the numbers as separate, vertically offset column runs:
+
+```
+HEIAN SHODAN  21
+HEIAN NIDAN
+HEIAN SANDAN  26      <- 26 is HEIAN NIDAN's count
+HEIAN YONDAN  20      <- 20 is HEIAN SANDAN's count
+HEIAN GODAN   27      <- 27 is HEIAN YONDAN's count
+TEKKI SHODAN  23      <- 23 is HEIAN GODAN's count
+```
+
+A reader — human or model — who takes each line at face value gets every count
+after the first attributed to the wrong kata, and the result *looks* orderly. The
+verification agents reported "BASSAI DAI 42" as a verbatim quote; the extracted
+text reads `BASSAI DAI 24`, with 42 several rows below against `HANGETSU`. Their
+number was right, reached by inferring the offset from the adjacent
+characteristic text ("Penetrating the fortress of an enemy" is Bassai's meaning),
+but the quote was a reconstruction presented as a transcription.
+
+**So the JKA Chiba table is used as the citation rather than the manual**, because
+its name-to-number pairing is unambiguous. One URL the agents cited on
+`jka.or.jp` was also checked and **redirects to the site homepage** — it is not a
+live document and nothing rests on it.
+
+### How this changes the stored data
+
+- 24 kata now carry `source_documented` citations naming the JKA table and
+  quoting the row.
+- Nijushiho carries two `disputed` citations and no count.
+- Jiin carries an `unverified` citation recording that a pass looked and found
+  nothing — which is a different and stronger statement than never having looked.
+- No count anywhere claims `committee_verified`. MMAKF has adopted nothing, and
+  the schema will not let a row say otherwise without a named approver.

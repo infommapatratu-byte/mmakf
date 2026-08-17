@@ -34,9 +34,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import net from 'node:net';
 import crypto from 'node:crypto';
 import postgres from 'postgres';
+import { startAstroDev, type DevServer } from './helpers/astro-dev';
 
 /** A port derived from the pid, so parallel runs on one machine do not collide. */
 const DB_PORT = 6800 + (process.pid % 700);
@@ -45,24 +45,12 @@ const DB_URL = `postgresql://postgres:postgres@127.0.0.1:${DB_PORT}/postgres`;
 const SECRET = 'live-error-disclosure-suite-secret';
 
 let dbServer: ChildProcess | null = null;
-let astro: ChildProcess | null = null;
+let server: DevServer | null = null;
 let sql: ReturnType<typeof postgres> | null = null;
 let base = '';
-let astroLog = '';
 
 /** The driver's real words for the failure the page is about to hit. */
 let rawFailure = '';
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = net.createServer();
-    s.on('error', reject);
-    s.listen(0, '127.0.0.1', () => {
-      const port = (s.address() as net.AddressInfo).port;
-      s.close(() => resolve(port));
-    });
-  });
-}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -92,52 +80,37 @@ beforeAll(async () => {
   }
 
   // ── A real astro dev pointed at it ──────────────────────────────────────
-  const port = await freePort();
-  base = `http://127.0.0.1:${port}`;
-  // `astro preview` crashes with the Vercel adapter (docs/PROJECT-CONTEXT.md
-  // §8), and `npx` resolution differs on Windows — so the CLI entry is invoked
-  // through the same node binary vitest is running under.
-  astro = spawn(process.execPath, ['node_modules/astro/astro.js', 'dev', '--port', String(port), '--host', '127.0.0.1'], {
-    cwd: process.cwd(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+  //
+  // The server, its port and its readiness are the helper's job, and so is the
+  // LOCK that stops this suite booting alongside the other two. The
+  // ASTRO_CACHE_DIR that used to be set here was doing nothing whatsoever:
+  // astro consults cacheDir for the content store on BUILD only, and in dev
+  // writes <root>/.astro/data-store.json unconditionally — so all three servers
+  // always shared one file and raced on its rename. See helpers/astro-dev.ts.
+  //
+  // The probe is /live, which is the page under test: a 500 from it is the
+  // DEFECT being measured rather than a boot failure, and the helper treats any
+  // status at all as "listening".
+  server = await startAstroDev({
+    label: 'live-error-disclosure',
+    probePath: '/live',
     env: {
-      ...process.env,
       DATABASE_URL: DB_URL,
       POSTGRES_URL: '',
       ADMIN_SESSION_SECRET: SECRET,
-      // Its OWN Astro cache. tests/seo-live.test.ts boots a second `astro dev`
-      // in this same directory, and two servers sharing one cacheDir race on
-      // the rename of data-store.json — the loser exits and the suite reports
-      // "astro dev exited" with nothing about the real cause. See the note on
-      // cacheDir in astro.config.mjs.
-      ASTRO_CACHE_DIR: '.astro-test-live',
       // The classroom's own "not configured" notice is a different state with a
-      // different card; leaving these unset is what /live already expects.
+      // different card; leaving the rest unset is what /live already expects.
       NODE_ENV: 'development',
     },
   });
-  astro.stdout?.on('data', (d) => (astroLog += d));
-  astro.stderr?.on('data', (d) => (astroLog += d));
-
-  const deadline = Date.now() + 120_000;
-  for (;;) {
-    if (Date.now() > deadline) throw new Error(`astro dev never answered on ${base}.\n${astroLog}`);
-    if (astro.exitCode !== null) throw new Error(`astro dev exited with ${astro.exitCode}.\n${astroLog}`);
-    try {
-      const r = await fetch(`${base}/live`);
-      // Any answer at all means the server is listening. A 500 here is the
-      // defect under test, not a boot failure.
-      if (r.status) { await r.text(); break; }
-    } catch {
-      /* not listening yet */
-    }
-    await sleep(500);
-  }
-}, 180_000);
+  base = server.base;
+  // Generous, because this hook boots a Postgres AND may wait its turn at the
+  // dev-server lock behind another live suite.
+}, 600_000);
 
 afterAll(async () => {
   if (sql) await sql.end({ timeout: 5 }).catch(() => {});
-  astro?.kill();
+  await server?.stop();
   dbServer?.kill();
 });
 

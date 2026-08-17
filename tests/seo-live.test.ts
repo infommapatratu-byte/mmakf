@@ -16,72 +16,41 @@
  * organised against.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
-import net from 'node:net';
+import { startAstroDev, type DevServer } from './helpers/astro-dev';
 import { PRIVATE_PREFIXES, EXCLUSIONS } from '@/lib/seo';
 
-let proc: ChildProcess | null = null;
+let server: DevServer | null = null;
 let base = '';
 /** Body of /sitemap.xml, and the paths it advertises. */
 let sitemapXml = '';
 let paths: string[] = [];
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = net.createServer();
-    s.on('error', reject);
-    s.listen(0, '127.0.0.1', () => {
-      const port = (s.address() as net.AddressInfo).port;
-      s.close(() => resolve(port));
-    });
-  });
-}
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
+// ONE astro dev AT A TIME — see ./helpers/astro-dev.ts. The ASTRO_CACHE_DIR
+// this suite used to pass was doing nothing: astro consults cacheDir for the
+// content store on BUILD only, and in dev writes <root>/.astro/data-store.json
+// unconditionally. Three servers therefore always shared one file.
 beforeAll(async () => {
-  const port = await freePort();
-  base = `http://127.0.0.1:${port}`;
-  // `astro preview` crashes with the Vercel adapter (docs/PROJECT-CONTEXT.md
-  // §8), and `npx` resolution differs on Windows — so the CLI entry is invoked
-  // through the same node binary vitest is running under.
-  proc = spawn(process.execPath, ['node_modules/astro/astro.js', 'dev', '--port', String(port), '--host', '127.0.0.1'], {
-    cwd: process.cwd(),
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // Its OWN Astro cache. tests/live-error-disclosure.test.ts boots a second
-    // `astro dev` in this same directory, and two servers sharing one cacheDir
-    // race on the rename of data-store.json — the loser exits and the suite
-    // reports "astro dev exited" with nothing about the real cause. See the
-    // note on cacheDir in astro.config.mjs.
-    env: { ...process.env, ASTRO_CACHE_DIR: '.astro-test-seo' },
-  });
-  let log = '';
-  proc.stdout?.on('data', (d) => (log += d));
-  proc.stderr?.on('data', (d) => (log += d));
+  server = await startAstroDev({ label: 'seo-live', probePath: '/sitemap.xml' });
+  base = server.base;
 
-  const deadline = Date.now() + 90_000;
-  for (;;) {
-    if (Date.now() > deadline) throw new Error(`astro dev never answered on ${base}.\n${log}`);
-    if (proc.exitCode !== null) throw new Error(`astro dev exited with ${proc.exitCode}.\n${log}`);
-    try {
-      const r = await fetch(`${base}/sitemap.xml`);
-      if (r.ok) {
-        sitemapXml = await r.text();
-        break;
-      }
-    } catch {
-      /* not listening yet */
-    }
-    await sleep(500);
+  const res = await fetch(base + '/sitemap.xml', { signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) {
+    throw new Error(`/sitemap.xml answered ${res.status}:\n${server.log().slice(-3000)}`);
   }
+  sitemapXml = await res.text();
 
   paths = [...sitemapXml.matchAll(/<loc>([^<]+)<\/loc>/g)].map((m) =>
     m[1].replace(/^https?:\/\/[^/]+/, '')
   );
-}, 120_000);
+  // Generous, because this hook may now WAIT for its turn at the lock behind
+  // another live suite as well as booting a server of its own.
+}, 600_000);
 
-afterAll(() => {
-  proc?.kill();
+afterAll(async () => {
+  // Awaited: stop() holds the dev-server lock until the child has genuinely
+  // exited, so the next suite cannot start a server while this one is still
+  // writing .astro/data-store.json.
+  await server?.stop();
 });
 
 /**

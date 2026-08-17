@@ -1,0 +1,502 @@
+---
+// /admin/marketplace/[id] — SELLER 360.
+//
+// The seller equivalent of PERSON 360 and ORGANIZATION 360: everything MMAKF
+// knows about one trader, on one screen, with the decisions available from it.
+//
+// ─── WHAT IS DELIBERATELY NOT HERE ──────────────────────────────────────────
+//
+//   · NO BANK ACCOUNT NUMBER, and none is available to render. sellerDossier()
+//     redacts the legacy columns at the source and does not select
+//     `payout_accounts.providerAccountId` or any document's `storageKey` at
+//     all. A page that received the number and was trusted not to print it is
+//     one careless template away from printing it.
+//
+//   · NO VERIFICATION EVIDENCE unless the caller holds `marketplace:verify`.
+//     The evidence blob can carry reference numbers from a tax register, and
+//     an ordinary administrator has no use for it. The dossier substitutes
+//     '[withheld]' rather than omitting the field, so the reader knows there is
+//     something they are not being shown.
+//
+// ─── AND THE THING IT LEADS WITH ────────────────────────────────────────────
+//
+// The RISK FLAGS raised when the application arrived. They are flags and not
+// findings — a shared phone number is usually a family business and
+// occasionally a suspended trader re-registering — and the whole reason they
+// are automatic is that a human decides which.
+
+import AdminShell from '@/components/AdminShell.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import { sellerDossier, ALL_CHECKS } from '@/db/seller-registry';
+import { missingCommercialDetails, COMMISSION_NOT_SET } from '@/db/marketplace';
+
+export const prerender = false;
+
+const id = Number(Astro.params.id);
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+
+let dossier: any = null;
+let denied = false;
+let loadError: string | null = null;
+
+if (configured && principal && Number.isInteger(id)) {
+  try {
+    dossier = await sellerDossier(db(), principal, id);
+  } catch (err: any) {
+    if (err instanceof ForbiddenError) denied = true;
+    else if (err?.code === 'unknown_seller') loadError = 'No seller with that reference.';
+    else {
+      console.error('[admin/marketplace/id]', err);
+      loadError = 'This seller could not be read. The fault has been logged; nothing has been changed.';
+    }
+  }
+}
+
+const may = (a: any) => (principal ? canAnywhere(principal, a) : false);
+const seller = dossier?.seller ?? null;
+
+const money = (m: number | null | undefined) => {
+  if (m == null) return '—';
+  const sign = m < 0 ? '−' : '';
+  const abs = Math.abs(Math.round(m));
+  return `${sign}₹${Math.floor(abs / 100).toLocaleString('en-IN')}.${String(abs % 100).padStart(2, '0')}`;
+};
+const date = (v: unknown) => (v ? new Date(String(v)).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
+const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+const missing = seller ? missingCommercialDetails(seller).missing : [];
+const verificationBy = new Map((dossier?.verifications ?? []).map((v: any) => [v.check, v]));
+
+const revenue = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.totalMinor ?? 0), 0);
+const commission = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.commissionMinor ?? 0), 0);
+const refunded = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.refundedMinor ?? 0), 0);
+---
+
+<AdminShell title={seller ? seller.tradingName : 'Seller'} action="marketplace:read">
+  <section>
+    <div class="container">
+
+      {denied && (
+        <div class="card" role="alert">
+          <h2 class="h3">This seller is outside your scope.</h2>
+          <p>
+            The check ran on the server against your bindings. A state officer sees the sellers placed in
+            their own state; this one is placed elsewhere, or is unlocated and therefore reachable only from
+            a national binding.
+          </p>
+        </div>
+      )}
+
+      {loadError && <div class="card" role="alert"><p>{loadError}</p></div>}
+
+      {seller && (
+        <>
+          <p><a href="/admin/marketplace">← Marketplace console</a></p>
+
+          <div class="card">
+            <div class="row between">
+              <div>
+                <div class="eyebrow">{seller.ref}</div>
+                <h1 class="display-2" style="margin-top:8px">{seller.tradingName}</h1>
+                <p class="muted">
+                  {titleCase(seller.sellerType) || 'Kind not recorded'} ·
+                  {' '}{titleCase(seller.businessType) || 'Legal form not recorded'} ·
+                  {' '}{seller.legalName ? `legally ${seller.legalName}` : 'no legal name recorded'}
+                </p>
+              </div>
+              <div class="statuses">
+                <span class={`pill pill-${seller.status}`}>{titleCase(seller.status)}</span>
+                <span class="pill">{titleCase(seller.storeStatus)}</span>
+                <span class="pill">{titleCase(seller.complianceStatus)}</span>
+                {seller.restrictedAt && <span class="pill pill-bad">Restricted</span>}
+              </div>
+            </div>
+          </div>
+
+          {/* ── Risk flags ─────────────────────────────────────────────── */}
+          {(dossier.application?.riskFlags ?? []).length > 0 && (
+            <div class="card tone-wait">
+              <div class="eyebrow">Raised automatically at submission</div>
+              <h2 class="h3">Things to look at before deciding</h2>
+              <p class="muted">
+                These are flags, not findings. A shared phone number is usually a family business and
+                occasionally a suspended trader re-registering — which is precisely why a person decides
+                and this system does not.
+              </p>
+              <ul>
+                {(dossier.application.riskFlags as any[]).map((f: any) => (
+                  <li><strong>{titleCase(f.kind)}.</strong> {f.detail}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* ── The decisions ──────────────────────────────────────────── */}
+          <div class="card">
+            <div class="eyebrow">Decisions</div>
+            <div class="row">
+              {seller.status === 'applied' && may('marketplace:review') && (
+                <>
+                  <button class="btn btn-primary" data-act="seller/approve" data-id={seller.id}
+                    data-prompt="Approving this seller. What did you check? This is recorded against the decision.">Approve as a seller</button>
+                  <button class="btn" data-act="seller/reject" data-id={seller.id}
+                    data-prompt="Refusing this application. The applicant reads this reason.">Refuse</button>
+                </>
+              )}
+              {seller.status === 'approved' && may('marketplace:suspend') && (
+                <>
+                  <button class="btn" data-act="seller/suspend" data-id={seller.id}
+                    data-prompt="Suspending this seller. Every one of their items leaves public view immediately; nothing is deleted.">Suspend</button>
+                  <button class="btn" id="restrict" data-id={seller.id}>Restrict to some categories</button>
+                </>
+              )}
+              {seller.status === 'suspended' && may('marketplace:suspend') && (
+                <button class="btn btn-primary" data-act="seller/reinstate" data-id={seller.id}
+                  data-prompt="Reinstating this seller. The record of the suspension is kept.">Reinstate</button>
+              )}
+              {seller.restrictedAt && may('marketplace:suspend') && (
+                <button class="btn" data-act="seller/unrestrict" data-id={seller.id}
+                  data-prompt="Lifting the restriction. The reason it was applied is kept.">Lift the restriction</button>
+              )}
+            </div>
+            {seller.status === 'approved' && (
+              <p class="hint">
+                Approving a seller is one decision. Each item they list is reviewed separately — being
+                approved to sell is not permission to publish.
+              </p>
+            )}
+          </div>
+
+          {/* ── Verification ───────────────────────────────────────────── */}
+          <div class="card">
+            <div class="eyebrow">Verification</div>
+            <h2 class="h3">Evidence</h2>
+            <p class="muted">{dossier.notes.verification}</p>
+            {missing.length > 0 && (
+              <p><strong>Not supplied:</strong> {missing.join(', ')}. Reported so you can ask; nothing here refuses on it.</p>
+            )}
+            <table>
+              <caption class="sr-only">Verification checks</caption>
+              <thead><tr>
+                <th scope="col">Check</th><th scope="col">Status</th><th scope="col">Decided</th>
+                <th scope="col">Expires</th>{may('marketplace:verify') && <th scope="col">Record</th>}
+              </tr></thead>
+              <tbody>
+                {ALL_CHECKS.map((check) => {
+                  const v: any = verificationBy.get(check) ?? { status: 'not_started' };
+                  return (
+                    <tr class={v.expired ? 'expired' : ''}>
+                      <th scope="row">{titleCase(check)}</th>
+                      <td>
+                        <span class="pill">{titleCase(v.status)}</span>
+                        {v.expired && <span class="pill pill-bad">Lapsed</span>}
+                        {v.reason && <div class="muted">{v.reason}</div>}
+                      </td>
+                      <td>{date(v.decidedAt)}</td>
+                      <td>{date(v.expiresAt)}</td>
+                      {may('marketplace:verify') && (
+                        <td>
+                          <form class="verify-form row" data-check={check} data-id={seller.id}>
+                            <label class="sr-only" for={`vs-${check}`}>Outcome for {check}</label>
+                            <select id={`vs-${check}`} name="status" required>
+                              <option value="">…</option>
+                              <option value="under_review">Under review</option>
+                              <option value="documents_required">Documents required</option>
+                              <option value="verified">Verified</option>
+                              <option value="rejected">Rejected</option>
+                              <option value="expired">Expired</option>
+                            </select>
+                            <label class="sr-only" for={`ve-${check}`}>Expiry date</label>
+                            <input id={`ve-${check}`} name="expiresAt" type="date" />
+                            <button class="btn btn-small" type="submit">Record</button>
+                          </form>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p class="hint">
+              A refusing outcome — rejected, documents required, suspended — requires a reason, because a
+              refusal the applicant cannot act on is an obstruction rather than a decision.
+            </p>
+          </div>
+
+          {/* ── Badges ─────────────────────────────────────────────────── */}
+          <div class="card">
+            <div class="eyebrow">Trust</div>
+            <h2 class="h3">Badges</h2>
+            {dossier.badges.length === 0
+              ? <p class="muted">None. Nothing this seller writes in their profile can produce one.</p>
+              : <ul class="badges">{dossier.badges.map((b: any) => (
+                  <li><strong>{b.label}</strong><br /><span class="muted">{b.basis}</span></li>
+                ))}</ul>}
+            {may('marketplace:review') && (
+              <form id="badge-form" class="row">
+                <label class="sr-only" for="badge">Badge to grant</label>
+                <select id="badge" name="badge" required>
+                  <option value="">Grant a badge…</option>
+                  <option value="mmakf_official">MMAKF Official</option>
+                  <option value="mmakf_authorised">MMAKF Authorised</option>
+                </select>
+                <input name="authority" placeholder="Authority — resolution, meeting, contract" maxlength="200" />
+                <button class="btn btn-small" type="submit">Grant</button>
+              </form>
+            )}
+            <p class="hint">
+              Only the two endorsement badges can be granted. “Verified seller” and “Verified brand” are
+              derived from the evidence above and cannot be granted by hand — granting one would assert a
+              verification that never happened.
+            </p>
+          </div>
+
+          {/* ── Brand authorisations ───────────────────────────────────── */}
+          <div class="card">
+            <div class="eyebrow">Brands</div>
+            <h2 class="h3">Claimed relationships</h2>
+            {dossier.authorisations.length === 0 ? (
+              <p class="muted">None claimed.</p>
+            ) : (
+              <table>
+                <caption class="sr-only">Brand authorisations</caption>
+                <thead><tr>
+                  <th scope="col">Brand</th><th scope="col">Relationship</th><th scope="col">Scope</th>
+                  <th scope="col">Valid to</th><th scope="col">Status</th>{may('marketplace:brand') && <th scope="col"></th>}
+                </tr></thead>
+                <tbody>
+                  {dossier.authorisations.map((a: any) => (
+                    <tr>
+                      <th scope="row">{a.brand.name}</th>
+                      <td>{titleCase(a.auth.relationship)}</td>
+                      <td>{a.auth.scope ?? '—'}</td>
+                      <td>{a.auth.validTo ?? '—'}</td>
+                      <td><span class="pill">{titleCase(a.auth.status)}</span></td>
+                      {may('marketplace:brand') && (
+                        <td class="row">
+                          {a.auth.status !== 'verified' && <button class="btn btn-small" data-brand="verified" data-id={a.auth.id}>Verify</button>}
+                          {a.auth.status === 'claimed' && <button class="btn btn-small" data-brand="rejected" data-id={a.auth.id}>Reject</button>}
+                          {a.auth.status === 'verified' && <button class="btn btn-small" data-brand="revoked" data-id={a.auth.id}>Revoke</button>}
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <p class="hint">
+              A claim is not an authorisation. A badge appears only after somebody here has looked at the
+              document — and it stops working on its own the day the authorisation expires.
+            </p>
+          </div>
+
+          {/* ── Trade ──────────────────────────────────────────────────── */}
+          <div class="grid">
+            <div class="card stat"><div class="n">{dossier.listings.length}</div><div class="k">Items</div></div>
+            <div class="card stat"><div class="n">{dossier.orders.length}</div><div class="k">Orders (recent)</div></div>
+            <div class="card stat"><div class="n">{money(revenue)}</div><div class="k">Gross (recent)</div></div>
+            <div class="card stat"><div class="n">{money(commission)}</div><div class="k">Commission</div></div>
+            <div class="card stat"><div class="n">{money(refunded)}</div><div class="k">Refunded</div></div>
+            <div class="card stat"><div class="n">{dossier.commissionGaps}</div><div class="k">Sales held</div></div>
+          </div>
+
+          {dossier.commissionGaps > 0 && (
+            <div class="card"><p class="warn">
+              {dossier.commissionGaps} of this seller’s sales cannot be settled — {COMMISSION_NOT_SET}
+            </p></div>
+          )}
+
+          {/* ── Payout accounts ────────────────────────────────────────── */}
+          <div class="card">
+            <div class="eyebrow">Payout</div>
+            <h2 class="h3">Where money would be sent</h2>
+            {dossier.payoutAccounts.length === 0 ? (
+              <p class="muted">
+                No payout account. A payout is refused without a verified one — money is not sent to an
+                account nobody has checked.
+              </p>
+            ) : (
+              <table>
+                <caption class="sr-only">Payout accounts</caption>
+                <thead><tr><th scope="col">Provider</th><th scope="col">Holder</th><th scope="col">Bank</th><th scope="col">Account</th><th scope="col">Status</th></tr></thead>
+                <tbody>
+                  {dossier.payoutAccounts.map((p: any) => (
+                    <tr>
+                      <th scope="row">{p.provider}</th>
+                      <td>{p.holderName ?? '—'}</td>
+                      <td>{p.bankName ?? '—'}</td>
+                      <td>{p.last4 ? `••••${p.last4}` : '—'}</td>
+                      <td>{titleCase(p.status)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <p class="hint">
+              MMAKF does not hold the account number. Four digits identify the account; they do not enable
+              anybody to use it, and there is no column here that would.
+            </p>
+          </div>
+
+          {/* ── Items, disputes, returns, audit ─────────────────────────── */}
+          <details class="card">
+            <summary><strong>Items ({dossier.listings.length})</strong></summary>
+            <table>
+              <caption class="sr-only">This seller’s items</caption>
+              <thead><tr><th scope="col">Item</th><th scope="col">Status</th><th scope="col">From</th><th scope="col">Variants</th></tr></thead>
+              <tbody>
+                {dossier.listings.map((l: any) => (
+                  <tr>
+                    <th scope="row">{l.title}<div class="muted">{l.ref}</div></th>
+                    <td>{titleCase(l.status)}{l.quarantinedAt && <span class="pill pill-bad">Quarantined</span>}</td>
+                    <td>{money(l.priceMinor)}</td>
+                    <td>{l.variantCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
+
+          <details class="card">
+            <summary><strong>Disputes ({dossier.disputes.length}) and returns ({dossier.returns.length})</strong></summary>
+            <ul>
+              {dossier.disputes.map((d: any) => (
+                <li>{d.ref} — {titleCase(d.kind)} — {titleCase(d.status)}{d.outcome ? ` — ${titleCase(d.outcome)}` : ''}</li>
+              ))}
+              {dossier.returns.map((r: any) => (
+                <li>{r.ref} — return — {titleCase(r.status)}</li>
+              ))}
+            </ul>
+          </details>
+
+          <details class="card">
+            <summary><strong>Fraud signals ({dossier.fraudSignals.length})</strong></summary>
+            <p class="muted">
+              Raised by automated checks. Nothing reads these and suspends anybody — enforcement is a
+              decision made above, by a person, against a record they can read.
+            </p>
+            <ul>
+              {dossier.fraudSignals.map((f: any) => (
+                <li><strong>{titleCase(f.kind)}</strong> ({titleCase(f.status)}) — {f.detail}</li>
+              ))}
+            </ul>
+          </details>
+
+          <p><a href={`/admin/audit?entityType=seller&entityId=${seller.id}`}>Every decision recorded against this seller →</a></p>
+
+          <p id="page-error" class="error" role="alert" hidden></p>
+        </>
+      )}
+    </div>
+  </section>
+</AdminShell>
+
+<script>
+  const pageError = document.getElementById('page-error');
+  const say = (m: string) => {
+    if (!pageError) { window.alert(m); return; }
+    pageError.textContent = m; pageError.hidden = false;
+    pageError.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  async function post(action: string, body: Record<string, unknown>) {
+    const r = await fetch(`/api/marketplace/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const b = await r.json().catch(() => ({}));
+    return { ok: r.ok && b.ok, body: b };
+  }
+  const reloadOr = (res: any, fallback: string) => {
+    if (res.ok) { window.location.reload(); return; }
+    say(res.body.error || fallback);
+  };
+
+  document.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', async () => {
+    const el = b as HTMLElement;
+    const reason = window.prompt(el.dataset.prompt || 'Reason:');
+    if (!reason) return;
+    reloadOr(await post(el.dataset.act!, { sellerId: Number(el.dataset.id), reason }), 'Could not record the decision.');
+  }));
+
+  document.getElementById('restrict')?.addEventListener('click', async () => {
+    const cats = window.prompt(
+      'Restrict this seller from which categories? Enter the category slugs, separated by commas.\n\n' +
+      'A restriction is not a suspension — they keep trading in everything else.'
+    );
+    if (!cats) return;
+    const reason = window.prompt('Why? The seller reads this.');
+    if (!reason) return;
+    reloadOr(await post('seller/restrict', {
+      sellerId: Number((document.getElementById('restrict') as HTMLElement).dataset.id),
+      categories: cats.split(',').map((c) => c.trim()).filter(Boolean),
+      reason,
+    }), 'Could not apply the restriction.');
+  });
+
+  document.querySelectorAll('.verify-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const el = form as HTMLElement;
+      const f = new FormData(form as HTMLFormElement);
+      const status = String(f.get('status') ?? '');
+      if (!status) return;
+      let reason: string | null = null;
+      if (['rejected', 'documents_required', 'suspended'].includes(status)) {
+        reason = window.prompt('This outcome requires a reason the applicant can act on:');
+        if (!reason) return;
+      }
+      const expiresAt = String(f.get('expiresAt') ?? '').trim();
+      reloadOr(await post('verification/decide', {
+        sellerId: Number(el.dataset.id), check: el.dataset.check, status, reason,
+        ...(expiresAt ? { expiresAt } : {}),
+      }), 'Could not record the verification.');
+    });
+  });
+
+  document.getElementById('badge-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target as HTMLFormElement);
+    const reason = window.prompt('Why is MMAKF granting this badge? Recorded with the grant.');
+    if (!reason) return;
+    const sellerId = Number((document.querySelector('[data-act]') as HTMLElement)?.dataset.id
+      ?? (document.getElementById('restrict') as HTMLElement)?.dataset.id
+      ?? window.location.pathname.split('/').pop());
+    reloadOr(await post('badge/grant', {
+      badge: f.get('badge'), sellerId, reason, authority: f.get('authority') || null,
+    }), 'Could not grant the badge.');
+  });
+
+  document.querySelectorAll('[data-brand]').forEach((b) => b.addEventListener('click', async () => {
+    const el = b as HTMLElement;
+    const reason = window.prompt(`Reason for marking this authorisation ${el.dataset.brand}:`);
+    if (!reason) return;
+    reloadOr(await post('brand/decide', {
+      authorisationId: Number(el.dataset.id), status: el.dataset.brand, reason,
+    }), 'Could not record the decision.');
+  }));
+</script>
+
+<style>
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .row.between { justify-content: space-between; align-items: flex-start; }
+  .statuses { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill { padding: 2px 10px; border-radius: 999px; border: 1px solid currentColor; font-size: 0.85em; white-space: nowrap; }
+  .grid { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; margin: 18px 0; }
+  @media (min-width: 900px) { .grid { grid-template-columns: repeat(6, 1fr); } }
+  .stat .n { font-size: 1.4rem; font-weight: 700; line-height: 1.1; }
+  .stat .k { opacity: 0.75; margin-top: 4px; font-size: 0.9em; }
+  .badges { list-style: none; padding: 0; display: grid; gap: 10px; }
+  .muted { opacity: 0.75; }
+  .warn { font-weight: 600; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
+  .error { color: #b00020; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); vertical-align: top; }
+  tr.expired { opacity: 0.85; }
+  .btn-small { padding: 4px 10px; font-size: 0.9em; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style>

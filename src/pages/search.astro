@@ -35,6 +35,7 @@ import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import Icon from '@/components/Icon.astro';
 import { isConfigured, db } from '@/db';
+import { searchTechnical } from '@/data/shotokan';
 import { identify } from '@/lib/session';
 import {
   search, KIND_ORDER, PUBLIC_KINDS, MIN_QUERY_LENGTH, MAX_QUERY_LENGTH,
@@ -77,6 +78,35 @@ if (configured && query.length >= MIN_QUERY_LENGTH) {
     failure = err?.message || 'The search could not be completed.';
   }
 }
+
+/**
+ * THE TECHNICAL LIBRARY, SEARCHED WITHOUT A DATABASE. §31.
+ *
+ * `search()` above reads Postgres. The Shotokan library does not live there —
+ * it is static source compiled into the bundle, because it is public
+ * martial-arts knowledge, identical in every deployment, with no per-tenant
+ * variation and nothing to authorise.
+ *
+ * That difference is the entire reason this block sits OUTSIDE the `configured`
+ * guard. Production currently receives no DATABASE_URL, so a visitor searching
+ * "gyaku zuki" today is shown the not-configured notice and nothing else —
+ * while the answer is compiled into the very page declining to give it. §31
+ * names that query as an acceptance criterion by name, and it was failing on
+ * the live site for a reason that has nothing to do with the technical library.
+ *
+ * So these results are always computed, always shown, and kept visibly separate
+ * from the register results, which are a different kind of thing with a
+ * different authorisation story attached.
+ */
+const technical = query.length >= MIN_QUERY_LENGTH ? searchTechnical(query, 24) : [];
+
+const TECH_LABEL: Record<string, string> = {
+  technique: 'Technique',
+  kata: 'Kata',
+  kumite: 'Kumite',
+  system: 'Kumite',
+  term: 'Terminology',
+};
 
 const tooShort = query.length > 0 && query.length < MIN_QUERY_LENGTH;
 
@@ -178,11 +208,16 @@ const keep = (k: string, v: string) => {
         <div class="notice" role="status">
           <Icon name="shield" size={22} color="var(--gold)" />
           <div>
-            <strong>The federation database is not configured for this environment.</strong>
+            <strong>The federation register&rsquo;s database is not configured for this environment.</strong>
             <p>
-              Search reads federation records from Postgres. Until <code>DATABASE_URL</code> is set,
-              this page has nothing to search — which is reported here rather than rendered as
-              an empty result set.
+              People, dojos, units, events and certificates are read from Postgres. Until{' '}
+              <code>DATABASE_URL</code> is set, there is nothing to search in those — which is
+              reported here rather than rendered as an empty result set.
+            </p>
+            <p>
+              The <strong>Shotokan technical library is not affected</strong>: it is compiled into
+              the site rather than stored in the register, so techniques, kata, kumite and
+              terminology are searchable below regardless.
             </p>
           </div>
         </div>
@@ -206,6 +241,38 @@ const keep = (k: string, v: string) => {
       )}
     </div>
   </section>
+
+  {/* ═══════ THE TECHNICAL LIBRARY — §31 ═══════
+      Rendered FIRST, and outside the `result &&` guard, because it does not
+      depend on the database. A visitor searching a technique name gets the
+      answer whether or not the register is connected. */}
+  {technical.length > 0 && (
+    <section>
+      <div class="container">
+        <div class="result-head">
+          <h2 class="display-2" style="font-size:clamp(1.4rem,2.6vw,2rem)">
+            {technical.length} in the <em class="r">technical library</em>
+          </h2>
+        </div>
+        <p class="text-muted" style="margin:0 0 20px;max-width:70ch">
+          Shotokan technique, kata, kumite and terminology. Public martial-arts knowledge, held in the
+          site itself rather than in the federation register — and carrying no grade, because MMAKF has
+          published no syllabus.
+        </p>
+        <ul class="tech-hits">
+          {technical.map((t) => (
+            <li class="tech-hit">
+              <a class="tech-link" href={t.href}>
+                <span class="tech-kind">{TECH_LABEL[t.kind] ?? t.kind}</span>
+                <span class="tech-title">{t.title}</span>
+                <span class="tech-sub">{t.subtitle}</span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  )}
 
   {result && (
     <section class="bg2">
@@ -324,6 +391,38 @@ const keep = (k: string, v: string) => {
 </Base>
 
 <style>
+  /* Technical library results. Visually distinct from register hits on purpose:
+     they are a different kind of answer, from a different store, with a
+     different authorisation story — and a reader should not have to work that
+     out from the URL. */
+  .tech-hits { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+  .tech-hit { border-top: 1px solid var(--border); }
+  .tech-hit:last-child { border-bottom: 1px solid var(--border); }
+  .tech-link {
+    display: grid;
+    grid-template-columns: 8.5rem 1fr;
+    gap: 4px 18px;
+    padding: 14px 4px;
+    text-decoration: none;
+  }
+  .tech-link:hover { background: var(--bg2, rgba(0, 0, 0, .02)); }
+  .tech-kind {
+    grid-row: 1 / span 2;
+    align-self: start;
+    font-size: .72rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: 3px;
+  }
+  .tech-title { font-weight: 600; }
+  .tech-sub { color: var(--muted); font-size: .92rem; }
+
+  @media (max-width: 640px) {
+    .tech-link { grid-template-columns: 1fr; gap: 2px; }
+    .tech-kind { grid-row: auto; }
+  }
+
   .sr-only {
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
     overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;

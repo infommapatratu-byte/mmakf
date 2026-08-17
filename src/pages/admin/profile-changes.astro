@@ -1,0 +1,385 @@
+---
+// /admin/profile-changes — requests to change a field the federation governs.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THESE FIELDS ARE GOVERNED AT ALL
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Most of a profile is the member's own to correct, and this screen is not
+// involved: somebody fixing a landline should not wait on a committee, and a
+// governance model that made them would be routed around inside a week.
+//
+// GOVERNED_FIELDS in src/db/identity.ts names the exceptions — the fields where
+// an unreviewed edit silently changes an OUTCOME somewhere else:
+//
+//   · a date of birth is a competition age category;
+//   · a name is what a certificate already in somebody's hands says;
+//   · a nationality is eligibility for a national squad;
+//   · a gender is a competition category.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE THREE REFUSALS THIS SCREEN HAS TO SHOW PROPERLY
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// decideProfileChange() throws an IdentityError for each of these, and a page
+// that let any of them reach a 500 would be turning a designed control into
+// what looks like a broken screen:
+//
+//  · self_decision — the requester may not decide their own request. Otherwise
+//    a governed change is an ordinary edit with extra steps.
+//  · record_moved  — the field changed while the request sat in the queue. This
+//    is the important one. A fortnight-old approval written blindly over a value
+//    somebody has since corrected is a silent regression, and it is the whole
+//    reason `oldValue` is captured at request time. The message names the
+//    current value so the reviewer can see what happened.
+//  · not_open      — already decided.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// APPROVAL AND APPLICATION ARE TWO FACTS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `appliedAt` is stamped only after the write to `persons` succeeds, so an
+// approved request that never applied is a row a queue can find rather than a
+// change everybody believes happened. This page reports which of the two it
+// got, rather than saying "approved" and leaving the reader to assume.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// profileChangeQueue() filters in SQL on the subject's placement via
+// visibleScopes(). decideProfileChange() re-checks authority against the person
+// the request is about — the request id travels in a form body, and a list
+// having filtered is not a permission.
+
+export const prerender = false;
+
+import AdminShell from '@/components/AdminShell.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import { profileChangeQueue, decideProfileChange, isIdentityError } from '@/db/identity';
+import * as s from '@/db/schema';
+import { inArray } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/profile-changes');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+const mayDecide = Boolean(identity) && canAnywhere(identity!.principal, 'profilechange:decide');
+
+// Dates of birth and names of real people. Never a shared-cache document.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+// ─── The decision ───────────────────────────────────────────────────────────
+//
+// Posts to this page rather than to /api/, for the reason given in
+// src/pages/admin/policy.astro: the middleware requires application/json on
+// /api/ paths and a form without JavaScript cannot send one, while the
+// same-origin check that answers CSRF applies here just the same.
+
+let error: string | null = null;
+let postedReason = '';
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  postedReason = get('reason');
+
+  const rl = await rateLimit(Astro.request, 'profile-change-decide', 40, 60);
+  const raw = get('decision');
+  const decision = raw === 'approved' || raw === 'rejected' ? raw : null;
+  const requestId = Number(get('requestId'));
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many decisions in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so there is no register to change.';
+  } else if (!mayDecide) {
+    Astro.response.status = 403;
+    error = 'Deciding a governed change requires profilechange:decide, which this account does not hold in any scope.';
+  } else if (!Number.isInteger(requestId) || requestId <= 0) {
+    Astro.response.status = 400;
+    error = 'Name the request to decide.';
+  } else if (!decision) {
+    Astro.response.status = 400;
+    error = 'A decision must be an approval or a refusal.';
+  } else if (!postedReason) {
+    Astro.response.status = 400;
+    error = 'A decision requires a recorded reason — for an approval as much as a refusal.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: postedReason,
+    };
+    try {
+      const out = await decideProfileChange(db(), ctx, { requestId, decision, reason: postedReason });
+      // WHICH of the two facts happened. "approved" alone would let a reader
+      // believe the record changed when the module may have declined to write.
+      const outcome = decision === 'rejected' ? 'rejected' : out.applied ? 'applied' : 'approved_not_applied';
+      return Astro.redirect(`${SELF}?done=${outcome}`, 303);
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = 'Your credential does not hold profilechange:decide over this person’s record.';
+      } else if (isIdentityError(err)) {
+        // The module's sentences are written for a reader and name the rule
+        // that refused — including 'record_moved', which quotes both values.
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[admin/profile-changes] decision failed', err);
+        Astro.response.status = 500;
+        error = 'The decision was not recorded. Nothing was changed.';
+      }
+    }
+  }
+}
+
+// ─── The read ───────────────────────────────────────────────────────────────
+
+const DONE_MESSAGES: Record<string, string> = {
+  applied: 'Approved, and the change was written to the register.',
+  approved_not_applied: 'Approved — but the change was NOT written. Re-open the request: the record moved underneath the decision.',
+  rejected: 'Refused, with your reason recorded against the request.',
+};
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE_MESSAGES[done] ? DONE_MESSAGES[done] : null;
+
+/** Why each governed field is governed — printed beside the request. */
+const WHY_GOVERNED: Record<string, string> = {
+  fullName: 'A name is what a certificate already issued says.',
+  givenName: 'Part of the name on issued credentials.',
+  middleName: 'Part of the name on issued credentials.',
+  familyName: 'Part of the name on issued credentials.',
+  dob: 'A date of birth is a competition age category.',
+  gender: 'A gender is a competition category.',
+  nationality: 'A nationality is eligibility for a national squad.',
+};
+
+interface Row {
+  id: number;
+  ref: string;
+  field: string;
+  oldValue: string | null;
+  newValue: string | null;
+  evidence: unknown;
+  status: string;
+  createdAt: Date | string | null;
+  requestedByUserId: number | null;
+  person: { id: number; federationId: string | null; fullName: string | null } | null;
+  /** True when the register no longer says what the request recorded. */
+  moved: boolean;
+  currentValue: string | null;
+}
+
+let rows: Row[] = [];
+let notConfigured = false;
+let readFailed = false;
+let failureDetail: string | null = null;
+const myUserId = identity?.userId ?? null;
+
+if (!configured) {
+  notConfigured = true;
+} else if (identity && mayDecide) {
+  try {
+    const d = db();
+    const queue = await profileChangeQueue(d, identity.principal, { limit: 100 });
+
+    const ids = [...new Set(queue.map((r: any) => r.personId))];
+    const people = ids.length
+      ? await d.select().from(s.persons).where(inArray(s.persons.id, ids))
+      : [];
+    const byId = new Map(people.map((p: any) => [p.id, p]));
+
+    rows = queue.map((r: any) => {
+      const p = byId.get(r.personId) ?? null;
+      // The same comparison decideProfileChange() will make. Computed here so
+      // the reviewer is warned BEFORE they press approve, rather than being
+      // handed a refusal afterwards.
+      const current = p && p[r.field] != null ? String(p[r.field]) : null;
+      return {
+        id: r.id,
+        ref: r.ref,
+        field: r.field,
+        oldValue: r.oldValue,
+        newValue: r.newValue,
+        evidence: r.evidence,
+        status: r.status,
+        createdAt: r.createdAt,
+        requestedByUserId: r.requestedByUserId,
+        person: p ? { id: p.id, federationId: p.federationId, fullName: p.fullName } : null,
+        moved: p ? current !== r.oldValue : false,
+        currentValue: current,
+      };
+    });
+  } catch (err: any) {
+    readFailed = true;
+    failureDetail = String(err?.message ?? err);
+  }
+}
+
+const fmtDate = (v: Date | string | null) => {
+  if (!v) return '—';
+  const d = v instanceof Date ? v : new Date(v);
+  return Number.isNaN(d.getTime()) ? '—' : d.toISOString().slice(0, 16).replace('T', ' ');
+};
+---
+
+<AdminShell
+  title="Profile changes"
+  requires="profilechange:decide"
+  intro="Requests to change a field the federation governs — the ones where an unreviewed edit would silently change an outcome."
+>
+  {doneMessage && <p class="notice notice--done" role="status">{doneMessage}</p>}
+  {error && <p class="notice notice--error" role="alert">{error}</p>}
+
+  {notConfigured && (
+    <p class="notice">
+      The federation database is not configured on this deployment. There is no
+      register to change and no requests to decide.
+    </p>
+  )}
+
+  {readFailed && (
+    <ErrorState
+      title="The change queue could not be read"
+      description="The register is configured but did not answer."
+      detail={failureDetail}
+      retryHref={SELF}
+    />
+  )}
+
+  {!notConfigured && !readFailed && rows.length === 0 && (
+    <EmptyState
+      title="No governed changes are waiting"
+      description="Members can correct most of their own profile without review. Only a name, a date of birth, a gender or a nationality arrives here."
+    />
+  )}
+
+  {rows.map((r) => {
+    const isMine = myUserId != null && r.requestedByUserId === myUserId;
+    return (
+      <article class="req">
+        <header class="req__head">
+          <h2>{r.ref}</h2>
+          <p class="req__meta">filed {fmtDate(r.createdAt)} · {r.status}</p>
+        </header>
+
+        <dl class="req__body">
+          <dt>Person</dt>
+          <dd>
+            {r.person
+              ? `${r.person.fullName ?? '(no name)'} — ${r.person.federationId ?? `#${r.person.id}`}`
+              : 'This record could not be read.'}
+          </dd>
+
+          <dt>Field</dt>
+          <dd>
+            <code>{r.field}</code>
+            {WHY_GOVERNED[r.field] && <span class="req__why"> {WHY_GOVERNED[r.field]}</span>}
+          </dd>
+
+          <dt>Recorded as</dt>
+          <dd>{r.oldValue ?? <em>(empty)</em>}</dd>
+
+          <dt>Asked to become</dt>
+          <dd><strong>{r.newValue ?? <em>(empty)</em>}</strong></dd>
+
+          <dt>Evidence supplied</dt>
+          <dd>
+            {r.evidence
+              ? <details><summary>As submitted</summary><pre>{JSON.stringify(r.evidence, null, 2)}</pre></details>
+              : <em>None supplied.</em>}
+          </dd>
+        </dl>
+
+        {/* The warning that stops the silent regression, shown BEFORE the
+            control rather than as a refusal afterwards. */}
+        {r.moved && (
+          <p class="notice notice--error">
+            <strong>The record has moved since this request was filed.</strong>
+            It now reads <strong>{r.currentValue ?? '(empty)'}</strong>, not
+            {' '}{r.oldValue ?? '(empty)'}. An approval will be refused. Somebody
+            has corrected this field in the meantime; the member should file a
+            fresh request against the current value.
+          </p>
+        )}
+
+        {isMine ? (
+          /* The module refuses a self-decision, so offering the control would
+             be offering a button that always errors. Said, not hidden. */
+          <p class="notice">
+            You filed this request. It must be decided by somebody else — a
+            governed change approved by the person who asked for it is an
+            ordinary edit with extra steps.
+          </p>
+        ) : (
+          <form method="POST" action={SELF} class="req__decide">
+            <input type="hidden" name="requestId" value={String(r.id)} />
+            <label for={`reason-${r.id}`}>Reason (required, recorded against the decision)</label>
+            <textarea
+              id={`reason-${r.id}`}
+              name="reason"
+              required
+              maxlength="2000"
+              rows="2"
+              placeholder="What evidence did you see, and what did it show?"
+            ></textarea>
+            <div class="req__actions">
+              <button type="submit" name="decision" value="rejected">Refuse</button>
+              <button type="submit" name="decision" value="approved">Approve and apply</button>
+            </div>
+          </form>
+        )}
+      </article>
+    );
+  })}
+</AdminShell>
+
+<style>
+  .notice {
+    padding: var(--space-3, 0.75rem) var(--space-4, 1rem);
+    border-radius: var(--radius, 6px);
+    margin-block: var(--space-3, 0.75rem);
+    border: 1px solid var(--color-border, #d0d0d0);
+    background: var(--color-surface-2, #f6f6f6);
+  }
+  .notice--error { border-color: #a11; background: #fdf3f3; }
+  .notice--done { border-color: #171; background: #f3fbf5; }
+
+  .req {
+    border: 1px solid var(--color-border, #d0d0d0);
+    border-radius: var(--radius, 6px);
+    padding: var(--space-4, 1rem);
+    margin-block: var(--space-5, 1.25rem);
+  }
+  .req__head { display: flex; flex-wrap: wrap; gap: var(--space-3, 0.75rem); align-items: baseline; justify-content: space-between; }
+  .req__head h2 { margin: 0; font-size: 1.05rem; font-family: var(--font-mono, monospace); }
+  .req__meta { margin: 0; color: var(--color-text-muted, #555); }
+
+  .req__body { display: grid; grid-template-columns: auto 1fr; gap: 0.35rem 0.9rem; margin-block: var(--space-3, 0.75rem); }
+  .req__body dt { color: var(--color-text-muted, #555); }
+  .req__body dd { margin: 0; }
+  .req__why { color: var(--color-text-muted, #555); }
+  .req__body pre { overflow-x: auto; font-size: 0.8rem; }
+
+  .req__decide { display: grid; gap: var(--space-2, 0.5rem); }
+  .req__decide textarea { width: 100%; }
+  .req__actions { display: flex; flex-wrap: wrap; gap: var(--space-2, 0.5rem); }
+</style>

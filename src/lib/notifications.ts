@@ -66,6 +66,11 @@ export const NOTIFIABLE = {
   // is 'booked' — the people who actually hold a place on that occurrence,
   // which is a query this system can answer exactly rather than approximately.
   CLASS_SESSION_CANCELLED: { audience: 'booked', essential: true, title: 'A class has been cancelled' },
+  CLASS_SESSION_RESCHEDULED: { audience: 'booked', essential: true, title: 'A class has moved' },
+  // THE CLUB'S OWN MEMBERS, and only a CLUB's. See the 'unit_members' case in
+  // resolveRecipients(): a national or state publication resolves to nobody
+  // rather than to every member in the country.
+  SCHEDULE_PUBLISHED: { audience: 'unit_members', essential: true, title: 'Your club’s timings have changed' },
 } as const;
 
 export type NotifiableEvent = keyof typeof NOTIFIABLE;
@@ -487,6 +492,26 @@ async function resolveRecipients(db: DB, event: any, audience: string): Promise<
       // on unknown[] and the function promises number[].
       return [...new Set<number>(rows.map((r: any) => r.personId).filter(Boolean))];
     }
+    case 'unit_members': {
+      // THE PEOPLE WHO TRAIN THERE. `persons.dojoId` is where a member is
+      // placed, so this is a query and not an estimate.
+      //
+      // AND IT IS DELIBERATELY LIMITED TO A CLUB. A schedule published at
+      // national, state or district scope resolves to NOBODY here — not
+      // because those changes do not matter, but because "every member of the
+      // federation" is a fan-out this system must never perform on the strength
+      // of one administrator saving a form. When MMAKF wants a national
+      // announcement it is a circular, which is a different act with a
+      // different approval path.
+      if (event.payload?.ownerScope !== 'dojo') return [];
+      const dojoId = Number(event.payload?.ownerId);
+      if (!Number.isFinite(dojoId)) return [];
+      const rows = await db
+        .select({ id: s.persons.id })
+        .from(s.persons)
+        .where(and(eq(s.persons.dojoId, dojoId), eq(s.persons.status, 'active')));
+      return rows.map((r: any) => r.id).filter(Boolean);
+    }
     case 'approvers': {
       // Resolved from role bindings, and the REQUESTER is excluded — they cannot
       // approve their own request, so telling them one is waiting is noise.
@@ -540,6 +565,13 @@ function describe(event: { eventType: string; payload: any }): string {
       return 'The draw has been published for a category you entered.';
     case 'RANKING_UPDATED':
       return 'The national rankings have been updated.';
+    case 'CLASS_SESSION_RESCHEDULED':
+      return `${event.payload?.className ?? 'A class'} has moved from ${String(event.payload?.previousStartsAt ?? '').slice(0, 16).replace('T', ' ')} to ${String(event.payload?.startsAt ?? '').slice(0, 16).replace('T', ' ')}. Your place moved with it.`;
+    case 'SCHEDULE_PUBLISHED':
+      // NOT the new hours themselves. A timetable is a table, the body of a
+      // notification is one line, and half a timetable is worse than none —
+      // the reader goes to the page, which has all of it.
+      return `Your club has published new timings, in force from ${event.payload?.effectiveFrom ?? 'a date shown on the schedule'}. Check the class you attend before your next session.`;
     case 'CLASS_SESSION_CANCELLED':
       // Names the class and the time, because "a class has been cancelled" sends
       // somebody to open the app to find out which one — and the person most
@@ -575,7 +607,9 @@ function linkFor(event: { eventType: string; payload: any }): string {
     case 'APPROVAL_REQUESTED':
       return '/admin/approvals';
     case 'CLASS_SESSION_CANCELLED':
-      return '/schedule';
+    case 'CLASS_SESSION_RESCHEDULED':
+    case 'SCHEDULE_PUBLISHED':
+      return '/my/schedule';
     default:
       return '/my';
   }

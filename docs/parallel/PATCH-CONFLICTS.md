@@ -257,3 +257,34 @@ claims the federation checked it.
 changed and nothing needs to be. If you want the static pages to carry the same
 caveat the database now carries, the sentence is in
 `technical_citations.notes` for every kata.
+
+### 8a. Outcome of the verification pass — the corpus was mostly right
+
+Conflict 8 was resolved by evidence rather than by either agent giving way. A
+parallel research workflow (13 agents, 447 tool calls) checked all 26 asserted
+counts against published sources, and the results were then re-verified by hand
+against the JKA Chiba Prefecture Headquarters movement-count table
+(<https://jkachiba.com/kyodousuu/>, fetched and parsed directly).
+
+**24 of 26 counts in `src/data/kata.ts` are corroborated exactly.** The content
+agent's figures were sound, and the "JKA-line convention" policy stated in that
+file's header turns out to be accurate.
+
+Three things did not survive:
+
+1. **Nijushiho — corpus 24, JKA 34.** 24 is what the name means (二十四歩,
+   "twenty-four steps"); the kata has 34 counted movements. Stored as `disputed`
+   with both figures and no count.
+2. **Kanku Dai kiai — corpus 15/45, table 15/65.** An apparent digit
+   transposition. Recorded in the citation; not silently corrected, because kiai
+   are the content agent's field and not stored in a column here.
+3. **Sochin kiai — corpus 28/41, table 30/41.** Same handling.
+
+**Jiin** is absent from the JKA table; its count is now stored as null with a
+citation recording that a pass looked and found nothing.
+
+**For the Shotokan content agent.** Nothing in `src/data/kata.ts` was modified.
+Three values in it are contradicted by a published JKA table — `nijushiho.movements`,
+`kanku-dai.kiai` and `sochin.kiai` — and the evidence is in
+`src/data/kata-verification.ts` and in `technical_citations`. Those are yours to
+change or defend; the database records the disagreement either way.

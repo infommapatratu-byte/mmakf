@@ -1,0 +1,351 @@
+---
+/**
+ * MY TRAINING WEEK — /my/schedule
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * IT TAKES NO IDENTIFIER
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The same structural rule the rest of /my is built on: there is no id in the
+ * path, none in the query string and none in a form. The only person this page
+ * can read is the caller, resolved from their own session. A member area that
+ * accepts "whose schedule?" as input is one that will eventually be sent
+ * somebody else's, and no amount of checking afterwards undoes that shape.
+ *
+ * The only mutation here — booking or releasing a place — passes a SESSION id,
+ * never a person id. src/db/scheduling.ts resolves the person from the caller's
+ * own user row and refuses anything else without `booking:write` in the club's
+ * scope, so the id in the request buys nothing.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * A CANCELLED CLASS STAYS ON THE PAGE
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * personalSchedule() returns cancelled and rescheduled sessions deliberately,
+ * and this renders them struck through with what happened. The alternative is a
+ * gap where a class used to be, which reads as a fault in the timetable rather
+ * than as a change — and the person most in need of this page is the one whose
+ * Tuesday moved.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT IS OFFERED TO BOOK
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Only sessions bookableSessions() will actually take. It excludes anything
+ * cancelled, full, in the past, blacked out at the venue, or on a day the club
+ * has since declared closed. A federation booking page that lists every slot
+ * and then telephones you three days later to say the coach was away is the
+ * failure src/db/booking.ts was written to prevent, and this is the same
+ * refusal for classes.
+ */
+import Base from '@/layouts/Base.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { eq } from 'drizzle-orm';
+import { ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  personalSchedule, bookableSessions, bookClassSession, cancelSessionBooking,
+  todayIso, addDays, isSchedulingError,
+  type PersonalSession, type BookableSession,
+} from '@/db/scheduling';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/my/schedule');
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+type Gate = 'no_database' | 'signed_out' | 'shared_credential' | 'no_person' | 'ok';
+let gate: Gate = 'ok';
+let personId: number | null = null;
+
+if (!configured) gate = 'no_database';
+else if (!identity) gate = 'signed_out';
+else if (identity.shared) gate = 'shared_credential';
+else {
+  const [row] = await db()
+    .select({ personId: s.users.personId })
+    .from(s.users)
+    .where(eq(s.users.id, identity.principal.userId as number))
+    .limit(1);
+  personId = row?.personId ?? null;
+  if (personId == null) gate = 'no_person';
+}
+
+let error: string | null = null;
+let done: string | null = null;
+
+// ─── Booking and releasing ──────────────────────────────────────────────────
+//
+// Posts to this page, not to /api/. src/middleware.ts requires application/json
+// on /api/ paths and a form with JavaScript off cannot send one; CSRF is
+// already handled, because the middleware refuses a mutating request that is
+// not same-origin before any of this runs.
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const field = (k: string) => String(form.get(k) ?? '').trim();
+  const action = field('action');
+  const rl = await rateLimit(Astro.request, 'my-schedule', 30, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many requests in a short time. Nothing was booked or cancelled. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (gate !== 'ok' || personId == null) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was booked or cancelled.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity!.principal,
+      ip: clientIp(Astro.request),
+      authority: 'user',
+      reason: field('reason') || 'Member self-service',
+    };
+    try {
+      if (action === 'book') {
+        // The person id is NOT taken from the form. It is this page's own
+        // resolved caller, and the module re-resolves it from the user row.
+        await bookClassSession(db(), ctx, Number(field('sessionId')), personId);
+        return Astro.redirect(`${SELF}?done=booked`, 303);
+      }
+      if (action === 'release') {
+        await cancelSessionBooking(db(), ctx, Number(field('bookingId')), field('reason') || 'Cancelled by the member');
+        return Astro.redirect(`${SELF}?done=released`, 303);
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = 'The federation’s permission rules do not allow this account to do that. Nothing was changed.';
+      } else if (isSchedulingError(err)) {
+        // The engine writes its refusals for the person who hit them — "that
+        // session is full", "that place is already held under MMAKF-BKG-…" —
+        // so they are shown as they are.
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        Astro.response.status = 500;
+        error = 'That could not be completed. Nothing was booked or cancelled.';
+        console.error('[my/schedule]', err);
+      }
+    }
+  }
+}
+
+const DONE: Record<string, string> = {
+  booked: 'Your place is booked. It appears in your week below.',
+  released: 'Your place has been released and is available to somebody else.',
+};
+done = DONE[Astro.url.searchParams.get('done') ?? ''] ?? null;
+
+// ─── The week ───────────────────────────────────────────────────────────────
+
+let mine: PersonalSession[] = [];
+let offered: BookableSession[] = [];
+let myDojoId: number | null = null;
+let loadError: string | null = null;
+
+if (gate === 'ok' && personId != null) {
+  try {
+    const database = db();
+    const from = todayIso();
+    const to = addDays(from, 27);
+    mine = await personalSchedule(database, personId, from, to);
+
+    const [me] = await database.select({ dojoId: s.persons.dojoId })
+      .from(s.persons).where(eq(s.persons.id, personId)).limit(1);
+    myDojoId = me?.dojoId ?? null;
+    if (myDojoId) {
+      offered = await bookableSessions(database, { dojoId: myDojoId }, from, to);
+    }
+  } catch (err) {
+    console.error('[my/schedule] read failed', err);
+    loadError = 'Your training week could not be read. Nothing has been changed.';
+  }
+}
+
+const bookedSessionIds = new Set(mine.filter((x) => x.role === 'attending').map((x) => x.sessionId));
+const openToBook = offered.filter((x) => !bookedSessionIds.has(x.id));
+
+const DAY_FMT = (iso: string) =>
+  new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
+---
+
+<Base title="My training week — MMAKF" description="Your MMAKF classes, bookings and changes.">
+  <section>
+    <div class="container" style="max-width:960px">
+      <div class="eyebrow">Your week</div>
+      <h1 class="display-2" style="margin-top:12px">Training <em class="r">week</em>.</h1>
+      <div class="rule"></div>
+
+      {error && <div style="margin-top:24px"><ErrorState title="Nothing was changed" safe={error} retryHref={null} /></div>}
+      {done && <div class="ok-note">{done}</div>}
+
+      {gate === 'no_database' ? (
+        <EmptyState
+          title="The member area is not available on this deployment"
+          body="Your training week is read from the federation register, which needs a database."
+        />
+      ) : gate === 'signed_out' ? (
+        <EmptyState
+          title="Sign in to see your week"
+          body="Your classes, your bookings and any changes to them are on your own record. Sign in to read it."
+        />
+      ) : gate === 'shared_credential' ? (
+        <EmptyState
+          title="This is a shared credential"
+          body="A shared sign-in is attributable to no person, so it has no training record and cannot hold a place in a class. Sign in with your own account."
+        />
+      ) : gate === 'no_person' ? (
+        <EmptyState
+          title="This account is not linked to a member record"
+          body="Your sign-in works; it is not yet attached to a person on the federation register, so there is no training week to show. The federation office can link them."
+        />
+      ) : loadError ? (
+        <ErrorState title="We couldn’t read your week" safe="Nothing has been changed." />
+      ) : (
+        <>
+          {/* ═══════ WHAT I HAVE ON ═══════ */}
+          <h2 class="sec-h">The next four weeks</h2>
+          {mine.length === 0 ? (
+            <EmptyState
+              title="Nothing is booked"
+              body={
+                myDojoId
+                  ? 'You hold no places in the next four weeks. Anything your club has open is listed below.'
+                  : 'You hold no places, and your record is not attached to a club — so there is nothing to offer you. The federation office can place you at a club.'
+              }
+            />
+          ) : (
+            <ul class="week">
+              {mine.map((x) => (
+                <li class={`wk ${x.status === 'cancelled' ? 'wk-off' : ''} ${x.status === 'rescheduled' ? 'wk-moved' : ''}`}>
+                  <div class="wk-when">
+                    <div class="wk-day">{DAY_FMT(x.localDate)}</div>
+                    <div class="wk-time">{x.localStart}–{x.localEnd}</div>
+                  </div>
+                  <div class="wk-what">
+                    <div class="wk-title">
+                      {x.className}
+                      <span class="pill">{x.role === 'teaching' ? 'you teach this' : 'attending'}</span>
+                      {x.mode === 'online' && <span class="pill live">online</span>}
+                    </div>
+                    <div class="wk-where text-muted">
+                      {x.mode === 'online'
+                        ? (x.onlineUrl ? 'Online — the joining link is on the class page' : 'Online')
+                        : (x.venueName ?? 'Venue not recorded')}
+                      {x.bookingRef && <> · {x.bookingRef}</>}
+                    </div>
+                    {x.status === 'cancelled' && (
+                      <div class="wk-note">
+                        <strong>Cancelled.</strong> {x.cancelledReason ? x.cancelledReason : 'Your place was released; no fee applies.'}
+                      </div>
+                    )}
+                    {x.status === 'rescheduled' && (
+                      <div class="wk-note">
+                        <strong>Moved.</strong> This session was rescheduled — the replacement appears in this list at its new time,
+                        and your place moved with it.
+                      </div>
+                    )}
+                  </div>
+                  <div class="wk-do">
+                    {x.role === 'attending' && x.status === 'scheduled' && x.bookingId != null && (
+                      <form method="post" class="inline-form">
+                        <input type="hidden" name="action" value="release" />
+                        {/* The booking id is this caller's own row. The module
+                            re-checks ownership against the signed-in person
+                            before releasing anything, so a substituted id is
+                            refused rather than honoured. */}
+                        <input type="hidden" name="bookingId" value={x.bookingId} />
+                        <input class="input input-sm" name="reason" placeholder="Reason (optional)" />
+                        <button class="btn btn-ghost btn-sm" type="submit">Release my place</button>
+                      </form>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {/* ═══════ WHAT I COULD BOOK ═══════ */}
+          {myDojoId && (
+            <>
+              <h2 class="sec-h">Open at your club</h2>
+              {openToBook.length === 0 ? (
+                <p class="text-muted">
+                  Nothing further is open in the next four weeks. Only sessions that can genuinely be
+                  taken are listed — a full class, a cancelled one, or one on a day the club has closed
+                  does not appear here at all.
+                </p>
+              ) : (
+                <ul class="week">
+                  {openToBook.map((x) => (
+                    <li class="wk">
+                      <div class="wk-when">
+                        <div class="wk-day">{DAY_FMT(x.localDate)}</div>
+                        <div class="wk-time">{x.localStart}–{x.localEnd}</div>
+                      </div>
+                      <div class="wk-what">
+                        <div class="wk-title">
+                          {x.className}
+                          {x.mode === 'online' && <span class="pill live">online</span>}
+                        </div>
+                        <div class="wk-where text-muted">
+                          {x.seatsRemaining == null
+                            ? 'No capacity limit recorded'
+                            : `${x.seatsRemaining} ${x.seatsRemaining === 1 ? 'place' : 'places'} left of ${x.capacity}`}
+                        </div>
+                      </div>
+                      <div class="wk-do">
+                        <form method="post">
+                          <input type="hidden" name="action" value="book" />
+                          <input type="hidden" name="sessionId" value={x.id} />
+                          <button class="btn btn-primary btn-sm" type="submit">Book a place</button>
+                        </form>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .sec-h { font-family: var(--font-display); font-size: 1.02rem; margin: 36px 0 14px; color: var(--gold); }
+  .ok-note {
+    border: 1px solid var(--border); border-left: 3px solid var(--gold);
+    border-radius: var(--radius); padding: 12px 16px; margin-top: 24px; font-size: .86rem;
+  }
+  .week { list-style: none; display: flex; flex-direction: column; gap: 12px; }
+  .wk {
+    display: flex; gap: 20px; align-items: center; flex-wrap: wrap;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card); padding: 16px 18px;
+  }
+  .wk-when { flex: 0 0 200px; }
+  .wk-day { font-size: .82rem; }
+  .wk-time { font-family: var(--font-display); color: var(--gold); }
+  .wk-what { flex: 1 1 320px; display: flex; flex-direction: column; gap: 5px; }
+  .wk-title { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-family: var(--font-display); font-size: .98rem; }
+  .wk-where { font-size: .82rem; }
+  .wk-note { font-size: .82rem; line-height: 1.55; margin-top: 4px; }
+  .wk-off .wk-day, .wk-off .wk-time, .wk-off .wk-title { text-decoration: line-through; opacity: .75; }
+  .wk-moved .wk-time { text-decoration: line-through; opacity: .75; }
+  .wk-do { flex: 0 0 auto; }
+  .inline-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .input-sm { padding: 5px 8px; font-size: .78rem; }
+  .btn-sm { padding: 6px 12px; font-size: .78rem; }
+</style>

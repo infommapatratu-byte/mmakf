@@ -30,6 +30,7 @@ import {
   SITE_ORIGIN,
   PRIVATE_PREFIXES,
   EXCLUSIONS,
+  DYNAMIC_ROUTE_POLICY,
   isPrivatePath,
   routeFromPageFile,
   isDynamicRoute,
@@ -118,6 +119,36 @@ describe('no private path is ever advertised', () => {
       (r): r is string => !!r && classifyRoute(r).kind === 'unclassified'
     );
     expect(unclassified).toEqual([]);
+  });
+
+  it('every PUBLIC dynamic route has a written expansion policy', () => {
+    // THE GUARD THAT WAS MISSING, AND IT LET THE SAME BUG SHIP TWICE.
+    //
+    // A dynamic route contributes NOTHING to the sitemap unless something
+    // expands it. That is the right default — /athlete/[id] must never be
+    // bulk-crawled, and most of its subjects are children — but it is a SILENT
+    // default: a public dynamic route with no policy simply never appears, and
+    // nothing anywhere says so.
+    //
+    // /learn/[audience] went unadvertised that way until somebody noticed the
+    // six pages that are how a school finds MMAKF at all. Then /kata/[slug] did
+    // exactly the same thing, for the twenty-six kata pages, and survived a
+    // review because the only check pointing at DYNAMIC_ROUTE_POLICY ran in the
+    // other direction — it asserted that a policy KEY names a real route, which
+    // catches a stale entry and cannot catch a missing one.
+    //
+    // A policy is not a promise to expand. /athlete/[id] and
+    // /learn/applications/[ref] both carry one saying, at length, why they are
+    // deliberately NOT expanded. What this refuses is the third state: a public
+    // dynamic route nobody has thought about either way.
+    const publicDynamic = FILES.map(routeFromPageFile)
+      .filter((r): r is string => !!r && isDynamicRoute(r) && !isPrivatePath(r));
+
+    const undecided = publicDynamic.filter((r) => !DYNAMIC_ROUTE_POLICY[r]);
+    expect(
+      undecided,
+      'public dynamic routes with no entry in DYNAMIC_ROUTE_POLICY — decide whether each should be expanded into the sitemap, and write down why'
+    ).toEqual([]);
   });
 
   it('and that check is not vacuous — an undeclared section IS unclassified', () => {

@@ -1,0 +1,212 @@
+---
+/**
+ * /shotokan/kata — the kata section of the curriculum browser. §33.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS IS NOT A SECOND KATA LIBRARY
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * /kata already exists and is complete: twenty-six forms, the kanji, the
+ * meanings, the Okinawan names, the vocabulary. Building a second index of the
+ * same twenty-six records is how two pages start disagreeing about what a form
+ * is — and this project has a whole file, src/data/kata.ts, whose header exists
+ * because content stated twice gets stated two ways.
+ *
+ * So this page does the thing /kata does NOT: it shows each kata's place in the
+ * TECHNICAL GRAPH. Which techniques the library records as appearing in it, how
+ * many reference recordings exist, and how many of those MMAKF may actually
+ * show. That is the curriculum-browser view, and it is genuinely different
+ * information rather than a restatement.
+ *
+ * Every link goes through to /kata/[slug] for the form itself.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { researchMatrix, kataGraph, libraryStats } from '@/data/shotokan';
+import { KATA, kataGroups, MOVEMENT_COUNT_NOTE } from '@/data/kata';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const stats = libraryStats();
+const groups = kataGroups();
+const matrix = new Map(researchMatrix().map((r) => [r.kataSlug, r]));
+
+/** Techniques recorded against each kata, resolved once. */
+const techniquesFor = new Map(
+  KATA.map((k) => [k.slug, kataGraph(k.slug)?.techniques ?? []])
+);
+
+const totalLinks = [...techniquesFor.values()].reduce((n, list) => n + list.length, 0);
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'CollectionPage',
+  name: 'Shotokan kata in the technical library',
+  url: canonicalFor(surface, '/shotokan/kata'),
+  description:
+    'Each of the twenty-six Shotokan kata with its place in the technical library: the kihon it contains, the reference recordings on file, and their rights standing.',
+  isPartOf: { '@type': 'WebSite', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
+};
+---
+
+<Base
+  title="Shotokan kata in the technical library — MMAKF"
+  description={`The twenty-six Shotokan kata mapped into the technical library: which of the ${stats.techniques} documented techniques each form contains, how many reference recordings are on file for it, and which of those MMAKF has the standing to show.`}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Kata', url: '/shotokan/kata' },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow="Kata 型"
+    title={`The canon, <em class="r">connected</em>.`}
+    lead="Not another list of the twenty-six forms — that is the kata library. This is where each form sits in the technical graph: the kihon inside it, and the footage on file."
+    pills={[`${KATA.length} kata`, `${totalLinks} technique links`, `${stats.videosRegistered} recordings registered`]}
+  />
+
+  {/* ═══════ WHAT THIS PAGE IS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">Where to start</div>
+          <h2 class="display-2" style="margin-top:16px">The forms themselves are <em class="r">next door</em>.</h2>
+          <div class="rule"></div>
+          <p class="body-txt">
+            For what a kata is &mdash; the name and where it comes from, the kanji, the shape it travels on
+            the floor, what it develops, and the Japanese it teaches &mdash; go to the
+            {' '}<a href={h('/kata')}>kata library</a>. All twenty-six are written there at length, and
+            nothing on this page repeats them.
+          </p>
+          <p class="body-txt">
+            What is here instead is the part that only exists once kihon, kata and kumite are held in one
+            system: which documented techniques the library records inside each form, and what reference
+            footage has been found, checked and filed against it.
+          </p>
+          <p class="body-txt">{MOVEMENT_COUNT_NOTE}</p>
+        </div>
+
+        <aside class="fade panel" aria-labelledby="no-syllabus">
+          <div class="eyebrow">Still not a syllabus</div>
+          <h3 id="no-syllabus" class="panel-h">No form is placed at a grade.</h3>
+          <p class="panel-p">
+            <strong>MMAKF has not published its grading syllabus.</strong> The groupings below are the two
+            named series and the rest of the canon &mdash; they are series because they <em>are</em> series,
+            not because they are a ladder.
+          </p>
+          <p class="panel-p">
+            Nothing here says which form is examined at which grade, in which order they are learned, or what
+            standard a candidate is measured against.
+          </p>
+          <a class="btn btn-ghost" href={h('/belt-system')}>The belt system &amp; grading &rarr;</a>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE CANON, WITH ITS GRAPH ═══════ */}
+  {groups.map((g, i) => (
+    <section class={i % 2 === 0 ? 'bg2' : ''}>
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">{g.members.length} kata</div>
+          <h2 class="display-2">{g.title}</h2>
+          <div class="rule"></div>
+          <p class="lead">{g.blurb}</p>
+        </div>
+        <div class="grid grid-2">
+          {g.members.map((k) => {
+            const techs = techniquesFor.get(k.slug) ?? [];
+            const row = matrix.get(k.slug);
+            return (
+              <div class="card fade">
+                <div class="kata-card-top">
+                  <span class="kata-kanji" lang="ja">{k.kanji}</span>
+                  {k.movements !== null && <span class="pill">{k.movements} movements</span>}
+                </div>
+                <div class="card-title" style="font-size:1.05rem">
+                  <a href={h(`/kata/${k.slug}`)}>{k.name}</a>
+                </div>
+                <div class="kata-meaning">{k.meaning}</div>
+
+                <div class="card-body">
+                  <strong>Kihon recorded in this form.</strong>{' '}
+                  {techs.length === 0 ? (
+                    <span class="text-muted">
+                      None recorded. That is an absence of a written link, not a claim that the form
+                      contains no documented technique.
+                    </span>
+                  ) : (
+                    <span class="tlist">
+                      {techs.map((t, n) => (
+                        <>
+                          {n > 0 && ', '}
+                          <a href={h(`/shotokan/techniques/${t.slug}`)}>{t.name}</a>
+                        </>
+                      ))}
+                    </span>
+                  )}
+                </div>
+
+                <div class="card-body">
+                  <strong>Reference footage.</strong>{' '}
+                  {!row || row.total === 0 ? (
+                    <span class="text-muted">None registered.</span>
+                  ) : row.publishable === 0 ? (
+                    <span class="text-muted">
+                      {row.total} registered, <strong>none citable</strong> — every one is a third-party
+                      upload awaiting a rights decision.
+                    </span>
+                  ) : (
+                    <span>{row.total} registered, {row.publishable} citable.</span>
+                  )}
+                </div>
+
+                <div class="kata-card-foot">
+                  <span class="text-muted">{k.formerName ? `formerly ${k.formerName}` : ''}</span>
+                  <a class="text-gold" href={h(`/kata/${k.slug}`)}>The form &rarr;</a>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  ))}
+
+  <section>
+    <div class="container">
+      <div class="panel fade" style="max-width:70ch">
+        <div class="eyebrow">Coverage</div>
+        <h3 class="panel-h">Every kata has footage. Almost none of it is ours to show.</h3>
+        <p class="panel-p">
+          All {KATA.length} forms carry at least one checked, playable recording in the register. The two
+          sources with kata coverage &mdash; SKIF New Zealand and Colchester JKA &mdash; both embed
+          recordings uploaded by third parties, so those are filed with full attribution and held for a
+          technical-committee rights decision rather than embedded here.
+        </p>
+        <a class="btn btn-ghost" href={h('/shotokan/videos')}>The source register and research matrix &rarr;</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="bg2">
+    <div class="container">
+      <div class="flex flex-wrap gap-3">
+        <a class="btn btn-ghost" href={h('/kata')}>The kata library</a>
+        <a class="btn btn-ghost" href={h('/shotokan/kihon')}>Kihon</a>
+        <a class="btn btn-ghost" href={h('/shotokan/kumite')}>Kumite</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .tlist a { white-space: nowrap; }
+</style>

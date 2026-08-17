@@ -24,7 +24,9 @@
     "content:check": "node scripts/reseed.mjs",
     "content:push": "node scripts/reseed.mjs --write",
     "videos:discover": "node scripts/discover-videos.mjs",
-    "videos:check": "node scripts/check-video-links.mjs"
+    "videos:check": "node scripts/check-video-links.mjs",
+    "library:status": "node scripts/seed-technical-library.mjs --status",
+    "library:seed": "node scripts/seed-technical-library.mjs"
   },
   "dependencies": {
     "@astrojs/vercel": "^8.2.11",

@@ -1491,6 +1491,16 @@ export async function revokeAffiliation(
 
 export interface DirectoryEntry {
   kind: UnitKind;
+  /**
+   * The register row id.
+   *
+   * SERVER-SIDE ONLY, and the one field here that is not for the reader: it is
+   * the key `publishedWeek()` needs to answer "when does this club train?".
+   * Never rendered — the public identifier is `code`, which the federation
+   * issues and can reissue. Carrying it changes nothing about what this
+   * function refuses to publish: still no address, telephone number or email.
+   */
+  id: number;
   code: string;
   name: string;
   city: string | null;
@@ -1616,6 +1626,7 @@ export async function publicDirectory(
 
     return {
       kind,
+      id: r.id,
       code: r.code,
       name: r.name,
       // City is a location; the address line is where an instructor may live.

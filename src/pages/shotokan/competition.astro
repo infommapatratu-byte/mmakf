@@ -1,0 +1,282 @@
+---
+/**
+ * WKF competition kumite rules. The sport layer, kept visibly separate.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * THE ONE THING THIS PAGE MUST NEVER BE MISREAD AS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Every rule on this page is the World Karate Federation's. None of it is
+ * MMAKF doctrine, and none of it describes traditional Shotokan practice.
+ *
+ * The failure is specific and it has a victim: a student reads that a jodan
+ * kick scores three points and a punch scores one, and concludes that Shotokan
+ * values the kick three times as highly. It does not. That ratio is a
+ * competition convention designed to reward difficulty under a referee, and it
+ * carries no technical judgement about a technique's worth in kihon or kata. A
+ * page that prints the scoring table without saying whose table it is invites
+ * exactly that inference, and nobody has to lie for it to happen.
+ *
+ * So the attribution is not a footnote. It is the first block on the page, it
+ * is in the heading of every article, and every provision is rendered as a
+ * QUOTATION with its clause number — never paraphrased into MMAKF's voice.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WHY THE TEXT IS QUOTED RATHER THAN SUMMARISED
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * A summary of a competition rule is a new rule. Article 8.5 requires SIX
+ * criteria and says a technique must fulfil all six; a gloss that lists four of
+ * them has changed what scores. Competitors and coaches plan around these
+ * words, so the words are what appear, sourced to the clause they came from and
+ * linked to the published document.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * NO DATABASE
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Rendered from src/data/technical-reference.ts — the same module that seeds
+ * sport_kumite_rulesets — and NOT from Postgres. Production has no DATABASE_URL
+ * for this content, and a technical page that goes blank without a database is
+ * a page search engines and learners find empty. The database copy exists so
+ * the rules can be reviewed, versioned and cited; this page exists so they can
+ * be read.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { WKF_KUMITE_RULESET, WKF_KUMITE_PROVISIONS, RETRIEVED_ON } from '@/data/technical-reference';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const url = canonicalFor(surface, '/shotokan/competition');
+
+/** Provisions grouped by article, in document order. */
+const articles: { article: string; heading: string; provisions: typeof WKF_KUMITE_PROVISIONS }[] = [];
+for (const p of WKF_KUMITE_PROVISIONS) {
+  let group = articles.find((a) => a.article === p.article);
+  if (!group) {
+    group = { article: p.article, heading: '', provisions: [] as any };
+    articles.push(group);
+  }
+  (group.provisions as any).push(p);
+}
+// The article's own name, taken from its first provision rather than typed
+// again here — one source for the wording, so it cannot drift.
+for (const group of articles) {
+  const topic = group.provisions[0]?.topic ?? '';
+  group.heading = topic === 'scoring' ? 'Scoring'
+    : topic === 'prohibited' ? 'Prohibited behaviour'
+    : topic === 'area' ? 'The competition area'
+    : topic.replace(/_/g, ' ');
+}
+
+const scoring = WKF_KUMITE_PROVISIONS.find((p) => p.clause === '8.6');
+const criteria = WKF_KUMITE_PROVISIONS.find((p) => p.clause === '8.5');
+
+const description =
+  `The World Karate Federation's kumite competition rules, version ${WKF_KUMITE_RULESET.version}, valid from `
+  + `1 January 2026 — scoring, the six criteria a technique must meet, contact distance and the seventeen `
+  + `prohibited behaviours, each quoted from the published rules with its clause number. WKF sport `
+  + `regulation, not traditional Shotokan practice.`;
+
+/**
+ * `Article` with an explicit `citation` and `isBasedOn`, because that is what
+ * this page is: MMAKF's presentation of somebody else's document. Marking it up
+ * as a HowTo or a Course would claim it teaches a method of ours.
+ */
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'Article',
+  headline: `WKF kumite competition rules ${WKF_KUMITE_RULESET.version}`,
+  url,
+  description,
+  inLanguage: 'en',
+  datePublished: WKF_KUMITE_RULESET.effectiveFrom,
+  isPartOf: { '@type': 'WebSite', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
+  about: { '@type': 'Thing', name: 'Karate kumite competition rules' },
+  citation: {
+    '@type': 'CreativeWork',
+    name: `${WKF_KUMITE_RULESET.title} (Rules Version ${WKF_KUMITE_RULESET.version})`,
+    url: WKF_KUMITE_RULESET.documentUrl,
+    publisher: { '@type': 'Organization', name: 'World Karate Federation', url: 'https://www.wkf.net/' },
+  },
+  isBasedOn: WKF_KUMITE_RULESET.documentUrl,
+  publisher: { '@type': 'Organization', name: 'Modern Martial Arts Karate-Do Federation of India' },
+};
+---
+
+<Base
+  title={`WKF kumite competition rules ${WKF_KUMITE_RULESET.version} — MMAKF`}
+  description={description}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Competition', url: '/shotokan/competition' },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow="Competition 試合組手"
+    title={`The rules a <em class="r">referee</em> actually applies.`}
+    lead="The World Karate Federation's kumite competition rules, quoted clause by clause. This is sport regulation with an effective date and a governing body — a separate subject from the Shotokan you train in the dojo, and this page keeps them separate."
+    pills={[
+      `Version ${WKF_KUMITE_RULESET.version}`,
+      'Valid from 1 January 2026',
+      `${WKF_KUMITE_PROVISIONS.length} provisions quoted`,
+    ]}
+  />
+
+  {/* ── Whose rules these are, before anything else ──────────────────────── */}
+  <section>
+    <div class="container">
+      <aside class="whose" aria-labelledby="whose-h">
+        <h2 id="whose-h" class="whose-h">Every rule below is the WKF&rsquo;s.</h2>
+        <p class="body-txt">
+          These are the World Karate Federation&rsquo;s competition rules, reproduced
+          with attribution so competitors, coaches and officials can read what the
+          document actually says. <strong>They are not MMAKF doctrine</strong>, and
+          they are <strong>not a description of traditional Shotokan</strong>.
+        </p>
+        <p class="body-txt">
+          The distinction matters most in the scoring table. Under these rules a
+          face-level kick scores three points and a punch scores one. That ratio
+          rewards difficulty under a referee inside a three-minute bout &mdash; it is
+          not a statement that the kick is three times the technique. Nothing in
+          kihon or kata follows from it.
+        </p>
+        <p class="src">
+          Source:
+          <a href={WKF_KUMITE_RULESET.documentUrl} rel="noopener nofollow" target="_blank">
+            {WKF_KUMITE_RULESET.title}, Rules Version {WKF_KUMITE_RULESET.version}
+          </a>
+          &nbsp;&mdash; published by the World Karate Federation, retrieved {RETRIEVED_ON}.
+          The document is linked, not rehosted.
+        </p>
+      </aside>
+    </div>
+  </section>
+
+  {/* ── The two things a competitor asks first ───────────────────────────── */}
+  {scoring && (
+    <section>
+      <div class="container">
+        <div class="eyebrow">The scale</div>
+        <h2 class="display-2" style="margin-top:16px">What <em class="r">scores</em>.</h2>
+        <div class="rule"></div>
+        <blockquote class="prov">
+          <p>{scoring.sourceQuote}</p>
+          <cite>WKF Kumite Competition Rules {WKF_KUMITE_RULESET.version}, {scoring.clause}</cite>
+        </blockquote>
+      </div>
+    </section>
+  )}
+
+  {criteria && (
+    <section>
+      <div class="container">
+        <div class="eyebrow">The bar</div>
+        <h2 class="display-2" style="margin-top:16px">All <em class="r">six</em>, or none.</h2>
+        <div class="rule"></div>
+        <p class="body-txt">
+          A technique that lands is not automatically a technique that scores. The
+          rules set six criteria and require every one of them &mdash; which is why a
+          fast, clean strike delivered at the wrong distance is waved off.
+        </p>
+        <blockquote class="prov">
+          <p>{criteria.sourceQuote}</p>
+          <cite>WKF Kumite Competition Rules {WKF_KUMITE_RULESET.version}, {criteria.clause}</cite>
+        </blockquote>
+      </div>
+    </section>
+  )}
+
+  {/* ── Every provision, article by article ──────────────────────────────── */}
+  {articles.map((group) => (
+    <section>
+      <div class="container">
+        <div class="eyebrow">{group.article}</div>
+        <h2 class="display-2" style="margin-top:16px">{group.heading}</h2>
+        <div class="rule"></div>
+        <ol class="provisions">
+          {group.provisions.map((p) => (
+            <li id={`clause-${String(p.clause ?? '').replace(/\./g, '-')}`}>
+              <div class="clause">{p.clause}</div>
+              <div class="clause-body">
+                {p.heading && <h3>{p.heading}</h3>}
+                <blockquote class="prov">
+                  <p>{p.sourceQuote}</p>
+                </blockquote>
+                {p.appliesTo && p.appliesTo !== 'all' && (
+                  <p class="applies">Applies to: {p.appliesTo}</p>
+                )}
+              </div>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </section>
+  ))}
+
+  {/* ── Back into the traditional material ───────────────────────────────── */}
+  <section>
+    <div class="container">
+      <div class="eyebrow">The other subject</div>
+      <h2 class="display-2" style="margin-top:16px">Kumite is <em class="r">older</em> than the rulebook.</h2>
+      <div class="rule"></div>
+      <p class="body-txt">
+        Gohon, kihon ippon and jiyu ippon kumite are teaching progressions, not
+        competition formats. They answer a different question &mdash; how a student
+        learns distance, timing and commitment against a partner &mdash; and they
+        long predate any scoring table.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-ghost" href={h('/shotokan/kumite')}>The kumite library</a>
+        <a class="btn btn-ghost" href={h('/shotokan/kihon')}>Kihon library</a>
+        <a class="btn btn-ghost" href={h('/shotokan')}>Shotokan overview</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .whose {
+    border-left: 4px solid var(--c-warn, #b45309);
+    background: var(--c-surface-2, rgba(180, 83, 9, .06));
+    padding: 20px 24px;
+    border-radius: 0 10px 10px 0;
+    margin-block: 8px 24px;
+  }
+  .whose-h { font-size: 1.25rem; margin: 0 0 12px; }
+  .whose p { max-width: 72ch; }
+  .src { font-size: .9rem; opacity: .85; margin-top: 12px; }
+
+  .provisions { list-style: none; padding: 0; margin: 24px 0 0; display: grid; gap: 20px; }
+  .provisions li { display: grid; grid-template-columns: 5.5rem 1fr; gap: 16px; align-items: start; }
+  .clause {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: .95rem; font-weight: 700; opacity: .8;
+    padding-top: 2px;
+  }
+  .clause-body h3 { font-size: 1.05rem; margin: 0 0 8px; }
+
+  .prov {
+    margin: 0;
+    padding: 14px 18px;
+    border-left: 3px solid var(--c-border, #d4d4d8);
+    background: var(--c-surface-2, rgba(0, 0, 0, .03));
+    border-radius: 0 8px 8px 0;
+  }
+  .prov p { margin: 0; max-width: 78ch; }
+  .prov cite { display: block; margin-top: 10px; font-size: .85rem; opacity: .75; font-style: normal; }
+  .applies { font-size: .85rem; opacity: .8; margin: 8px 0 0; }
+
+  .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+
+  @media (max-width: 40rem) {
+    .provisions li { grid-template-columns: 1fr; gap: 6px; }
+    .clause { padding-top: 0; }
+  }
+</style>

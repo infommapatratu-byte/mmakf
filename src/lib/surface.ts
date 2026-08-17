@@ -210,7 +210,9 @@ export const PUBLIC_NAV: NavItem[] = [
       { href: '/shotokan/kihon', label: 'Kihon library', note: 'Stances, punches, blocks, strikes and kicks' },
       { href: '/kata', label: 'Kata library' },
       { href: '/shotokan/kumite', label: 'Kumite library', note: 'Partner practice, tactics and competition' },
+      { href: '/shotokan/stances', label: 'Stances', note: 'Dachi-waza, compared side by side' },
       { href: '/shotokan/terminology', label: 'Terminology' },
+      { href: '/shotokan/videos', label: 'Video source register', note: 'What was found, checked, and whether we may show it' },
       { href: '/belt-system', label: 'Grades and belts' },
       { href: '/regulations', label: 'Regulations' },
     ],
@@ -366,6 +368,16 @@ export const ADMIN_GROUPS: AdminGroup[] = [
       { href: '/admin/coaches', label: 'Coaches', action: 'coach:read' },
       { href: '/admin/membership', label: 'Members', action: 'membership:read' },
       { href: '/admin/onboarding', label: 'Role applications', action: 'role:grant' },
+      // Two records that may be one person. Gated on its own action rather than
+      // on 'person:write': every dojo administrator holds that so they can
+      // correct a telephone number, and deciding that two national identity
+      // records describe one human being is a different kind of act.
+      { href: '/admin/duplicates', label: 'Duplicate records', action: 'duplicate:review' },
+      // Changes to the fields where an unreviewed edit silently changes an
+      // outcome — a date of birth is a competition age category, a name is what
+      // an issued certificate says. Separated from 'person:write' for the same
+      // reason as the row above.
+      { href: '/admin/profile-changes', label: 'Profile changes', action: 'profilechange:decide' },
       { href: '/admin/governance', label: 'Governance', action: 'content:read' },
     ],
   },

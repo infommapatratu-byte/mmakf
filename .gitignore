@@ -4,6 +4,10 @@ dist/
 # Per-suite Astro caches: the two suites that boot a real `astro dev` each get
 # their own, so they cannot race on data-store.json. See astro.config.mjs.
 .astro-test-live/
+# The cross-process mutex that keeps the three live suites from booting an
+# astro dev at the same time. Never committed; reclaimed automatically if a
+# worker dies holding it. See tests/helpers/astro-dev.ts.
+.astro-dev-lock/
 .astro-test-seo/
 .vercel/
 .env

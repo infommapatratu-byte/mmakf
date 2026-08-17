@@ -1100,14 +1100,35 @@ export async function myListings(db: DB, principal: Principal, opts: { limit?: n
     reviewedAt: s.listings.reviewedAt,
     decisionReason: s.listings.decisionReason,
     revision: s.listings.revision,
-    // Answers "is this actually on the site right now?" from the same three
-    // conditions the public query uses, so the seller's screen and the shop
-    // cannot disagree.
-    publiclyVisible: sql<boolean>`(
-      ${s.listings.status} = 'approved'
-      AND ${s.sellers.status} = 'approved'
-      AND ${s.listings.contentHash} = ${s.listings.approvedContentHash}
-    )`,
+
+    // Added by 0029, so the seller's own screen can say WHY something is not on
+    // sale rather than only that it is not. Nothing here is reviewable content;
+    // these are the columns /portal/seller/products reads to name the failing
+    // condition, one at a time.
+    contentHash: s.listings.contentHash,
+    approvedContentHash: s.listings.approvedContentHash,
+    quarantinedAt: s.listings.quarantinedAt,
+    quarantineReason: s.listings.quarantineReason,
+    variantCount: s.listings.variantCount,
+
+    /**
+     * "Is this actually on the site right now?"
+     *
+     * THE PREDICATE ITSELF, interpolated — not a copy of it.
+     *
+     * This was three hand-written conditions, and migration 0029 added two more
+     * to `publicListingPredicate()` (quarantine, and the seller's shop being
+     * open). The copy did not move, so for a while this column would have told
+     * a seller their quarantined item was on sale — which is exactly the
+     * "seller's screen and the shop cannot disagree" failure the previous
+     * comment here promised to prevent, arriving by the route that comment did
+     * not cover: not somebody editing the copy, but somebody editing the
+     * ORIGINAL.
+     *
+     * There is now one definition and no copy, so a sixth condition cannot
+     * introduce the same drift again.
+     */
+    publiclyVisible: sql<boolean>`(${publicListingPredicate()})`,
   })
     .from(s.listings)
     .innerJoin(s.sellers, eq(s.sellers.id, s.listings.sellerId))

@@ -1,0 +1,433 @@
+---
+// /admin/duplicates — two records that might be one human being.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DEFECT THIS PAGE CLOSES
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// detectPersonDuplicates() has raised candidates since migration 0025, and
+// until this file nothing could open the table it raises them into. A register
+// that notices a possible duplicate, records it carefully, and shows it to
+// nobody has spent the effort and kept none of the benefit — worse, it has an
+// audit trail proving it knew.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// IT SHOWS THE SIGNALS, NOT JUST THE SCORE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The score orders the queue and nothing else. What a reviewer actually decides
+// on is WHICH signals fired: "a verified telephone and a matching date of
+// birth" and "two common names in the same district" can score similarly and
+// mean entirely different things, and in a country with a great many shared
+// names the second is ordinary. A screen that printed 850/1000 and no reasons
+// would be asking somebody to ratify an arithmetic they cannot see.
+//
+// So `signals` is rendered as sentences. The raw jsonb is available in a
+// disclosure for anybody who wants it, and is not the primary presentation.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// "MERGED" DOES NOT MERGE, AND THE PAGE SAYS SO IN WORDS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// decideDuplicate() accepts 'merged' as a DECISION and performs no merge —
+// there is no code path in src/db/identity.ts that rewrites one person's
+// records onto another, deliberately, because what a merge means for rank
+// history, membership numbers and certificates already in people's hands is a
+// federation decision MMAKF has not made.
+//
+// An administrator who presses a button labelled "merge" and believes two
+// records were combined has been misled BY THIS PAGE. That is the failure the
+// standing notice below exists to prevent, and it is why the control is
+// labelled "Record as the same person" rather than "Merge".
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// duplicateQueue() filters in SQL against `persons` via visibleScopes(), and
+// EITHER side of a pair being in the caller's scope brings it into view — a
+// duplicate straddling two states must be visible to both, or it is worked by
+// neither. The decision path does NOT trust that filtering: decideDuplicate()
+// re-checks the caller against both people, because the candidate id travels in
+// a form body and a list having filtered is not a permission.
+
+export const prerender = false;
+
+import AdminShell from '@/components/AdminShell.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import { duplicateQueue, decideDuplicate, isIdentityError } from '@/db/identity';
+import * as s from '@/db/schema';
+import { inArray } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/duplicates');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+const mayReview = Boolean(identity) && canAnywhere(identity!.principal, 'duplicate:review');
+
+// The page prints names and dates of birth of real people side by side. It is
+// never a shared-cache document.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+// ─── The decision ───────────────────────────────────────────────────────────
+//
+// Posts to this page rather than to /api/. src/middleware.ts requires
+// application/json on every /api/ path and a form with JavaScript off cannot
+// send one; the same middleware refuses a mutating request that is not
+// same-origin before any of this runs, so CSRF is already answered.
+
+const DONE_MESSAGES: Record<string, string> = {
+  same: 'Recorded as the same person. No records were merged — see the notice above.',
+  distinct: 'Recorded as two different people. The pair will not be raised again.',
+  merged: 'A merge decision was RECORDED. No records were merged — see the notice above.',
+};
+
+let error: string | null = null;
+let postedReason = '';
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  postedReason = get('reason');
+
+  const rl = await rateLimit(Astro.request, 'duplicate-decide', 40, 60);
+  const raw = get('decision');
+  const decision = raw === 'same' || raw === 'distinct' || raw === 'merged' ? raw : null;
+  const candidateId = Number(get('candidateId'));
+  const survivorRaw = get('mergedIntoId');
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many decisions in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so there is no register to decide against.';
+  } else if (!mayReview) {
+    // Re-checked against the session on every act. The rendered page is not
+    // evidence of authority: it may be minutes old, the reader's bindings may
+    // have been withdrawn since, and the request may not have come from the
+    // page at all.
+    Astro.response.status = 403;
+    error = 'Deciding a suspected duplicate requires duplicate:review, which this account does not hold in any scope.';
+  } else if (!Number.isInteger(candidateId) || candidateId <= 0) {
+    Astro.response.status = 400;
+    error = 'Name the candidate to decide.';
+  } else if (!decision) {
+    Astro.response.status = 400;
+    error = 'A decision must be “the same person”, “two different people”, or a recorded merge.';
+  } else if (!postedReason) {
+    // decideDuplicate() refuses this too, and its refusal is the gate that
+    // holds. This one exists so the reviewer is told before the round trip
+    // rather than after it.
+    Astro.response.status = 400;
+    error = 'A decision requires a recorded reason. Declaring two records to be one person is not a fact the register can hold without one.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: postedReason,
+    };
+    try {
+      await decideDuplicate(db(), ctx, {
+        candidateId,
+        decision,
+        reason: postedReason,
+        mergedIntoId: survivorRaw ? Number(survivorRaw) : null,
+      });
+      return Astro.redirect(`${SELF}?done=${decision}`, 303);
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = 'Your credential does not hold duplicate:review over either of these records.';
+      } else if (isIdentityError(err)) {
+        // The module's own sentence. It is written for a reader and says which
+        // rule refused — 'no_reason', 'not_open', 'bad_target', 'no_target'.
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        // A driver fault or a constraint name is a fact about the server, not
+        // about the reviewer.
+        console.error('[admin/duplicates] decision failed', err);
+        Astro.response.status = 500;
+        error = 'The decision was not recorded. Nothing was changed.';
+      }
+    }
+  }
+}
+
+// ─── The read ───────────────────────────────────────────────────────────────
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE_MESSAGES[done] ? DONE_MESSAGES[done] : null;
+
+/** How each signal reads to somebody who has to decide on it. */
+const SIGNAL_WORDS: Record<string, string> = {
+  verified_phone: 'The same telephone number, and BOTH records have proved it',
+  verified_email: 'The same email address, and BOTH records have proved it',
+  phone: 'The same telephone number, unverified on at least one side',
+  email: 'The same email address, unverified on at least one side',
+  name_and_dob: 'The same name and the same date of birth',
+  name_and_area: 'The same name in the same locality — weak on its own',
+};
+
+interface Party {
+  id: number;
+  federationId: string | null;
+  fullName: string | null;
+  dob: string | null;
+  city: string | null;
+  status: string | null;
+}
+
+interface Candidate {
+  id: number;
+  score: number;
+  signals: string[];
+  rawSignals: unknown;
+  detectedAt: Date | string | null;
+  left: Party | null;
+  right: Party | null;
+}
+
+let candidates: Candidate[] = [];
+let notConfigured = false;
+let readFailed = false;
+let failureDetail: string | null = null;
+
+if (!configured) {
+  notConfigured = true;
+} else if (identity && mayReview) {
+  try {
+    const d = db();
+    const rows = await duplicateQueue(d, identity.principal, { limit: 100 });
+
+    // One query for every person named across the whole queue, rather than two
+    // per row. A review screen that issues 200 round trips to render 100 pairs
+    // is a screen that stops being opened.
+    const ids = [...new Set(rows.flatMap((r: any) => [r.leftId, r.rightId]))];
+    const people: Party[] = ids.length
+      ? await d.select({
+          id: s.persons.id,
+          federationId: s.persons.federationId,
+          fullName: s.persons.fullName,
+          dob: s.persons.dob,
+          city: s.persons.city,
+          status: s.persons.status,
+        }).from(s.persons).where(inArray(s.persons.id, ids))
+      : [];
+    const byId = new Map(people.map((p) => [p.id, p]));
+
+    candidates = rows.map((r: any) => {
+      const list = Array.isArray(r.signals?.signals) ? r.signals.signals : [];
+      return {
+        id: r.id,
+        score: r.score,
+        signals: list,
+        rawSignals: r.signals,
+        detectedAt: r.detectedAt,
+        left: byId.get(r.leftId) ?? null,
+        right: byId.get(r.rightId) ?? null,
+      };
+    });
+  } catch (err: any) {
+    readFailed = true;
+    failureDetail = String(err?.message ?? err);
+  }
+}
+
+const fmtDate = (v: Date | string | null) => {
+  if (!v) return '—';
+  const d = v instanceof Date ? v : new Date(v);
+  return Number.isNaN(d.getTime()) ? '—' : d.toISOString().slice(0, 16).replace('T', ' ');
+};
+---
+
+<AdminShell
+  title="Duplicate records"
+  requires="duplicate:review"
+  intro="Two records that may describe one person. Raised automatically; decided only by a person."
+>
+  {doneMessage && (
+    <p class="notice notice--done" role="status">{doneMessage}</p>
+  )}
+  {error && (
+    <p class="notice notice--error" role="alert">{error}</p>
+  )}
+
+  {/* THE STANDING NOTICE. Not a footnote: it is the difference between an
+      administrator understanding what they just did and believing something
+      that did not happen. */}
+  <p class="notice notice--standing">
+    <strong>Recording a decision here does not combine any records.</strong>
+    MMAKF has not decided what merging two people would mean for rank history,
+    membership numbers, or certificates already issued — so nothing in this
+    system rewrites one person’s records onto another. A decision is filed
+    against the pair, with your reason, and both records continue to exist
+    exactly as they are.
+  </p>
+
+  {notConfigured && (
+    <p class="notice">
+      The federation database is not configured on this deployment. There is no
+      register to compare, so no duplicates can be raised or decided here.
+    </p>
+  )}
+
+  {readFailed && (
+    <ErrorState
+      title="The duplicate queue could not be read"
+      description="The register is configured but did not answer."
+      detail={failureDetail}
+      retryHref={SELF}
+    />
+  )}
+
+  {!notConfigured && !readFailed && candidates.length === 0 && (
+    <EmptyState
+      title="No suspected duplicates are waiting"
+      description="Nothing has scored high enough to be worth a person's time. This is the ordinary state, not a sign that detection is off — candidates are raised as contacts are added and people are registered."
+    />
+  )}
+
+  {candidates.map((c) => (
+    <article class="pair">
+      <header class="pair__head">
+        <h2>Candidate #{c.id}</h2>
+        <p class="pair__meta">
+          Score <strong>{c.score}</strong>/1000 · raised {fmtDate(c.detectedAt)}
+        </p>
+      </header>
+
+      {/* WHY this pair was raised, before who is in it. */}
+      <div class="pair__signals">
+        <h3>Why these two were raised</h3>
+        {c.signals.length === 0 ? (
+          <p>No signals were recorded against this candidate.</p>
+        ) : (
+          <ul>
+            {c.signals.map((sig) => (
+              <li>{SIGNAL_WORDS[sig] ?? sig}</li>
+            ))}
+          </ul>
+        )}
+        <details>
+          <summary>The recorded signals, as stored</summary>
+          <pre>{JSON.stringify(c.rawSignals, null, 2)}</pre>
+        </details>
+      </div>
+
+      <div class="pair__people">
+        {[c.left, c.right].map((p) => (
+          <section class="party">
+            {p ? (
+              <>
+                <h3>{p.fullName ?? '(no name on record)'}</h3>
+                <dl>
+                  <dt>Federation ID</dt><dd>{p.federationId ?? '—'}</dd>
+                  <dt>Date of birth</dt><dd>{p.dob ?? '—'}</dd>
+                  <dt>City</dt><dd>{p.city ?? '—'}</dd>
+                  <dt>Status</dt><dd>{p.status ?? '—'}</dd>
+                </dl>
+              </>
+            ) : (
+              /* The queue named a person the register no longer returns. Said
+                 plainly rather than rendered as an empty card, because the two
+                 are different facts. */
+              <p>This record could not be read. It may be outside your scope.</p>
+            )}
+          </section>
+        ))}
+      </div>
+
+      <form method="POST" action={SELF} class="pair__decide">
+        <input type="hidden" name="candidateId" value={String(c.id)} />
+
+        <label for={`reason-${c.id}`}>Reason (required, recorded against the decision)</label>
+        <textarea
+          id={`reason-${c.id}`}
+          name="reason"
+          required
+          maxlength="2000"
+          rows="2"
+          placeholder="What did you check, and what did it show?"
+        ></textarea>
+
+        <label for={`survivor-${c.id}`}>
+          If recording these as the same person, which record should the federation treat as authoritative?
+        </label>
+        <select id={`survivor-${c.id}`} name="mergedIntoId">
+          <option value="">Not stated</option>
+          {c.left && <option value={String(c.left.id)}>{c.left.federationId ?? `#${c.left.id}`}</option>}
+          {c.right && <option value={String(c.right.id)}>{c.right.federationId ?? `#${c.right.id}`}</option>}
+        </select>
+
+        <div class="pair__actions">
+          <button type="submit" name="decision" value="distinct">
+            Two different people
+          </button>
+          <button type="submit" name="decision" value="same">
+            The same person
+          </button>
+          <button type="submit" name="decision" value="merged">
+            The same person — record a merge decision
+          </button>
+        </div>
+      </form>
+    </article>
+  ))}
+</AdminShell>
+
+<style>
+  .notice {
+    padding: var(--space-3, 0.75rem) var(--space-4, 1rem);
+    border-radius: var(--radius, 6px);
+    margin-block: var(--space-3, 0.75rem);
+  }
+  .notice--standing {
+    border: 1px solid var(--color-border, #d0d0d0);
+    background: var(--color-surface-2, #f6f6f6);
+  }
+  .notice--error { border: 1px solid #a11; background: #fdf3f3; }
+  .notice--done { border: 1px solid #171; background: #f3fbf5; }
+
+  .pair {
+    border: 1px solid var(--color-border, #d0d0d0);
+    border-radius: var(--radius, 6px);
+    padding: var(--space-4, 1rem);
+    margin-block: var(--space-5, 1.25rem);
+  }
+  .pair__head { display: flex; flex-wrap: wrap; gap: var(--space-3, 0.75rem); align-items: baseline; justify-content: space-between; }
+  .pair__head h2 { margin: 0; font-size: 1.05rem; }
+  .pair__meta { margin: 0; color: var(--color-text-muted, #555); }
+
+  .pair__signals ul { margin: var(--space-2, 0.5rem) 0; padding-inline-start: 1.2rem; }
+  .pair__signals h3 { font-size: 0.95rem; margin-block-end: var(--space-2, 0.5rem); }
+  .pair__signals pre { overflow-x: auto; font-size: 0.8rem; }
+
+  /* Two columns where there is room, stacked on a phone — an operations
+     console is read on a phone as often as on a desk. */
+  .pair__people { display: grid; gap: var(--space-4, 1rem); grid-template-columns: 1fr; }
+  @media (min-width: 40rem) { .pair__people { grid-template-columns: 1fr 1fr; } }
+  .party { border: 1px solid var(--color-border, #d0d0d0); border-radius: var(--radius, 6px); padding: var(--space-3, 0.75rem); }
+  .party h3 { margin-block: 0 var(--space-2, 0.5rem); font-size: 1rem; }
+  .party dl { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 0.75rem; margin: 0; }
+  .party dt { color: var(--color-text-muted, #555); }
+  .party dd { margin: 0; }
+
+  .pair__decide { margin-block-start: var(--space-4, 1rem); display: grid; gap: var(--space-2, 0.5rem); }
+  .pair__decide textarea, .pair__decide select { width: 100%; }
+  .pair__actions { display: flex; flex-wrap: wrap; gap: var(--space-2, 0.5rem); }
+</style>

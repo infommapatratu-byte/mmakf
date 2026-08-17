@@ -45,8 +45,10 @@ import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import { isConfigured, db } from '@/db';
 import { publicDirectory, type DirectoryEntry, type UnitKind } from '@/db/affiliation';
+import OpeningHours from '@/components/OpeningHours.astro';
 import { get } from '@/lib/storage';
 import { centreTimings, hasTimings, type Timings } from '@/lib/timings';
+import { publishedWeek, todayIso, type PublishedWeek } from '@/db/scheduling';
 
 export const prerender = false;
 
@@ -121,9 +123,52 @@ for (const b of branches) {
   if (hasTimings(t)) timingsByName.set(key, t);
 }
 
+// ─── And, in preference to it, from the scheduling engine ───────────────────
+//
+// THE ENGINE OUTRANKS THE PROSE. A club that has published a real timetable —
+// rows, with seasons that have dates — has answered this question properly, and
+// the editorial string is a stand-in for clubs that have not. Where both exist
+// the engine wins, because the engine is the one the club can change itself and
+// the one that knows today is a public holiday.
+//
+// TODAY, NOT THE WEEK. A register row is a summary; a seven-day resolution per
+// club would multiply this page's queries by seven for information the row has
+// no space to show. A club's full week belongs on the club's own page.
+//
+// AND IT IS BOUNDED. Each lookup is its own round trip, so a register of five
+// hundred clubs would resolve five hundred times and the page would hang. Past
+// the cap the row falls back to the editorial timing rather than to nothing,
+// and the page says so beneath the list rather than quietly showing fewer
+// answers than it has clubs.
+const ENGINE_LOOKUP_CAP = 60;
+const engineWeeks = new Map<number, PublishedWeek>();
+let engineSkipped = 0;
+
+if (state === 'ready' && kind === 'dojo' && isConfigured()) {
+  const today = todayIso();
+  const lookedUp = entries.slice(0, ENGINE_LOOKUP_CAP);
+  engineSkipped = entries.length - lookedUp.length;
+  for (const e of lookedUp) {
+    try {
+      const week = await publishedWeek(db(), { dojoId: e.id }, today, today);
+      // `configured: false` is a first-class result and NOT an error: it means
+      // this club has published nothing, which the editorial fallback or the
+      // "not published" line below already says correctly.
+      if (week.configured) engineWeeks.set(e.id, week);
+    } catch (err) {
+      // One club's unreadable schedule must not take the register down with it.
+      console.warn('[dojos] schedule read failed for', e.code, err);
+    }
+  }
+}
+
 // Decorated once here rather than inside the template, so the register rows stay
 // a plain map and the lookup cost is paid per centre instead of per render.
-const rows = entries.map((e) => ({ e, timings: timingsByName.get(nameKey(e.name)) ?? null }));
+const rows = entries.map((e) => ({
+  e,
+  week: engineWeeks.get(e.id) ?? null,
+  timings: timingsByName.get(nameKey(e.name)) ?? null,
+}));
 
 const asAt = new Date();
 const fmtDate = (iso: string | null): string => {
@@ -306,7 +351,7 @@ const pills: string[] =
           </p>
 
           <ul class="dir-list" id="dir-list">
-            {rows.map(({ e, timings }) => (
+            {rows.map(({ e, week, timings }) => (
               <li
                 class="dir-row"
                 data-search={`${e.name} ${e.code} ${where(e)}`.toLowerCase()}
@@ -351,7 +396,9 @@ const pills: string[] =
                   <div class="dir-meta-row">
                     <dt>Training timings</dt>
                     <dd>
-                      {timings ? (
+                      {week ? (
+                        <OpeningHours week={week} subject={e.name} compact />
+                      ) : timings ? (
                         <Fragment>
                           {timings.hours && <div>{timings.hours}</div>}
                           {timings.sunday && <div>{timings.sunday}</div>}
@@ -367,6 +414,14 @@ const pills: string[] =
               </li>
             ))}
           </ul>
+          {engineSkipped > 0 && (
+            <p class="dir-note dir-cap" role="note">
+              Published timetables were read for the first {ENGINE_LOOKUP_CAP} units on this page.
+              The remaining {engineSkipped} show the timings recorded in the federation's own
+              register instead, which may be less current than the unit's own timetable — open a
+              unit's page, or ask it directly, before travelling.
+            </p>
+          )}
           <p class="dir-empty" id="dir-empty" hidden role="status">
             No recorded unit matches that search. Try part of the town name, or clear the filter — a
             club the federation has never chartered will not appear here at all.
@@ -592,6 +647,7 @@ const pills: string[] =
   }
   .dir-meta dd { margin: 0; font-size: 0.84rem; color: var(--off-white); overflow-wrap: anywhere; }
   .dir-untimed { color: var(--muted); font-style: italic; }
+  .dir-cap { margin-top: 18px; }
   .dir-expired { color: var(--red-2); font-weight: 600; }
 
   .dir-note {

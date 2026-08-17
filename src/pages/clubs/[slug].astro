@@ -1,0 +1,374 @@
+---
+/**
+ * A CLUB'S OWN PAGE — /clubs/[slug]
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * IT REMAINS VISIBLY PART OF MMAKF
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The federation's instruction is explicit: a club page must not look like an
+ * independent random website. So this page renders inside the federation's own
+ * layout, states the club's affiliation standing and charter validity in the
+ * first screen, and links back to the register a reader can check it against.
+ * The club supplies the content; MMAKF supplies the standing, and the standing
+ * is the reason anyone trusts the rest.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE TIMINGS ARE THIS CLUB'S TIMINGS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Resolved through the engine, which walks room → club → district → state →
+ * federation and STOPS at the first level with a published version. When the
+ * answer came from an ancestor, <OpeningHours> says so in words — a club must
+ * never appear to have confirmed hours it has never seen.
+ *
+ * When nothing anywhere has published, the component renders a sentence telling
+ * the reader to contact the club. NOT an empty week: a blank timetable says the
+ * club never opens, which is a claim the federation has not made and cannot
+ * stand behind, and it is how somebody ends up outside a locked door.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT IS DELIBERATELY ABSENT
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * No telephone number, no email address, no instructor's contact details. The
+ * federation removed its own published personal numbers from fourteen places on
+ * this site; republishing a club's under a different heading would undo that.
+ * Enquiries go through /contact and the club's own admission process.
+ *
+ * The instructor list is an INNER join on `instructor_quals` (see
+ * src/db/clubs.ts) — only people who actually hold a live instructor
+ * credential. A left join would have published the name of every member at the
+ * club, including every child, under the heading "instructors".
+ *
+ * A lapsed, suspended or revoked club has NO page: clubProfile() returns null
+ * and this renders 404. Its standing is reported on /dojos, in words. Leaving a
+ * former club's page up would be the federation vouching for it; rewriting the
+ * page to say "formerly affiliated" would still be a promotional page for a
+ * club MMAKF no longer stands behind.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import OpeningHours from '@/components/OpeningHours.astro';
+import Icon from '@/components/Icon.astro';
+import { isConfigured, db } from '@/db';
+import { clubProfile, type ClubProfile } from '@/db/clubs';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const slug = String(Astro.params.slug ?? '');
+
+let profile: ClubProfile | null = null;
+let failed = false;
+if (isConfigured()) {
+  try {
+    profile = await clubProfile(db(), slug);
+  } catch (err) {
+    console.error('[clubs/slug] profile read failed', err);
+    failed = true;
+  }
+}
+
+// A club that is not published gets a real 404, not a page saying "not found".
+// A soft 404 is indexed, and an indexed page for a club MMAKF does not vouch
+// for is precisely the "fake location page" the instruction forbids.
+if (!profile && !failed) {
+  return new Response(null, { status: 404 });
+}
+if (failed) {
+  Astro.response.status = 503;
+}
+
+const club = profile?.club ?? null;
+const where = club ? [club.city, club.district, club.state].filter(Boolean).join(', ') : '';
+const mapVenue = profile?.venues.find((v) => v.latitude != null && v.longitude != null) ?? null;
+const bookable = (profile?.classes ?? []).filter((c) => c.requiresBooking).length;
+
+const ACCESS_WORDS: Record<string, string> = {
+  stepFree: 'Step-free access',
+  step_free: 'Step-free access',
+  accessibleWc: 'Accessible WC',
+  accessible_wc: 'Accessible WC',
+  hearingLoop: 'Hearing loop',
+  lift: 'Lift',
+  parking: 'Accessible parking',
+};
+---
+
+{failed ? (
+  <Base title="Club — MMAKF" description="MMAKF affiliated club.">
+    {/* The page's h1 comes from PageHero here too. A second h1 in a failure
+        branch is still a second h1, and a reader using a screen reader on a bad
+        day is exactly the reader this page must not also confuse. */}
+    <PageHero
+      image="https://images.unsplash.com/photo-1544367567-0f2fcb009e0b?auto=format&fit=crop&w=1800&q=70"
+      eyebrow="MMAKF affiliated club"
+      title={`We couldn&rsquo;t load this <em>club</em>.`}
+      lead="The federation register did not answer. Nothing is wrong with the club's affiliation — this page could not read it."
+    />
+    <section>
+      <div class="container">
+        <p class="lead">
+          Try again shortly, or use the
+          <a href={h('/dojos')} class="text-gold">affiliation register</a>, which answers whether a
+          club is affiliated today.
+        </p>
+      </div>
+    </section>
+  </Base>
+) : (
+<Base
+  title={`${club!.name} — MMAKF affiliated club${where ? ` in ${club!.city ?? where}` : ''}`}
+  description={`${club!.name} is an MMAKF-affiliated Shotokan karate club${where ? ` in ${where}` : ''}. Published training timings, classes, age groups and facilities.`}
+>
+  <PageHero
+    image="https://images.unsplash.com/photo-1544367567-0f2fcb009e0b?auto=format&fit=crop&w=1800&q=70"
+    eyebrow="MMAKF affiliated club"
+    title={club!.name}
+    lead={`${where || 'Location not recorded'} · MMAKF affiliated · This club publishes its own training timings, which are not the federation headquarters'.`}
+    pills={[
+      club!.standing === 'provisional' ? 'Provisionally affiliated' : 'Affiliated',
+      club!.disciplines[0] ?? 'Shotokan',
+    ].filter(Boolean)}
+  />
+
+  {/* ═══════ STANDING ═══════
+      First, and above the timetable. Everything below this is the club's own
+      material; this is the federation's statement about it, and it is the
+      reason a reader should believe the rest. */}
+  <section style="padding-bottom:0">
+    <div class="container">
+      <div class="standing fade">
+        <div>
+          <strong>
+            {club!.standing === 'provisional'
+              ? 'Provisionally affiliated to MMAKF.'
+              : 'Affiliated to the Modern Martial Arts Karate-Do Federation of India.'}
+          </strong>
+          {club!.standing === 'provisional' && ' The full charter has not yet been granted.'}
+          {club!.charterValidUntil
+            ? ` Charter recorded as valid to ${club!.charterValidUntil}.`
+            : ' No charter validity date is recorded against this unit.'}
+          {' '}Registration code <code>{club!.code}</code>.
+        </div>
+        <a href={h('/dojos')} class="btn btn-ghost">Check the register</a>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ TIMINGS ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">This week</div>
+        <h2 class="display-2">When <em class="r">this club</em> trains.</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="fade">
+        <OpeningHours
+          week={profile!.week}
+          subject={club!.name}
+          unconfiguredNote="This club has not published its timings to the federation. That is not the same as being closed — contact the club before travelling. Do not assume the headquarters' timings apply here; they do not."
+        />
+      </div>
+      {profile!.week.configured && (
+        <p class="mt-6 text-muted" style="font-size:.8rem">
+          Subscribe in your calendar:
+          <a href={h(`/clubs/${club!.slug}/schedule.ics`)} class="text-gold">{club!.name} timetable (.ics)</a>.
+          The feed carries what this club has published and nothing private.
+        </p>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ CLASSES ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Classes</div>
+        <h2 class="display-2">What you can <em class="r">join</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      {profile!.classes.length === 0 ? (
+        <p class="text-muted">
+          This club has not published a class list. Its training timings above are what the
+          federation holds; ask the club which batch suits your age and grade.
+        </p>
+      ) : (
+        <div class="grid grid-3">
+          {profile!.classes.map((c) => (
+            <div class="card fade">
+              <div class="card-eyebrow">{c.mode === 'online' ? 'Online' : c.mode === 'hybrid' ? 'Dojo &amp; online' : 'At the dojo'}</div>
+              <div class="card-title" style="font-size:1rem">{c.name}</div>
+              {c.summary && <div class="card-body">{c.summary}</div>}
+              <div class="cls-tags">
+                {c.audience && <span class="pill">{c.audience}</span>}
+                {c.level && <span class="pill">{c.level}</span>}
+                {c.discipline && <span class="pill">{c.discipline}</span>}
+                {(c.ageMin != null || c.ageMax != null) && (
+                  <span class="pill">
+                    {c.ageMin != null && c.ageMax != null ? `ages ${c.ageMin}–${c.ageMax}`
+                      : c.ageMin != null ? `ages ${c.ageMin}+`
+                      : `up to ${c.ageMax}`}
+                  </span>
+                )}
+                {c.capacity != null && <span class="pill">{c.capacity} places</span>}
+              </div>
+              <div class="card-body" style="font-size:.8rem;margin-top:10px">
+                {c.requiresBooking
+                  ? 'A place must be booked. Available sessions are shown when you sign in.'
+                  : 'No booking needed — turn up during the published timings.'}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {bookable > 0 && (
+        <div class="mt-8 flex flex-wrap gap-3">
+          <a href={h('/my/schedule')} class="btn btn-primary">Book a class</a>
+          <a href={h('/register')} class="btn btn-ghost">Register with MMAKF</a>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ WHERE ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Where</div>
+        <h2 class="display-2">Training <em class="r">locations</em>.</h2>
+        <div class="rule"></div>
+      </div>
+      {profile!.venues.length === 0 ? (
+        <p class="text-muted">
+          No training location is recorded for this club in the federation&rsquo;s venue register.
+          An address the federation has not recorded is not one this page will guess at.
+        </p>
+      ) : (
+        <div class="grid grid-2">
+          {profile!.venues.map((v) => (
+            <div class="card fade">
+              <div class="card-eyebrow">{v.kind.replace(/_/g, ' ')}</div>
+              <div class="card-title" style="font-size:1rem">{v.name}</div>
+              <div class="card-body">
+                {[v.addressLine, v.city, v.postcode].filter(Boolean).join(', ') || 'Address not recorded'}
+              </div>
+              <dl class="v-meta">
+                {v.capacity != null && (
+                  <div><dt>Capacity</dt><dd>{v.capacity}</dd></div>
+                )}
+                {v.parking && <div><dt>Parking</dt><dd>{v.parking}</dd></div>}
+                {v.transport && <div><dt>Getting there</dt><dd>{v.transport}</dd></div>}
+                <div>
+                  <dt>Accessibility</dt>
+                  <dd>
+                    {/* ABSENT IS NOT "NO". A null here means nobody has surveyed
+                        this room, and saying "no step-free access" on that
+                        basis sends a wheelchair user to cancel rather than to
+                        telephone. Only keys recorded as true are rendered. */}
+                    {v.accessibility && Object.entries(v.accessibility).some(([, val]) => val === true)
+                      ? Object.entries(v.accessibility)
+                          .filter(([, val]) => val === true)
+                          .map(([key]) => ACCESS_WORDS[key] ?? key.replace(/[_-]/g, ' '))
+                          .join(', ')
+                      : 'Not surveyed — contact the club'}
+                  </dd>
+                </div>
+                {v.latitude != null && v.longitude != null && (
+                  <div>
+                    <dt>Map</dt>
+                    <dd>
+                      <a
+                        class="text-gold"
+                        rel="noopener noreferrer"
+                        target="_blank"
+                        href={`https://www.openstreetmap.org/?mlat=${v.latitude}&mlon=${v.longitude}#map=16/${v.latitude}/${v.longitude}`}
+                      >Open in a map</a>
+                    </dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  </section>
+
+  {/* ═══════ WHO ═══════ */}
+  {profile!.instructors.length > 0 && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">Instructors</div>
+          <h2 class="display-2">Who <em class="r">teaches</em> here.</h2>
+          <div class="rule"></div>
+        </div>
+        <ul class="ins">
+          {profile!.instructors.map((i) => (
+            <li class="ins-row">
+              <span class="ins-name">{i.fullName}</span>
+              {i.role && <span class="pill">{i.role.replace(/_/g, ' ')}</span>}
+            </li>
+          ))}
+        </ul>
+        <p class="mt-6 text-muted" style="font-size:.8rem">
+          Everyone listed holds a live MMAKF instructor credential. Contact details are not published;
+          enquiries go through the <a href={h('/contact')} class="text-gold">federation office</a> or the club.
+        </p>
+      </div>
+    </section>
+  )}
+
+  {/* ═══════ BACK TO THE FEDERATION ═══════ */}
+  <section>
+    <div class="container">
+      <div class="fed fade">
+        <div>
+          <div class="eyebrow">Part of MMAKF</div>
+          <h2 class="display-2" style="margin-top:12px">One federation, <em class="r">many clubs</em>.</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            {club!.name} is one of the federation&rsquo;s affiliated units. Grading, certification and
+            competition entry run through MMAKF; timings, classes and fees are the club&rsquo;s own.
+          </p>
+          <div class="mt-8 flex flex-wrap gap-3">
+            <a href={h('/clubs')} class="btn btn-primary">Find another club</a>
+            <a href={h('/belt-system')} class="btn btn-ghost">The grading syllabus</a>
+            <a href={h('/verify')} class="btn btn-ghost">Verify a certificate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</Base>
+)}
+
+<style>
+  .bg2 { background: var(--bg-2); }
+  .standing {
+    display: flex; gap: 20px; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; padding: 18px 22px;
+    border: 1px solid var(--border); border-left: 3px solid var(--gold);
+    border-radius: var(--radius); background: var(--card);
+    font-size: .88rem; line-height: 1.65;
+  }
+  .standing > div { flex: 1 1 420px; }
+  .cls-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 14px; }
+  .v-meta { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; font-size: .82rem; }
+  .v-meta > div { display: flex; gap: 10px; }
+  .v-meta dt { color: var(--gold); min-width: 110px; font-size: .68rem; letter-spacing: .14em; text-transform: uppercase; padding-top: 2px; }
+  .ins { list-style: none; display: flex; flex-wrap: wrap; gap: 10px; }
+  .ins-row {
+    display: flex; gap: 10px; align-items: center;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card); padding: 10px 14px; font-size: .88rem;
+  }
+  .ins-name { font-family: var(--font-display); }
+  .fed { max-width: 68ch; }
+</style>

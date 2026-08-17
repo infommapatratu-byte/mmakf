@@ -1,0 +1,1009 @@
+---
+// /my/family — the people you may act for, and precisely what you may do for
+// each of them.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DEFECT THIS PAGE CLOSES
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// guardianCan() in src/db/identity.ts has answered "may this person do this
+// thing for that person?" since migration 0025, and until this file nothing in
+// src/pages ever asked it. The PARENT role in src/lib/rbac.ts is older still
+// and had nowhere to go. A capability table with no consumer is a design
+// document rather than a control, and the first surface written against it
+// decides whether the design survives contact with a template.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// IT TAKES NO IDENTIFIER
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Like /my, /my/passport and /my/notifications, this page accepts no personId,
+// no federation id and no relationship id — not in the path, not in the query
+// string, and not in a form, because it has no form. The guardian whose
+// authority is tested is read from the caller's own person row, which is
+// reached from the session cookie. The request cannot express "show me somebody
+// else's family", and a shape that cannot ask the question is a stronger
+// guarantee than any check made after it has been asked.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTHING IS SHOWN BECAUSE SOMEBODY IS A PARENT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The federation's brief puts it in one sentence: "Sensitive information must
+// not become visible simply because a user has 'parent' status." So:
+//
+//   · the PARENT role is not consulted anywhere on this page, and neither is
+//     can() — a role says which OFFICE somebody holds, and this page is not
+//     asking about an office;
+//   · the existence of a verified relationship shows nothing either. A verified
+//     relationship with no capability granted under it renders a card that says
+//     so and contains no fact about the person it names, INCLUDING THEIR NAME;
+//   · every field sits behind its own guardianCan() call for the capability
+//     that covers it, and each capability is asked for separately. There is no
+//     single check reused for five panels, because the moment there is, four of
+//     them are gated on the wrong question.
+//
+// The render model enforces the third point structurally rather than by
+// discipline. A dependant's name, grade, dojo, attendance, results, enrolments
+// and orders are never ASSIGNED to anything the template can read unless the
+// matching capability came back true — the query that would fetch them is not
+// run at all. A list that fetches everything and then hides some of it has
+// already read it (§53), and this is that rule applied one person at a time.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// "NOT GRANTED" AND "NOTHING RECORDED" ARE DIFFERENT SENTENCES
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A parent who may not see attendance must be told that the capability has not
+// been granted. Showing them an empty attendance panel instead would state, in
+// the federation's own voice, that their child has attended nothing. Those are
+// two different facts about the world, and conflating them is a lie the reader
+// has no way to detect. Every panel therefore has three renderings and not two:
+// not granted, granted and empty, granted and populated.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// AN ASSERTION IS NOT A RELATIONSHIP
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// dependantsOf() returns VERIFIED relationships only. A claim still awaiting a
+// decision is listed separately, and the query that lists it does not join
+// `persons` at all — so the subject's name is not merely withheld from the
+// markup, it is never fetched. An unverified claim confers nothing, and
+// "nothing" has to include confirmation that the record it points at exists.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THERE IS NO CONTROL ON THIS PAGE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// No grant control, and that is the whole point: a guardian who could grant
+// themselves a capability is the escalation guardian_authorizations exists to
+// prevent. grantGuardianCapability() is gated on 'guardian:verify', which no
+// member holds, and the medical and safeguarding capabilities are gated twice
+// on top of that.
+//
+// And no enrolment control either, which deserves saying plainly rather than
+// being noticed later. `manage_enrolment` is the capability a guardian would
+// act through, but there is no function in this repository that enrols a person
+// ON BEHALF OF a guardian — enrol() in src/db/academy.ts authorises against the
+// caller's own person record. A button wired to a call that will refuse is a
+// dead button, and a dead button is worse than an absent one because it
+// promises. So the capability renders the enrolment RECORD and says where a
+// change is actually made.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// FIVE HONEST STATES BEFORE ANY DATA IS SHOWN
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//   no database configured  — nothing has failed, and it says so
+//   not signed in           — guardianship is held by a person, not by a browser
+//   a shared credential     — attributable to nobody, so it is nobody's guardian
+//   no person record linked — explained, not crashed
+//   ok                      — the relationships themselves
+
+import Base from '@/layouts/Base.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import Status from '@/components/Status.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import { and, asc, desc, eq } from 'drizzle-orm';
+import { dependantsOf, guardianCan, type GuardianCapability } from '@/db/identity';
+import { formatINR } from '@/db/fees';
+import { humanise } from '@/lib/status';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+type Gate = 'no_database' | 'signed_out' | 'shared_credential' | 'no_person' | 'ok';
+
+/**
+ * The capabilities this page can act on, with the words a reader needs.
+ *
+ * A SUBSET of GUARDIAN_CAPABILITIES in src/db/identity.ts, and deliberately
+ * named one by one rather than derived from that constant. Two of the eight —
+ * view_medical and view_safeguarding — are gated twice on the granting side
+ * precisely because they are not ordinary, and a page that mapped over the
+ * whole array would have quietly grown a medical panel the day somebody added
+ * one to it. `give_consent` is absent for the mirror-image reason: it
+ * authorises an ACT, and there is no consent form here for it to authorise.
+ *
+ * `covers` describes what THIS PAGE renders under each capability. It does not
+ * redefine the capability — the comment beside GUARDIAN_CAPABILITIES does that,
+ * and it is the only place that should.
+ */
+interface PageCapability {
+  capability: GuardianCapability;
+  label: string;
+  covers: string;
+}
+
+const PAGE_CAPABILITIES: PageCapability[] = [
+  { capability: 'view_profile', label: 'See their record', covers: 'Their name, member ID, grade and dojo.' },
+  { capability: 'view_attendance', label: 'See their attendance', covers: 'Whether they were marked present at a training session.' },
+  { capability: 'view_results', label: 'See their results', covers: 'Their competition placings, including ones not yet final.' },
+  { capability: 'manage_enrolment', label: 'Manage their enrolment', covers: 'Which courses they are enrolled on.' },
+  { capability: 'pay', label: 'Pay on their behalf', covers: 'Orders raised against them, and any invoice issued.' },
+];
+
+/**
+ * How many relationships this page renders, and how many rows sit under each.
+ *
+ * Both are caps rather than truths, and where either bites the page says so. An
+ * institutional guardian may legitimately hold hundreds of relationships, and
+ * five capability checks plus five reads apiece is not a page that opens.
+ */
+const DEPENDANT_LIMIT = 20;
+const ROW_LIMIT = 10;
+
+interface Dependant {
+  relationshipId: number;
+  type: string;
+  /** capability -> granted. Every entry is one guardianCan() answer. */
+  held: Record<string, boolean>;
+  /** Null unless view_profile is held. The NAME lives in here and nowhere else. */
+  profile: {
+    fullName: string;
+    federationId: string;
+    dojoName: string | null;
+    dojoCity: string | null;
+    grades: Array<{ kind: string; gradeLabel: string; awardedOn: string }>;
+  } | null;
+  attendance: any[];
+  results: any[];
+  enrolments: any[];
+  orders: any[];
+}
+
+let gate: Gate = 'ok';
+let person: any = null;
+let loadError: string | null = null;
+
+let dependants: Dependant[] = [];
+let pending: Array<{ relationshipId: number; type: string; createdAt: unknown }> = [];
+let verifiedTotal = 0;
+
+if (!configured) {
+  gate = 'no_database';
+} else if (!identity) {
+  gate = 'signed_out';
+} else if (identity.userId == null) {
+  // A shared office or unit credential lands here, and correctly: authority
+  // over a child is granted to a named person, so a credential attributable to
+  // no individual can hold none of it.
+  gate = 'shared_credential';
+} else {
+  const user = (
+    await db().select({ personId: s.users.personId }).from(s.users).where(eq(s.users.id, identity.userId)).limit(1)
+  )[0];
+  if (!user?.personId) {
+    gate = 'no_person';
+  } else {
+    person = (await db().select().from(s.persons).where(eq(s.persons.id, user.personId)).limit(1))[0] ?? null;
+    if (!person) {
+      gate = 'no_person';
+    } else {
+      try {
+        const d = db();
+
+        // ── The claims still awaiting a decision ────────────────────────────
+        //
+        // NOTE WHAT THIS QUERY DOES NOT DO: it does not join `persons`. The
+        // subject's name is not selected and then withheld from the template,
+        // it is never read out of the database at all. An asserted relationship
+        // confers nothing, and a page that printed "you have claimed to be the
+        // parent of <name>" would have turned an unverified claim into a
+        // lookup — confirmation that a record exists is itself a fact about
+        // somebody who has not been shown to be in this caller's care.
+        pending = await d
+          .select({
+            relationshipId: s.personRelationships.id,
+            type: s.personRelationships.type,
+            createdAt: s.personRelationships.createdAt,
+          })
+          .from(s.personRelationships)
+          .where(and(
+            eq(s.personRelationships.holderPersonId, person.id),
+            eq(s.personRelationships.status, 'asserted'),
+          ))
+          .orderBy(asc(s.personRelationships.id));
+
+        // ── The verified ones ───────────────────────────────────────────────
+        //
+        // dependantsOf() filters on status = 'verified' in SQL. A rejected,
+        // expired or REVOKED relationship never reaches this page, and
+        // revokeRelationship() revokes the capabilities alongside it — so
+        // neither half of the answer can outlive the other.
+        //
+        // The holder is person.id: the caller's own person row, reached from
+        // their own session. It is not accepted from the request anywhere on
+        // this page, because the request has nowhere to put it.
+        const verified = await dependantsOf(d, person.id);
+        verifiedTotal = verified.length;
+
+        for (const row of verified.slice(0, DEPENDANT_LIMIT)) {
+          // ONE guardianCan() CALL PER CAPABILITY, and no inference between
+          // them. GUARDIAN_CAPABILITIES is deliberately not a hierarchy —
+          // view_results does not imply view_attendance, and nothing at all
+          // implies view_profile — so an implication drawn here would be a
+          // capability nobody granted.
+          const held: Record<string, boolean> = {};
+          for (const c of PAGE_CAPABILITIES) {
+            held[c.capability] = await guardianCan(d, {
+              guardianPersonId: person.id,
+              subjectPersonId: row.personId,
+              capability: c.capability,
+            });
+          }
+
+          const dep: Dependant = {
+            relationshipId: row.relationshipId,
+            type: row.type,
+            held,
+            profile: null,
+            attendance: [],
+            results: [],
+            enrolments: [],
+            orders: [],
+          };
+
+          // `row.fullName`, `row.federationId` and `row.dob` came back from
+          // dependantsOf() and are deliberately dropped here. The name is
+          // re-read below, INSIDE the capability check, so that there is no
+          // branch of this file in which it is in scope and ungated.
+          if (held.view_profile) {
+            const p = (await d
+              .select({
+                fullName: s.persons.fullName,
+                federationId: s.persons.federationId,
+                dojoName: s.dojos.name,
+                dojoCity: s.dojos.city,
+              })
+              .from(s.persons)
+              .leftJoin(s.dojos, eq(s.dojos.id, s.persons.dojoId))
+              .where(eq(s.persons.id, row.personId))
+              .limit(1))[0] ?? null;
+
+            // Active grades only. A superseded or revoked grade is a real part
+            // of a passport and belongs on /my/passport, which is the athlete's
+            // own surface. The question a guardian is asking here is "what
+            // grade do they hold", and a revoked one in that answer reads as
+            // current.
+            const grades = await d
+              .select({
+                kind: s.rankRecords.kind,
+                gradeLabel: s.rankRecords.gradeLabel,
+                awardedOn: s.rankRecords.awardedOn,
+              })
+              .from(s.rankRecords)
+              .where(and(
+                eq(s.rankRecords.personId, row.personId),
+                eq(s.rankRecords.status, 'active'),
+              ))
+              .orderBy(desc(s.rankRecords.awardedOn));
+
+            dep.profile = p ? { ...p, grades } : null;
+          }
+
+          if (held.view_attendance) {
+            dep.attendance = await d
+              .select({
+                heldOn: s.trainingSessions.heldOn,
+                title: s.trainingSessions.title,
+                focus: s.trainingSessions.focus,
+                present: s.sessionAttendance.present,
+              })
+              .from(s.sessionAttendance)
+              .innerJoin(s.trainingSessions, eq(s.trainingSessions.id, s.sessionAttendance.sessionId))
+              .where(eq(s.sessionAttendance.personId, row.personId))
+              .orderBy(desc(s.trainingSessions.heldOn))
+              .limit(ROW_LIMIT);
+          }
+
+          if (held.view_results) {
+            // Provisional results included, and labelled as such. A guardian
+            // asking what happened at the weekend is entitled to the answer the
+            // athlete gets on their own passport; withholding a placing until
+            // it is final would leave them believing nothing was recorded.
+            dep.results = await d
+              .select({
+                eventTitle: s.competitionEvents.title,
+                startsOn: s.competitionEvents.startsOn,
+                category: s.eventCategories.label,
+                placing: s.competitionResults.placing,
+                medal: s.competitionResults.medal,
+                status: s.competitionResults.status,
+              })
+              .from(s.competitionResults)
+              .innerJoin(s.competitionEvents, eq(s.competitionEvents.id, s.competitionResults.eventId))
+              .innerJoin(s.eventCategories, eq(s.eventCategories.id, s.competitionResults.categoryId))
+              .where(eq(s.competitionResults.personId, row.personId))
+              .orderBy(desc(s.competitionEvents.startsOn))
+              .limit(ROW_LIMIT);
+          }
+
+          if (held.manage_enrolment) {
+            // `enrolments.progressPercent` is a CACHED column and is not read
+            // here. /my/courses derives progress through courseProgress()
+            // rather than trusting it, and a figure this page cannot vouch for
+            // would be a measurement of somebody's child that nobody made.
+            dep.enrolments = await d
+              .select({
+                title: s.courses.title,
+                status: s.enrolments.status,
+                enrolledAt: s.enrolments.enrolledAt,
+                completedAt: s.enrolments.completedAt,
+              })
+              .from(s.enrolments)
+              .innerJoin(s.courses, eq(s.courses.id, s.enrolments.courseId))
+              .where(eq(s.enrolments.personId, row.personId))
+              .orderBy(desc(s.enrolments.enrolledAt))
+              .limit(ROW_LIMIT);
+          }
+
+          if (held.pay) {
+            // A LEFT join: an order with no invoice is the ordinary case for
+            // anything not yet paid, and an inner join would silently drop
+            // exactly the rows a payer came here to find.
+            dep.orders = await d
+              .select({
+                orderNo: s.orders.orderNo,
+                status: s.orders.status,
+                totalPaise: s.orders.totalPaise,
+                currency: s.orders.currency,
+                createdAt: s.orders.createdAt,
+                invoiceNo: s.invoices.invoiceNo,
+              })
+              .from(s.orders)
+              .leftJoin(s.invoices, eq(s.invoices.orderId, s.orders.id))
+              .where(eq(s.orders.personId, row.personId))
+              .orderBy(desc(s.orders.createdAt))
+              .limit(ROW_LIMIT);
+          }
+
+          dependants.push(dep);
+        }
+      } catch (err: any) {
+        // The driver's own words are logged and NOT rendered. This is a
+        // member-facing page: putting err.message on it is how a connection
+        // string reaches a stranger, and readableError() in /my/index.astro
+        // makes the same call for the same reason.
+        console.error('[my/family]', err);
+        loadError = 'The federation could not read who you are recorded as acting for.';
+      }
+    }
+  }
+}
+
+const fmtDate = (v: unknown): string => {
+  if (v == null || v === '') return '—';
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime())
+    ? String(v)
+    : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+};
+
+/**
+ * Money, and never a rupee sign on an amount that is not in rupees.
+ *
+ * formatINR() prints ₹ unconditionally, which is right for the currency it is
+ * named after and a misstatement for anything else. An order carries its own
+ * currency code, so the code is checked rather than assumed — the same defect
+ * class as quoting another federation's fee in rupees.
+ */
+function money(minor: number | null | undefined, currency: string | null | undefined): string {
+  if (minor == null) return '—';
+  const code = (currency ?? 'INR').toUpperCase();
+  if (code === 'INR') return formatINR(minor);
+  return `${minor} ${code}, in that currency's smallest unit`;
+}
+
+const capped = verifiedTotal > DEPENDANT_LIMIT;
+const nothingAtAll = dependants.length === 0 && pending.length === 0;
+---
+
+<Base
+  title="My family — MMAKF"
+  description="The people the federation has verified you may act for, and exactly which of their records you have been granted sight of."
+>
+  <section>
+    <div class="container">
+
+      {gate === 'no_database' && (
+        <div class="card">
+          <div class="eyebrow">Family</div>
+          <h1 class="display-2" style="margin-top:14px">Not available on this deployment.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            Who may act for whom is a pair of rows in the federation’s database —
+            a verified relationship, and a capability granted under it. No
+            federation database is configured for this deployment, so there is
+            nothing to read. This is not an empty family and nothing has failed.
+          </p>
+        </div>
+      )}
+
+      {gate === 'signed_out' && (
+        <div class="card">
+          <div class="eyebrow">Family</div>
+          <h1 class="display-2" style="margin-top:14px">Sign in to see who you may act for.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            A guardianship is held by a person, not by a browser. This page shows
+            what is recorded against whoever is signed in and accepts no
+            identifier — there is no way to ask it for anybody else’s family.
+          </p>
+          <p style="margin-top:18px"><a class="btn btn-primary" href={h('/my')}>Go to the member area</a></p>
+        </div>
+      )}
+
+      {gate === 'shared_credential' && (
+        <div class="card">
+          <div class="eyebrow">Family</div>
+          <h1 class="display-2" style="margin-top:14px">A shared credential is nobody’s guardian.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            You are signed in with a shared office credential. Authority over
+            another person’s record is granted to a named individual and to
+            nobody else, so a credential that identifies no individual can hold
+            none of it. Sign in with your own account.
+          </p>
+        </div>
+      )}
+
+      {gate === 'no_person' && (
+        <div class="card">
+          <div class="eyebrow">Family</div>
+          <h1 class="display-2" style="margin-top:14px">Your account is not linked to a member record.</h1>
+          <div class="rule"></div>
+          <p class="lead">
+            A relationship runs between two people in the federation’s register,
+            and this account is not yet attached to either of them. The office
+            makes the link — write to
+            <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a>
+            with your member ID.
+          </p>
+        </div>
+      )}
+
+      {gate === 'ok' && (
+        <>
+          <div class="section-head" style="margin-bottom:36px">
+            <div class="eyebrow">Family</div>
+            <h1 class="display-2" style="margin-top:14px">Who you may <em class="r">act for</em>.</h1>
+            <div class="rule"></div>
+            <p class="lead">
+              The federation grants authority over another person’s record one
+              capability at a time, and never as a consequence of being their
+              parent. Each person below shows exactly what you have been granted,
+              and exactly what you have not.
+            </p>
+          </div>
+
+          {loadError ? (
+            <ErrorState
+              title="We couldn’t read who you are recorded as acting for."
+              safe="Nothing has been changed. Reading this page writes nothing, and no relationship and no permission has been altered by the failure."
+              body={loadError}
+              secondary={{ label: 'Back to my record', href: h('/my') }}
+            />
+          ) : nothingAtAll ? (
+            <EmptyState
+              title="Nobody is recorded as being in your care."
+              body="This page lists people the federation has verified you stand in a relationship to — a child, a ward, or anyone else it has recorded and checked. Nothing of that kind is held against your member record, and there is no control here that could add one: a relationship is claimed with the office and verified by it, never granted by the person who would benefit from it."
+              action={{ label: 'Back to my record', href: h('/my') }}
+              secondary={{ label: 'My athlete passport', href: h('/my/passport') }}
+            />
+          ) : (
+            <>
+              {/* ── Claims still awaiting a decision ───────────────────────── */}
+              {pending.length > 0 && (
+                <div class="fm-pending">
+                  <h2 class="fm-h2">Claims awaiting the federation’s decision</h2>
+                  <p class="fm-note">
+                    A claimed relationship confers nothing at all until the
+                    federation has checked it, so these are listed without the
+                    person they name. That is not a display choice — the record
+                    is not read while the claim is unverified, because confirming
+                    that it points at somebody real would already be more than a
+                    claim is worth.
+                  </p>
+                  <ul class="fm-claims">
+                    {pending.map((c) => (
+                      <li class="fm-claim">
+                        <span class="fm-claim-type">{humanise(c.type)}</span>
+                        <span class="fm-claim-when">Claimed {fmtDate(c.createdAt)}</span>
+                        <Status value="asserted" domain="relationship" />
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* ── Verified relationships, one card each ──────────────────── */}
+              {dependants.map((dep) => (
+                <article class="fm-card">
+                  <header class="fm-card-head">
+                    <div class="card-eyebrow">{humanise(dep.type)} — verified</div>
+                    {/* The NAME is a view_profile field. Where that capability
+                        has not been granted the heading names the relationship
+                        instead, because the alternative is printing the one fact
+                        the caller has specifically not been given. */}
+                    <h2 class="fm-h2">
+                      {dep.profile
+                        ? dep.profile.fullName
+                        : 'A person the federation has verified you are related to'}
+                    </h2>
+                    {dep.profile && (
+                      <p class="fm-sub">Member ID <strong>{dep.profile.federationId}</strong></p>
+                    )}
+                  </header>
+
+                  {/* ── What you hold, said plainly ─────────────────────────── */}
+                  <div class="fm-caps">
+                    <h3 class="fm-h3">What you have been granted</h3>
+                    <ul class="fm-cap-list">
+                      {PAGE_CAPABILITIES.map((c) => (
+                        <li class:list={['fm-cap', dep.held[c.capability] ? 'fm-cap-yes' : 'fm-cap-no']}>
+                          <span class="fm-cap-mark" aria-hidden="true"></span>
+                          <span class="fm-cap-label">{c.label}</span>
+                          <span class="fm-cap-state">{dep.held[c.capability] ? 'Granted' : 'Not granted'}</span>
+                          <span class="fm-cap-covers">{c.covers}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p class="fm-note">
+                      Capabilities are granted by the federation and cannot be
+                      granted by you — there is no control on this page, or
+                      anywhere in the member area, that adds one to your own
+                      record. To ask for one, write to
+                      <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a>
+                      naming the member and the capability.
+                    </p>
+                  </div>
+
+                  {/* ── Record ──────────────────────────────────────────────── */}
+                  <section class="fm-panel">
+                    <h3 class="fm-h3">Their record</h3>
+                    {!dep.held.view_profile ? (
+                      <p class="fm-denied">
+                        You have not been granted sight of this person’s record,
+                        so the federation shows you nothing under it — not their
+                        name, not their grade and not their dojo. This is a
+                        permission, not an absence: it says nothing about what
+                        the register holds.
+                      </p>
+                    ) : !dep.profile ? (
+                      <p class="fm-empty">
+                        The register holds no readable record for this person,
+                        although the relationship to them is verified. The office
+                        can say why.
+                      </p>
+                    ) : (
+                      <dl class="fm-dl">
+                        <div>
+                          <dt>Grade</dt>
+                          <dd>
+                            {dep.profile.grades.length === 0
+                              ? 'No active grade is recorded against their name.'
+                              : dep.profile.grades
+                                  .map((g) => `${g.gradeLabel} (${humanise(g.kind)}), awarded ${fmtDate(g.awardedOn)}`)
+                                  .join('; ')}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Dojo</dt>
+                          <dd>
+                            {dep.profile.dojoName
+                              ? [dep.profile.dojoName, dep.profile.dojoCity].filter(Boolean).join(', ')
+                              : 'No dojo is recorded against their name.'}
+                          </dd>
+                        </div>
+                      </dl>
+                    )}
+                  </section>
+
+                  {/* ── Attendance ──────────────────────────────────────────── */}
+                  <section class="fm-panel">
+                    <h3 class="fm-h3">Attendance</h3>
+                    {!dep.held.view_attendance ? (
+                      <p class="fm-denied">
+                        You have not been granted sight of this person’s
+                        attendance. Nothing is shown here, and nothing should be
+                        read into that — an empty panel would say they have
+                        attended nothing, which is a different claim entirely.
+                      </p>
+                    ) : dep.attendance.length === 0 ? (
+                      <p class="fm-empty">
+                        You may see their attendance. The federation has recorded
+                        no training session against them.
+                      </p>
+                    ) : (
+                      <>
+                        <div class="tbl-scroll">
+                          <table class="fm-tbl">
+                            <thead>
+                              <tr>
+                                <th scope="col">Date</th>
+                                <th scope="col">Session</th>
+                                <th scope="col">Marked</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {dep.attendance.map((a: any) => (
+                                <tr>
+                                  <td>{fmtDate(a.heldOn)}</td>
+                                  <td>
+                                    {a.title ?? 'Untitled session'}
+                                    {a.focus && <div class="text-muted" style="font-size:.74rem">{a.focus}</div>}
+                                  </td>
+                                  <td>{a.present ? 'Present' : 'Absent'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {dep.attendance.length >= ROW_LIMIT && (
+                          <p class="fm-note">
+                            The {ROW_LIMIT} most recent sessions are shown. Older
+                            ones are kept and are not listed here.
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </section>
+
+                  {/* ── Results ─────────────────────────────────────────────── */}
+                  <section class="fm-panel">
+                    <h3 class="fm-h3">Competition results</h3>
+                    {!dep.held.view_results ? (
+                      <p class="fm-denied">
+                        You have not been granted sight of this person’s results.
+                        The federation may hold some; this page is not where you
+                        will find that out.
+                      </p>
+                    ) : dep.results.length === 0 ? (
+                      <p class="fm-empty">
+                        You may see their results. The federation has recorded no
+                        competition result against them.
+                      </p>
+                    ) : (
+                      <>
+                        <div class="tbl-scroll">
+                          <table class="fm-tbl">
+                            <thead>
+                              <tr>
+                                <th scope="col">Event</th>
+                                <th scope="col">Category</th>
+                                <th scope="col">Placing</th>
+                                <th scope="col">Standing</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {dep.results.map((r: any) => (
+                                <tr>
+                                  <td>
+                                    <strong>{r.eventTitle}</strong>
+                                    <div class="text-muted" style="font-size:.74rem">{fmtDate(r.startsOn)}</div>
+                                  </td>
+                                  <td>{r.category}</td>
+                                  <td>
+                                    {r.placing}
+                                    {r.medal && <div class="text-muted" style="font-size:.74rem">{humanise(r.medal)}</div>}
+                                  </td>
+                                  <td><Status value={r.status} domain="result" /></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {dep.results.length >= ROW_LIMIT && (
+                          <p class="fm-note">
+                            The {ROW_LIMIT} most recent results are shown. Older
+                            ones are kept and are not listed here.
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </section>
+
+                  {/* ── Enrolment ───────────────────────────────────────────── */}
+                  <section class="fm-panel">
+                    <h3 class="fm-h3">Course enrolment</h3>
+                    {!dep.held.manage_enrolment ? (
+                      <p class="fm-denied">
+                        You have not been granted authority over this person’s
+                        enrolment, so the courses they are on are not listed.
+                      </p>
+                    ) : dep.enrolments.length === 0 ? (
+                      <p class="fm-empty">
+                        You may act on their enrolment. They are enrolled on no
+                        course.
+                      </p>
+                    ) : (
+                      <>
+                        <div class="tbl-scroll">
+                          <table class="fm-tbl">
+                            <thead>
+                              <tr>
+                                <th scope="col">Course</th>
+                                <th scope="col">Enrolled</th>
+                                <th scope="col">Status</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {dep.enrolments.map((e: any) => (
+                                <tr>
+                                  <td>{e.title}</td>
+                                  <td>{fmtDate(e.enrolledAt)}</td>
+                                  <td><Status value={e.status} domain="enrolment" /></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {dep.enrolments.length >= ROW_LIMIT && (
+                          <p class="fm-note">The {ROW_LIMIT} most recent enrolments are shown.</p>
+                        )}
+                      </>
+                    )}
+                    {dep.held.manage_enrolment && (
+                      <p class="fm-note">
+                        This page carries no control that changes an enrolment.
+                        Enrolling or withdrawing on somebody else’s behalf is not
+                        something this system can do yet, and a button that would
+                        be refused the moment it was pressed is worse than an
+                        honest absence. Write to
+                        <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a>
+                        and the office will make the change.
+                      </p>
+                    )}
+                  </section>
+
+                  {/* ── Money ───────────────────────────────────────────────── */}
+                  <section class="fm-panel">
+                    <h3 class="fm-h3">Orders and invoices</h3>
+                    {!dep.held.pay ? (
+                      <p class="fm-denied">
+                        You have not been granted authority to pay on this
+                        person’s behalf, so nothing they owe and nothing they
+                        have paid is shown.
+                      </p>
+                    ) : dep.orders.length === 0 ? (
+                      <p class="fm-empty">
+                        You may pay on their behalf. No order has been raised
+                        against them.
+                      </p>
+                    ) : (
+                      <>
+                        <div class="tbl-scroll">
+                          <table class="fm-tbl">
+                            <thead>
+                              <tr>
+                                <th scope="col">Order</th>
+                                <th scope="col">Raised</th>
+                                <th scope="col">Amount</th>
+                                <th scope="col">Status</th>
+                                <th scope="col">Invoice</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {dep.orders.map((o: any) => (
+                                <tr>
+                                  <td class="text-muted" style="font-size:.78rem">{o.orderNo}</td>
+                                  <td>{fmtDate(o.createdAt)}</td>
+                                  <td>{money(o.totalPaise, o.currency)}</td>
+                                  <td><Status value={o.status} domain="order" /></td>
+                                  <td class="text-muted" style="font-size:.78rem">
+                                    {o.invoiceNo ?? 'Not issued'}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {dep.orders.length >= ROW_LIMIT && (
+                          <p class="fm-note">
+                            The {ROW_LIMIT} most recent orders are shown. Older
+                            ones are kept and are not listed here.
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </section>
+                </article>
+              ))}
+
+              {capped && (
+                <p class="fm-note">
+                  {verifiedTotal} verified relationships are recorded against your
+                  member record and the first {DEPENDANT_LIMIT} are shown. The
+                  rest are held and are not listed here.
+                </p>
+              )}
+            </>
+          )}
+        </>
+      )}
+
+    </div>
+  </section>
+</Base>
+
+<style>
+  .fm-h2 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    line-height: var(--leading-snug);
+    color: var(--white);
+  }
+
+  .fm-h3 {
+    margin: 0 0 var(--space-3);
+    font-size: var(--text-sm);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .fm-sub { margin: var(--space-2) 0 0; color: var(--off-white); font-size: var(--text-sm); }
+
+  .fm-note {
+    margin: var(--space-4) 0 0;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: var(--leading-relaxed);
+    max-width: 68ch;
+  }
+
+  /* ── Pending claims ───────────────────────────────────────────────────── */
+
+  .fm-pending {
+    padding: var(--space-5) 0 var(--space-6);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: var(--space-6);
+  }
+  .fm-claims { list-style: none; margin: var(--space-4) 0 0; padding: 0; }
+  .fm-claim {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-4);
+    padding: var(--space-3) 0;
+    border-top: 1px solid var(--border);
+  }
+  .fm-claim-type { color: var(--off-white); }
+  .fm-claim-when { color: var(--muted); font-size: var(--text-sm); }
+
+  /* ── One relationship ─────────────────────────────────────────────────── */
+
+  .fm-card {
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+    padding: var(--space-6);
+    margin-bottom: var(--space-6);
+  }
+  .fm-card-head { margin-bottom: var(--space-6); }
+
+  /* ── The capability ledger ────────────────────────────────────────────── */
+
+  .fm-caps {
+    padding: var(--space-5) 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: var(--space-5);
+  }
+  .fm-cap-list { list-style: none; margin: 0; padding: 0; }
+
+  /* Granted and not-granted are separated by the WORD in .fm-cap-state as well
+     as by colour and by the mark, so the distinction survives a monochrome
+     print and a colour-blind reader (WCAG 1.4.1). */
+  .fm-cap {
+    display: grid;
+    grid-template-columns: 12px minmax(0, 16rem) 8rem minmax(0, 1fr);
+    align-items: baseline;
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+  }
+  .fm-cap-mark {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    align-self: center;
+  }
+  .fm-cap-yes .fm-cap-mark { background: var(--gold); }
+  .fm-cap-no .fm-cap-mark { background: transparent; border: 1px solid var(--border-2); }
+  .fm-cap-label { color: var(--off-white); }
+  .fm-cap-state { font-size: var(--text-sm); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+  .fm-cap-yes .fm-cap-state { color: var(--gold-2); }
+  .fm-cap-no .fm-cap-state { color: var(--muted); }
+  .fm-cap-covers { color: var(--muted); font-size: var(--text-sm); }
+
+  /* ── Panels ───────────────────────────────────────────────────────────── */
+
+  .fm-panel { padding: var(--space-5) 0; border-top: 1px solid var(--border); }
+  .fm-panel:first-of-type { border-top: 0; }
+
+  /* A refusal is quieter than a failure and louder than a blank. It is not red:
+     nothing has gone wrong, and painting a permission boundary as an error
+     teaches a reader to ring the office about a system that is working. */
+  .fm-denied {
+    margin: 0;
+    padding-left: var(--space-4);
+    border-left: 2px solid var(--border-2);
+    color: var(--muted);
+    line-height: var(--leading-relaxed);
+    max-width: 68ch;
+  }
+  .fm-empty {
+    margin: 0;
+    color: var(--off-white);
+    line-height: var(--leading-relaxed);
+    max-width: 68ch;
+  }
+
+  .fm-dl { margin: 0; }
+  .fm-dl > div {
+    display: grid;
+    grid-template-columns: 10rem minmax(0, 1fr);
+    gap: var(--space-4);
+    padding: var(--space-2) 0;
+  }
+  .fm-dl dt { color: var(--muted); font-size: var(--text-sm); }
+  .fm-dl dd { margin: 0; color: var(--off-white); }
+
+  .fm-tbl { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+  .fm-tbl th {
+    text-align: left;
+    padding: var(--space-2) var(--space-4) var(--space-2) 0;
+    color: var(--muted);
+    font-weight: 400;
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+    font-size: var(--text-xs);
+    border-bottom: 1px solid var(--border);
+  }
+  .fm-tbl td {
+    padding: var(--space-3) var(--space-4) var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--off-white);
+    vertical-align: top;
+  }
+
+  /* PART AL. The capability ledger stacks rather than shrinking to four
+     unreadable columns, and the description list loses its gutter. */
+  @media (max-width: 820px) {
+    .fm-cap { grid-template-columns: 12px minmax(0, 1fr); }
+    .fm-cap-state { grid-column: 2; }
+    .fm-cap-covers { grid-column: 2; }
+    .fm-dl > div { grid-template-columns: 1fr; gap: var(--space-1); }
+    .fm-card { padding: var(--space-5) var(--space-4); }
+  }
+</style>

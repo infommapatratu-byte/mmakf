@@ -1,0 +1,383 @@
+---
+// /portal/seller/orders — fulfilment, returns and disputes.
+//
+// ─── THE ISOLATION FACT THIS PAGE RESTS ON ──────────────────────────────────
+//
+// mySellerOrders(), myReturns() and myDisputes() take NO seller id. Each
+// resolves the caller's seller row from the session inside its own SQL and
+// filters on it there. Reading another seller's orders is not refused by this
+// page — it cannot be asked for by it.
+//
+// ─── AND THE TWO THINGS IT REFUSES TO INVENT ────────────────────────────────
+//
+//   · A DISPATCH DEADLINE. `dispatchBy` is null unless MMAKF has published an
+//     SLA, and this page renders "no deadline set" rather than a date it chose.
+//     A countdown against an invented window is a threat the federation cannot
+//     stand behind.
+//
+//   · A TRACKING LINK. The dispatch form's tracking fields are optional and
+//     nothing is generated. A consignment sent without tracking is displayed as
+//     one; a fabricated link that 404s at the carrier is worse than nothing,
+//     because the buyer believes it.
+
+import Base from '@/layouts/Base.astro';
+import { db } from '@/db';
+import { mySellerOrders, slaFor } from '@/db/seller-orders';
+import { myReturns, myDisputes } from '@/db/returns';
+import { myLocations } from '@/db/inventory';
+import { SLA_NOT_SET } from '@/db/marketplace-finance';
+import { sellerContext, readableError, money, fmtDateTime, fmtDate, titleCase, SELLER_TABS } from './_gate';
+
+export const prerender = false;
+
+const ctx = await sellerContext(Astro.request.headers.get('cookie'));
+
+let orders: any[] = [];
+let returns: any[] = [];
+let disputes: any[] = [];
+let locations: any[] = [];
+let sla: any = null;
+let pageError: string | null = ctx.loadError;
+
+if (ctx.gate === 'seller' && ctx.approved && !pageError) {
+  try {
+    orders = await mySellerOrders(db(), ctx.identity!.principal, { limit: 100 });
+    returns = await myReturns(db(), ctx.identity!.principal, 50);
+    disputes = await myDisputes(db(), ctx.identity!.principal, 50);
+    locations = await myLocations(db(), ctx.identity!.principal);
+    sla = await slaFor(db(), ctx.seller.id);
+  } catch (err: any) {
+    pageError = readableError(err, 'Your orders');
+  }
+}
+
+/** What the seller is expected to do next, from the status alone. */
+const NEXT: Record<string, { verb: string; action: string } | null> = {
+  paid: { verb: 'Accept', action: 'order/accept' },
+  seller_accepted: { verb: 'Mark packed', action: 'order/pack' },
+  processing: { verb: 'Mark packed', action: 'order/pack' },
+  packed: { verb: 'Dispatch', action: 'order/ship' },
+  shipped: { verb: 'Mark delivered', action: 'order/delivered' },
+  in_transit: { verb: 'Mark delivered', action: 'order/delivered' },
+};
+
+const live = orders.filter((o: any) =>
+  ['paid', 'seller_accepted', 'processing', 'packed', 'shipped', 'in_transit'].includes(o.status));
+const settled = orders.filter((o: any) => !live.includes(o));
+
+const overdue = (o: any) => o.dispatchBy && !o.dispatchedAt && new Date(o.dispatchBy) < new Date();
+---
+
+<Base
+  title="Your orders — MMAKF marketplace"
+  description="Your MMAKF seller orders: accept, pack, dispatch, deliver, and handle returns and disputes."
+>
+  <section>
+    <div class="container">
+
+      {ctx.gate !== 'seller' && (
+        <div class="card"><div class="eyebrow">Seller area</div>
+        <h1 class="display-2" style="margin-top:14px">Your orders</h1>
+        <p>Sign in with a personal account that holds an approved seller record.</p></div>
+      )}
+
+      {ctx.gate === 'seller' && (
+        <>
+          <div class="eyebrow">MMAKF marketplace</div>
+          <h1 class="display-1" style="margin-top:14px">Orders</h1>
+
+          <nav class="tabs" aria-label="Seller area">
+            {SELLER_TABS.map((t) => (
+              <a href={t.href} aria-current={t.href === '/portal/seller/orders' ? 'page' : undefined}>{t.label}</a>
+            ))}
+          </nav>
+
+          {pageError && <div class="card" role="alert"><p>{pageError}</p></div>}
+
+          {!ctx.approved && (
+            <div class="card"><p>MMAKF has not approved this seller account, so there are no orders.</p></div>
+          )}
+
+          {ctx.approved && (
+            <>
+              {!sla?.configured && (
+                <p class="muted">{SLA_NOT_SET}</p>
+              )}
+
+              <h2 class="h3">To fulfil ({live.length})</h2>
+              {live.length === 0 && <div class="card"><p class="muted">Nothing waiting.</p></div>}
+
+              {live.map((o: any) => {
+                const next = NEXT[o.status] ?? null;
+                return (
+                  <article class="card">
+                    <header class="row between">
+                      <div>
+                        <h3 class="h4" style="margin:0">{o.sellerOrderNo}</h3>
+                        <p class="muted" style="margin:4px 0">
+                          {fmtDateTime(o.createdAt)} · {money(o.totalMinor, o.currency)} · {titleCase(o.status)}
+                        </p>
+                      </div>
+                      <div>
+                        {overdue(o)
+                          ? <span class="pill pill-bad">Dispatch overdue</span>
+                          : o.dispatchBy
+                            ? <span class="pill">Dispatch by {fmtDate(o.dispatchBy)}</span>
+                            : <span class="pill muted">No deadline set</span>}
+                      </div>
+                    </header>
+
+                    <table>
+                      <caption class="sr-only">Items in {o.sellerOrderNo}</caption>
+                      <thead><tr><th scope="col">Item</th><th scope="col">Qty</th><th scope="col">Total</th></tr></thead>
+                      <tbody>
+                        {(o.lines ?? []).map((l: any) => (
+                          <tr><th scope="row">{l.description}</th><td>{l.quantity}</td><td>{money(l.totalPaise)}</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+
+                    <details>
+                      <summary>Deliver to</summary>
+                      <address>
+                        {o.buyerName}<br />
+                        {[o.shipTo?.line1, o.shipTo?.line2, o.shipTo?.city, o.shipTo?.state, o.shipTo?.postcode]
+                          .filter(Boolean).join(', ')}<br />
+                        {o.buyerPhone}
+                      </address>
+                      <p class="hint">
+                        This is the address as given at checkout, copied to your order. You see only your own
+                        consignment; the rest of this buyer's basket is not reachable from here.
+                      </p>
+                    </details>
+
+                    {o.commissionResolved === false && (
+                      <p class="warn">
+                        MMAKF has not published a commission covering this sale, so it cannot be settled yet.
+                        Ship it as normal — the goods are sold and it is the payout that is waiting.
+                      </p>
+                    )}
+
+                    <div class="row">
+                      {next && next.action !== 'order/ship' && (
+                        <button class="btn btn-primary btn-small" data-simple={next.action} data-id={o.id}>{next.verb}</button>
+                      )}
+                      {next && next.action === 'order/ship' && (
+                        <details class="ship">
+                          <summary class="btn btn-primary btn-small">Dispatch</summary>
+                          <form class="ship-form" data-id={o.id}>
+                            <label for={`carrier-${o.id}`}>Carrier</label>
+                            <input id={`carrier-${o.id}`} name="carrier" maxlength="80" placeholder="India Post" />
+                            <label for={`track-${o.id}`}>Tracking number</label>
+                            <input id={`track-${o.id}`} name="trackingNumber" maxlength="80" />
+                            <label for={`url-${o.id}`}>Tracking URL</label>
+                            <input id={`url-${o.id}`} name="trackingUrl" type="url" maxlength="300" />
+                            {locations.length > 0 && (
+                              <>
+                                <label for={`from-${o.id}`}>Dispatched from</label>
+                                <select id={`from-${o.id}`} name="fromLocationId">
+                                  {locations.map((loc: any) => <option value={loc.id}>{loc.code} — {loc.name}</option>)}
+                                </select>
+                              </>
+                            )}
+                            <p class="hint">
+                              All three tracking fields are optional and nothing is invented. A consignment with
+                              no tracking is shown to the buyer as one — a link that fails at the carrier is
+                              worse than none, because they believe it.
+                            </p>
+                            <button class="btn btn-primary btn-small" type="submit">Confirm dispatch</button>
+                          </form>
+                        </details>
+                      )}
+                      {['paid', 'seller_accepted', 'processing', 'packed'].includes(o.status) && (
+                        <button class="btn btn-small" data-cancel={o.id}>Cancel</button>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+
+              {/* ── Returns ─────────────────────────────────────────────── */}
+              <h2 class="h3">Returns ({returns.length})</h2>
+              {returns.length === 0 && <div class="card"><p class="muted">No returns.</p></div>}
+              {returns.map((r: any) => (
+                <article class="card">
+                  <header class="row between">
+                    <div>
+                      <h3 class="h4" style="margin:0">{r.ref}</h3>
+                      <p class="muted" style="margin:4px 0">
+                        {fmtDate(r.requestedAt)} · {titleCase(r.status)} · asked for a {r.remedySought}
+                      </p>
+                    </div>
+                    {r.respondBy && !r.sellerRespondedAt && <span class="pill">Respond by {fmtDate(r.respondBy)}</span>}
+                  </header>
+                  <p><strong>Reason:</strong> {r.reason}{r.reasonDetail ? ` — ${r.reasonDetail}` : ''}</p>
+                  {r.rmaNumber && <p class="muted">Return authorisation <code>{r.rmaNumber}</code></p>}
+
+                  {['requested', 'seller_reviewing'].includes(r.status) && (
+                    <div class="row">
+                      <button class="btn btn-primary btn-small" data-return-approve={r.id}>Authorise the return</button>
+                      <button class="btn btn-small" data-return-reject={r.id}>Refuse</button>
+                    </div>
+                  )}
+                  {['authorised', 'in_transit', 'received'].includes(r.status) && locations.length > 0 && (
+                    <p class="hint">
+                      When the goods arrive, inspect them and record what came back. Sellable units return to
+                      stock; damaged units go to the damaged bucket — and what neither accounts for is the
+                      remainder somebody has to explain.
+                    </p>
+                  )}
+                </article>
+              ))}
+
+              {/* ── Disputes ────────────────────────────────────────────── */}
+              <h2 class="h3">Disputes ({disputes.length})</h2>
+              {disputes.length === 0 && <div class="card"><p class="muted">No disputes.</p></div>}
+              {disputes.map((d: any) => (
+                <article class="card">
+                  <header class="row between">
+                    <div>
+                      <h3 class="h4" style="margin:0">{d.ref}</h3>
+                      <p class="muted" style="margin:4px 0">
+                        {fmtDate(d.raisedAt)} · {titleCase(d.kind)} · {titleCase(d.status)}
+                      </p>
+                    </div>
+                    {d.respondBy && !d.sellerRespondedAt && <span class="pill">Respond by {fmtDate(d.respondBy)}</span>}
+                  </header>
+                  <p>{d.summary}</p>
+                  {d.sellerResponse && <p><strong>Your response:</strong> {d.sellerResponse}</p>}
+                  {d.outcome && <p><strong>MMAKF decided:</strong> {titleCase(d.outcome)} — {d.decisionReason}</p>}
+                  {!d.sellerRespondedAt && ['open', 'seller_responding'].includes(d.status) && (
+                    <form class="dispute-form" data-id={d.id}>
+                      <label for={`resp-${d.id}`}>Your response</label>
+                      <textarea id={`resp-${d.id}`} name="response" rows="3" required maxlength="4000"></textarea>
+                      <button class="btn btn-primary btn-small" type="submit">Send response</button>
+                    </form>
+                  )}
+                </article>
+              ))}
+
+              <h2 class="h3">Closed ({settled.length})</h2>
+              {settled.length > 0 && (
+                <table class="card">
+                  <caption class="sr-only">Closed orders</caption>
+                  <thead><tr><th scope="col">Order</th><th scope="col">Date</th><th scope="col">Status</th><th scope="col">Total</th><th scope="col">Refunded</th></tr></thead>
+                  <tbody>
+                    {settled.map((o: any) => (
+                      <tr>
+                        <th scope="row">{o.sellerOrderNo}</th>
+                        <td>{fmtDate(o.createdAt)}</td>
+                        <td>{titleCase(o.status)}</td>
+                        <td>{money(o.totalMinor)}</td>
+                        <td>{o.refundedMinor ? money(o.refundedMinor) : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              <p id="page-error" class="error" role="alert" hidden></p>
+            </>
+          )}
+        </>
+      )}
+
+    </div>
+  </section>
+</Base>
+
+<script>
+  const pageError = document.getElementById('page-error');
+  const say = (m: string) => {
+    if (!pageError) { window.alert(m); return; }
+    pageError.textContent = m; pageError.hidden = false;
+    pageError.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  async function post(action: string, body: Record<string, unknown>) {
+    const r = await fetch(`/api/marketplace/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const b = await r.json().catch(() => ({}));
+    return { ok: r.ok && b.ok, body: b };
+  }
+  const reloadOr = (res: any, fallback: string) => {
+    if (res.ok) { window.location.reload(); return; }
+    say(res.body.error || fallback);
+  };
+
+  document.querySelectorAll('[data-simple]').forEach((b) => b.addEventListener('click', async () => {
+    const el = b as HTMLElement;
+    reloadOr(await post(el.dataset.simple!, { sellerOrderId: Number(el.dataset.id) }), 'Could not update the order.');
+  }));
+
+  document.querySelectorAll('.ship-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(form as HTMLFormElement);
+      const v = (k: string) => { const x = f.get(k); return typeof x === 'string' && x.trim() ? x.trim() : null; };
+      const res = await post('order/ship', {
+        sellerOrderId: Number((form as HTMLElement).dataset.id),
+        carrier: v('carrier'), trackingNumber: v('trackingNumber'), trackingUrl: v('trackingUrl'),
+        fromLocationId: f.get('fromLocationId') ? Number(f.get('fromLocationId')) : null,
+      });
+      if (res.ok && res.body.result?.trackingRecorded === false) {
+        window.alert('Dispatched. No tracking number was recorded, so the buyer will be shown that there is none rather than a link that does not work.');
+      }
+      reloadOr(res, 'Could not record the dispatch.');
+    });
+  });
+
+  document.querySelectorAll('[data-cancel]').forEach((b) => b.addEventListener('click', async () => {
+    const reason = window.prompt('Why are you cancelling? The buyer is told, and it counts toward your cancellation rate.');
+    if (!reason) return;
+    reloadOr(await post('order/cancel', {
+      sellerOrderId: Number((b as HTMLElement).dataset.cancel), reason, by: 'seller',
+    }), 'Could not cancel the order.');
+  }));
+
+  document.querySelectorAll('[data-return-approve]').forEach((b) => b.addEventListener('click', async () => {
+    const reason = window.prompt('Authorising this return. What should the buyer be told?');
+    if (!reason) return;
+    reloadOr(await post('return/decide', {
+      returnRequestId: Number((b as HTMLElement).dataset.returnApprove), approve: true, reason,
+    }), 'Could not authorise the return.');
+  }));
+
+  document.querySelectorAll('[data-return-reject]').forEach((b) => b.addEventListener('click', async () => {
+    const reason = window.prompt('Refusing this return. The buyer reads this reason, so it has to be one they can act on.');
+    if (!reason) return;
+    reloadOr(await post('return/decide', {
+      returnRequestId: Number((b as HTMLElement).dataset.returnReject), approve: false, reason,
+    }), 'Could not record the decision.');
+  }));
+
+  document.querySelectorAll('.dispute-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(form as HTMLFormElement);
+      reloadOr(await post('dispute/respond', {
+        disputeId: Number((form as HTMLElement).dataset.id), response: f.get('response'),
+      }), 'Could not send the response.');
+    });
+  });
+</script>
+
+<style>
+  .tabs { display: flex; gap: 16px; margin: 18px 0; flex-wrap: wrap; }
+  .tabs a { padding: 6px 0; border-bottom: 2px solid transparent; text-decoration: none; }
+  .tabs a[aria-current='page'] { border-bottom-color: currentColor; font-weight: 600; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .row.between { justify-content: space-between; align-items: flex-start; }
+  .pill { padding: 2px 10px; border-radius: 999px; border: 1px solid currentColor; font-size: 0.85em; white-space: nowrap; }
+  .pill.muted { opacity: 0.6; }
+  .muted { opacity: 0.75; }
+  .warn { font-weight: 600; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
+  .error { color: #b00020; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); }
+  .btn-small { padding: 4px 10px; font-size: 0.9em; }
+  .ship summary { display: inline-block; cursor: pointer; list-style: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style>

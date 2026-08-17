@@ -1,0 +1,327 @@
+---
+/**
+ * FIND A CLUB — /clubs
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THIS IS NOT /dojos, AND THE DIFFERENCE IS THE POINT
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * /dojos is the AFFILIATION REGISTER. It answers a parent's question — *is the
+ * club my child already trains at actually affiliated, today?* — and it answers
+ * it by listing lapsed units rather than hiding them, because the person most
+ * in need of that page is the parent of a child already somewhere.
+ *
+ * This page answers the other question: *where can my child train?* That is a
+ * search, and a search must not offer a club whose charter has expired. Sending
+ * a new family to a lapsed club, on the federation's own recommendation, is a
+ * different act from letting an existing family look their club up. So this
+ * page shows currently-affiliated clubs only, and says so, and links to the
+ * register for the other question.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * LOCATION IS ASKED FOR, NEVER TAKEN
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * There is no geolocation call on page load. A PIN code, a city or nothing at
+ * all are all first-class inputs; the browser's location is offered as a button
+ * the reader presses, which is the only form of consent that means anything.
+ *
+ * And the ordering says what it is. Clubs with recorded coordinates are ordered
+ * by straight-line distance and labelled as straight-line; everything else
+ * follows in name order with no distance shown. A list that silently mixed the
+ * two would present an arbitrary order as a proximity ranking, and somebody
+ * would drive to the top one.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * NOTHING HERE IS INVENTED
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The filter values are derived from the classes clubs have actually published —
+ * an audience appears in the list because some club serves it. A hard-coded
+ * taxonomy would offer "Women's self-defence" as a filter that returns nothing,
+ * which reads as "the federation does not do this".
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { nearbyClubs, type ClubSummary, type ClubFilter } from '@/db/clubs';
+import * as s from '@/db/schema';
+import { asc } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const q = Astro.url.searchParams;
+const filter: ClubFilter = {
+  stateUnitId: q.get('state') ? Number(q.get('state')) : null,
+  districtUnitId: q.get('district') ? Number(q.get('district')) : null,
+  city: q.get('city') || null,
+  audience: q.get('audience') || null,
+  level: q.get('level') || null,
+  discipline: q.get('discipline') || null,
+  onlineOnly: q.get('online') === 'yes',
+  age: q.get('age') ? Number(q.get('age')) : null,
+};
+const pin = (q.get('pin') || '').trim();
+const lat = q.get('lat');
+const lon = q.get('lon');
+
+type State = 'ready' | 'not_configured' | 'unavailable';
+let state: State = 'not_configured';
+let clubs: ClubSummary[] = [];
+let states: any[] = [];
+let districts: any[] = [];
+
+if (isConfigured()) {
+  try {
+    const database = db();
+    [states, districts] = await Promise.all([
+      database.select({ id: s.stateUnits.id, name: s.stateUnits.name }).from(s.stateUnits).orderBy(asc(s.stateUnits.name)),
+      database.select({ id: s.districtUnits.id, name: s.districtUnits.name }).from(s.districtUnits).orderBy(asc(s.districtUnits.name)),
+    ]);
+    clubs = await nearbyClubs(
+      database,
+      {
+        postalCode: pin || null,
+        city: filter.city,
+        latitude: lat ? Number(lat) : null,
+        longitude: lon ? Number(lon) : null,
+      },
+      filter
+    );
+    state = 'ready';
+  } catch (err) {
+    // A read failure must never render as "no clubs are affiliated" — that is a
+    // claim about the federation made on the strength of a broken query.
+    console.error('[clubs] search failed', err);
+    state = 'unavailable';
+  }
+}
+
+/** Offered because a club publishes it, never because this file lists it. */
+const uniq = (key: 'audiences' | 'levels' | 'disciplines') =>
+  [...new Set(clubs.flatMap((c) => c[key]))].filter(Boolean).sort();
+const audiences = uniq('audiences');
+const levels = uniq('levels');
+const disciplines = uniq('disciplines');
+
+const anyDistance = clubs.some((c) => c.distanceKm != null);
+const activeFilters = [
+  filter.city && `city: ${filter.city}`,
+  filter.audience && `for: ${filter.audience}`,
+  filter.level && `level: ${filter.level}`,
+  filter.discipline && `discipline: ${filter.discipline}`,
+  filter.onlineOnly && 'online available',
+  filter.age != null && `age ${filter.age}`,
+  pin && `PIN ${pin}`,
+].filter(Boolean) as string[];
+---
+
+<Base
+  title="Find an MMAKF Club — MMAKF"
+  description="Search MMAKF-affiliated karate clubs, dojos and training centres by state, district, city or PIN code — with their own published timings, classes and age groups."
+>
+  <PageHero
+    image="https://images.unsplash.com/photo-1555597673-b21d5c935865?auto=format&fit=crop&w=1800&q=70"
+    eyebrow="Find a club"
+    title={`Train at an <em>affiliated</em> club.`}
+    lead="Every MMAKF club sets its own timings, its own classes and its own age groups. Search by where you are, who is training, and what they want to train for."
+    pills={['Affiliated clubs only', 'Own timings per club']}
+  />
+
+  <section>
+    <div class="container">
+      {/* ═══════ THE SEARCH ═══════ */}
+      <form method="get" class="find card fade" role="search" aria-label="Find a club">
+        <div class="find-grid">
+          <label class="fld">
+            <span class="input-label">PIN code</span>
+            <input class="input" name="pin" value={pin} inputmode="numeric" placeholder="829117" />
+          </label>
+          <label class="fld">
+            <span class="input-label">City or town</span>
+            <input class="input" name="city" value={filter.city ?? ''} placeholder="Ramgarh" />
+          </label>
+          <label class="fld">
+            <span class="input-label">State</span>
+            <select class="input" name="state">
+              <option value="">Any state</option>
+              {states.map((u: any) => <option value={u.id} selected={filter.stateUnitId === u.id}>{u.name}</option>)}
+            </select>
+          </label>
+          <label class="fld">
+            <span class="input-label">District</span>
+            <select class="input" name="district">
+              <option value="">Any district</option>
+              {districts.map((u: any) => <option value={u.id} selected={filter.districtUnitId === u.id}>{u.name}</option>)}
+            </select>
+          </label>
+          <label class="fld">
+            <span class="input-label">Age of student</span>
+            <input class="input" name="age" type="number" min="3" max="99" value={filter.age ?? ''} placeholder="8" />
+          </label>
+          {audiences.length > 0 && (
+            <label class="fld">
+              <span class="input-label">Who it is for</span>
+              <select class="input" name="audience">
+                <option value="">Anyone</option>
+                {audiences.map((a) => <option value={a} selected={filter.audience === a}>{a}</option>)}
+              </select>
+            </label>
+          )}
+          {levels.length > 0 && (
+            <label class="fld">
+              <span class="input-label">Level</span>
+              <select class="input" name="level">
+                <option value="">Any level</option>
+                {levels.map((l) => <option value={l} selected={filter.level === l}>{l}</option>)}
+              </select>
+            </label>
+          )}
+          {disciplines.length > 0 && (
+            <label class="fld">
+              <span class="input-label">Discipline</span>
+              <select class="input" name="discipline">
+                <option value="">Any discipline</option>
+                {disciplines.map((d) => <option value={d} selected={filter.discipline === d}>{d}</option>)}
+              </select>
+            </label>
+          )}
+        </div>
+        <div class="find-actions">
+          <label class="chk"><input type="checkbox" name="online" value="yes" checked={filter.onlineOnly} /> <span>Has online or hybrid classes</span></label>
+          <button class="btn btn-primary" type="submit">Search</button>
+          <a class="btn btn-ghost" href={h('/clubs')}>Clear</a>
+          {/* Consent, pressed. Never called on load — see the header note. */}
+          <button class="btn btn-ghost" type="button" id="use-location" hidden>Use my location</button>
+          <a class="btn btn-ghost" href={h('/dojos')}>Affiliation register</a>
+        </div>
+        <p class="find-note text-muted">
+          This search lists <strong>currently affiliated</strong> clubs only. To check whether a club
+          you already train at is affiliated — including one whose charter has lapsed — use the
+          <a href={h('/dojos')} class="text-gold">affiliation register</a>, which lists those too and
+          states each unit&rsquo;s standing.
+        </p>
+      </form>
+
+      {/* ═══════ RESULTS ═══════ */}
+      {state === 'not_configured' ? (
+        <EmptyState
+          title="The club register is not available on this deployment"
+          body="Club search reads the federation register, which needs a database. The affiliation register and the headquarters timetable are unaffected."
+        />
+      ) : state === 'unavailable' ? (
+        <ErrorState
+          title="We couldn’t search the club register"
+          safe="Nothing you entered has been recorded. The register itself is unaffected."
+          secondary={{ href: h('/dojos'), label: 'Open the affiliation register' }}
+        />
+      ) : clubs.length === 0 ? (
+        <EmptyState
+          title="No affiliated club matches that search"
+          body={
+            activeFilters.length
+              ? `Nothing matched ${activeFilters.join(', ')}. Widen the search — a club that has not yet published its classes will not match a class filter even though it trains.`
+              : 'No club is currently affiliated in the register. That is a statement about the register, not about the federation — units in the middle of chartering do not appear here.'
+          }
+        />
+      ) : (
+        <>
+          <div class="res-head fade">
+            <p>
+              <strong>{clubs.length}</strong> affiliated {clubs.length === 1 ? 'club' : 'clubs'}
+              {activeFilters.length > 0 && <> matching {activeFilters.join(', ')}</>}.
+              {anyDistance && <> Distances are <strong>straight-line</strong>, not travel distance.</>}
+            </p>
+          </div>
+          <ul class="res">
+            {clubs.map((c) => (
+              <li class="res-row card fade">
+                <div class="res-main">
+                  <div class="res-title">
+                    {c.slug ? <a href={h(`/clubs/${c.slug}`)}>{c.name}</a> : <span>{c.name}</span>}
+                    {c.standing === 'provisional' && <span class="pill">Provisional</span>}
+                  </div>
+                  <div class="res-where text-muted">
+                    {[c.city, c.district, c.state].filter(Boolean).join(' · ') || 'Location not recorded'}
+                    {c.distanceKm != null && <> · <strong>{c.distanceKm} km</strong> away</>}
+                  </div>
+                  <div class="res-tags">
+                    {c.audiences.map((a) => <span class="pill">{a}</span>)}
+                    {c.levels.map((l) => <span class="pill">{l}</span>)}
+                    {c.online && <span class="pill live">online available</span>}
+                  </div>
+                  <div class="res-classes text-muted">
+                    {c.classCount > 0
+                      ? `${c.classCount} published ${c.classCount === 1 ? 'class' : 'classes'}`
+                      : 'No classes published yet — the club has not entered its timetable'}
+                  </div>
+                </div>
+                <div class="res-go">
+                  {c.slug ? (
+                    <a class="btn btn-ghost" href={h(`/clubs/${c.slug}`)}>Timings &amp; classes</a>
+                  ) : (
+                    // A club with no slug has no page. Saying so beats a link
+                    // to a URL guessed from its name, which would move.
+                    <span class="text-muted" style="font-size:.78rem">No public page yet</span>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  </section>
+</Base>
+
+<script>
+  // Progressive: the button only appears where the API exists, and it only ever
+  // runs on a press. Nothing reads a location on load.
+  const btn = document.getElementById('use-location');
+  if (btn && 'geolocation' in navigator) {
+    btn.hidden = false;
+    btn.addEventListener('click', () => {
+      btn.textContent = 'Finding you…';
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const url = new URL(window.location.href);
+          url.searchParams.set('lat', pos.coords.latitude.toFixed(6));
+          url.searchParams.set('lon', pos.coords.longitude.toFixed(6));
+          window.location.href = url.toString();
+        },
+        () => {
+          // Refused or unavailable. Say so and leave the form usable — a PIN
+          // code is a complete answer on its own.
+          btn.textContent = 'Location unavailable — use a PIN code';
+          btn.disabled = true;
+        },
+        { maximumAge: 300000, timeout: 10000 }
+      );
+    });
+  }
+</script>
+
+<style>
+  .find { padding: 22px; margin-bottom: 28px; }
+  .find-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; }
+  .fld { display: flex; flex-direction: column; gap: 4px; }
+  .input-label { font-size: .66rem; letter-spacing: .18em; text-transform: uppercase; color: var(--gold); }
+  .find-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 18px; }
+  .chk { display: flex; gap: 8px; align-items: center; font-size: .84rem; }
+  .find-note { font-size: .8rem; line-height: 1.6; margin-top: 14px; max-width: 80ch; }
+
+  .res-head { margin-bottom: 16px; font-size: .88rem; }
+  .res { list-style: none; display: flex; flex-direction: column; gap: 14px; }
+  .res-row { display: flex; gap: 20px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 18px 20px; }
+  .res-main { flex: 1 1 420px; display: flex; flex-direction: column; gap: 7px; }
+  .res-title { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-family: var(--font-display); font-size: 1.02rem; }
+  .res-where { font-size: .84rem; }
+  .res-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .res-classes { font-size: .78rem; }
+</style>

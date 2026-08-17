@@ -1,0 +1,218 @@
+---
+/**
+ * /shotokan/stances — the stances, on their own page. §7 and §33.
+ *
+ * They already appear in /shotokan/kihon as one family among seven. This page
+ * exists because §7 asks for them specifically, and because a stance is not
+ * really a technique in the way a punch is: it is the thing every technique
+ * inherits its power and its mobility from, and it is what a beginner spends
+ * their first year on. It earns the comparison table below, which no other
+ * family would.
+ *
+ * Generated from the same STANCES array as the kihon page, so the two cannot
+ * come to disagree about what exists or what it does.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { STANCES } from '@/data/shotokan';
+import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+/**
+ * The comparison table's columns, drawn from the mechanics each record already
+ * carries. Nothing is computed or inferred here — a blank cell means the record
+ * does not state it, which is a fact worth showing rather than filling in.
+ */
+const COLS = [
+  ['weight', 'Weight'],
+  ['feet', 'Feet'],
+  ['knees', 'Knees'],
+] as const;
+
+/** First sentence only, so the table stays readable. */
+const first = (s: string | undefined) => (s ? s.split('. ')[0].replace(/\.$/, '') + '.' : '—');
+
+/**
+ * The table rows, resolved HERE rather than in the template.
+ *
+ * Not a style preference. Astro parses the template as JSX, so a generic type
+ * assertion written inline — `(t.mechanics as Record<string, string>)[key]` —
+ * has its angle brackets read as tags, and the page dies at request time with
+ * `Expected ")" but found "<string, string | undefined ...>"`. A clean build
+ * and a 500 on every request, because the template is compiled per request.
+ *
+ * Resolving in the frontmatter also means the template renders plain strings,
+ * which is what a template should be doing.
+ */
+const rows = STANCES.map((t) => {
+  const m = t.mechanics as Record<string, string | undefined>;
+  return {
+    slug: t.slug,
+    name: t.name,
+    english: t.english,
+    cells: COLS.map(([key]) => first(m[key])),
+  };
+});
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'CollectionPage',
+  name: 'Shotokan stances — dachi-waza',
+  url: canonicalFor(surface, '/shotokan/stances'),
+  description: `The ${STANCES.length} stances of Shotokan karate: weight distribution, foot and knee position, what each is for, the errors that ruin them and the drills that fix them.`,
+  isPartOf: { '@type': 'WebSite', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
+  hasPart: STANCES.map((t) => ({
+    '@type': 'LearningResource',
+    name: `${t.name} — ${t.english}`,
+    url: canonicalFor(surface, `/shotokan/techniques/${t.slug}`),
+  })),
+};
+---
+
+<Base
+  title="Shotokan stances — dachi-waza explained — MMAKF"
+  description={`All ${STANCES.length} Shotokan stances: zenkutsu-dachi, kokutsu-dachi, kiba-dachi and the rest. Weight distribution, foot and knee position, centre of gravity, what each stance is for, and the faults that ruin them.`}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Stances', url: '/shotokan/stances' },
+  ]}
+>
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+
+  <PageHero
+    eyebrow="Dachi-waza 立ち技"
+    title={`The <em class="r">${STANCES.length}</em> stances.`}
+    lead="Everything else in karate is built on top of these. A technique is only ever as good as what it is standing on."
+    pills={[`${STANCES.length} stances`, 'Weight, feet, knees', 'Common errors and fixes']}
+  />
+
+  <section>
+    <div class="container">
+      <div class="two-col">
+        <div class="fade">
+          <div class="eyebrow">Why stances first</div>
+          <h2 class="display-2" style="margin-top:16px">The stance is <em class="r">the technique</em>.</h2>
+          <div class="rule"></div>
+          <p class="body-txt">
+            A reverse punch thrown from a stance whose back heel lifts transmits nothing: the drive from the
+            floor escapes through the raised heel before it reaches the hip. A front-leg kick from a stance
+            carrying weight on the front foot has to shift that weight first, which is the telegraph an
+            opponent reads. Almost every fault worth correcting in the first years of practice is a stance
+            fault wearing the costume of a hand technique.
+          </p>
+          <p class="body-txt">
+            That is why these are trained for their own sake, held for counts that feel unreasonable, and
+            walked up and down a floor with no arm movement at all &mdash; so that nothing can hide behind
+            an arm.
+          </p>
+        </div>
+        <aside class="fade panel">
+          <div class="eyebrow">One thing worth fixing early</div>
+          <h3 class="panel-h">The knee tracks over the foot.</h3>
+          <p class="panel-p">
+            In every weighted stance on this page, the bent knee must stay above and in line with its foot,
+            never drifting inward. It appears as a &ldquo;common error&rdquo; on four separate records
+            because it is four separate stances&rsquo; version of the same fault.
+          </p>
+          <p class="panel-p">
+            It is worth naming here as well, because unlike most technical faults this one is not merely
+            inefficient. It is the fault that ends knees.
+          </p>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ COMPARISON ═══════ */}
+  <section class="bg2">
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">Side by side</div>
+        <h2 class="display-2">How they <em class="r">differ</em>.</h2>
+        <div class="rule"></div>
+        <p class="lead">
+          The first sentence of each mechanical point, so the trade every stance makes is visible in one
+          place. Follow a stance through for the whole description.
+        </p>
+      </div>
+      <div class="tablewrap fade">
+        <table class="cmp">
+          <caption class="sr-only">Shotokan stances compared by weight distribution, foot position and knee position.</caption>
+          <thead>
+            <tr>
+              <th scope="col">Stance</th>
+              {COLS.map(([, label]) => <th scope="col">{label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr>
+                <th scope="row">
+                  <a href={h(`/shotokan/techniques/${r.slug}`)}>{r.name}</a>
+                  <div class="cmp-en">{r.english}</div>
+                </th>
+                {r.cells.map((cell) => <td>{cell}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══════ THE STANCES ═══════ */}
+  <section>
+    <div class="container">
+      <div class="section-head fade">
+        <div class="eyebrow">In full</div>
+        <h2 class="display-2">Each stance</h2>
+        <div class="rule"></div>
+      </div>
+      <div class="grid grid-3">
+        {STANCES.map((t) => (
+          <a class="card hoverable fade" href={h(`/shotokan/techniques/${t.slug}`)}>
+            <div class="kata-card-top">
+              <span class="kata-kanji" lang="ja">{t.kanji ?? ''}</span>
+              {t.contested && <span class="pill">Not settled</span>}
+            </div>
+            <div class="card-title" style="font-size:1.05rem">{t.name}</div>
+            <div class="kata-meaning">{t.english}</div>
+            <div class="card-body">{t.summary.split('. ')[0]}.</div>
+            <div class="kata-card-foot">
+              <span class="text-muted">{t.commonErrors.length} common errors</span>
+              <span class="text-gold">Read &rarr;</span>
+            </div>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="bg2">
+    <div class="container">
+      <div class="flex flex-wrap gap-3">
+        <a class="btn btn-ghost" href={h('/shotokan/kihon')}>The rest of kihon</a>
+        <a class="btn btn-ghost" href={h('/shotokan/techniques')}>All techniques A–Z</a>
+        <a class="btn btn-ghost" href={h('/kata')}>Kata library</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .cmp { border-collapse: collapse; width: 100%; font-size: .88rem; min-width: 760px; }
+  .cmp th, .cmp td {
+    text-align: left;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line, rgba(0, 0, 0, .1));
+    vertical-align: top;
+  }
+  .cmp thead th { font-weight: 600; border-bottom-width: 2px; white-space: nowrap; }
+  .cmp tbody th { font-weight: 500; white-space: nowrap; }
+  .cmp-en { font-weight: 400; opacity: .7; font-size: .85em; margin-top: 2px; }
+</style>

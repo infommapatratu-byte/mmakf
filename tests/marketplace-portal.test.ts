@@ -45,6 +45,38 @@ const LIST_PAGE = readFileSync('src/pages/portal/listings.astro', 'utf8');
 const ITEM_PAGE = readFileSync('src/pages/portal/listings/[id].astro', 'utf8');
 const SURFACE = [ROUTE, LIST_PAGE, ITEM_PAGE];
 
+/**
+ * The surface with its prose removed.
+ *
+ * The conversion guard below reads raw source and looks for the literal token
+ * it forbids. That is the right instrument — a second conversion is a second
+ * rounding rule and no type will ever catch it — but pointed at a whole file it
+ * also reads the COMMENTS, and this codebase explains itself at length. The
+ * guard duly failed on the sentence in [...action].ts that warns a future
+ * reader not to introduce a stray multiplication: naming the forbidden token is
+ * the only way to warn about it, so the documentation and the check were in a
+ * fight neither could win.
+ *
+ * Deleting the warning to satisfy a regex would be the wrong repair. It removes
+ * the thing that PREVENTS the defect in order to preserve the thing that merely
+ * DETECTS it. So the check measures code, and the comments stay.
+ *
+ * This is deliberately not a weakening. A conversion written in a comment
+ * converts no money, and one written in a string literal is still caught,
+ * because strings are left entirely intact. Only commentary is stripped.
+ */
+function codeOnly(src: string): string {
+  return src
+    // Block comments, JSDoc included. Non-greedy, so two of them cannot merge
+    // into one match and swallow the code sitting between them.
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    // HTML comments — the .astro templates carry these.
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    // Line comments, but never the // inside a URL, which would otherwise
+    // truncate every https:// line and hide whatever followed it on it.
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
 // ─── 1. The money boundary ──────────────────────────────────────────────────
 
 describe('rupees to paise — the one conversion on the seller surface', () => {
@@ -123,13 +155,13 @@ describe('rupees to paise — the one conversion on the seller surface', () => {
   it('is the ONLY rupee-to-paise conversion in the seller surface', () => {
     // A second conversion site is a second rounding rule, and two rounding
     // rules on money is how ₹450.50 becomes 450.5 in a column meaning paise.
-    const conversions = SURFACE.flatMap((src) => [
+    const conversions = SURFACE.map(codeOnly).flatMap((src) => [
       ...src.matchAll(/\*\s*100\b/g),
       ...src.matchAll(/paise\s*\(/g),
     ]);
     expect(conversions.map((m) => m[0])).toEqual([]);
 
-    const definitions = SURFACE.filter((src) => /function rupeesToPaise/.test(src));
+    const definitions = SURFACE.map(codeOnly).filter((src) => /function rupeesToPaise/.test(src));
     expect(definitions).toHaveLength(1);
   });
 });

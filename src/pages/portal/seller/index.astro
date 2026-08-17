@@ -1,0 +1,345 @@
+---
+// /portal/seller — the seller's overview.
+//
+// Standing, verification, badges, the storefront, and the things MMAKF has not
+// decided. It takes no identifier of any kind; see _gate.ts.
+//
+// TWO THINGS THIS PAGE IS CAREFUL ABOUT:
+//
+//   · THE BADGES ARE THE DERIVED ONES. They come from badgesFor(), which
+//     computes them from current verification and authorisation rows every time
+//     it runs. A seller cannot make one appear by typing, and this page renders
+//     the BASIS beside each one so it is obvious where it came from.
+//
+//   · WHERE THE FEDERATION HAS DECIDED NOTHING, IT SAYS SO IN THE MODULE'S OWN
+//     WORDS. There is no commission figure, no SLA and no return window
+//     anywhere in this file, because MMAKF has published none of them.
+
+import Base from '@/layouts/Base.astro';
+import { db } from '@/db';
+import { eq, sql } from 'drizzle-orm';
+import * as s from '@/db/schema';
+import { COMMISSION_NOT_SET } from '@/db/marketplace';
+import { COMMISSION_NOT_CONFIGURED, SLA_NOT_SET, myAccount } from '@/db/marketplace-finance';
+import { effectiveReturnPolicy } from '@/db/returns';
+import { slaFor } from '@/db/seller-orders';
+import {
+  sellerContext, readableError, money, fmtDate, titleCase,
+  SELLER_TABS, SELLER_STANDING,
+} from './_gate';
+
+export const prerender = false;
+
+const ctx = await sellerContext(Astro.request.headers.get('cookie'));
+
+let counts = { listings: 0, live: 0, inReview: 0, openOrders: 0, openReturns: 0, disputes: 0 };
+let account: any = null;
+let sla: any = null;
+let returnPolicy: any = null;
+let pageError: string | null = ctx.loadError;
+
+if (ctx.gate === 'seller' && ctx.seller && !pageError) {
+  try {
+    const one = async (q: any) => (await q)[0]?.n ?? 0;
+    const sellerId = ctx.seller.id;
+
+    counts.listings = await one(db().select({ n: sql<number>`count(*)::int` })
+      .from(s.listings).where(eq(s.listings.sellerId, sellerId)));
+    counts.inReview = await one(db().select({ n: sql<number>`count(*)::int` })
+      .from(s.listings).where(sql`${s.listings.sellerId} = ${sellerId} and ${s.listings.status} = 'submitted'`));
+    // The SAME five conditions the public shop uses, asked of this seller's rows
+    // — so this page and the shop cannot disagree about what is on sale.
+    counts.live = await one(db().select({ n: sql<number>`count(*)::int` })
+      .from(s.listings).innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
+      .where(sql`${s.listings.sellerId} = ${sellerId}
+        and ${s.listings.status} = 'approved'
+        and ${s.sellers.status} = 'approved'
+        and ${s.listings.contentHash} = ${s.listings.approvedContentHash}
+        and ${s.listings.quarantinedAt} is null
+        and ${s.sellers.storeStatus} = 'open'`));
+    counts.openOrders = await one(db().select({ n: sql<number>`count(*)::int` })
+      .from(s.sellerOrders).where(sql`${s.sellerOrders.sellerId} = ${sellerId}
+        and ${s.sellerOrders.status} in ('paid','seller_accepted','processing','packed','shipped','in_transit')`));
+    counts.openReturns = await one(db().select({ n: sql<number>`count(*)::int` })
+      .from(s.returnRequests).where(sql`${s.returnRequests.sellerId} = ${sellerId}
+        and ${s.returnRequests.status} in ('requested','seller_reviewing','authorised','in_transit','received')`));
+    counts.disputes = await one(db().select({ n: sql<number>`count(*)::int` })
+      .from(s.marketplaceDisputes).where(sql`${s.marketplaceDisputes.sellerId} = ${sellerId}
+        and ${s.marketplaceDisputes.status} in ('open','seller_responding','under_review','escalated')`));
+
+    account = await myAccount(db(), ctx.identity!.principal);
+    sla = await slaFor(db(), sellerId);
+    returnPolicy = await effectiveReturnPolicy(db(), sellerId);
+  } catch (err: any) {
+    pageError = readableError(err, 'Your seller overview');
+  }
+}
+
+const standing = ctx.seller ? SELLER_STANDING[ctx.seller.status] : null;
+const store = ctx.seller;
+const storeOpen = store?.storeStatus === 'open';
+
+/** The nine checks, in the order a reviewer works them. */
+const CHECK_ORDER = [
+  'identity', 'business', 'address', 'gst', 'pan', 'bank',
+  'brand_authorisation', 'manufacturer_authorisation', 'product_authorisation',
+];
+const verifications = (ctx.profile?.verifications ?? [])
+  .slice()
+  .sort((a: any, b: any) => CHECK_ORDER.indexOf(a.check) - CHECK_ORDER.indexOf(b.check));
+---
+
+<Base
+  title="Your seller area — MMAKF marketplace"
+  description="Your MMAKF seller account: standing, verification, storefront and the decisions the federation has recorded."
+>
+  <section>
+    <div class="container">
+
+      {ctx.gate === 'no_database' && (
+        <div class="card"><div class="eyebrow">Seller area</div>
+        <h1 class="display-2" style="margin-top:14px">Not available on this deployment.</h1>
+        <p>The federation database is not configured here, so nothing can be read or recorded.</p></div>
+      )}
+
+      {ctx.gate === 'signed_out' && (
+        <div class="card"><div class="eyebrow">Seller area</div>
+        <h1 class="display-2" style="margin-top:14px">Sign in to see your shop.</h1>
+        <p>Your seller record belongs to your account. <a href="/join">Create an account</a> or sign in.</p></div>
+      )}
+
+      {ctx.gate === 'shared_credential' && (
+        <div class="card"><div class="eyebrow">Seller area</div>
+        <h1 class="display-2" style="margin-top:14px">This credential cannot hold a seller record.</h1>
+        <p>A shared office credential is attributable to no one person, so it holds no shop.</p></div>
+      )}
+
+      {ctx.gate === 'no_seller' && (
+        <div class="card"><div class="eyebrow">Seller area</div>
+        <h1 class="display-2" style="margin-top:14px">You have not applied to sell.</h1>
+        <p>MMAKF reviews every application. Approval to sell is one decision; each item you list is reviewed separately.</p>
+        <p><a class="btn btn-primary" href="/seller/apply">Apply to sell</a></p></div>
+      )}
+
+      {ctx.gate === 'seller' && (
+        <>
+          <div class="eyebrow">MMAKF marketplace</div>
+          <h1 class="display-1" style="margin-top:14px">{store?.tradingName ?? 'Your shop'}</h1>
+
+          <nav class="tabs" aria-label="Seller area">
+            {SELLER_TABS.map((t) => (
+              <a href={t.href} aria-current={t.href === '/portal/seller' ? 'page' : undefined}>{t.label}</a>
+            ))}
+          </nav>
+
+          {pageError && <div class="card" role="alert"><p>{pageError}</p></div>}
+
+          {standing && (
+            <div class={`card tone-${standing.tone}`}>
+              <div class="eyebrow">Standing</div>
+              <h2 class="h3">{standing.label}</h2>
+              <p>{standing.body}</p>
+              {store?.decisionReason && <p><strong>MMAKF recorded:</strong> {store.decisionReason}</p>}
+              {store?.suspendedReason && <p><strong>Reason for suspension:</strong> {store.suspendedReason}</p>}
+              {store?.restrictedAt && (
+                <p>
+                  <strong>Restricted.</strong> You may keep trading, except in:
+                  {' '}{(store.restrictedCategories ?? []).join(', ') || '—'}.
+                  {store.restrictedReason ? ` ${store.restrictedReason}` : ''}
+                  {' '}A restriction is not a suspension — the rest of your shop is unaffected.
+                </p>
+              )}
+              <p class="muted">Seller reference <strong>{store?.ref}</strong> · {titleCase(store?.sellerType) || 'Kind not recorded'}</p>
+            </div>
+          )}
+
+          {ctx.approved && (
+            <div class="grid-4">
+              <div class="card stat"><div class="n">{counts.live}</div><div class="k">On sale now</div></div>
+              <div class="card stat"><div class="n">{counts.inReview}</div><div class="k">In review</div></div>
+              <div class="card stat"><div class="n">{counts.openOrders}</div><div class="k">Orders to fulfil</div></div>
+              <div class="card stat"><div class="n">{counts.openReturns + counts.disputes}</div><div class="k">Returns &amp; disputes</div></div>
+            </div>
+          )}
+
+          {/* ── Verification ───────────────────────────────────────────── */}
+          <div class="card">
+            <div class="eyebrow">Verification</div>
+            <h2 class="h3">What MMAKF has checked</h2>
+            <p class="muted">
+              Each check is recorded separately, so “identity confirmed, GST outstanding” is a state this
+              register can actually hold. A single verified/unverified flag could not express it.
+            </p>
+            <table>
+              <thead><tr><th scope="col">Check</th><th scope="col">Status</th><th scope="col">Recorded</th><th scope="col">Expires</th></tr></thead>
+              <tbody>
+                {verifications.map((v: any) => (
+                  <tr>
+                    <th scope="row">{titleCase(v.check)}</th>
+                    <td><span class={`pill pill-${v.status}`}>{titleCase(v.status)}</span>
+                      {v.status === 'documents_required' && v.reason && <div class="muted">{v.reason}</div>}
+                      {v.status === 'rejected' && v.reason && <div class="muted">{v.reason}</div>}
+                    </td>
+                    <td>{fmtDate(v.decidedAt)}</td>
+                    <td>{fmtDate(v.expiresAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p class="muted">{ctx.profile?.notes?.verification}</p>
+          </div>
+
+          {/* ── Badges ─────────────────────────────────────────────────── */}
+          <div class="card">
+            <div class="eyebrow">Trust</div>
+            <h2 class="h3">Badges you hold</h2>
+            {(ctx.profile?.badges ?? []).length === 0 ? (
+              <p class="muted">
+                None yet. A badge is a record, not a description — it appears when the evidence behind it
+                exists, and disappears when that evidence lapses. Nothing you write in your store profile
+                can produce one.
+              </p>
+            ) : (
+              <ul class="badges">
+                {(ctx.profile?.badges ?? []).map((b: any) => (
+                  <li><strong>{b.label}</strong><br /><span class="muted">{b.basis}</span></li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {/* ── Storefront ─────────────────────────────────────────────── */}
+          {ctx.approved && (
+            <form id="store-form" class="card">
+              <div class="eyebrow">Storefront</div>
+              <h2 class="h3">Your public shop</h2>
+              {store?.storeSlug
+                ? <p>Live at <a href={`/shop/seller/${store.storeSlug}`}><code>/shop/seller/{store.storeSlug}</code></a>{storeOpen ? '' : ' — currently closed, so nothing of yours is on sale.'}</p>
+                : <p class="muted">No public address yet.</p>}
+
+              <label for="storeSlug">Shop address</label>
+              <input id="storeSlug" name="storeSlug" value={store?.storeSlug ?? ''} maxlength="60" />
+              <p class="hint">Letters, numbers and hyphens. Two shops cannot share an address.</p>
+
+              <label for="storeTagline">Tagline</label>
+              <input id="storeTagline" name="storeTagline" value={store?.storeTagline ?? ''} maxlength="160" />
+              <p class="hint">
+                Describes your shop. It is <strong>not</strong> a badge: writing “Official MMAKF supplier”
+                here produces a tagline and nothing else, because a badge is a record MMAKF writes.
+              </p>
+
+              <label for="storeAbout">About your shop</label>
+              <textarea id="storeAbout" name="storeAbout" rows="4" maxlength="4000">{store?.storeAbout ?? ''}</textarea>
+
+              <p id="store-error" class="error" role="alert" hidden></p>
+              <p id="store-ok" class="ok" role="status" hidden></p>
+              <div class="row">
+                <button class="btn btn-primary" type="submit">Save shop details</button>
+                {storeOpen
+                  ? <button class="btn" type="button" data-store="close">Close my shop</button>
+                  : <button class="btn" type="button" data-store="open">Reopen my shop</button>}
+              </div>
+              <p class="hint">
+                Closing your shop stops new orders and takes your items off the marketplace. It is
+                <strong> not</strong> a suspension — nothing is recorded against you, and you reopen it yourself.
+              </p>
+            </form>
+          )}
+
+          {/* ── What the federation has not decided ────────────────────── */}
+          <div class="card">
+            <div class="eyebrow">Terms</div>
+            <h2 class="h3">What MMAKF has and has not set</h2>
+            <dl>
+              <dt>Commission</dt>
+              <dd>{account?.heldForCommission ? COMMISSION_NOT_CONFIGURED : COMMISSION_NOT_SET}</dd>
+              <dt>Service levels</dt>
+              <dd>{sla?.configured
+                ? `Accept within ${sla.acceptanceHours ?? '—'}h · dispatch within ${sla.dispatchHours ?? '—'}h.`
+                : SLA_NOT_SET}</dd>
+              <dt>Returns</dt>
+              <dd>
+                {returnPolicy?.windowDays != null
+                  ? `${returnPolicy.windowDays} days, set by the ${titleCase(returnPolicy.source)}.`
+                  : 'No return window is published.'}
+                {(returnPolicy?.notes ?? []).map((n: string) => <div class="muted">{n}</div>)}
+              </dd>
+            </dl>
+            {account?.heldForCommission > 0 && (
+              <p class="warn">
+                <strong>{account.heldForCommission} of your sales are held.</strong> MMAKF has not
+                published a commission covering them, so nothing can be settled until it does. Your goods
+                are sold and the money is safe — it is the payout that is waiting, not the sale.
+              </p>
+            )}
+          </div>
+        </>
+      )}
+
+    </div>
+  </section>
+</Base>
+
+<script>
+  const form = document.getElementById('store-form') as HTMLFormElement | null;
+  if (form) {
+    const err = document.getElementById('store-error')!;
+    const ok = document.getElementById('store-ok')!;
+    const show = (el: HTMLElement, m: string) => { el.textContent = m; el.hidden = false; };
+    const hide = () => { err.hidden = true; ok.hidden = true; };
+
+    async function post(action: string, body: Record<string, unknown>) {
+      const r = await fetch(`/api/marketplace/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      return { ok: r.ok, body: await r.json().catch(() => ({})) };
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      hide();
+      const f = new FormData(form);
+      const v = (k: string) => { const x = f.get(k); return typeof x === 'string' ? x.trim() : ''; };
+      const res = await post('store/update', {
+        storeSlug: v('storeSlug') || null,
+        storeTagline: v('storeTagline') || null,
+        storeAbout: v('storeAbout') || null,
+      });
+      if (res.ok && res.body.ok) { show(ok, 'Saved.'); window.setTimeout(() => window.location.reload(), 700); }
+      else show(err, res.body.error || 'Could not save. Nothing has been changed.');
+    });
+
+    form.querySelectorAll('[data-store]').forEach((b) => {
+      b.addEventListener('click', async () => {
+        hide();
+        const which = (b as HTMLElement).dataset.store;
+        const reason = which === 'close'
+          ? window.prompt('Why are you closing the shop? (optional — recorded for your own reference)') ?? null
+          : null;
+        const res = await post(`store/${which}`, { reason });
+        if (res.ok && res.body.ok) window.location.reload();
+        else show(err, res.body.error || 'Could not change the shop. Nothing has been changed.');
+      });
+    });
+  }
+</script>
+
+<style>
+  .tabs { display: flex; gap: 16px; margin: 18px 0; flex-wrap: wrap; }
+  .tabs a { padding: 6px 0; border-bottom: 2px solid transparent; text-decoration: none; }
+  .tabs a[aria-current='page'] { border-bottom-color: currentColor; font-weight: 600; }
+  .grid-4 { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; margin: 18px 0; }
+  @media (min-width: 900px) { .grid-4 { grid-template-columns: repeat(4, 1fr); } }
+  .stat .n { font-size: 2rem; font-weight: 700; line-height: 1; }
+  .stat .k { opacity: 0.75; margin-top: 4px; }
+  .pill { padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; font-size: 0.85em; }
+  .badges { list-style: none; padding: 0; display: grid; gap: 10px; }
+  .muted { opacity: 0.75; }
+  .warn { font-weight: 600; }
+  .hint { font-size: 0.9em; opacity: 0.75; margin-top: 4px; }
+  .error { color: #b00020; font-weight: 600; }
+  .ok { font-weight: 600; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); vertical-align: top; }
+</style>

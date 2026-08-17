@@ -43,6 +43,16 @@ import { isConfigured, db } from '@/db';
 import { ForbiddenError } from '@/lib/rbac';
 import type { AuditContext } from '@/db/federation';
 import * as mkt from '@/db/marketplace';
+// The marketplace platform (migration 0029). Same construction as `mkt` above:
+// every one of these modules holds its own authorisation, scoping, state
+// machine, reason requirements and audit writes, and nothing below re-decides
+// any of it.
+import * as reg from '@/db/seller-registry';
+import * as cat from '@/db/catalogue';
+import * as inv from '@/db/inventory';
+import * as so from '@/db/seller-orders';
+import * as fin from '@/db/marketplace-finance';
+import * as ret from '@/db/returns';
 
 export const prerender = false;
 
@@ -134,6 +144,67 @@ function priceMinorFromBody(b: Body): number {
   return minor;
 }
 
+/**
+ * The same rule, for the other amounts the platform acts carry.
+ *
+ * ONE FUNCTION, PARAMETERISED BY FIELD NAME, rather than six copies of
+ * `priceMinorFromBody`. Six copies is six chances for one of them to gain a
+ * `* 100` during a refactor, and the whole point of rupeesToPaise() is that
+ * there is exactly one grammar for a price in this surface.
+ *
+ * Each refuses a `*Minor` field for the same reason `priceMinor` is refused: a
+ * caller that could send paise directly is a caller that has its own
+ * conversion, and two conversions is two rounding rules.
+ */
+function minorFrom(b: Body, rupeeKey: string, minorKey: string, what: string): number {
+  if (b[minorKey] !== undefined) {
+    throw new InputError(
+      `This endpoint takes ${what} in rupees as \`${rupeeKey}\`. Paise are computed on the server, ` +
+      'in one place, so that the conversion cannot differ between callers.'
+    );
+  }
+  const minor = rupeesToPaise(b[rupeeKey]);
+  if (minor === null) {
+    throw new InputError(
+      `Enter ${what} in rupees — for example 450.50. Digits, and at most two decimal places.`
+    );
+  }
+  return minor;
+}
+
+const amountMinorFromBody = (b: Body) => minorFrom(b, 'amountRupees', 'amountMinor', 'the amount');
+const refundMinorFromBody = (b: Body) => minorFrom(b, 'refundRupees', 'refundMinor', 'the refund');
+const penaltyMinorFromBody = (b: Body) => minorFrom(b, 'penaltyRupees', 'penaltyMinor', 'the penalty');
+const flatMinorFromBody = (b: Body) => minorFrom(b, 'flatRupees', 'flatMinor', 'the flat charge');
+
+/**
+ * A payout adjustment, which is the ONE amount here that may be negative.
+ *
+ * `rupeesToPaise()` deliberately refuses a minus sign — a negative PRICE is
+ * always an error and letting one through is how a basket total is reduced by a
+ * caller. An adjustment is the opposite case: reducing what a seller is owed is
+ * the ordinary use, so the sign is read separately and applied here, and the
+ * magnitude still goes through the one conversion.
+ */
+function signedAmountMinorFromBody(b: Body): number {
+  const raw = String(b.amountRupees ?? '').trim();
+  const negative = raw.startsWith('-');
+  const magnitude = minorFrom(
+    { ...b, amountRupees: negative ? raw.slice(1) : raw },
+    'amountRupees', 'amountMinor', 'the adjustment',
+  );
+  return negative ? -magnitude : magnitude;
+}
+
+/** A whole number that may be negative — a stock correction, and only that. */
+function signedInt(b: Body, k: string): number {
+  const n = Number(b[k]);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) {
+    throw new InputError(`"${k}" must be a whole number — a stock correction cannot be a fraction of an item.`);
+  }
+  return n;
+}
+
 // ─── Body coercion ──────────────────────────────────────────────────────────
 //
 // Coercion only. Every rule about what a value MEANS — a title is required, a
@@ -204,6 +275,15 @@ type Handler = (ctx: AuditContext, b: Body) => Promise<unknown>;
  */
 const BUCKETS: Record<string, { bucket: string; limit: number; windowSeconds: number }> = {
   'seller/apply': { bucket: 'marketplace-apply', limit: 5, windowSeconds: 3600 },
+  // The long form of the same act, and the same reasoning: an account can only
+  // ever hold one seller row, so a burst is never legitimate traffic.
+  'seller/register': { bucket: 'marketplace-apply', limit: 5, windowSeconds: 3600 },
+  // Checkout is the one act here that RESERVES STOCK and allocates an order
+  // number before any money is involved. A loop against it holds a seller's
+  // entire inventory for forty-five minutes at a time, which is a denial of
+  // service against the seller rather than against this server — so it is
+  // limited more tightly than editing, and separately from it.
+  'checkout': { bucket: 'marketplace-checkout', limit: 12, windowSeconds: 300 },
 };
 const DEFAULT_BUCKET = { bucket: 'marketplace-write', limit: 60, windowSeconds: 60 };
 
@@ -300,6 +380,428 @@ const HANDLERS: Record<string, Handler> = {
   } as mkt.ListingDecision),
 
   'listing/delist': (ctx, b) => mkt.delistListing(db(), ctx, reqInt(b, 'listingId'), str(b, 'reason')),
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // THE MARKETPLACE PLATFORM (migration 0029)
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // RULE 1 STILL HOLDS, and it is the reason this block can be read quickly:
+  // NOT ONE seller-side handler below names a seller. `variant/add`,
+  // `stock/receive`, `order/accept`, `return/decide` and every other one
+  // resolve the caller's seller row from `ctx.principal.userId` inside their
+  // own SQL. A variant id names WHICH item; it never names WHOSE.
+  //
+  // RULE 2 STILL HOLDS: rupees arrive, `priceMinorFromBody()` converts once.
+  //
+  // The federation-side handlers DO take ids, because deciding somebody else's
+  // record is the entire act. Each is gated in its own module against the
+  // seller's scope.
+
+  // ── Registration: the full application ────────────────────────────────────
+  //
+  // A superset of `seller/apply` above, and deliberately a SECOND act rather
+  // than more optional fields on the first. The short form is what an existing
+  // dojo uses; this is the one /seller/apply posts, and it creates the frozen
+  // submission, the structured addresses and a verification row per check.
+  'seller/register': (ctx, b) => reg.registerAsSeller(db(), ctx, {
+    sellerType: str(b, 'sellerType') as any,
+    businessType: str(b, 'businessType') as any,
+    tradingName: str(b, 'tradingName'),
+    legalName: optStr(b, 'legalName'),
+    brandName: optStr(b, 'brandName'),
+    registrationNumber: optStr(b, 'registrationNumber'),
+    email: optStr(b, 'email'),
+    phone: optStr(b, 'phone'),
+    alternatePhone: optStr(b, 'alternatePhone'),
+    website: optStr(b, 'website'),
+    businessDescription: optStr(b, 'businessDescription'),
+    yearsOperating: optInt(b, 'yearsOperating'),
+    businessCategory: optStr(b, 'businessCategory'),
+    gstin: optStr(b, 'gstin'),
+    pan: optStr(b, 'pan'),
+    stateUnitId: optInt(b, 'stateUnitId'),
+    districtUnitId: optInt(b, 'districtUnitId'),
+    dojoId: optInt(b, 'dojoId'),
+    addresses: Array.isArray(b.addresses) ? (b.addresses as any[]) : [],
+    requestedCategories: Array.isArray(b.requestedCategories) ? (b.requestedCategories as string[]) : null,
+    requestedBrands: Array.isArray(b.requestedBrands) ? (b.requestedBrands as string[]) : null,
+    expectedMonthlyOrders: optInt(b, 'expectedMonthlyOrders'),
+    hasWarehouse: b.hasWarehouse === undefined ? null : Boolean(b.hasWarehouse),
+    shipsNationally: b.shipsNationally === undefined ? null : Boolean(b.shipsNationally),
+    motivation: optStr(b, 'motivation'),
+  }),
+
+  // ── The storefront, which is not the seller ───────────────────────────────
+  'store/update': (ctx, b) => reg.updateStore(db(), ctx, {
+    ...(b.storeSlug === undefined ? {} : { storeSlug: optStr(b, 'storeSlug') }),
+    ...(b.storeTagline === undefined ? {} : { storeTagline: optStr(b, 'storeTagline') }),
+    ...(b.storeAbout === undefined ? {} : { storeAbout: optStr(b, 'storeAbout') }),
+    ...(b.storeLogoUrl === undefined ? {} : { storeLogoUrl: optStr(b, 'storeLogoUrl') }),
+    ...(b.storeSpecialisms === undefined ? {} : {
+      storeSpecialisms: Array.isArray(b.storeSpecialisms) ? (b.storeSpecialisms as string[]) : null,
+    }),
+  }),
+
+  // Closing a shop is NOT a suspension, and this is the act that keeps the two
+  // apart. A seller going away for a fortnight must not have to be suspended.
+  'store/open': (ctx) => reg.setStoreOpen(db(), ctx, true, null),
+  'store/close': (ctx, b) => reg.setStoreOpen(db(), ctx, false, optStr(b, 'reason')),
+
+  // ── Variants. Price in rupees, converted by the one function. ─────────────
+  //
+  // Adding or repricing a variant RETURNS THE LISTING TO REVIEW — the result
+  // carries `returnedToReview` so the seller is told rather than finding out
+  // when the item leaves the shop.
+  'variant/add': (ctx, b) => cat.addVariant(db(), ctx, reqInt(b, 'listingId'), {
+    label: str(b, 'label'),
+    priceMinor: priceMinorFromBody(b),
+    sellerSku: optStr(b, 'sellerSku'),
+    barcode: optStr(b, 'barcode'),
+    gtin: optStr(b, 'gtin'),
+    attributes: (b.attributes && typeof b.attributes === 'object') ? (b.attributes as any) : null,
+    weightGrams: optInt(b, 'weightGrams'),
+    sortOrder: optInt(b, 'sortOrder') ?? 0,
+  }),
+
+  'variant/update': (ctx, b) => cat.updateVariant(db(), ctx, reqInt(b, 'variantId'), {
+    ...(b.label === undefined ? {} : { label: str(b, 'label') }),
+    ...(b.priceRupees === undefined && b.priceMinor === undefined ? {} : { priceMinor: priceMinorFromBody(b) }),
+    ...(b.sellerSku === undefined ? {} : { sellerSku: optStr(b, 'sellerSku') }),
+    ...(b.weightGrams === undefined ? {} : { weightGrams: optInt(b, 'weightGrams') }),
+  }),
+
+  // DISCONTINUES, never deletes. An order line points at this row for as long
+  // as the order exists.
+  'variant/discontinue': (ctx, b) =>
+    cat.discontinueVariant(db(), ctx, reqInt(b, 'variantId'), str(b, 'reason')),
+
+  // ── Inventory ─────────────────────────────────────────────────────────────
+  'location/create': (ctx, b) => inv.createLocation(db(), ctx, {
+    code: str(b, 'code'),
+    name: str(b, 'name'),
+    kind: (optStr(b, 'kind') ?? 'warehouse') as any,
+    addressLine: optStr(b, 'addressLine'),
+    city: optStr(b, 'city'),
+    district: optStr(b, 'district'),
+    state: optStr(b, 'state'),
+    postcode: optStr(b, 'postcode'),
+    contactName: optStr(b, 'contactName'),
+    contactPhone: optStr(b, 'contactPhone'),
+    priority: optInt(b, 'priority') ?? 100,
+    acceptsReturns: b.acceptsReturns === undefined ? false : Boolean(b.acceptsReturns),
+  }),
+
+  'stock/receive': (ctx, b) => inv.receiveStock(db(), ctx, {
+    variantId: reqInt(b, 'variantId'),
+    locationId: reqInt(b, 'locationId'),
+    qty: reqInt(b, 'qty'),
+    reason: optStr(b, 'reason'),
+  }),
+
+  // A manual correction, and it REQUIRES a reason — an unexplained stock change
+  // is indistinguishable from a loss nobody reported. The requirement lives in
+  // inventory.ts; this route does not restate it, it simply passes what came.
+  'stock/adjust': (ctx, b) => inv.adjustStock(db(), ctx, {
+    variantId: reqInt(b, 'variantId'),
+    locationId: reqInt(b, 'locationId'),
+    delta: signedInt(b, 'delta'),
+    reason: str(b, 'reason'),
+  }),
+
+  'stock/count': (ctx, b) => inv.recordStockCount(db(), ctx, {
+    variantId: reqInt(b, 'variantId'),
+    locationId: reqInt(b, 'locationId'),
+    countedQty: reqInt(b, 'countedQty'),
+    note: optStr(b, 'note'),
+  }),
+
+  'stock/lowrule': (ctx, b) => inv.setLowStockRule(db(), ctx, {
+    variantId: optInt(b, 'variantId'),
+    threshold: reqInt(b, 'threshold'),
+    notifyEmail: optStr(b, 'notifyEmail'),
+  }),
+
+  // ── Checkout ──────────────────────────────────────────────────────────────
+  //
+  // The cart names WHAT and HOW MANY. There is no price field on CartLine, so
+  // a tampered price is not rejected — it has nowhere to go. Every figure is
+  // resolved from `listing_variants` server-side.
+  'checkout': (ctx, b) => so.checkout(db(), ctx, {
+    lines: Array.isArray(b.lines)
+      ? (b.lines as any[]).map((l) => ({
+          variantId: Number(l?.variantId),
+          quantity: Number(l?.quantity),
+        }))
+      : [],
+    buyerName: optStr(b, 'buyerName'),
+    email: optStr(b, 'email'),
+    phone: optStr(b, 'phone'),
+    personId: optInt(b, 'personId'),
+    shipTo: (b.shipTo && typeof b.shipTo === 'object') ? (b.shipTo as any) : null,
+    eventId: optInt(b, 'eventId'),
+  }),
+
+  // ── Fulfilment. The seller's own orders, resolved from the session. ───────
+  'order/accept': (ctx, b) => so.acceptSellerOrder(db(), ctx, reqInt(b, 'sellerOrderId')),
+  'order/pack': (ctx, b) => so.markPacked(db(), ctx, reqInt(b, 'sellerOrderId')),
+
+  // TRACKING IS OPTIONAL AND NOTHING IS FABRICATED HERE. A consignment with no
+  // tracking number is recorded as one; the result says `trackingRecorded`
+  // so the surface can state it plainly rather than showing a dead link.
+  'order/ship': (ctx, b) => so.shipSellerOrder(db(), ctx, reqInt(b, 'sellerOrderId'), {
+    carrier: optStr(b, 'carrier'),
+    service: optStr(b, 'service'),
+    trackingNumber: optStr(b, 'trackingNumber'),
+    trackingUrl: optStr(b, 'trackingUrl'),
+    weightGrams: optInt(b, 'weightGrams'),
+    packageCount: optInt(b, 'packageCount') ?? 1,
+    fromLocationId: optInt(b, 'fromLocationId'),
+  }),
+
+  'order/delivered': (ctx, b) =>
+    so.markDelivered(db(), ctx, reqInt(b, 'sellerOrderId'), { deliveredTo: optStr(b, 'deliveredTo') }),
+
+  'order/cancel': (ctx, b) => so.cancelSellerOrder(
+    db(), ctx, reqInt(b, 'sellerOrderId'), str(b, 'reason'),
+    (optStr(b, 'by') ?? 'seller') as 'buyer' | 'seller' | 'federation',
+  ),
+
+  // ── Shipping configuration ────────────────────────────────────────────────
+  'return-policy/set': (ctx, b) => ret.setReturnPolicy(db(), ctx, {
+    windowDays: optInt(b, 'windowDays'),
+    returnShippingPaidBy: (optStr(b, 'returnShippingPaidBy') ?? null) as any,
+    conditionRequirements: optStr(b, 'conditionRequirements'),
+    exchangeOffered: b.exchangeOffered === undefined ? null : Boolean(b.exchangeOffered),
+    nonReturnable: Boolean(b.nonReturnable),
+    nonReturnableReason: optStr(b, 'nonReturnableReason'),
+    // Only the federation may set the floor, and setReturnPolicy asserts it.
+    marketplaceFloor: Boolean(b.marketplaceFloor),
+  }),
+
+  // ── Returns ───────────────────────────────────────────────────────────────
+  'return/request': (ctx, b) => ret.requestReturn(db(), ctx, {
+    sellerOrderId: reqInt(b, 'sellerOrderId'),
+    reason: str(b, 'reason'),
+    reasonDetail: optStr(b, 'reasonDetail'),
+    remedySought: (optStr(b, 'remedySought') ?? 'refund') as 'refund' | 'exchange',
+    items: Array.isArray(b.items)
+      ? (b.items as any[]).map((i) => ({
+          orderLineId: Number(i?.orderLineId),
+          quantity: Number(i?.quantity),
+          condition: i?.condition,
+        }))
+      : [],
+  }),
+
+  'return/decide': (ctx, b) => ret.decideReturn(db(), ctx, reqInt(b, 'returnRequestId'), {
+    approve: Boolean(b.approve),
+    reason: str(b, 'reason'),
+    returnToLocationId: optInt(b, 'returnToLocationId'),
+  }),
+
+  'return/inspect': (ctx, b) => ret.inspectReturn(db(), ctx, reqInt(b, 'returnRequestId'), {
+    locationId: reqInt(b, 'locationId'),
+    items: Array.isArray(b.items)
+      ? (b.items as any[]).map((i) => ({
+          returnItemId: Number(i?.returnItemId),
+          receivedQty: Number(i?.receivedQty),
+          sellableQty: Number(i?.sellableQty),
+          damagedQty: Number(i?.damagedQty),
+          result: i?.result,
+          notes: i?.notes ?? null,
+        }))
+      : [],
+  }),
+
+  'return/refund': (ctx, b) => ret.refundReturn(db(), ctx, reqInt(b, 'returnRequestId'), {
+    amountMinor: b.amountRupees === undefined && b.amountMinor === undefined
+      ? null : amountMinorFromBody(b),
+    fundedBy: (optStr(b, 'fundedBy') ?? 'seller') as 'seller' | 'platform',
+    reason: str(b, 'reason'),
+  }),
+
+  // ── Disputes ──────────────────────────────────────────────────────────────
+  'dispute/raise': (ctx, b) => ret.raiseDispute(db(), ctx, {
+    sellerOrderId: reqInt(b, 'sellerOrderId'),
+    kind: str(b, 'kind') as any,
+    summary: str(b, 'summary'),
+    returnRequestId: optInt(b, 'returnRequestId'),
+  }),
+
+  'dispute/respond': (ctx, b) =>
+    ret.respondToDispute(db(), ctx, reqInt(b, 'disputeId'), { response: str(b, 'response') }),
+
+  // A PENALTY IS NEVER COMPUTED. Whatever the deciding officer enters, with its
+  // own separately stated reason — required by decideDispute(), not here.
+  'dispute/decide': (ctx, b) => ret.decideDispute(db(), ctx, reqInt(b, 'disputeId'), {
+    outcome: str(b, 'outcome') as any,
+    reason: str(b, 'reason'),
+    refundMinor: b.refundRupees === undefined && b.refundMinor === undefined
+      ? null : refundMinorFromBody(b),
+    refundFundedBy: (optStr(b, 'refundFundedBy') ?? 'seller') as 'seller' | 'platform',
+    penaltyMinor: b.penaltyRupees === undefined && b.penaltyMinor === undefined
+      ? null : penaltyMinorFromBody(b),
+    penaltyReason: optStr(b, 'penaltyReason'),
+  }),
+
+  'report/create': (ctx, b) => ret.reportProblem(db(), ctx, {
+    sellerOrderId: reqInt(b, 'sellerOrderId'),
+    orderLineId: optInt(b, 'orderLineId'),
+    kind: str(b, 'kind'),
+    detail: str(b, 'detail'),
+  }),
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // THE FEDERATION'S SIDE
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  'verification/decide': (ctx, b) => reg.decideVerification(db(), ctx, {
+    sellerId: reqInt(b, 'sellerId'),
+    check: str(b, 'check') as any,
+    status: str(b, 'status') as any,
+    reason: optStr(b, 'reason'),
+    expiresAt: optStr(b, 'expiresAt') ? new Date(String(b.expiresAt)) : null,
+  }),
+
+  'seller/restrict': (ctx, b) => reg.restrictSeller(db(), ctx, reqInt(b, 'sellerId'), {
+    categories: Array.isArray(b.categories) ? (b.categories as string[]) : [],
+    reason: str(b, 'reason'),
+  }),
+  'seller/unrestrict': (ctx, b) =>
+    reg.liftRestriction(db(), ctx, reqInt(b, 'sellerId'), str(b, 'reason')),
+
+  // ── Badges. THE ONLY WRITE PATH, and no seller can reach it. ──────────────
+  //
+  // grantBadge() refuses the derived badges outright: granting `verified_seller`
+  // by hand would assert a verification that never happened.
+  'badge/grant': (ctx, b) => reg.grantBadge(db(), ctx, {
+    badge: str(b, 'badge') as any,
+    sellerId: optInt(b, 'sellerId'),
+    listingId: optInt(b, 'listingId'),
+    reason: str(b, 'reason'),
+    authority: optStr(b, 'authority'),
+  }),
+  'badge/revoke': (ctx, b) => reg.revokeBadge(db(), ctx, reqInt(b, 'grantId'), str(b, 'reason')),
+
+  // ── Brands ────────────────────────────────────────────────────────────────
+  //
+  // A seller CLAIMS; the federation VERIFIES. `brand/claim` does not take a
+  // status — claimBrandAuthorisation() always writes 'claimed', so there is no
+  // request shape in which a seller asserts their own verification.
+  'brand/claim': (ctx, b) => reg.claimBrandAuthorisation(db(), ctx, {
+    brandId: reqInt(b, 'brandId'),
+    relationship: str(b, 'relationship') as any,
+    scope: optStr(b, 'scope'),
+    issuer: optStr(b, 'issuer'),
+    issuerContact: optStr(b, 'issuerContact'),
+    referenceNumber: optStr(b, 'referenceNumber'),
+    validFrom: optStr(b, 'validFrom'),
+    validTo: optStr(b, 'validTo'),
+  }),
+  'brand/decide': (ctx, b) => reg.decideBrandAuthorisation(db(), ctx, reqInt(b, 'authorisationId'), {
+    status: str(b, 'status') as 'verified' | 'rejected' | 'revoked',
+    reason: str(b, 'reason'),
+  }),
+
+  // ── Catalogue governance ──────────────────────────────────────────────────
+  'taxonomy/adopt': (ctx) => cat.adoptProposedTaxonomy(db(), ctx),
+
+  // Quarantine: ONE column, and the item leaves every public surface at once
+  // while its orders, reviews and revisions survive.
+  'listing/quarantine': (ctx, b) =>
+    cat.quarantineListing(db(), ctx, reqInt(b, 'listingId'), str(b, 'reason')),
+  'listing/unquarantine': (ctx, b) =>
+    cat.liftQuarantine(db(), ctx, reqInt(b, 'listingId'), str(b, 'reason')),
+
+  'flag/raise': (ctx, b) => cat.raiseListingFlag(db(), ctx, reqInt(b, 'listingId'), {
+    kind: str(b, 'kind') as any,
+    detail: str(b, 'detail'),
+  }),
+  'flag/decide': (ctx, b) => cat.decideListingFlag(db(), ctx, reqInt(b, 'flagId'), {
+    status: str(b, 'status') as 'upheld' | 'dismissed',
+    reason: str(b, 'reason'),
+    actionTaken: optStr(b, 'actionTaken'),
+  }),
+
+  'authenticity/open': (ctx, b) => cat.openAuthenticityCase(db(), ctx, {
+    sellerId: reqInt(b, 'sellerId'),
+    listingId: optInt(b, 'listingId'),
+    brandId: optInt(b, 'brandId'),
+    complainantKind: str(b, 'complainantKind') as any,
+    complainantName: optStr(b, 'complainantName'),
+    complainantContact: optStr(b, 'complainantContact'),
+    orderId: optInt(b, 'orderId'),
+    allegation: str(b, 'allegation'),
+    quarantineListing: Boolean(b.quarantineListing),
+  }),
+  'authenticity/decide': (ctx, b) => cat.decideAuthenticityCase(db(), ctx, reqInt(b, 'caseId'), {
+    status: str(b, 'status') as 'upheld' | 'dismissed',
+    decision: str(b, 'decision'),
+  }),
+
+  // ── Commission. `marketplace:commission`, which no seller holds. ──────────
+  'commission/rule': (ctx, b) => fin.createCommissionRule(db(), ctx, {
+    code: str(b, 'code'),
+    label: str(b, 'label'),
+    description: optStr(b, 'description'),
+    sellerId: optInt(b, 'sellerId'),
+    sellerTier: optStr(b, 'sellerTier'),
+    sellerType: optStr(b, 'sellerType'),
+    categoryId: optInt(b, 'categoryId'),
+    listingId: optInt(b, 'listingId'),
+    campaignCode: optStr(b, 'campaignCode'),
+    contractRef: optStr(b, 'contractRef'),
+    priority: optInt(b, 'priority') ?? 100,
+  }),
+
+  // DRAFT. `chargedOnShipping` and `chargedOnTax` are read as booleans and
+  // draftCommissionVersion() refuses when either is absent — there is no safe
+  // default and this route does not supply one.
+  'commission/draft': (ctx, b) => fin.draftCommissionVersion(db(), ctx, reqInt(b, 'ruleId'), {
+    rateBps: optInt(b, 'rateBps'),
+    flatMinor: b.flatRupees === undefined && b.flatMinor === undefined ? null : flatMinorFromBody(b),
+    minMinor: optInt(b, 'minMinor'),
+    maxMinor: optInt(b, 'maxMinor'),
+    chargedOnShipping: b.chargedOnShipping as any,
+    chargedOnTax: b.chargedOnTax as any,
+    commissionTaxRateBps: optInt(b, 'commissionTaxRateBps'),
+    effectiveFrom: str(b, 'effectiveFrom'),
+    effectiveTo: optStr(b, 'effectiveTo'),
+    notes: optStr(b, 'notes'),
+  }),
+
+  'commission/publish': (ctx, b) =>
+    fin.publishCommissionVersion(db(), ctx, reqInt(b, 'versionId'), str(b, 'authority')),
+
+  'commission/reresolve': (ctx) => fin.reresolveCommissionGaps(db(), ctx),
+
+  // ── Settlement and payout ─────────────────────────────────────────────────
+  'settlement/close': (ctx, b) => fin.closeSettlement(db(), ctx, reqInt(b, 'settlementId')),
+  'settlement/approve': (ctx, b) =>
+    fin.approveSettlement(db(), ctx, reqInt(b, 'settlementId'), optStr(b, 'note')),
+  'settlement/accrue': (ctx, b) => fin.accrueSellerOrder(db(), reqInt(b, 'sellerOrderId')),
+  'settlement/statement': (ctx, b) => fin.generateStatement(db(), ctx, {
+    sellerId: reqInt(b, 'sellerId'),
+    settlementId: reqInt(b, 'settlementId'),
+    cadence: (optStr(b, 'cadence') ?? 'monthly') as 'daily' | 'weekly' | 'monthly',
+  }),
+
+  'payout/create': (ctx, b) => fin.createPayout(db(), ctx, reqInt(b, 'settlementId')),
+  'payout/paid': (ctx, b) => fin.markPayoutPaid(db(), ctx, reqInt(b, 'payoutId'), {
+    providerPayoutId: optStr(b, 'providerPayoutId'),
+    utr: optStr(b, 'utr'),
+  }),
+
+  // The function through which a person's income is reduced. Requires a reason
+  // and records an approver; adjustPayable() enforces both.
+  'payout/adjust': (ctx, b) => fin.adjustPayable(db(), ctx, {
+    sellerId: reqInt(b, 'sellerId'),
+    kind: str(b, 'kind') as any,
+    amountMinor: signedAmountMinorFromBody(b),
+    reason: str(b, 'reason'),
+    authority: optStr(b, 'authority'),
+    disputeId: optInt(b, 'disputeId'),
+  }),
 };
 
 // ─── Status mapping ─────────────────────────────────────────────────────────
@@ -315,11 +817,44 @@ const FORBIDDEN = new Set([
   'self_review',         // deciding your own shop
   'not_a_seller',        // no seller record at all
   'seller_not_approved', // gate one of two
+  // ── The platform's own refusals of AUTHORITY (0029) ──────────────────────
+  //
+  // Every one of these means "this is not yours", and each is 403 rather than
+  // 404 ONLY because the caller is a seller being told about their own account.
+  // The isolation errors below — not_your_order and its siblings — are 404, on
+  // purpose: they are returned when a seller asks about somebody else's row,
+  // and a 403 there would confirm that the id exists.
+  'closed_by_federation',
+  'derived_badge',       // a badge that must come from evidence, not a grant
 ]);
 
-const NOT_FOUND = new Set(['unknown_seller', 'unknown_listing']);
+const NOT_FOUND = new Set([
+  'unknown_seller', 'unknown_listing',
+  'unknown_variant', 'unknown_case', 'unknown_flag', 'unknown_brand',
+  'unknown_rule', 'unknown_version', 'unknown_settlement', 'unknown_payout',
+  'unknown_seller_order', 'unknown_return', 'unknown_dispute', 'unknown_item',
+  'unknown_authorisation', 'no_stock_record',
+  // THE ISOLATION ERRORS. 404 and not 403, deliberately — see above. A seller
+  // asking about another seller's order gets the same answer as one asking
+  // about an order that does not exist, because distinguishing them tells an
+  // attacker which ids are real.
+  'not_your_order', 'not_your_variant', 'not_your_listing',
+  'not_your_location', 'not_your_return', 'not_your_dispute',
+]);
 
-const CONFLICT = new Set(['already_applied', 'bad_transition']);
+const CONFLICT = new Set([
+  'already_applied', 'bad_transition',
+  'already_decided', 'already_published', 'already_paid',
+  'duplicate_location', 'slug_taken', 'last_variant',
+  // Stock the buyer cannot have. 409 rather than 400: nothing about the
+  // REQUEST was wrong — the world changed underneath it, and a client may
+  // reasonably retry with a smaller quantity.
+  'insufficient_stock', 'stock_taken',
+  // Money the federation has not been told how to handle. Also a conflict with
+  // the world rather than a bad request.
+  'unresolved_commission', 'no_verified_account', 'not_closed', 'not_approved',
+  'not_open', 'nothing_payable', 'window_closed', 'non_returnable',
+]);
 
 function statusFor(code: string): number {
   if (UNAUTHENTICATED.has(code)) return 401;

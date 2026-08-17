@@ -27,8 +27,8 @@ believed.
 Every figure below came from one of these, run just now:
 
 ```
-ls tests/*.test.ts | wc -l              96 files
-npx vitest run                          3,319 passing, 2 expected fail
+ls tests/*.test.ts | wc -l              97 files
+npx vitest run                          3,502 passing, 2 expected fail, 0 skipped
 ls drizzle/*.sql | wc -l                35 migrations
 grep -h 'CREATE TABLE' drizzle/* | wc -l  269 tables
 find src/pages -type f | wc -l          142 route files
@@ -53,14 +53,21 @@ repository is well ahead of what is running.
 
 | | |
 |---|---|
-| Database tables | **144** (117 before this session) |
-| Migrations | 12 files. **Applied to the test database in CI. NOT applied to production** — see below. |
-| Tests | **2,670** across **79** files, all passing (`npx vitest run`) |
-| Route files under `src/pages` | 130 |
-| Admin surfaces | 27 |
+| Database tables | **269** |
+| Migrations | 35 files. **Applied to the test database in CI. NOT applied to production** — see below. |
+| Tests | **3,502** across **97** files, none skipped (`npx vitest run`) |
+| Route files under `src/pages` | 142 |
+| Admin surfaces | 33 |
 | Statuses in the federation dictionary | **170**, across 8 tones |
 | `npx astro build` | succeeds |
 | Live 404s from links the site publishes | **0** (was 2) |
+
+> **This table used to contradict the one above it**, carrying 144 tables /
+> 2,670 tests / 79 files / 12 migrations while the Numbers block said 269 / 3,319
+> / 96 / 35. Both were in the same document, four screens apart. That is the
+> third staleness this file has recorded, and the most embarrassing kind: not a
+> figure that drifted from reality, but a document disagreeing with itself.
+> Corrected 17 August 2026 by running the commands.
 
 ---
 
@@ -365,12 +372,31 @@ Added 17 August 2026, in parallel with the rows above. Full account in
 | Kumite library | **Built and verified** | 6 systems, 16 principles, 8 combination families. Traditional and sport separated at the record level |
 | Terminology | **Built and verified** | 83 terms, translated *and* explained. 8 carry Hindi; the rest are null by policy, not by omission |
 | Video source register | **Built and verified** | 121 recordings, all checked against the platform with a negative control. All 26 kata covered |
-| Public routes | **Built and verified** | `/shotokan/kihon`, `/shotokan/techniques/[slug]`, `/shotokan/kumite`, `/shotokan/kumite/[slug]`, `/shotokan/terminology`, `/shotokan/videos`. In the nav, in the sitemap, fetched over HTTP by `tests/routes-live.test.ts` |
+| Public routes — **all nine §33 names** | **Built and verified** | `/shotokan`, `/shotokan/kihon`, `/shotokan/kata`, `/shotokan/kumite`, `/shotokan/techniques`, `/shotokan/stances`, `/shotokan/terminology`, `/shotokan/live`, `/shotokan/videos`, plus `/shotokan/techniques/[slug]` and `/shotokan/kumite/[slug]`. In the nav, in the sitemap, and each asserted to answer 200 over HTTP by `tests/routes-live.test.ts` |
+| §31 search, **without a database** | **Built and verified** | `searchTechnical()` was written and had no caller. `/search` reads Postgres, the library does not live there, and production has no `DATABASE_URL` — so "gyaku zuki" returned the not-configured notice while the answer was compiled into the same page. Technical results now render outside the database guard. Asserted for `gyaku zuki`, `bassai dai` and `sen no sen` |
+| §25 live detection, **actually running** | **Built** | `syncBroadcasts()` and `closeStaleBroadcasts()` were complete and had **no caller** — no route, no cron. `/api/cron/media-sync` invokes them gated on `CRON_SECRET`, skipping cleanly when the database or YouTube credentials are absent, publishing nothing. **Deliberately NOT in `vercel.json`** — a sub-daily cron makes Vercel reject the whole deployment on a Hobby plan, and a daily one cannot detect an hour-long class. Scheduling is the operator|’s choice |
 | Alias-aware search | **Built and verified** | `searchTechnical()` — `gyaku zuki` / `gyaku-zuki` / `gyakuzuki` / `reverse punch` all resolve; `sen no sen`, `bassai dai`, `enpi`/`empi` too |
 | Discovery pipeline | **Built and runs** | `scripts/discover-videos.mjs` reproduces the register end to end. Never writes; every classification labelled a machine guess |
 | Link health | **Built and runs** | `scripts/check-video-links.mjs` — per id, never per page. Last run 121/121 OK |
-| Rights decisions on the 51 held recordings | **Not made** | Deliberate. They are third-party uploads; a committee decides, not a script |
-| Technical player, chapters, timeline (§29, §30) | **Not built** | `media_chapters` exists; nothing consumes it, and there is no reviewed media to generate timestamps from |
+| Database seed, end to end | **Built and verified against a real Postgres** | `npm run library:seed`. `seedTechnicalLibrary()` was complete and tested but **reachable only from vitest** — no script, no route — so the only process that had ever run it wrote to a throwaway PGlite database. An operator could migrate, deploy, open the review queue and find it empty with nothing to tell them what they had missed. Verified: 26 kata, 42 techniques, 6 kumite forms, 145 appearances, 125 terms, 625 aliases, 95 citations, **121 media assets, 59 review-queue links** — and a second run produces zero deltas |
+| Rights decisions on the 51 held recordings | **Not made** | Deliberate. They are third-party uploads; a committee decides, not a script. Post-seed state is `rights = unknown` on all 121 assets, `published = 0` |
+| Technical player, chapters, timeline (§29, §30) | **Not built** | `media_chapters` exists; nothing consumes it, and there is no reviewed media to generate timestamps from. §30 forbids fabricating them, so nothing was faked to fill the gap |
+| Student progress marking (§43) | **Not built** | `lesson_progress` covers course lessons. Marking a *technique* or *kata* watched / practised / needs-work / bookmarked has no table and no surface |
+
+### The pattern worth naming: three capabilities that existed and never ran
+
+Found in one session, all the same shape, and none of them visible from the
+test suite because every one was tested:
+
+| Capability | State | Symptom |
+|---|---|---|
+| `seedTechnicalLibrary()` | Complete, idempotent, tested | Called only by vitest. An operator got an empty review queue with nothing telling them why |
+| `searchTechnical()` | Complete, tested | No caller. §31's own acceptance query returned nothing on the live site |
+| `syncBroadcasts()` | Complete, tested, error-isolated | No route, no cron. §25's premise — a class appears by itself — was never true |
+
+This is the same defect as a page linked from nowhere, which this repository
+already checks for. **A capability is not shipped until something invokes it on
+its own**, and a green test suite is not evidence that anything does.
 | Multi-angle synchronised playback (§28) | **Not built** | MMAKF has recorded no multi-angle material |
 
 **The 121 recordings are not in the database.** They are a verified static

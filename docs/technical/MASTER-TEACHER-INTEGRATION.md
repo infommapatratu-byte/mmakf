@@ -134,13 +134,53 @@ what the channels say they are.
 
 ---
 
+## Running the poller
+
+`syncBroadcasts()` and `closeStaleBroadcasts()` were complete, tested and
+**called by nothing** — no route, no cron, no button. §25's whole premise, that
+a class appears inside MMAKF by itself, was therefore never true in practice.
+
+`/api/cron/media-sync` now invokes both. It is authorised by `CRON_SECRET`
+(an unset secret means the job cannot be triggered, never "allow"), and it skips
+cleanly — reporting `skipped`, not failure — when the database or the YouTube
+credentials are absent.
+
+```
+curl -H "Authorization: Bearer $CRON_SECRET" https://<host>/api/cron/media-sync
+```
+
+### It is deliberately NOT registered in `vercel.json`
+
+It was, at `*/5 * * * *`, and `tests/vercel-config.test.ts` refused it. That
+guard encodes seventeen hours of stale production:
+
+```
+cron_jobs_limits_reached — Hobby accounts are limited to daily cron jobs.
+```
+
+Vercel rejects a sub-daily schedule **when the deployment is created**, before
+any build runs. No deployment appears, nothing shows in the Deployments tab, and
+the Git integration keeps reporting itself healthy while production serves
+yesterday's build.
+
+**A daily schedule was not the answer either.** A class lasts an hour; polling
+once a day cannot detect one. A cron entry that looks scheduled and can never
+work is precisely the fake affordance this project forbids — worse than an
+absent feature, because it reads as done.
+
+So scheduling is the operator's choice: a GitHub Actions schedule, an external
+ping service, or a Vercel plan that permits sub-daily crons. Suggested cadence
+is five minutes; the endpoint is idempotent and safe to call more often.
+
+---
+
 ## What is not built
 
 Stated plainly rather than left for a reader to discover:
 
 - **No channel id is stored for the Master Teacher channel.** Polling needs one,
   and obtaining it needs either the Data API with a key or a manual lookup by an
-  administrator.
+  administrator. Until then the poller has nothing to poll, and reports it.
 - **Multi-angle synchronised playback** (§28) is not built. The schema has no
   camera-angle grouping, and MMAKF has recorded no multi-angle material for it
   to group.

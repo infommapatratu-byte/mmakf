@@ -25,7 +25,7 @@
 // the first with the second loses the one that did the work, which is exactly
 // the attribution the federation needs to decide where to put its effort.
 
-import { and, asc, desc, eq, ilike, inArray, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { allocateFederationId, writeAudit, type AuditContext } from '@/db/federation';
 import { assertCan, canAnywhere, visibleScopes, type Principal } from '@/lib/rbac';

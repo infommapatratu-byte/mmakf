@@ -47,6 +47,8 @@ import { allocateFederationId, writeAudit, type AuditContext } from './federatio
 import { recordAddress, type AddressInput } from './geography';
 import { isUniqueViolation } from './pgerror';
 import { MINOR_AGE } from '@/lib/registration';
+import { publish, type PublishInput } from '@/lib/domain-events';
+import { log } from '@/lib/observability';
 import {
   assertCan, assertCanAnywhere, can, canAnywhere, visibleScopes,
   type Principal,
@@ -69,6 +71,56 @@ export class IdentityError extends Error {
 export function isIdentityError(err: unknown): err is IdentityError {
   return !!err && typeof err === 'object' && (err as any).name === 'IdentityError'
     && typeof (err as any).code === 'string';
+}
+
+// ─── The feed ───────────────────────────────────────────────────────────────
+
+/**
+ * Put a fact on the domain-event feed WITHOUT letting the feed break the fact.
+ *
+ * WHY THIS IS NOT THE SHAPE THE OTHER PRODUCERS USE. src/db/scheduling.ts and
+ * src/db/entitlements.ts call `await publish(tx, …)` INSIDE the transaction that
+ * made the change, so the change and the record of the change cannot come apart.
+ * That is the better arrangement and it is unavailable here: every function in
+ * this module is a sequence of statements against whatever handle the caller
+ * passed, with no transaction to join. An unguarded `await publish(db, …)` at
+ * the end of one of them would throw AFTER the guardianship had been verified
+ * and the audit row written — and the caller would be told the operation failed
+ * when it had already happened. That is worse than either alternative, because
+ * the natural response to it is to retry an act that has already taken effect.
+ *
+ * So the shape is the one src/db/grading.ts and src/pages/api/verify.ts use for
+ * a side effect that must not break its host, with one difference: THIS ONE
+ * LOGS. `.catch(() => {})` is right for a verification log; a missing domain
+ * event is not a harmless omission. src/lib/domain-events.ts says it in its own
+ * header — a feed that is missing events is worse than one a caller was not
+ * entitled to write to, because every downstream surface is then quietly wrong
+ * with nothing to show that it is. An error line is what stands in for the
+ * transaction this module has not got.
+ *
+ * THE GAP THAT LEAVES, NAMED RATHER THAN GLOSSED. A publish that fails is a
+ * mutation that happened with no event on the feed, and no consumer will ever
+ * learn of it; only the log will say so. Closing it means running these
+ * functions inside a transaction and publishing within it, which is a change to
+ * the shape of the module rather than to this wiring, and it is not made under
+ * cover of adding producers.
+ *
+ * Nothing here ever passes a contact value, an address line, a person's name or
+ * a free-text reason. The feed reaches further than the record does, and every
+ * payload below is identifiers, enum values and dates.
+ */
+async function announce(db: DB, input: PublishInput): Promise<void> {
+  try {
+    await publish(db, input);
+  } catch (err) {
+    log.error('identity: domain event not published', {
+      eventType: input.eventType,
+      entityType: input.entityType,
+      entityId: String(input.entityId),
+      eventCorrelationId: input.correlationId ?? null,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ─── Age ────────────────────────────────────────────────────────────────────
@@ -356,6 +408,23 @@ export async function verifyContact(
     oldValue: { verified: false },
     newValue: { verified: true, method: input.method, ref: input.ref },
   });
+
+  // The METHOD and the REFERENCE go to the audit row and stop there. Both are
+  // free text somebody typed, and the audit trail is a bounded readership with
+  // a record of who read it; the feed is neither. What a consumer needs is that
+  // this person now has a proven channel of this kind, which is all that travels.
+  //
+  // The early return above means this fires once per contact, and the
+  // correlation key makes a retry that got past it a duplicate rather than a
+  // second fact.
+  await announce(db, {
+    eventType: 'PERSON_CONTACT_VERIFIED',
+    entityType: 'person_contact',
+    entityId: input.contactId,
+    payload: { contactId: input.contactId, personId: c.personId, kind: c.kind },
+    correlationId: `person_contact:verified:${input.contactId}`,
+    actor: ctx.principal,
+  });
 }
 
 /** Retire a contact. Never a DELETE — it is how somebody was once reached. */
@@ -605,6 +674,28 @@ export async function assertRelationship(
       type: input.type, status: 'asserted',
     },
   });
+
+  // Published only on the branch that CREATED a row. The two returns above hand
+  // back a claim that was already on file, and re-submitting a form is not a
+  // second assertion — a consumer counting claims about a child must count
+  // claims, not submissions.
+  //
+  // `evidence` is not on the payload. It is caller-supplied JSON that may name
+  // a document, an issuing office or a third party, and none of that is bounded.
+  await announce(db, {
+    eventType: 'GUARDIANSHIP_ASSERTED',
+    entityType: 'person_relationship',
+    entityId: id,
+    payload: {
+      relationshipId: id,
+      holderPersonId: input.holderPersonId,
+      subjectPersonId: input.subjectPersonId,
+      type: input.type,
+      status: 'asserted',
+    },
+    correlationId: `person_relationship:asserted:${id}`,
+    actor: ctx.principal,
+  });
   return { id, created: true };
 }
 
@@ -654,6 +745,29 @@ export async function decideRelationship(
     oldValue: { status: r.status },
     newValue: { status: input.decision, reason: input.reason },
   });
+
+  // Two event types rather than one with an outcome field, for the reason the
+  // catalogue gives: a consumer that must react to a REFUSAL — somebody tried to
+  // attach themselves to this person's record and was turned away — should not
+  // have to open a payload to find out which fact it is holding.
+  //
+  // The REASON stays off the feed. It is free text written by an official about
+  // a decision concerning a child, and it can name a third party, a document or
+  // a family circumstance. The audit row carries it; the feed carries the fact.
+  await announce(db, {
+    eventType: input.decision === 'verified' ? 'GUARDIANSHIP_VERIFIED' : 'GUARDIANSHIP_REJECTED',
+    entityType: 'person_relationship',
+    entityId: input.relationshipId,
+    payload: {
+      relationshipId: input.relationshipId,
+      holderPersonId: r.holderPersonId,
+      subjectPersonId: r.subjectPersonId,
+      type: r.type,
+      status: input.decision,
+    },
+    correlationId: `person_relationship:${input.decision}:${input.relationshipId}`,
+    actor: ctx.principal,
+  });
 }
 
 /**
@@ -698,6 +812,27 @@ export async function revokeRelationship(
   await writeAudit(db, ctx, {
     entityType: 'person_relationship', entityId: input.relationshipId, action: 'revoke',
     oldValue: { status: r.status }, newValue: { status: 'revoked', reason: input.reason },
+  });
+
+  // THE ONE EVENT ON THIS FEED THAT WITHDRAWS AUTHORITY. Anything that cached a
+  // guardian's answer from guardianCan() has to hear about this, and hear about
+  // it as its own fact rather than inferring it from the absence of something.
+  // The capability rows revoked alongside produce no events of their own —
+  // revocation is one act with one cause, and fanning it out into a grant-shaped
+  // event per capability would invite a consumer to process them independently.
+  await announce(db, {
+    eventType: 'GUARDIANSHIP_REVOKED',
+    entityType: 'person_relationship',
+    entityId: input.relationshipId,
+    payload: {
+      relationshipId: input.relationshipId,
+      holderPersonId: r.holderPersonId,
+      subjectPersonId: r.subjectPersonId,
+      type: r.type,
+      status: 'revoked',
+    },
+    correlationId: `person_relationship:revoked:${input.relationshipId}`,
+    actor: ctx.principal,
   });
 }
 
@@ -761,6 +896,26 @@ export async function grantGuardianCapability(
       subject: r.subjectPersonId, holder: r.holderPersonId,
     },
   });
+
+  // ONE capability, named. The event mirrors the table: there is no bundle here
+  // and no event that says "a guardian was set up", because an event shaped like
+  // that is how an implied capability gets built by a consumer that assumed the
+  // usual set came with it.
+  await announce(db, {
+    eventType: 'GUARDIAN_CAPABILITY_GRANTED',
+    entityType: 'guardian_authorization',
+    entityId: rows[0].id,
+    payload: {
+      authorizationId: rows[0].id,
+      relationshipId: input.relationshipId,
+      capability: input.capability,
+      holderPersonId: r.holderPersonId,
+      subjectPersonId: r.subjectPersonId,
+      expiresAt: input.expiresAt ? new Date(input.expiresAt).toISOString() : null,
+    },
+    correlationId: `guardian_authorization:granted:${rows[0].id}`,
+    actor: ctx.principal,
+  });
   return { id: rows[0].id, created: true };
 }
 
@@ -789,6 +944,23 @@ export async function revokeGuardianCapability(
   await writeAudit(db, ctx, {
     entityType: 'guardian_authorization', entityId: input.authorizationId, action: 'revoke',
     newValue: { capability: a.capability, reason: input.reason },
+  });
+
+  // The reason is audited, not published — same rule as every other free-text
+  // field in this module. Which capability went is the operative fact.
+  await announce(db, {
+    eventType: 'GUARDIAN_CAPABILITY_REVOKED',
+    entityType: 'guardian_authorization',
+    entityId: input.authorizationId,
+    payload: {
+      authorizationId: input.authorizationId,
+      relationshipId: a.relationshipId,
+      capability: a.capability,
+      holderPersonId: r.holderPersonId,
+      subjectPersonId: r.subjectPersonId,
+    },
+    correlationId: `guardian_authorization:revoked:${input.authorizationId}`,
+    actor: ctx.principal,
   });
 }
 
@@ -974,6 +1146,37 @@ export async function recordConsent(
       version: input.policyVersion, decision: input.decision, capacity: input.capacity,
     },
   });
+
+  // WITHDRAWAL GETS ITS OWN EVENT TYPE. It is the decision that obliges somebody
+  // to stop doing something — take the photograph down, drop the mailing — and a
+  // consumer of "stop" must not have to sift the grants for it. 'granted' and
+  // 'refused' are both a decision being put on the record and share a type; the
+  // `decision` key on the payload tells them apart for anyone who cares.
+  //
+  // The VERSION travels with the policy key, because consent to version 1 is not
+  // consent to version 4 and an event that named only the policy would be read
+  // as the latter. `channel`, `ipHash` and `userAgentHash` do not travel: they
+  // are how the consent was captured, which is evidence for a dispute rather
+  // than a fact a consumer acts on, and the hashes are personal data.
+  await announce(db, {
+    eventType: input.decision === 'withdrawn' ? 'CONSENT_WITHDRAWN' : 'CONSENT_RECORDED',
+    entityType: 'consent_record',
+    entityId: rows[0].id,
+    payload: {
+      consentId: rows[0].id,
+      subjectPersonId: input.subjectPersonId,
+      policyKey: input.policyKey.trim(),
+      policyVersion: input.policyVersion.trim(),
+      decision: input.decision,
+      capacity: input.capacity,
+      givenByPersonId: input.givenByPersonId ?? null,
+      relationshipId: input.relationshipId ?? null,
+    },
+    // Consent is append-only: one row is one decision, and the row id is the
+    // identity of the fact.
+    correlationId: `consent_record:${rows[0].id}`,
+    actor: ctx.principal,
+  });
   return { id: rows[0].id };
 }
 
@@ -1152,16 +1355,49 @@ export async function detectPersonDuplicates(
 
     const [leftId, rightId] = personId < otherId ? [personId, otherId] : [otherId, personId];
 
+    // The id is taken back out of the insert so that the event below can name
+    // the candidate it raised, and — the part that matters — so that a re-run
+    // publishes NOTHING when the candidate was already open. This detector runs
+    // on every contact added, and the score moves when a contact becomes
+    // verified; republishing under one key with a re-scored payload is a
+    // `correlation_conflict`, and the intake path is not where anybody should
+    // discover one. A candidate already on the queue has not been raised again.
+    let candidateId: number | null = null;
     try {
-      await db.insert(idn.duplicateCandidates).values({
+      const inserted = await db.insert(idn.duplicateCandidates).values({
         subjectType: 'person', leftId, rightId, score,
         signals: { signals: list } as any,
-      });
+      }).returning({ id: idn.duplicateCandidates.id });
+      candidateId = inserted[0].id;
     } catch (err) {
       // Already open. The partial unique index is what makes re-running the
       // detector — which happens on every contact added — cheap and safe.
       if (!isUniqueViolation(err)) throw err;
     }
+
+    if (candidateId != null) {
+      // NO ACTOR. This runs on the intake path with no principal of its own —
+      // the signature takes no AuditContext — so the event carries no actor
+      // rather than a fabricated one. A machine-raised question attributed to
+      // whichever human happened to be nearby is a worse record than none.
+      //
+      // The SIGNALS are on the payload because a candidate without its evidence
+      // is a number nobody can act on, and they are the reason the catalogue
+      // puts this event at 'restricted': "these two share a verified telephone"
+      // is a household inference about two people who may both be children.
+      await announce(db, {
+        eventType: 'DUPLICATE_CANDIDATE_RAISED',
+        entityType: 'duplicate_candidate',
+        entityId: candidateId,
+        payload: {
+          candidateId, subjectType: 'person',
+          leftPersonId: leftId, rightPersonId: rightId,
+          score, signals: list,
+        },
+        correlationId: `duplicate_candidate:raised:${candidateId}`,
+      });
+    }
+
     raised.push({ otherPersonId: otherId, score, signals: list });
   }
 
@@ -1285,6 +1521,28 @@ export async function decideDuplicate(
     oldValue: { status: 'open', left: c.leftId, right: c.rightId, score: c.score },
     newValue: { status: input.decision, reason: input.reason, mergedInto: input.mergedIntoId ?? null },
   });
+
+  // `merged: false` is on the payload deliberately, and it is not padding. A
+  // decision of 'merged' means a human decided the two records are one person;
+  // it does NOT mean any record was rewritten, because nothing in this module
+  // rewrites one. A consumer that read the decision alone would act as though
+  // the register had been consolidated, and would be wrong in the direction
+  // that costs somebody their rank history.
+  await announce(db, {
+    eventType: 'DUPLICATE_DECIDED',
+    entityType: 'duplicate_candidate',
+    entityId: input.candidateId,
+    payload: {
+      candidateId: input.candidateId,
+      subjectType: c.subjectType,
+      leftPersonId: c.leftId, rightPersonId: c.rightId,
+      decision: input.decision,
+      mergedIntoId: input.mergedIntoId ?? null,
+      merged: false,
+    },
+    correlationId: `duplicate_candidate:decided:${input.candidateId}`,
+    actor: ctx.principal,
+  });
 }
 
 // ─── Governed profile changes ───────────────────────────────────────────────
@@ -1363,6 +1621,20 @@ export async function requestProfileChange(
       entityType: 'profile_change_request', entityId: rows[0].id, action: 'create',
       newValue: { ref, personId: input.personId, field: input.field },
     });
+
+    // THE FIELD NAME, NEVER THE VALUES. `oldValue` and `newValue` on this row
+    // are a person's name, date of birth, gender or nationality — the four
+    // things this module exists to stop being handled casually — and putting
+    // either onto a feed with no scope filter would undo that in one line. The
+    // field is what a consumer needs in order to route the request.
+    await announce(db, {
+      eventType: 'PROFILE_CHANGE_REQUESTED',
+      entityType: 'profile_change_request',
+      entityId: rows[0].id,
+      payload: { requestId: rows[0].id, ref, personId: input.personId, field: input.field },
+      correlationId: `profile_change_request:requested:${rows[0].id}`,
+      actor: ctx.principal,
+    });
     return { id: rows[0].id, ref };
   } catch (err) {
     if (!isUniqueViolation(err)) throw err;
@@ -1424,6 +1696,18 @@ export async function decideProfileChange(
       entityType: 'profile_change_request', entityId: input.requestId, action: 'reject',
       newValue: { field: r.field, reason: input.reason },
     });
+
+    await announce(db, {
+      eventType: 'PROFILE_CHANGE_DECIDED',
+      entityType: 'profile_change_request',
+      entityId: input.requestId,
+      payload: {
+        requestId: input.requestId, ref: r.ref, personId: r.personId,
+        field: r.field, decision: 'rejected', applied: false,
+      },
+      correlationId: `profile_change_request:decided:${input.requestId}`,
+      actor: ctx.principal,
+    });
     return { applied: false };
   }
 
@@ -1458,6 +1742,25 @@ export async function decideProfileChange(
     entityType: 'person', entityId: r.personId, action: 'update',
     oldValue: { [r.field]: r.oldValue },
     newValue: { [r.field]: r.newValue, viaRequest: r.ref, reason: input.reason },
+  });
+
+  // `applied: true` is reached only after the write to `persons` succeeded and
+  // the `record_moved` refusal above did not fire. An approval and an
+  // application are two facts here, and a consumer told only "approved" would
+  // believe a change happened that this function may have declined to make.
+  //
+  // Neither value travels, on this branch either. What changed is on the audit
+  // row and on the record; that it changed is what the feed says.
+  await announce(db, {
+    eventType: 'PROFILE_CHANGE_DECIDED',
+    entityType: 'profile_change_request',
+    entityId: input.requestId,
+    payload: {
+      requestId: input.requestId, ref: r.ref, personId: r.personId,
+      field: r.field, decision: 'approved', applied: true,
+    },
+    correlationId: `profile_change_request:decided:${input.requestId}`,
+    actor: ctx.principal,
   });
   return { applied: true };
 }

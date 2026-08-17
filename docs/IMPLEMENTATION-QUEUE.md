@@ -205,34 +205,70 @@ after pages that do not exist.
 
 ---
 
-## 9 — Seed the video register into the review queue
+## 9 — Seed the video register into the review queue — **SHIPPED 17 August 2026**
 
-The technical library shipped 121 verified external recordings as a static
-register (`src/data/shotokan/video-register.ts`) and the review board shipped as
-`/admin/technical-library`. **They are not joined.** The queue has a schema, a
-rights gate and an audit trail, and nothing in it.
+Recorded rather than deleted, because the shape of the miss is worth keeping.
 
-The seeder is small and the shape is already decided:
+**The seeder was never the missing part.** `seedTechnicalLibrary()` in
+`src/db/library-seed.ts` was complete, idempotent and covered by
+`tests/technical-library.test.ts` — and **nothing outside the test suite called
+it.** No npm script, no route, no cron. The only process that had ever run it
+was vitest, against a throwaway PGlite database deleted at the end of the run.
 
-1. `registerSource()` for the four productive sources, seeded from `SOURCES`
-   with `authorityRank` as the starting `authority_tier` — an administrator
-   changes it afterwards, per §41.
-2. One `media_assets` row per recording, keyed on `(platform, external_id)` so
-   re-running is idempotent. `rights: 'not_cleared'` on all of them.
-3. `proposeLink()` per recording with `proposed_by: 'import'` — **not `'ai'` and
-   not `'human'`** — so a reviewer can see exactly where the classification came
-   from.
-4. Review state: `rights_review` for the 51 third-party uploads, `technical_review`
-   for the 70 on a source's own channel. Neither is `approved`; the database
-   refuses that without a named approver anyway.
+So the capability existed and the outcome did not: an operator could apply every
+migration, deploy, open `/admin/technical-library`, find an empty queue, and have
+nothing anywhere tell them which command they had missed. A seeder nobody can run
+is a seeder that does not exist, however well tested it is — the same class of
+defect as a page linked from nowhere, which this project has shipped before and
+now checks for.
 
-**Do not let the seeder publish anything.** The whole point of the split is that
-a script establishes provenance and a committee decides.
+`scripts/seed-technical-library.mjs` closes it:
 
-Once seeded, `/shotokan/videos` and `/shotokan/techniques/[slug]` should read
-approved links from the database and fall back to the static register for what
-has not been reviewed — the register stays as the evidence of the research, not
-as the publication mechanism.
+```
+# The tables must exist first. The seed refuses an unmigrated database.
+npm run db:migrate
+
+# Count what is there. Writes nothing.
+npm run library:status
+
+# Apply the seed. Idempotent — safe to re-run.
+npm run library:seed
+```
+
+Every line above is safe to paste as-is. An earlier version of this block put the
+explanation on the same line as the command, and PowerShell duly tried to run the
+explanation — reporting `writes` as an unknown cmdlet.
+
+Verified against a **real Postgres over TCP**, not PGlite inside vitest:
+
+| | |
+|---|---|
+| kata | 26 |
+| techniques | 42 |
+| kumite forms | 6 |
+| technique/kata appearances | 145 |
+| terms / aliases | 125 / 625 |
+| citations | 95 |
+| **media assets** | **121** |
+| **review-queue links** | **59** |
+| reference curriculum items | 123 |
+| sport kumite provisions | 14 |
+
+A second run produced **zero deltas on every table.**
+
+It refuses two things rather than guessing: an unset `DATABASE_URL`, and an
+unmigrated database — seeding an empty schema produces a wall of driver errors
+that reads as a broken seeder rather than as a missing step.
+
+**It carries a resolve hook, which is worth knowing before writing another
+script like it.** `library-seed.ts` imports through the `@/` tsconfig alias, and
+`src/db/schema.ts` re-exports with extensionless relative specifiers. Vite and
+vitest resolve both; plain node resolves neither, and the failure names the
+imported file rather than the missing resolver.
+
+Post-seed state, which is the honest one: **121 assets at `rights = unknown`, 59
+links at state `new`, 0 published.** Nothing reaches a learner until a named
+reviewer decides both its rights and its technique.
 
 ---
 
