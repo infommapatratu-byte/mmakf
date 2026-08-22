@@ -657,6 +657,16 @@ if (authed) {
       background: var(--bg-2);
     }
     .lp-img-slot { margin-top: 8px; }
+    .lp-upload { margin-top: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .lp-upload-btn {
+      display: inline-block; cursor: pointer;
+      border: 1px solid var(--border-2); border-radius: var(--radius);
+      padding: 6px 12px; font-family: var(--font-display);
+      font-size: .7rem; letter-spacing: .1em; text-transform: uppercase;
+      color: var(--off-white);
+    }
+    .lp-upload-btn:hover { border-color: var(--gold); color: var(--gold); }
+    .lp-upload-note { font-size: .72rem; color: var(--muted); }
     .lp-img-prev {
       max-width: 100%; max-height: 140px; object-fit: contain;
       border-radius: var(--radius); border: 1px solid var(--border);
@@ -770,6 +780,7 @@ if (authed) {
       // nothing appear, with no explanation, is the failure this list exists
       // to turn into a sentence.
       const IMG_HOSTS = ['images.unsplash.com'];
+      const IMG_HOST_SUFFIX = '.public.blob.vercel-storage.com';
 
       function imageFieldLabel(f) {
         return /img|image|photo|thumb|logo|cover/i.test(f.n) || /image|photo/i.test(f.l);
@@ -784,7 +795,8 @@ if (authed) {
         let u;
         try { u = new URL(url); } catch (err) { return null; }
         if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
-        return { url: url, allowed: IMG_HOSTS.indexOf(u.host) >= 0, host: u.host };
+        const allowed = IMG_HOSTS.indexOf(u.host) >= 0 || u.host.endsWith(IMG_HOST_SUFFIX);
+        return { url: url, allowed: allowed, host: u.host };
       }
 
       function previewHtml(info) {
@@ -804,10 +816,19 @@ if (authed) {
         const control = f.textarea
           ? '<textarea class="input" id="' + cid + '" name="' + f.n + '" rows="3">' + v + '</textarea>'
           : '<input class="input" id="' + cid + '" name="' + f.n + '" type="' + (f.type || 'text') + '" value="' + v + '" />';
+        // A FILE PICKER BESIDE THE URL BOX, not instead of it. A link to an
+        // image somebody else already hosts is still legitimate; what was
+        // missing was any way to put a file on this federation's own domain
+        // without a developer and a git commit.
+        const picker = imageFieldLabel(f)
+          ? '<div class="lp-upload"><label class="lp-upload-btn">Upload a file'
+            + '<input type="file" accept="image/jpeg,image/png,image/webp" data-upload-for="' + f.n + '" hidden />'
+            + '</label><span class="lp-upload-note" data-note-for="' + f.n + '"></span></div>'
+          : '';
         const prev = imageFieldLabel(f)
           ? '<div class="lp-img-slot" data-for="' + f.n + '">' + previewHtml(imageInfo(value)) + '</div>'
           : '';
-        return '<div class="' + (f.full ? 'full' : '') + '">' + label + control + prev + '</div>';
+        return '<div class="' + (f.full ? 'full' : '') + '">' + label + control + picker + prev + '</div>';
       }
 
       function render() {
@@ -900,6 +921,39 @@ if (authed) {
             const slot = editForm.querySelector('.lp-img-slot[data-for="' + el.name + '"]');
             if (!slot) return;
             el.addEventListener('input', () => { slot.innerHTML = previewHtml(imageInfo(el.value)); });
+          });
+          editForm.querySelectorAll('input[data-upload-for]').forEach((fileEl) => {
+            const target = editForm.querySelector('[name="' + fileEl.dataset.uploadFor + '"]');
+            const note = editForm.querySelector('.lp-upload-note[data-note-for="' + fileEl.dataset.uploadFor + '"]');
+            const slot = editForm.querySelector('.lp-img-slot[data-for="' + fileEl.dataset.uploadFor + '"]');
+            fileEl.addEventListener('change', async () => {
+              const file = fileEl.files && fileEl.files[0];
+              if (!file) return;
+              if (note) note.textContent = 'Uploading ' + file.name + '...';
+              const dataUrl = await new Promise((resolve, reject) => {
+                const fr = new FileReader();
+                fr.onload = () => resolve(String(fr.result || ''));
+                fr.onerror = () => reject(fr.error);
+                fr.readAsDataURL(file);
+              }).catch(() => null);
+              if (!dataUrl) { if (note) note.textContent = 'That file could not be read.'; return; }
+              const res = await fetch('/api/uploads/image', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: file.name, contentType: file.type, data: dataUrl }),
+              }).catch(() => null);
+              const payload = res ? await res.json().catch(() => null) : null;
+              if (res && res.ok && payload && payload.url) {
+                // The field is filled in for the operator; the row is NOT saved
+                // yet. Storing a file and publishing it are two decisions, and
+                // Save is still the one that publishes.
+                if (target) target.value = payload.url;
+                if (slot) slot.innerHTML = previewHtml(imageInfo(payload.url));
+                if (note) note.textContent = 'Uploaded. Press Save to publish it.';
+              } else {
+                if (note) note.textContent = (payload && payload.error) || 'Upload failed.';
+              }
+              fileEl.value = '';
+            });
           });
           const first = editForm.querySelector('input, textarea');
           if (first) first.focus();

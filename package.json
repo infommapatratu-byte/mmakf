@@ -33,6 +33,7 @@
   "dependencies": {
     "@astrojs/vercel": "^8.2.11",
     "@upstash/redis": "^1.34.0",
+    "@vercel/blob": "^2.8.0",
     "astro": "^5.18.2",
     "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.9"
