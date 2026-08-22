@@ -1,0 +1,20 @@
+-- THE RECOVERY PATH COULD NOT RECORD ITSELF, SO IT COULD NOT RUN AT ALL.
+--
+-- scripts/reset-password.ts writes its audit row inside the SAME transaction as
+-- the password update, deliberately: one account or none. It wrote
+-- action = 'password_reset', and audit_action has never held that value.
+-- Postgres rejected the INSERT, the transaction rolled back, and THE PASSWORD
+-- UPDATE WENT WITH IT.
+--
+-- Nothing said so. The script's catch branch printed the credential it had
+-- generated under the words "probably NOT changed", the console answered the
+-- old password with "Invalid email or password", and the only visible trace was
+-- users.session_epoch never leaving 0 — which nothing read until
+-- scripts/user-status.ts existed. A federation officer spent an evening typing
+-- passwords that had never been written.
+--
+-- Recording it as 'update' was the alternative, and migration 0006 already
+-- argued against exactly that: a governance action indistinguishable from a
+-- clerk editing a row is the thing the audit exists to prevent. Reissuing
+-- somebody's credential is such an action.
+ALTER TYPE "audit_action" ADD VALUE IF NOT EXISTS 'password_reset';

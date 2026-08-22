@@ -62,6 +62,11 @@ export const auditAction = pgEnum('audit_action', [
   // to answer for; recording it as a generic 'update' makes it indistinguishable
   // from a clerk editing a row, which is the one thing the audit exists to prevent.
   'suspend', 'reinstate',
+  // Added in migration 0053. Reissuing somebody's credential is a governance
+  // act, not an 'update' — and until this existed the audit INSERT in
+  // scripts/reset-password.ts was rejected by the enum, rolling back the
+  // password change in the same transaction. Every reset silently did nothing.
+  'password_reset',
 ]);
 
 // ─── Federation hierarchy ───────────────────────────────────────────────────
