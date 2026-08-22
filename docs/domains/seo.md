@@ -98,7 +98,7 @@ site's own footer, which links to `/admin` and `/unit`.
 
 ### Structured data
 
-Four builders in `src/lib/seo.ts`, each of which returns `null` rather than
+Five builders in `src/lib/seo.ts`, each of which returns `null` rather than
 guessing.
 
 | Builder | Emits | Returns null when |
@@ -107,6 +107,7 @@ guessing.
 | `breadcrumbGraph(trail)` | `BreadcrumbList` | fewer than two crumbs |
 | `eventGraph(e)` | `SportsEvent` | no name, no place, or no parseable date |
 | `activityLocationGraph(unit)` | `SportsActivityLocation` | the unit is not currently affiliated |
+| `faqGraph(faqs)` | `FAQPage` | no entry carries both a question and an answer |
 
 **What `organizationGraph` deliberately omits** is the interesting part. No
 `aggregateRating` — there are no reviews, and inventing one is both a fabricated
@@ -131,6 +132,11 @@ District Championship at Ramgarh whose exact date is explicitly not known; a
 builder that filled in a plausible day would send somebody to a venue on the
 wrong date, which is the worst thing this site can do to anybody. No `offers`
 either — a fee this system has not been told is not zero, it is unknown.
+
+`faqGraph` strips markup out of an answer instead of passing it through. The
+answers are edited from `/admin` in a textarea, so a pasted `<a href>` would
+otherwise be republished as the answer's own text — and a stray `</script>` in
+one would end the `<script>` element the graph is serialised into.
 
 ---
 
@@ -192,11 +198,16 @@ later gets deleted by somebody tidying up, and the page reappears in the index.
 - **No `lastmod`**, and no way to produce an honest one. It needs a
   content-changed timestamp that nothing records.
 - **No `hreflang`, no alternate locales.** The site is English-only.
-- **No `Article`, `FAQPage`, `Course` or `Person` structured data**, although
-  `/faq`, `/press` and `/people/[slug]` would each support one.
-- **`activityLocationGraph()` produces nothing today**, and that is the correct
-  output. The unit register holds no currently-affiliated entry it would emit
-  for, and no "karate classes in <city>" page exists to emit it on. A location
+- **No `Article`, `Course` or `Person` structured data**, although `/press` and
+  `/people/[slug]` would each support one.
+- **`activityLocationGraph()` now reaches a page.** It is rendered by
+  `src/pages/clubs/[slug].astro` through `StructuredData`, which until then was
+  imported by no file at all — the builder was written, tested and wired to
+  nothing. It still EMITS nothing until the register holds a currently-affiliated
+  dojo carrying a slug an administrator set, and that remains the correct output
+  for the reasons below; what changed is that the day a real club is slugged, its
+  page describes itself instead of staying silent. No "karate classes in <city>"
+  page exists to emit it on. A location
   page is legitimate only where a real dojo exists; a national footprint
   assembled from cities MMAKF does not operate in would be the doorway-page
   pattern the federation explicitly refused. A **lapsed** unit returns null on

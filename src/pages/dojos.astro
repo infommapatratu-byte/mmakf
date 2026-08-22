@@ -155,6 +155,25 @@ if (state === 'ready' && kind === 'dojo' && isConfigured()) {
   }
 }
 
+/**
+ * The link a row puts on the club's name, or null for none.
+ *
+ * ONLY where an administrator SET a slug. Nothing here makes one up: a URL
+ * derived from a name moves the next time somebody corrects a spelling, which
+ * is why `publishableClubs()` refuses to mint them and why this page must not
+ * either. A club with no slug stays plain text.
+ *
+ * And only while the unit is chartered or provisional, because that is exactly
+ * what `clubProfile()` will serve — it returns null for every other standing.
+ * A lapsed club is deliberately LISTED here (note 1 above); linking its name
+ * would send the parent who most needs this page to a 404 instead of to the
+ * standing that is stated, in words, on the row itself.
+ */
+const clubPageHref = (e: DirectoryEntry): string | null =>
+  e.slug && (e.standing === 'chartered' || e.standing === 'provisional')
+    ? `/clubs/${e.slug}`
+    : null;
+
 // Decorated once here rather than inside the template, so the register rows stay
 // a plain map and the lookup cost is paid per centre instead of per render.
 const rows = entries.map((e) => {
@@ -166,6 +185,7 @@ const rows = entries.map((e) => {
     // the editorial fallback below should speak instead.
     day: day && day.configured ? day : null,
     timings: timingsByName.get(nameKey(e.name)) ?? null,
+    clubHref: clubPageHref(e),
   };
 });
 
@@ -354,14 +374,16 @@ const pills: string[] =
           </p>
 
           <ul class="dir-list" id="dir-list">
-            {rows.map(({ e, day, timings }) => (
+            {rows.map(({ e, day, timings, clubHref }) => (
               <li
                 class="dir-row"
                 data-search={`${e.name} ${e.code} ${where(e)}`.toLowerCase()}
                 data-group={e.affiliated ? 'current' : 'former'}
               >
                 <div class="dir-main">
-                  <h3 class="dir-name">{e.name}</h3>
+                  <h3 class="dir-name">
+                    {clubHref ? <a href={clubHref}>{e.name}</a> : e.name}
+                  </h3>
                   <div class="dir-code">{e.code}</div>
                   <div class="dir-where">{where(e)}</div>
                 </div>
@@ -618,6 +640,12 @@ const pills: string[] =
     color: var(--white);
     line-height: 1.3;
   }
+  /* A row whose club has a page must not read as a different heading from one
+     whose club has not — they are the same kind of row, and the underline on
+     hover is the only thing that should distinguish them. */
+  .dir-name a { color: inherit; text-decoration: none; }
+  .dir-name a:hover,
+  .dir-name a:focus-visible { text-decoration: underline; }
   .dir-code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.76rem;

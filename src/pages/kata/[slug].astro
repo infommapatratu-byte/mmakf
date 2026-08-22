@@ -26,9 +26,11 @@ import {
   kataBySlug, kataTerms, kataNeighbours,
   FEDERATION_KATA_FOOTAGE, MOVEMENT_COUNT_NOTE, VIDEO_POSITION,
 } from '@/data/kata';
+import { canonicalFor, type Surface } from '@/lib/surface';
 
 export const prerender = false;
 
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
 const { slug } = Astro.params;
 const kata = kataBySlug(slug);
 
@@ -41,15 +43,19 @@ if (!kata) {
 const terms = kataTerms(kata);
 const { prev, next } = kataNeighbours(kata);
 
+// The addresses below are the SURFACE's own, not literals. They were written
+// as https://www.mmakf.in/... , so the copy of this page served from learn
+// named the www address as its canonical: two hosts nominating one URL, which
+// is the duplicate-content collision canonicalFor() exists to prevent.
 const jsonLd: Record<string, unknown> = {
   '@context': 'https://schema.org',
   '@type': 'CreativeWork',
   name: kata.name,
-  url: `https://www.mmakf.in/kata/${kata.slug}`,
+  url: canonicalFor(surface, `/kata/${kata.slug}`),
   inLanguage: 'en',
   genre: 'Shotokan karate kata',
   description: kata.character,
-  isPartOf: { '@type': 'CollectionPage', name: 'The Shotokan kata library', url: 'https://www.mmakf.in/kata' },
+  isPartOf: { '@type': 'CollectionPage', name: 'The Shotokan kata library', url: canonicalFor(surface, '/kata') },
 };
 if (kata.kanji) jsonLd.alternateName = kata.kanji;
 ---
@@ -57,6 +63,11 @@ if (kata.kanji) jsonLd.alternateName = kata.kanji;
 <Base
   title={`${kata.name} — Shotokan Kata — MMAKF`}
   description={`${kata.name} (${kata.kanji ?? kata.name}), "${kata.meaning}". What the form is, what it develops, and the Japanese terminology it uses, translated and explained.`}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Kata', url: '/kata' },
+    { name: kata.name, url: `/kata/${kata.slug}` },
+  ]}
 >
   <PageHero
     eyebrow={kata.series ? `${kata.series} series` : 'Shotokan kata'}

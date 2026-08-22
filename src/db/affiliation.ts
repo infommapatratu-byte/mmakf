@@ -1503,6 +1503,17 @@ export interface DirectoryEntry {
   id: number;
   code: string;
   name: string;
+  /**
+   * The club's own public address — /clubs/<slug> — or null for none.
+   *
+   * Null for a district and for a state unit: neither has a page of that kind
+   * and neither table carries the column. Null too for a dojo nobody has given
+   * a slug, and it stays null: `publishableClubs()` publishes only a slug an
+   * administrator SET, so no reader of this field may derive one from `name`.
+   * A URL built from a name moves the next time a spelling is corrected, and
+   * breaks the link a parent bookmarked.
+   */
+  slug: string | null;
   city: string | null;
   state: string | null;
   district: string | null;
@@ -1629,6 +1640,10 @@ export async function publicDirectory(
       id: r.id,
       code: r.code,
       name: r.name,
+      // Decided by kind, not by the row: `state_units` and `district_units`
+      // carry no slug column at all, so `r.slug` there is undefined rather than
+      // null, and only a dojo has a /clubs page to point at anyway.
+      slug: kind === 'dojo' ? (r.slug ?? null) : null,
       // City is a location; the address line is where an instructor may live.
       city: kind === 'dojo' ? (r.city ?? null) : (r.hqCity ?? null),
       state: kind === 'state' ? r.state : (states.find((x: any) => x.id === r.stateUnitId)?.state ?? null),

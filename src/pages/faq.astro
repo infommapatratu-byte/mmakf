@@ -3,18 +3,27 @@ import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import EnrollCTA from '@/components/EnrollCTA.astro';
 import { get } from '@/lib/storage';
+import { faqGraph } from '@/lib/seo';
 
 export const prerender = false;
 
 const fed = await get('federation');
 const faqs = await get<any[]>('faqs');
 const programs = await get<any[]>('programs');
+
+// The questions themselves are what a searcher types, and this page stated
+// nowhere that it answers any: a stack of <details> elements is a stack of
+// disclosure widgets to a crawler. Null when the store holds no usable pair,
+// because an FAQPage with nothing in it claims answers the page has not got.
+const jsonLd = faqGraph(faqs);
 ---
 
 <Base
   title="FAQ — MMAKF"
   description="Answers to common questions about training at MMAKF — ages, experience, fees, gradings, women's programs and online training."
 >
+  {jsonLd && <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />}
+
   <PageHero
     eyebrow="Questions"
     title={`Before you <em>begin</em>.`}

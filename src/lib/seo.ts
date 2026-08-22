@@ -438,3 +438,104 @@ export function activityLocationGraph(
     },
   };
 }
+
+export interface FaqEntry {
+  q: string;
+  a: string;
+}
+
+/**
+ * Answer prose → plain text.
+ *
+ * The FAQ answers are EDITABLE — /admin serves them from the store through a
+ * textarea, so what arrives here is whatever an administrator last typed, and a
+ * pasted `<a href>` or `<br>` would be republished as the answer's own TEXT: a
+ * searcher reads the tags, and a link inside an answer is not a link in a rich
+ * result anyway.
+ *
+ * The angle brackets left behind once the tags are gone are dropped as well,
+ * because this graph is serialised into a `<script>` element: a stray
+ * `</script>` inside an answer would end that element early and spill the rest
+ * of the JSON onto the page. `&lt;` and `&gt;` are deliberately NOT decoded,
+ * for the same reason — decoding them puts the brackets straight back.
+ */
+const plainText = (s: unknown): string =>
+  String(s ?? '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[<>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * An FAQPage, or null.
+ *
+ * Null whenever nothing survives — an empty list, or entries carrying only one
+ * half of a pair. An FAQPage with an empty `mainEntity` tells a search engine
+ * the page answers questions and then names none of them, which is markup
+ * emitted because a page ought to have some: the thing this module refuses
+ * everywhere else. /faq reads the same to a visitor with or without it.
+ *
+ * A half-filled pair is DROPPED rather than completed. A Question with no
+ * acceptedAnswer is invalid markup, and an answer with no question would be an
+ * answer the federation never gave to a question nobody asked.
+ */
+export function faqGraph(faqs: FaqEntry[]): Graph | null {
+  const pairs = (faqs ?? [])
+    .map((f) => ({ q: plainText(f?.q), a: plainText(f?.a) }))
+    .filter((f) => f.q && f.a);
+  if (!pairs.length) return null;
+  return {
+    '@context': 'https://schema.org',
+    '@type': 'FAQPage',
+    mainEntity: pairs.map((f) => ({
+      '@type': 'Question',
+      name: f.q,
+      acceptedAnswer: { '@type': 'Answer', text: f.a },
+    })),
+  };
+}
+
+// ── page descriptions ───────────────────────────────────────────────────────
+
+/**
+ * A meta description built from the record the page is about, cut at a word.
+ *
+ * Both Shotokan detail routes built this from a TEMPLATE. The technique page
+ * pasted the same tail onto forty-odd descriptions — mechanics, principles,
+ * common errors, drills, application — and a crawler shown that many strings
+ * that differ only in a name treats them as boilerplate and writes its own
+ * snippet instead. The one sentence that tells those pages apart, the record's
+ * own `summary`, was loaded in the same file and left unused.
+ *
+ * Two ways the obvious fix goes wrong, both closed here:
+ *
+ *  · `summary.slice(0, 150)` cuts mid-word and can leave the description
+ *    ending on a comma. That is not an internal detail — it is the text a
+ *    searcher reads. So the cut lands on a word boundary and dangling
+ *    punctuation goes with it.
+ *
+ *  · A record with no summary must not put the word "undefined" in front of
+ *    every reader. An absent summary means the name-and-gloss head IS the
+ *    whole description, not a broken one.
+ */
+export function metaDescription(
+  name: string,
+  kanji: string | null | undefined,
+  english: string,
+  summary: string | null | undefined,
+  limit = 155
+): string {
+  const head = `${name}${kanji ? ` ${kanji}` : ''}${english ? `, ${english}.` : '.'}`;
+  const body = (summary ?? '').trim();
+  const full = body ? `${head} ${body}` : head;
+  if (full.length <= limit) return full;
+
+  // One past the limit, so a boundary sitting exactly on it still counts.
+  const over = full.slice(0, limit + 1);
+  const space = over.lastIndexOf(' ');
+  const cut = (space > 0 ? over.slice(0, space) : over.slice(0, limit))
+    .replace(/[ ,;:–—-]+$/, '');
+  // A cut that happens to land on a full stop already reads as finished.
+  return /[.!?…]$/.test(cut) ? cut : cut + '…';
+}

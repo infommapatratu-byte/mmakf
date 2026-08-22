@@ -94,9 +94,21 @@ describe('the directory identifies the unit it names', () => {
 
   it('still publishes no address, telephone number or email', async () => {
     const [entry] = await publicDirectory(db, { kind: 'dojo' });
+    // AN EXACT KEY SET, ON PURPOSE. This is an allowlist, not a sample: a
+    // field added to DirectoryEntry reaches /dojos AND the public
+    // /api/v1/dojos response, so a new key has to be argued for here before
+    // it can be published. It has already earned its keep once — it caught
+    // `slug` arriving silently.
+    //
+    // `slug` IS admitted, and the distinction is worth stating: it is an
+    // ADDRESS, not a contact detail. It is the segment in /clubs/<slug>,
+    // printed in every link to the club and listed in the sitemap, so it is
+    // public the moment the page exists. A telephone number or an email is
+    // a way to reach a person and stays out — which is what this test is
+    // named for.
     expect(Object.keys(entry).sort()).toEqual([
       'affiliated', 'affiliatedSince', 'charterCurrent', 'charterValidUntil',
-      'city', 'code', 'district', 'id', 'kind', 'name', 'note', 'standing', 'state',
+      'city', 'code', 'district', 'id', 'kind', 'name', 'note', 'slug', 'standing', 'state',
     ]);
   });
 });

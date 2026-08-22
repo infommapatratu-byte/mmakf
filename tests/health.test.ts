@@ -31,6 +31,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 let redisAnswer: () => Promise<boolean> = async () => true;
 let databaseAnswer: () => Promise<boolean> = async () => true;
 let databaseConfigured = true;
+/** The fault CLASS and the URL SHAPE the route reports. See src/db/index.ts. */
+let registerFault: string | null = null;
+let urlShape = 'ok';
 
 vi.mock('../src/lib/storage', () => ({
   redisHealthy: () => redisAnswer(),
@@ -39,6 +42,12 @@ vi.mock('../src/lib/storage', () => ({
 vi.mock('../src/db', () => ({
   isConfigured: () => databaseConfigured,
   databaseHealthy: () => databaseAnswer(),
+  // A MOCK FACTORY IS AN ALLOWLIST TOO. Adding an export to src/db that the
+  // route calls, and not adding it here, fails every test in this file with
+  // "No <name> export is defined on the mock" — which is what happened when
+  // dbFault and dbUrlShape were added to the payload.
+  lastRegisterFault: () => registerFault,
+  connectionShape: () => urlShape,
 }));
 
 const route = await import('../src/pages/api/health');
@@ -69,6 +78,8 @@ beforeEach(() => {
   redisAnswer = async () => true;
   databaseAnswer = async () => true;
   databaseConfigured = true;
+  registerFault = null;
+  urlShape = 'ok';
 });
 
 afterEach(() => {
@@ -171,6 +182,34 @@ describe('the payload an operator and a monitor read', () => {
     expect(body.ok).toBe(true);
     expect(status).toBe(200);
     expect(probed, 'an unconfigured register must not be dialled').toBe(false);
+  });
+
+  it('says WHY the register refused, as a class and never as a message', async () => {
+    // The reason these two fields exist: "database":"error" and nothing else
+    // cost five days of a locked admin console, because a refused password
+    // reads exactly like a paused project through that one word.
+    databaseConfigured = true;
+    databaseAnswer = async () => false;
+    registerFault = '28P01';
+    urlShape = 'pooled_host_bare_user';
+
+    const { body } = await health();
+    expect(body.database).toBe('error');
+    expect(body.dbFault).toBe('28P01');
+    expect(body.dbUrlShape).toBe('pooled_host_bare_user');
+    // Scalars, like every other field here — command.astro renders these
+    // through String().
+    expect(typeof body.dbUrlShape).toBe('string');
+  });
+
+  it('reports no fault while the register is answering', async () => {
+    databaseConfigured = true;
+    databaseAnswer = async () => true;
+    registerFault = '28P01';   // stale: the route must not report it once healthy
+
+    const { body } = await health();
+    expect(body.database).toBe('ok');
+    expect(body.dbFault).toBeNull();
   });
 
   it('answers with exactly the four contracted fields — no envelope, no objects', async () => {

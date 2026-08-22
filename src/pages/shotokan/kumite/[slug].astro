@@ -23,6 +23,7 @@ import PageHero from '@/components/PageHero.astro';
 import { kumiteSystem, kumiteConcept, techniqueBySlug, terms as resolveTerms } from '@/data/shotokan';
 import { kataBySlug } from '@/data/kata';
 import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+import { metaDescription } from '@/lib/seo';
 
 export const prerender = false;
 
@@ -69,6 +70,16 @@ const worldLabel =
   : record.world === 'traditional' ? 'Traditional development'
   : 'Traditional and sport';
 
+/**
+ * The meta description, from THIS record.
+ *
+ * The line this replaced pasted `summary.slice(0, 150)` onto the name and the
+ * gloss, which cuts mid-word and can end the description on a comma — and it
+ * is the text a searcher reads, not an internal detail. It would also throw
+ * outright on a record carrying no summary.
+ */
+const description = metaDescription(record.name, record.kanji, record.english, record.summary);
+
 const jsonLd = {
   '@context': 'https://schema.org',
   '@type': 'LearningResource',
@@ -89,7 +100,7 @@ const jsonLd = {
 
 <Base
   title={`${record.name} (${record.english}) — Shotokan kumite — MMAKF`}
-  description={`${record.name}${record.kanji ? ` ${record.kanji}` : ''}, ${record.english}. ${record.summary.slice(0, 150)}`}
+  description={description}
   breadcrumbs={[
     { name: 'Shotokan', url: '/shotokan' },
     { name: 'Kumite', url: '/shotokan/kumite' },

@@ -184,7 +184,17 @@ const dojoKun = [
             <div style="font-family:var(--font-accent);font-style:italic;font-size:2.5rem;color:var(--gold);line-height:1">"</div>
             <p class="body-txt italic" style="font-size:1rem;margin:8px 0 20px">{t.txt}</p>
             <div style="display:flex;align-items:center;gap:12px;padding-top:18px;border-top:1px solid var(--border)">
-              <div style="width:42px;height:42px;border-radius:50%;background:var(--card-2);display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-weight:600;color:var(--gold);font-size:.85rem">{t.name.split(' ').map((n: string) => n[0]).slice(0, 2).join('')}</div>
+              {/* A PHOTOGRAPH IF THERE IS ONE, INITIALS IF THERE IS NOT.
+                  The initials are not a placeholder to be replaced later: most
+                  of these people have supplied no photograph and are not going
+                  to, and a card that renders a broken image because a field is
+                  empty looks worse than one that never promised a face. */}
+              {t.img ? (
+                <img src={t.img} alt="" loading="lazy" width="42" height="42"
+                     style="width:42px;height:42px;border-radius:50%;object-fit:cover;background:var(--card-2)" />
+              ) : (
+                <div style="width:42px;height:42px;border-radius:50%;background:var(--card-2);display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-weight:600;color:var(--gold);font-size:.85rem">{t.name.split(' ').map((n: string) => n[0]).slice(0, 2).join('')}</div>
+              )}
               <div>
                 <div style="font-family:var(--font-display);font-weight:600;font-size:.92rem">{t.name}</div>
                 <div class="text-muted" style="font-size:.75rem">{t.role}</div>

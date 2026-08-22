@@ -511,12 +511,37 @@ if (authed) {
 
         <ListPanel id="testimonials" title="Testimonials" subtitle="Words of warriors." apiKey="testimonials"
           rows={data!.testimonials} fields={[
-            {n:'name',l:'Name'},{n:'role',l:'Role'},{n:'txt',l:'Testimonial',full:true,textarea:true}
+            {n:'name',l:'Name'},{n:'role',l:'Role'},{n:'img',l:'Photo (optional)',full:true},{n:'txt',l:'Testimonial',full:true,textarea:true}
           ]} />
 
         <section id="leads" class="admin-panel">
-          <h2 class="admin-h">Enrolment Leads</h2>
-          <p class="admin-sub">Captured from the public site enrol form. Most recent first.</p>
+          <h2 class="admin-h">Enrolment Leads &mdash; closed archive</h2>
+          {/*
+            THIS IS NOT THE LEAD PIPELINE, AND SAYING SO IS THE POINT.
+
+            It reads the legacy Redis list that /api/enroll appended to. That
+            endpoint is RETIRED and answers 410: nothing has written here since,
+            and nothing ever read it while it was live — src/pages/api/enroll.ts
+            sets out at length how an enquiry sent to it reached nobody.
+
+            The working register is the `leads` TABLE behind /admin/leads, which
+            carries an owner, a source, a stage and an email address. Leaving this
+            panel titled "Enrolment Leads" beside it invited exactly one mistake:
+            reading a dead list of test rows as the federation's enquiries.
+
+            It stays rather than being deleted because two of the rows in it are
+            REAL PEOPLE who enquired in July 2026 and were never answered. Those
+            are owed a reply, and a list nobody can see is a list nobody acts on.
+          */}
+          <p class="admin-sub">
+            Everything the retired public enrol form captured, kept so nothing in it is lost.
+            Nothing new arrives here. The live pipeline &mdash; with owners, sources, stages and
+            email addresses &mdash; is <a href="/admin/leads" class="text-gold">Leads and CRM</a>.
+          </p>
+          <p class="admin-sub" style="margin-top:6px">
+            This form only ever recorded a name, a telephone number and a programme. There is no
+            address in it to show, and inventing a column for one would be inventing the data.
+          </p>
           <div class="card" style="margin-top:20px;padding:0;overflow:hidden">
             {leadList.length === 0 ? (
               <div style="padding:32px;text-align:center;color:var(--muted)">No leads yet.</div>

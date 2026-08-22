@@ -145,13 +145,35 @@ async function upsertState() {
   return row.id;
 }
 
-async function upsertDojo(code, name, city, stateUnitId) {
+/**
+ * `slug` is what gives a club a page of its own, and nothing in the application
+ * code writes one. `publishableClubs()` lists only clubs carrying a slug an
+ * administrator SET, so every dojo this script wrote had none, every
+ * /clubs/<slug> was a 404, and the demonstration register was three rows in a
+ * table with nowhere to click through to — which is not the register working
+ * end to end that this file exists to show.
+ *
+ * The slugs are FIXED and written out by hand at the call sites, never derived
+ * from the name, for the reason the schema column gives: a URL built from a
+ * name moves the next time somebody corrects a spelling, and takes a link
+ * somebody's parent had bookmarked with it.
+ */
+async function upsertDojo(code, name, city, stateUnitId, slug) {
   const full = PREFIX + code;
   const found = await db.select().from(s.dojos).where(eq(s.dojos.code, full)).limit(1);
-  if (found.length) return found[0].id;
+  if (found.length) {
+    // A register seeded before this script wrote slugs still holds null, and a
+    // re-run would leave it there — the demonstration clubs unpublished for a
+    // second time, with nothing on screen saying why. Filled ONLY when it is
+    // null, so a slug somebody set by hand is never overwritten.
+    if (found[0].slug == null) {
+      await db.update(s.dojos).set({ slug }).where(eq(s.dojos.id, found[0].id));
+    }
+    return found[0].id;
+  }
   const [row] = await db.insert(s.dojos)
     .values({
-      code: full, name, city, stateUnitId, status: 'active',
+      code: full, name, city, stateUnitId, slug, status: 'active',
       affiliatedOn: '2024-04-01', affiliationExpiresOn: '2027-03-31',
     })
     .returning({ id: s.dojos.id });
@@ -201,9 +223,9 @@ try {
 
   // THREE CLUBS, THREE DIFFERENT ANSWERS — because the point of the register is
   // that they are allowed to differ.
-  const hombu = await upsertDojo('DOJO-HQ', 'MMAKF Hombu Dojo (demo)', 'Patratu', stateUnitId);
-  const evening = await upsertDojo('DOJO-BKR', 'MMAKF Bokaro Dojo (demo)', 'Bokaro', stateUnitId);
-  const silent = await upsertDojo('DOJO-RNC', 'MMAKF Ranchi Centre (demo)', 'Ranchi', stateUnitId);
+  const hombu = await upsertDojo('DOJO-HQ', 'MMAKF Hombu Dojo (demo)', 'Patratu', stateUnitId, 'demo-hombu-patratu');
+  const evening = await upsertDojo('DOJO-BKR', 'MMAKF Bokaro Dojo (demo)', 'Bokaro', stateUnitId, 'demo-bokaro');
+  const silent = await upsertDojo('DOJO-RNC', 'MMAKF Ranchi Centre (demo)', 'Ranchi', stateUnitId, 'demo-ranchi');
 
   console.log('Publishing demonstration timetables:');
 

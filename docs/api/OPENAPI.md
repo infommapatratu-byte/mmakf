@@ -224,7 +224,11 @@ matters here.
 "data": [{ "kind": "dojo", "code": "…", "name": "…", "city": "…", "state": "Jharkhand",
            "district": "…", "standing": "chartered|provisional|lapsed|suspended|revoked",
            "affiliated": true, "affiliatedSince": "2024-01-01",
-           "charterValidUntil": "2030-01-01", "charterCurrent": true, "note": null }]
+           "charterValidUntil": "2030-01-01", "charterCurrent": true, "note": null,
+           // The club's public page is /clubs/<slug>. Null until an administrator sets one;
+           // never minted from the name, because a URL derived from a name moves the next
+           // time somebody corrects a spelling. An address, not a contact detail.
+           "slug": "mmakf-patratu" }]
 "meta": { "kind": "dojo", "includeFormer": true, "matched": 8, "scanTruncated": false,
           "contactDetailsIncluded": false }
 ```

@@ -51,6 +51,7 @@ import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import OpeningHours from '@/components/OpeningHours.astro';
 import Icon from '@/components/Icon.astro';
+import StructuredData from '@/components/StructuredData.astro';
 import { isConfigured, db } from '@/db';
 import { clubProfile, type ClubProfile } from '@/db/clubs';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
@@ -125,6 +126,27 @@ const ACCESS_WORDS: Record<string, string> = {
   title={`${club!.name} — MMAKF affiliated club${where ? ` in ${club!.city ?? where}` : ''}`}
   description={`${club!.name} is an MMAKF-affiliated Shotokan karate club${where ? ` in ${where}` : ''}. Published training timings, classes, age groups and facilities.`}
 >
+  {/* ═══════ WHAT A SEARCH ENGINE IS TOLD THIS PAGE IS ═══════
+      Base.astro states the federation on every page, and that graph is one
+      national organisation at Patratu. Alone, it means a parent searching for
+      karate in this club's own city is answered by a head office rather than
+      by the dojo they can reach. This is the only markup on the site that says
+      an MMAKF dojo is a PLACE, and until now it was built and imported nowhere.
+
+      The club row is all that is passed, and activityLocationGraph emits only
+      what the affiliation register holds: the name, and the city and state it
+      sits in. No street address, no coordinates, no opening hours — the
+      register has none of them. The venue cards further down DO carry an
+      address, and they are deliberately not passed: a venue is a room, a club
+      may train in several, and picking one would publish a room's address as
+      the club's own.
+
+      Found branch only. A club that is not currently affiliated has no page at
+      all — clubProfile() returns null and this route answers 404 — and the
+      failure branch above has no club to describe. A location record for a club
+      the federation has stopped vouching for is worse than emitting none. */}
+  <StructuredData units={[profile!.club]} />
+
   <PageHero
     image="https://images.unsplash.com/photo-1544367567-0f2fcb009e0b?auto=format&fit=crop&w=1800&q=70"
     eyebrow="MMAKF affiliated club"

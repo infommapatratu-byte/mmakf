@@ -15,9 +15,11 @@
 import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
 import { KATA, TERMS, FEDERATION_KATA_FOOTAGE, kataGroups, VIDEO_POSITION, MOVEMENT_COUNT_NOTE } from '@/data/kata';
+import { canonicalFor, type Surface } from '@/lib/surface';
 
 export const prerender = false;
 
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
 const groups = kataGroups();
 const termCount = Object.keys(TERMS).length;
 
@@ -26,19 +28,25 @@ const termCount = Object.keys(TERMS).length;
  * no ratings, no "difficulty", and above all no grade — a search engine that
  * repeated an invented grade would spread the fabrication further than the
  * page ever could.
+ *
+ * The page addresses are canonicalFor(), not literals. They were written as
+ * https://www.mmakf.in/... , so the copy of this index served from learn named
+ * the www addresses as its own — two hosts nominating one URL, which is the
+ * duplicate-content collision the canonical exists to prevent. The WebSite
+ * below keeps its literal: that is the federation's site, not this page.
  */
 const jsonLd = {
   '@context': 'https://schema.org',
   '@type': 'CollectionPage',
   name: 'The Shotokan kata library',
-  url: 'https://www.mmakf.in/kata',
+  url: canonicalFor(surface, '/kata'),
   description: `All ${KATA.length} kata of the Shotokan canon: the name and its meaning, the kanji, the character of the form, and the Japanese terminology explained.`,
   isPartOf: { '@type': 'WebSite', name: 'Modern Martial Arts Karate-Do Federation of India', url: 'https://www.mmakf.in' },
   hasPart: KATA.map((k) => ({
     '@type': 'CreativeWork',
     name: k.name,
     alternateName: k.kanji ?? undefined,
-    url: `https://www.mmakf.in/kata/${k.slug}`,
+    url: canonicalFor(surface, `/kata/${k.slug}`),
   })),
 };
 ---
@@ -46,6 +54,10 @@ const jsonLd = {
 <Base
   title="The Shotokan Kata Library — MMAKF"
   description={`All ${KATA.length} kata of the Shotokan canon, explained: the name and what it means, the kanji, the number of movements, what each form develops, and ${termCount} Japanese terms translated and explained.`}
+  breadcrumbs={[
+    { name: 'Shotokan', url: '/shotokan' },
+    { name: 'Kata', url: '/kata' },
+  ]}
 >
   <PageHero
     eyebrow="Kata"

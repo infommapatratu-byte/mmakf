@@ -32,6 +32,7 @@ import PageHero from '@/components/PageHero.astro';
 import PracticeMark from '@/components/PracticeMark.astro';
 import { techniqueGraph, familyByKey } from '@/data/shotokan';
 import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
+import { metaDescription } from '@/lib/seo';
 
 export const prerender = false;
 
@@ -89,6 +90,17 @@ const mechanics = MECHANIC_LABELS
   .filter((row): row is readonly [string, string] => Boolean(row[1]));
 
 /**
+ * The meta description, from THIS technique.
+ *
+ * What was here was a template: the name, the gloss, then the same sentence
+ * of section names — mechanics, principles, common errors, drills — on every
+ * one of the forty-odd technique pages. `summary` is the prose that tells one
+ * of them from another; it was already rendered under "What it is" below and
+ * already in the JSON-LD, and it is what the description carries now.
+ */
+const description = metaDescription(t.name, t.kanji, t.english, t.summary);
+
+/**
  * Structured data. Only what is on the page.
  *
  * §46 forbids fabricating duration, upload date, creator or rating, so this
@@ -121,7 +133,7 @@ const jsonLd = {
 
 <Base
   title={`${t.name} (${t.english}) — Shotokan technique — MMAKF`}
-  description={`${t.name}${t.kanji ? ` ${t.kanji}` : ''}, ${t.english}. Mechanics, principles, common errors and how to correct them, drills, application, and the kata and kumite it belongs to.`}
+  description={description}
   breadcrumbs={[
     { name: 'Shotokan', url: '/shotokan' },
     { name: 'Kihon', url: '/shotokan/kihon' },
