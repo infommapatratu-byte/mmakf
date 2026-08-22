@@ -244,6 +244,7 @@ if (authed) {
           <a href="#leads">Enrolment Leads</a>
         </nav>
         <div style="padding:16px;border-top:1px solid var(--border)">
+          <a class="btn btn-ghost" href="/admin/password" style="width:100%;justify-content:center;margin-bottom:8px">Change password</a>
           <button class="btn btn-ghost" style="width:100%;justify-content:center" id="logoutBtn">Logout</button>
           <a href="/" target="_blank" class="btn-link" style="display:block;text-align:center;margin-top:10px">View Site →</a>
         </div>
@@ -694,6 +695,31 @@ if (authed) {
       clearTimeout(window._tt);
       window._tt = setTimeout(() => t.classList.remove('show'), 1800);
     }
+
+    // THE "MUST CHANGE THIS PASSWORD" PROMPT.
+    //
+    // /api/auth/login has always returned mustChangePassword, and this page
+    // has always written it to sessionStorage — where NOTHING read it. So an
+    // account handed a generated credential was told, in the register and
+    // nowhere a human could see, to replace it.
+    //
+    // Raised client-side from that existing flag rather than from a fresh
+    // query, because the alternative is reading users.must_change_password on
+    // every admin request to render one banner.
+    try {
+      if (sessionStorage.getItem('mmakf_must_change_password') === '1') {
+        const wrap = document.querySelector('.admin-main') || document.body;
+        const bar = document.createElement('div');
+        bar.setAttribute('role', 'status');
+        bar.style.cssText =
+          'border:1px solid var(--gold);border-radius:var(--radius);padding:14px 18px;' +
+          'margin-bottom:20px;display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap';
+        bar.innerHTML =
+          '<span style="font-size:.86rem">This account is still using a password somebody else generated for it.</span>' +
+          '<a class="btn btn-primary" href="/admin/password" style="font-size:.7rem">Set your own</a>';
+        wrap.prepend(bar);
+      }
+    } catch (e) { /* private mode, or storage refused: the page still works */ }
 
     // Logout
     document.getElementById('logoutBtn')?.addEventListener('click', async () => {
