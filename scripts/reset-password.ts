@@ -112,15 +112,52 @@ try {
     );
   }
 
+  // A DISABLED ACCOUNT CANNOT SIGN IN, WHATEVER ITS PASSWORD IS.
+  //
+  // signIn() refuses on status before it looks at the credential, and the route
+  // reports that refusal as "Invalid email or password" — deliberately, so a
+  // stranger cannot learn which addresses are disabled. The operator standing
+  // here is not a stranger, and without this they reissue a perfectly good
+  // password, watch it be called invalid, and reissue it again.
+  if (found.status !== 'active') {
+    console.warn(
+      `
+WARNING: this account's status is "${found.status}", not "active".
+` +
+      'A password will still be set below, and it will still be refused at sign-in:
+' +
+      'the console answers a disabled account with "Invalid email or password", the
+' +
+      'same words it uses for a wrong one. Re-enable the account before handing this
+' +
+      'credential to anybody.
+'
+    );
+  }
+
   // Hashed before the transaction opens; scrypt costs ~100ms and there is no
   // reason to hold a pooler backend across it.
   const passwordHash = await hashPassword(password);
 
   const updated = await sql.begin(async (tx) => {
+    // THE LOCKOUT IS CLEARED HERE, AND IT HAS TO BE.
+    //
+    // signIn() checks locked_until BEFORE it verifies the password
+    // (src/db/users.ts). Reissuing the credential without clearing the lock
+    // therefore hands somebody a password that is CORRECT and still refused,
+    // for up to fifteen minutes, with the console saying the account is locked
+    // — so the documented recovery path did not, on its own, recover anything.
+    // Whoever is locked out has usually just spent five attempts earning the
+    // lock, which is exactly why they are running this.
+    //
+    // It costs nothing: the lock exists to slow online guessing against a
+    // password that no longer exists a line above this one.
     const [row] = await tx`
       UPDATE users
          SET password_hash = ${passwordHash},
              must_change_password = 'yes',
+             failed_attempts = 0,
+             locked_until = NULL,
              session_epoch = session_epoch + 1
        WHERE id = ${found.id}
       RETURNING id, email, status, session_epoch
