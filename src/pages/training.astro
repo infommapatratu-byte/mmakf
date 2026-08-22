@@ -30,6 +30,7 @@ import Icon from '@/components/Icon.astro';
 import { get } from '@/lib/storage';
 import { isConfigured, db } from '@/db';
 import { activeFramework, todayIsoForFees } from '@/lib/training-fee-state';
+import { audienceBySlug } from '@/data/audiences';
 
 export const prerender = false;
 
@@ -93,7 +94,7 @@ const AUDIENCES = [
     icon: 'shield',
   },
   {
-    slug: 'community',
+    slug: 'communities',
     label: 'Communities & clubs',
     lede: 'Workshops, camps and self-defence programmes for residential communities, NGOs and clubs.',
     detail: 'Often the shortest route into training for people who would never walk into a dojo — which is exactly why the federation runs them.',
@@ -101,7 +102,7 @@ const AUDIENCES = [
     icon: 'pin',
   },
   {
-    slug: 'individual',
+    slug: 'individuals',
     label: 'Individuals & families',
     lede: 'Train at an affiliated dojo, online, or one-to-one with a federation coach.',
     detail: 'Children, adults, beginners and graded karateka train on the same syllabus. Personal coaching is a service MMAKF offers — it is not what MMAKF is.',
@@ -110,6 +111,29 @@ const AUDIENCES = [
   },
 ];
 
+
+/**
+ * WHERE "Request training" ACTUALLY WENT.
+ *
+ * Every row here linked to /training/<slug>, and only two of those routes were
+ * ever built: /training/individual and /training/estimate. Schools, corporates,
+ * universities, government and communities returned 404 — live on mmakf.in — so
+ * the federation's primary call to action was a dead end on five rows out of
+ * six, and the visitor who clicked it was told the page did not exist.
+ *
+ * The destinations already existed the whole time. They are the ones the learn
+ * surface uses, so they are READ FROM THE CANONICAL AUDIENCE DEFINITIONS rather
+ * than restated here: the heading goes to the editorial page, and the button
+ * goes to the application form itself — the twenty-step institutional intake,
+ * or the shorter individual enquiry.
+ *
+ * Both fall back to a route that exists rather than throwing. A page that 500s
+ * to report a broken link is worse than the broken link; the fallbacks below
+ * (/learn/<slug> and /learn/request) are real pages, so no branch here can
+ * produce another 404.
+ */
+const readHref  = (slug: string) => audienceBySlug(slug)?.publicPath ?? `/learn/${slug}`;
+const applyHref = (slug: string) => audienceBySlug(slug)?.action.href ?? '/learn/request';
 /** The components a programme is assembled from — never nine separate products. */
 const PATHWAYS = programs.slice(0, 9);
 ---
@@ -161,7 +185,7 @@ const PATHWAYS = programs.slice(0, 9);
             <div class="aud-num" aria-hidden="true">{String(i + 1).padStart(2, '0')}</div>
             <div class="aud-body">
               <h3 class="aud-title">
-                <a href={`/training/${a.slug}`}>{a.label}</a>
+                <a href={readHref(a.slug)}>{a.label}</a>
               </h3>
               <p class="aud-lede">{a.lede}</p>
               <p class="aud-detail">{a.detail}</p>
@@ -171,7 +195,7 @@ const PATHWAYS = programs.slice(0, 9);
               </div>
             </div>
             <div class="aud-go">
-              <a class="btn btn-ghost" href={`/training/${a.slug}`}>Request training &rarr;</a>
+              <a class="btn btn-ghost" href={applyHref(a.slug)}>Request training &rarr;</a>
             </div>
           </li>
         ))}
