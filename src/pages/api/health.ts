@@ -41,6 +41,29 @@ function asRegisterState(check: HealthCheck): 'ok' | 'error' | 'not_configured' 
   return check.status === 'down' ? 'error' : 'ok';
 }
 
+/**
+ * WHY THE FAULT CLASS CAN BE ABSENT WHILE THE STATE IS 'error'.
+ *
+ * probe() races the check against a three-second cap. When the register is
+ * merely SLOW rather than refusing, the timeout wins that race, the query is
+ * still running, and databaseHealthy() never reaches the catch that records a
+ * code — so lastRegisterFault() is null and the payload said "error" with no
+ * reason beside it. That is precisely the hole dbFault was added to close, and
+ * it reopened one layer up.
+ *
+ * A TIMEOUT IS ITS OWN FAULT, and it is a different fix from a refusal:
+ * nothing is wrong with the credential, the register is not answering in time.
+ * Sending an operator to check a password over that would waste the evening a
+ * wrong password already wasted once.
+ */
+function registerFault(check: HealthCheck): string | null {
+  if (asRegisterState(check) === 'ok') return null;
+  const code = lastRegisterFault();
+  if (code) return code;
+  if (check.status === 'down' && /timed out/i.test(check.detail ?? '')) return 'timeout';
+  return null;
+}
+
 export const GET: APIRoute = async () => {
   const [redis, database] = await Promise.all([
     // Redis is probed as configured unconditionally because the contracted
@@ -104,7 +127,7 @@ export const GET: APIRoute = async () => {
       //
       // Both are fixed vocabularies. No message, no host, no role, no value —
       // the same bar dbVars below is held to.
-      dbFault: asRegisterState(database) === 'ok' ? null : lastRegisterFault(),
+      dbFault: registerFault(database),
       dbUrlShape: connectionShape(),
       dbVars: {
         DATABASE_URL: Boolean(process.env.DATABASE_URL),

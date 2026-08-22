@@ -212,6 +212,20 @@ describe('the payload an operator and a monitor read', () => {
     expect(body.dbFault).toBeNull();
   });
 
+  it('a register that is merely SLOW is reported as a timeout, not as nothing', async () => {
+    // probe() caps each dependency at three seconds. A register that hangs
+    // loses that race while its query is still running, so databaseHealthy()
+    // never reaches the catch that records a code - and the payload used to say
+    // 'error' with dbFault null, which reads as 'no fault' when there is one.
+    databaseConfigured = true;
+    databaseAnswer = () => new Promise<boolean>(() => {});   // never settles
+    registerFault = null;
+
+    const { body } = await health();
+    expect(body.database).toBe('error');
+    expect(body.dbFault).toBe('timeout');
+  }, 10_000);
+
   it('answers with exactly the four contracted fields — no envelope, no objects', async () => {
     // API-ARCHITECTURE.md §12.1 item 2. command.astro keys its explanations off
     // `String(body.redis)` and `String(body.database)`, so a HealthCheck object
