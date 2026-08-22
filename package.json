@@ -21,6 +21,7 @@
     "user:create": "node scripts/create-user.ts",
     "user:reset-password": "node scripts/reset-password.ts",
     "user:status": "node scripts/user-status.ts",
+    "user:disable": "node scripts/disable-user.ts",
     "links:check": "node scripts/check-links.mjs",
     "backup": "node scripts/backup.mjs",
     "content:check": "node scripts/reseed.mjs",
