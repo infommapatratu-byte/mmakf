@@ -102,15 +102,67 @@ if ($hasSslMode) {
 }
 Write-Host ''
 
+# ── THE CERTIFICATE, LOADED RATHER THAN EXPLAINED ────────────────────────
+#
+# This used to print an instruction with a path the operator had to substitute,
+# and every command run before they did it failed the same way:
+# SELF_SIGNED_CERT_IN_CHAIN, which reads as a credentials problem and is not one.
+# reset-password got as far as PRINTING A NEW PASSWORD under its cautious
+# 'probably not changed' branch, and the operator then spent an evening typing a
+# credential that had never been written, into a form that could only say
+# 'Invalid email or password'.
+#
+# A certificate sitting in the project root is not a thing to tell somebody
+# about. It is a thing to load.
+
 if (-not $hasSslMode) {
-    Write-Host 'If a command later fails with SELF_SIGNED_CERT_IN_CHAIN, your provider'
-    Write-Host 'uses a private root. Download its CA certificate (Supabase: Project'
-    Write-Host 'Settings > Database > SSL certificate) and then run:'
-    Write-Host ''
-    Write-Host '    $env:DATABASE_CA_CERT = Get-Content <path-to-the-file-you-downloaded> -Raw' -ForegroundColor Yellow
-    Write-Host ''
-    Write-Host '(that one does need a real path substituted — there is no file to guess)'
-    Write-Host ''
+    $root = Split-Path -Parent $PSScriptRoot
+
+    if ($env:DATABASE_CA_CERT) {
+        Write-Host 'CA        : DATABASE_CA_CERT already set in this session' -ForegroundColor Green
+        Write-Host ''
+    } else {
+        # The name this repository writes, first; then any single certificate the
+        # operator has dropped in the root themselves. MORE THAN ONE AND IT PICKS
+        # NONE — guessing which root to trust is the one decision this script must
+        # never make on its own.
+        $preferred = Join-Path $root 'supabase-root-2021.crt'
+        $found = $null
+        $ambiguous = $false
+
+        if (Test-Path $preferred) {
+            $found = $preferred
+        } else {
+            $certs = @(Get-ChildItem -Path (Join-Path $root '*') -File -Include *.crt, *.pem -ErrorAction SilentlyContinue)
+            if ($certs.Count -eq 1) {
+                $found = $certs[0].FullName
+            } elseif ($certs.Count -gt 1) {
+                $ambiguous = $true
+                Write-Host 'CA        : several certificates in the project root, so none was chosen:' -ForegroundColor Yellow
+                foreach ($c in $certs) { Write-Host ('              ' + $c.Name) -ForegroundColor Yellow }
+                Write-Host '            Set it yourself:  $env:DATABASE_CA_CERT = Get-Content <file> -Raw' -ForegroundColor Yellow
+                Write-Host ''
+            }
+        }
+
+        if ($found) {
+            $pem = Get-Content $found -Raw
+            if ($pem -match '-----BEGIN CERTIFICATE-----') {
+                $env:DATABASE_CA_CERT = $pem
+                Write-Host ('CA        : loaded from ' + (Split-Path -Leaf $found)) -ForegroundColor Green
+                Write-Host ''
+            } else {
+                Write-Host ('CA        : ' + (Split-Path -Leaf $found) + ' holds no PEM certificate, so it was ignored') -ForegroundColor Yellow
+                Write-Host ''
+            }
+        } elseif (-not $ambiguous) {
+            Write-Host 'If a command fails with SELF_SIGNED_CERT_IN_CHAIN, your provider uses a'
+            Write-Host 'private root. Download its CA certificate (Supabase: Project Settings >'
+            Write-Host 'Database > SSL Configuration > Download certificate), save it into this'
+            Write-Host 'folder, and dot-source this script again — it will be picked up.'
+            Write-Host ''
+        }
+    }
 }
 
 Write-Host 'DATABASE_URL is set for this window only. Next:' -ForegroundColor Cyan
