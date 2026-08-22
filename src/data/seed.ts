@@ -380,7 +380,11 @@ export const SEED = {
     { grade: '9th → 8th Kyu',  belt: 'Yellow → Orange',   kihon: 'Soto-uke · uchi-uke · mae-geri combinations',             kata: 'Heian Nidan',                    kumite: 'Gohon Kumite' },
     { grade: '8th → 7th Kyu',  belt: 'Orange → Green',    kihon: 'Kokutsu-dachi · shuto-uke · yoko-geri keage & kekomi',    kata: 'Heian Sandan',                   kumite: 'Sanbon Kumite (three-step)' },
     { grade: '7th → 6th Kyu',  belt: 'Green → Blue',      kihon: 'Kiba-dachi · empi strikes · mawashi-geri',                kata: 'Heian Yondan',                   kumite: 'Sanbon Kumite' },
-    { grade: '6th → 5th Kyu',  belt: 'Blue → Blue',       kihon: 'Compound combinations · ushiro-geri',                     kata: 'Heian Godan',                    kumite: 'Kihon Ippon Kumite (one-step)' },
+    // 6TH TO 5TH IS A RETENTION, and the column says so rather than reading
+    // 'Blue → Blue' — which stated, to anyone reading the published table, that
+    // the federation charges ₹1,000 for an examination that changes nothing.
+    // The examination is real and the fee is real; the belt is the same one.
+    { grade: '6th → 5th Kyu',  belt: 'Blue (retained)',  kihon: 'Compound combinations · ushiro-geri',                     kata: 'Heian Godan',                    kumite: 'Kihon Ippon Kumite (one-step)' },
     { grade: '5th → 4th Kyu',  belt: 'Blue → Brown 3',    kihon: 'Advanced combinations at full speed',                     kata: 'Tekki Shodan',                   kumite: 'Kihon Ippon Kumite' },
     { grade: '4th → 2nd Kyu',  belt: 'Brown 3 → Brown 1', kihon: 'Full syllabus review under pressure',                     kata: 'Bassai Dai + all previous kata', kumite: 'Jiyu Ippon Kumite (semi-free)' },
     { grade: '1st Kyu → Shodan', belt: 'Brown → Black',   kihon: 'Complete kihon syllabus, both sides, at full intent',     kata: 'Bassai Dai · Kanku Dai · tokui kata', kumite: 'Jiyu Kumite (free sparring)' },

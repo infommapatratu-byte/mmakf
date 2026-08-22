@@ -20,7 +20,20 @@ const achievements = data.achievements;
 const gallery = (data.gallery || []).filter((g: any) => g.img);
 ---
 
-<Base title={`MMAKF — ${fed.tagline}`}>
+{/*
+  THE STRONGEST PAGE ON THE DOMAIN WAS DESCRIBING ITSELF WITH THE FALLBACK.
+
+  Base.astro's default description exists so a page that forgets one is not
+  blank. It is not a description OF THE HOMEPAGE, and search engines were being
+  handed the generic organisation blurb for the single URL most likely to answer
+  "karate class in Patratu" or "martial arts class near me". Written for this
+  page, and naming the districts MMAKF actually teaches in — which is a claim the
+  branches array on this very page already makes, not a new one.
+*/}
+<Base
+  title={`MMAKF — ${fed.tagline}`}
+  description="Learn Shotokan karate with the Modern Martial Arts Karate-Do Federation of India — karate, self-defence and martial arts classes for children and adults at affiliated dojos in Patratu, Ramgarh, Hazaribagh, Ranchi and Bokaro, Jharkhand, and online. Graded syllabus, verifiable certificates, WKF international pathway. Established 1983."
+>
 
   {/* ═══════ HERO ═══════ */}
   <section id="hero" class="hero">
