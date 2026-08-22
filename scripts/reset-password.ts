@@ -120,19 +120,15 @@ try {
   // here is not a stranger, and without this they reissue a perfectly good
   // password, watch it be called invalid, and reissue it again.
   if (found.status !== 'active') {
-    console.warn(
-      `
-WARNING: this account's status is "${found.status}", not "active".
-` +
-      'A password will still be set below, and it will still be refused at sign-in:
-' +
-      'the console answers a disabled account with "Invalid email or password", the
-' +
-      'same words it uses for a wrong one. Re-enable the account before handing this
-' +
-      'credential to anybody.
-'
-    );
+    for (const line of [
+      '',
+      `WARNING: this account's status is "${found.status}", not "active".`,
+      'A password will still be set below, and it will still be refused at sign-in:',
+      'the console answers a disabled account with "Invalid email or password", the',
+      'same words it uses for a wrong one. Re-enable the account before handing this',
+      'credential to anybody.',
+      '',
+    ]) console.warn(line);
   }
 
   // Hashed before the transaction opens; scrypt costs ~100ms and there is no
