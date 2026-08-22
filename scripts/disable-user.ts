@@ -44,6 +44,32 @@ function arg(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
+/**
+ * A flag whose value is a SENTENCE, not a token.
+ *
+ * arg() takes exactly one argument, which is right for an email address and
+ * wrong for a reason. A shell splits an unquoted phrase into separate argv
+ * entries, so `--reason placeholder address, created in error` reached the
+ * audit trail as the single word "placeholder" — and it did, on the first
+ * real use of this script. A governance record that silently keeps the first
+ * word of the explanation is worse than one with no explanation at all: it
+ * reads like the whole reason.
+ *
+ * Everything up to the next --flag is taken, so quoting becomes optional
+ * rather than load-bearing.
+ */
+function sentenceArg(name: string): string | undefined {
+  const i = process.argv.indexOf(`--${name}`);
+  if (i < 0) return undefined;
+  const words: string[] = [];
+  for (let j = i + 1; j < process.argv.length; j += 1) {
+    if (process.argv[j].startsWith('--')) break;
+    words.push(process.argv[j]);
+  }
+  const joined = words.join(' ').trim();
+  return joined || undefined;
+}
+
 /** A refusal the operator can act on, as distinct from a database fault. */
 class Refused extends Error {}
 
@@ -58,7 +84,7 @@ if (!email || !email.includes('@')) {
   console.error('Usage: npm run user:disable -- --email <address> [--reason "why"]');
   process.exit(1);
 }
-const reason = (arg('reason') || 'Disabled by a database operator through scripts/disable-user.ts').slice(0, 500);
+const reason = (sentenceArg('reason') || 'Disabled by a database operator through scripts/disable-user.ts').slice(0, 500);
 
 const sql = postgres(url, { max: 1, prepare: false, connect_timeout: 15, ...tlsFor(url) });
 
