@@ -36,7 +36,7 @@ MoSCoW notation: **[M]** must, **[S]** should, **[C]** could.
 | Shihan | Grandmaster-level instructor title (here: Shihan Pramod Kumar Pathak, VI Dan, Soke) |
 | Sensei / Senpai | Instructor / senior student |
 | Kyu | Coloured-belt grade, counts down 10th → 1st |
-| Dan | Black-belt grade, counts up I → X (site lists I–VI) |
+| Dan | Black-belt grade, counts up I → X (the site lists all ten) |
 | Kihon / Kata / Kumite / Bunkai / Reigi | The five training pillars: basics / forms / sparring / application / etiquette |
 | Gi | Karate uniform |
 | WKF | World Karate Federation (international pathway: SportsID, Sportdata) |
@@ -290,7 +290,7 @@ Feature inventory. Every feature is specified with purpose, user flow, business 
 
 **Content dependencies.** `federation`, `beltGrading`, `syllabus`, `programs`.
 
-**Sections.** PageHero → dual panel: **Kyu table** (each row: colour swatch + rank + ₹fee; swatch palette fixed 10-entry array white→yellow→orange→green→blue→purple→browns, mapped by index — BR-8.1: if admin adds an 11th kyu row, swatch falls back to `#888`) and **Dan table** (rank, note, WKF pill) → **Kata syllabus table** (columns Grading/Belt/Kihon/Kata/Kumite from `syllabus`; min-width 860 px, own scroll container) → note: gradings quarterly at hombu + video submission online; Dan exams under Shihan authority → **Grading principles** — 3 static cards (Time in grade / Full syllabus / Character counts) → EnrollCTA.
+**Sections.** PageHero → dual panel: **Kyu table** (each row: colour swatch + rank + ₹fee; swatch palette fixed 10-entry array white→yellow→orange→green→blue→blue→browns, mapped by index — MMAKF AWARDS NO PURPLE BELT: 6th and 5th Kyu are both Blue, the second being a grade passed with the colour retained — BR-8.1: if admin adds an 11th kyu row, swatch falls back to `#888`) and **Dan table** (rank, note, WKF pill) → **Kata syllabus table** (columns Grading/Belt/Kihon/Kata/Kumite from `syllabus`; min-width 860 px, own scroll container) → note: gradings quarterly at hombu + video submission online; Dan exams under Shihan authority → **Grading principles** — 3 static cards (Time in grade / Full syllabus / Character counts) → EnrollCTA.
 
 ---
 

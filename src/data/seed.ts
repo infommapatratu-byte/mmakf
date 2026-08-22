@@ -380,8 +380,8 @@ export const SEED = {
     { grade: '9th → 8th Kyu',  belt: 'Yellow → Orange',   kihon: 'Soto-uke · uchi-uke · mae-geri combinations',             kata: 'Heian Nidan',                    kumite: 'Gohon Kumite' },
     { grade: '8th → 7th Kyu',  belt: 'Orange → Green',    kihon: 'Kokutsu-dachi · shuto-uke · yoko-geri keage & kekomi',    kata: 'Heian Sandan',                   kumite: 'Sanbon Kumite (three-step)' },
     { grade: '7th → 6th Kyu',  belt: 'Green → Blue',      kihon: 'Kiba-dachi · empi strikes · mawashi-geri',                kata: 'Heian Yondan',                   kumite: 'Sanbon Kumite' },
-    { grade: '6th → 5th Kyu',  belt: 'Blue → Purple',     kihon: 'Compound combinations · ushiro-geri',                     kata: 'Heian Godan',                    kumite: 'Kihon Ippon Kumite (one-step)' },
-    { grade: '5th → 4th Kyu',  belt: 'Purple → Brown 3',  kihon: 'Advanced combinations at full speed',                     kata: 'Tekki Shodan',                   kumite: 'Kihon Ippon Kumite' },
+    { grade: '6th → 5th Kyu',  belt: 'Blue → Blue',       kihon: 'Compound combinations · ushiro-geri',                     kata: 'Heian Godan',                    kumite: 'Kihon Ippon Kumite (one-step)' },
+    { grade: '5th → 4th Kyu',  belt: 'Blue → Brown 3',    kihon: 'Advanced combinations at full speed',                     kata: 'Tekki Shodan',                   kumite: 'Kihon Ippon Kumite' },
     { grade: '4th → 2nd Kyu',  belt: 'Brown 3 → Brown 1', kihon: 'Full syllabus review under pressure',                     kata: 'Bassai Dai + all previous kata', kumite: 'Jiyu Ippon Kumite (semi-free)' },
     { grade: '1st Kyu → Shodan', belt: 'Brown → Black',   kihon: 'Complete kihon syllabus, both sides, at full intent',     kata: 'Bassai Dai · Kanku Dai · tokui kata', kumite: 'Jiyu Kumite (free sparring)' },
   ],
@@ -525,19 +525,34 @@ export const SEED = {
       { rank: '8th Kyu — Orange',  fee: 700 },
       { rank: '7th Kyu — Green',   fee: 800 },
       { rank: '6th Kyu — Blue',    fee: 900 },
-      { rank: '5th Kyu — Purple',  fee: 1000 },
+      { rank: '5th Kyu — Blue',    fee: 1000 },
       { rank: '4th Kyu — Brown 3', fee: 1200 },
       { rank: '3rd Kyu — Brown 2', fee: 1400 },
       { rank: '2nd Kyu — Brown 1', fee: 1600 },
       { rank: '1st Kyu — Brown',   fee: 1800 },
     ],
+    // THE FULL LADDER, ALL TEN.
+    //
+    // This stopped at Rokudan, which stated something the federation does not
+    // mean: that VI Dan is where its grading ends, and that Rokudan is the
+    // "grandmaster level". Shotokan runs to Judan, and a federation that
+    // publishes six is telling every senior karateka it has no grade left to
+    // give them.
+    //
+    // Time in grade follows the standard n-years-after-the-previous rule the
+    // first six already used. The upper grades are conferred by the technical
+    // authority rather than examined on a mat, which is why the top two say so.
     dan: [
-      { rank: 'Shodan — I Dan',    note: 'Minimum 1 year after 1st Kyu', wkf: 'Eligible for WKF SportsID registration' },
-      { rank: 'Nidan — II Dan',    note: 'Minimum 2 years after Shodan', wkf: 'Sportdata ranking entry' },
-      { rank: 'Sandan — III Dan',  note: 'Minimum 3 years after Nidan',  wkf: 'Coach certification eligible' },
-      { rank: 'Yondan — IV Dan',   note: 'Minimum 4 years after Sandan', wkf: 'Senior instructor authority' },
-      { rank: 'Godan — V Dan',     note: 'Minimum 5 years after Yondan', wkf: 'Federation-level authority' },
-      { rank: 'Rokudan — VI Dan',  note: 'Minimum 6 years after Godan',  wkf: 'Grandmaster level (Shihan)' },
+      { rank: 'Shodan — I Dan',      note: 'Minimum 1 year after 1st Kyu',    wkf: 'Eligible for WKF SportsID registration' },
+      { rank: 'Nidan — II Dan',      note: 'Minimum 2 years after Shodan',    wkf: 'Sportdata ranking entry' },
+      { rank: 'Sandan — III Dan',    note: 'Minimum 3 years after Nidan',     wkf: 'Coach certification eligible' },
+      { rank: 'Yondan — IV Dan',     note: 'Minimum 4 years after Sandan',    wkf: 'Senior instructor authority' },
+      { rank: 'Godan — V Dan',       note: 'Minimum 5 years after Yondan',    wkf: 'Federation-level authority' },
+      { rank: 'Rokudan — VI Dan',    note: 'Minimum 6 years after Godan',     wkf: 'Shihan — master instructor' },
+      { rank: 'Shichidan — VII Dan', note: 'Minimum 7 years after Rokudan',   wkf: 'Senior examiner authority' },
+      { rank: 'Hachidan — VIII Dan', note: 'Minimum 8 years after Shichidan', wkf: 'Technical directorate' },
+      { rank: 'Kudan — IX Dan',      note: 'Minimum 9 years after Hachidan',  wkf: 'Conferred by the federation' },
+      { rank: 'Judan — X Dan',       note: 'Minimum 10 years after Kudan',    wkf: 'Highest grade — conferred, not examined' },
     ],
   },
   /**

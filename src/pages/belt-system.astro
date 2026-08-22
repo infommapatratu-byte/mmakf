@@ -11,19 +11,24 @@ const grading = await get('beltGrading');
 const syllabus = await get<any[]>('syllabus');
 const programs = await get<any[]>('programs');
 
-// Visual swatch colours for the kyu belt list (order matches SEED kyu ranks)
-const beltColors = ['#e8e8e8', '#e6c619', '#e07820', '#2e8b3a', '#2456b0', '#6a3ab0', '#6b4226', '#5c3820', '#4d2f1b', '#3d2515'];
+// Visual swatch colours for the kyu belt list (order matches SEED kyu ranks).
+//
+// INDEX 5 IS BLUE, NOT PURPLE. MMAKF awards no purple belt — 6th and 5th Kyu
+// are both Blue, the second being a grade passed with the colour retained.
+// The swatch is keyed by POSITION, so it silently mislabels the moment the
+// kyu list changes length; BR-8.1 is the '#888' fallback below.
+const beltColors = ['#e8e8e8', '#e6c619', '#e07820', '#2e8b3a', '#2456b0', '#2456b0', '#6b4226', '#5c3820', '#4d2f1b', '#3d2515'];
 ---
 
 <Base
   title="Belt System & Syllabus — MMAKF"
-  description="The MMAKF Shotokan grading system — ten kyu grades to black belt, Dan progression to Shihan, and the kata syllabus for every examination."
+  description="The MMAKF Shotokan grading system — ten kyu grades to black belt, ten Dan grades from Shodan to Judan, and the kata syllabus for every examination."
 >
   <PageHero
     image="https://images.unsplash.com/photo-1593810450967-f9c42742e326?auto=format&fit=crop&w=1800&q=70"
     eyebrow="Grading"
     title={`From white belt to <em>Shihan</em>.`}
-    lead="Ten kyu grades carry you from white to brown. Dan grades carry you from Shodan to grandmaster. Every examination follows the federation's Shotokan syllabus."
+    lead="Ten kyu grades carry you from white to brown. Ten Dan grades carry you from Shodan to Judan. Every examination follows the federation's Shotokan syllabus."
     pills={['Formal syllabus', 'WKF pathway']}
   />
 

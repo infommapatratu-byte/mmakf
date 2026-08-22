@@ -72,6 +72,63 @@ describe('seed integrity', () => {
     }
   });
 
+  /**
+   * THE PUBLISHED BELT LADDER, AND BOTH ENCODINGS OF IT.
+   *
+   * The rank/fee table lives here and the swatch palette lives in
+   * src/pages/belt-system.astro, keyed by POSITION rather than by rank — two
+   * arrays a person edits one at a time, which is exactly how a belt ends up
+   * the wrong colour on a page nobody re-reads.
+   *
+   * The federation reported the purple belt as wrong on the live site. Nothing
+   * in this suite asserted a colour at all, so nothing could have caught it;
+   * the only kyu assertion was that each fee is a non-negative integer.
+   */
+  it('publishes the ladder MMAKF awards — no purple, ten kyu, ten dan', () => {
+    const kyu = SEED.beltGrading.kyu;
+    const dan = SEED.beltGrading.dan;
+
+    expect(kyu).toHaveLength(10);
+
+    // No purple belt anywhere: not in the rank table, not in the kata
+    // syllabus's belt transitions, which carried it twice more.
+    for (const k of kyu) {
+      expect(k.rank, `kyu rank "${k.rank}" names a purple belt`).not.toMatch(/purple/i);
+    }
+    for (const row of SEED.syllabus as any[]) {
+      expect(row.belt, `syllabus row "${row.grade}" names a purple belt`).not.toMatch(/purple/i);
+    }
+
+    // 6th and 5th Kyu are both Blue; Brown begins at 4th.
+    expect(kyu[4].rank).toMatch(/6th Kyu/);
+    expect(kyu[4].rank).toMatch(/Blue/);
+    expect(kyu[5].rank).toMatch(/5th Kyu/);
+    expect(kyu[5].rank).toMatch(/Blue/);
+    expect(kyu[6].rank).toMatch(/4th Kyu/);
+    expect(kyu[6].rank).toMatch(/Brown/);
+
+    // The swatch array is read out of the page source rather than imported: it
+    // is a module-scope const inside .astro frontmatter, and there is no other
+    // way to hold it to the ladder it is drawing.
+    const page = readFileSync(join('src', 'pages', 'belt-system.astro'), 'utf8');
+    const found = /const beltColors = \[([^\]]*)\]/.exec(page);
+    expect(found, 'beltColors array not found in belt-system.astro').not.toBeNull();
+    const colours = found![1].split(',').map((c) => c.trim().replace(/^'|'$/g, '')).filter(Boolean);
+    expect(colours, 'one swatch per kyu grade, or the page mislabels every belt below the gap')
+      .toHaveLength(kyu.length);
+    expect(colours[4], '6th and 5th Kyu are the same belt and must draw the same swatch')
+      .toBe(colours[5]);
+
+    // The Dan ladder runs to Judan. Publishing six tells every senior karateka
+    // the federation has no grade left to give them.
+    expect(dan).toHaveLength(10);
+    const names = ['Shodan', 'Nidan', 'Sandan', 'Yondan', 'Godan',
+                   'Rokudan', 'Shichidan', 'Hachidan', 'Kudan', 'Judan'];
+    names.forEach((n, i) => {
+      expect(dan[i].rank, `dan grade ${i + 1}`).toMatch(new RegExp(`^${n} `));
+    });
+  });
+
   it('schedule modes are dojo or online (drives pill styling)', () => {
     for (const s of SEED.schedule) {
       expect(['dojo', 'online']).toContain(s.mode);
