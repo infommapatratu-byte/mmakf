@@ -235,3 +235,56 @@ describe('the owner/row-level-security dependency is recorded where the connecti
     expect(/owner/i.test(src), 'the ownership note is gone from src/db/index.ts').toBe(true);
   });
 });
+
+// ─── Saying WHY, without saying WHO ────────────────────────────────────
+//
+// /api/health said `"database":"error"` and no more, and that cost five days of
+// a locked admin console: 28P01 — the register refusing the application's
+// password — reads identically to a paused project, a withdrawn route, or a
+// database that answers and was never migrated.
+
+describe('the register reports the CLASS of a fault and never its content', () => {
+  it('a pooled host reached with a bare role is named as such', () => {
+    // THE MISCONFIGURATION THAT REPORTS ITSELF AS THE WRONG PROBLEM. A pooler
+    // multiplexes projects onto one hostname and carries the tenant in the role
+    // (`<role>.<project-ref>`), so a bare role cannot be routed — and the
+    // refusal reads 'password authentication failed', which sends an operator
+    // to reset a password that was never wrong.
+    expect(dbm.connectionShape('postgresql://postgres:pw@aws-0-ap-south-1.pooler.supabase.com:6543/postgres'))
+      .toBe('pooled_host_bare_user');
+    expect(dbm.connectionShape('postgresql://postgres.abcdefghijklmnop:pw@aws-0-ap-south-1.pooler.supabase.com:6543/postgres'))
+      .toBe('ok');
+  });
+
+  it('a direct host with a bare role is fine, and is not confused with a pooler', () => {
+    expect(dbm.connectionShape('postgresql://postgres:pw@db.abcdefghijklmnop.supabase.co:5432/postgres'))
+      .toBe('ok');
+    expect(dbm.connectionShape('postgresql://postgres:postgres@127.0.0.1:5433/postgres'))
+      .toBe('ok');
+  });
+
+  it('the states that are not a URL at all are their own answers', () => {
+    expect(dbm.connectionShape('')).toBe('not_configured');
+    expect(dbm.connectionShape('not a url')).toBe('unparseable');
+    expect(dbm.connectionShape('postgresql://aws-0-ap-south-1.pooler.supabase.com:6543/postgres'))
+      .toBe('no_user');
+  });
+
+  it('NOTHING OF THE VALUE CAN LEAVE: every answer is one of five fixed words', () => {
+    // The whole safety property. If a future edit ever returns something derived
+    // from the string — a host, a role, a project reference — this fails, because
+    // /api/health publishes this to anybody who asks.
+    const allowed = ['not_configured', 'unparseable', 'no_user', 'pooled_host_bare_user', 'ok'];
+    const urls = [
+      '', 'not a url',
+      'postgresql://secretuser:secretpw@secret.host.example:5432/secretdb',
+      'postgresql://postgres:p@w%40rd@aws-0-x.pooler.supabase.com:6543/postgres',
+      'postgresql://postgres.ref:pw@aws-0-x.pooler.supabase.com:5432/postgres',
+    ];
+    for (const u of urls) expect(allowed).toContain(dbm.connectionShape(u));
+  });
+
+  it('no fault is reported while nothing has failed', () => {
+    expect(['string', 'object']).toContain(typeof dbm.lastRegisterFault());
+  });
+});

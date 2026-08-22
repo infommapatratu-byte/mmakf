@@ -23,7 +23,7 @@
 
 import type { APIRoute } from 'astro';
 import { redisHealthy } from '@/lib/storage';
-import { isConfigured, databaseHealthy } from '@/db';
+import { isConfigured, databaseHealthy, lastRegisterFault, connectionShape } from '@/db';
 import { probe, overallStatus, type HealthCheck } from '@/lib/observability';
 
 export const prerender = false;
@@ -87,6 +87,25 @@ export const GET: APIRoute = async () => {
       // `env` names the deployment environment, because "is it ticked for
       // Production?" was the other question nobody could answer from outside.
       env: process.env.VERCEL_ENV || 'local',
+      // ── WHY THE REGISTER FAILED, AS A CLASS ───────────────────────────────
+      //
+      // `database` says whether it answered. These two say WHY it did not, and
+      // they exist because that one word cost five days of a locked admin
+      // console: 28P01 — the register refusing the application's password — is
+      // indistinguishable, through `"error"` alone, from a paused project, a
+      // withdrawn route, or a database that answers and was never migrated.
+      // Telling them apart meant streaming the deployment's runtime log while
+      // provoking a login, which is not a thing an operator can be asked to do.
+      //
+      // `dbUrlShape` is the other half, and it names the misconfiguration that
+      // REPORTS ITSELF AS THE WRONG PROBLEM: a pooled host reached with a bare
+      // role fails as `password authentication failed`, so the operator resets a
+      // password that was never wrong. See connectionShape() in src/db/index.ts.
+      //
+      // Both are fixed vocabularies. No message, no host, no role, no value —
+      // the same bar dbVars below is held to.
+      dbFault: asRegisterState(database) === 'ok' ? null : lastRegisterFault(),
+      dbUrlShape: connectionShape(),
       dbVars: {
         DATABASE_URL: Boolean(process.env.DATABASE_URL),
         POSTGRES_URL: Boolean(process.env.POSTGRES_URL),

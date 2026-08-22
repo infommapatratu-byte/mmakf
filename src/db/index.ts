@@ -189,8 +189,84 @@ export function __setTestClient(c: any) {
   cached = c;
 }
 
+// ─── WHY A FAULT CLASS LEAVES THIS MODULE, WHEN A CONNECTION STRING NEVER DOES
+//
+// /api/health reported `"database":"error"` and nothing else, and that one word
+// cost the federation five days of a locked admin console. The register was
+// REFUSING THE APPLICATION'S CREDENTIALS — PostgresError 28P01, `password
+// authentication failed for user "postgres"` — and from outside that is
+// indistinguishable from a paused project, a withdrawn route, or a database that
+// answers perfectly and was never migrated. Each of those is a different fix,
+// and the only way to tell them apart was to stream the deployment's runtime log
+// while provoking a login.
+//
+// So the CLASS of the fault is published and the fault itself is not. One token
+// off a fixed list leaves here — a SQLSTATE or a Node error code — with no
+// message attached, because THE MESSAGE IS WHERE THE IDENTIFIERS LIVE: `password
+// authentication failed for user "postgres"` names the role, and a DNS failure
+// names the host. Anything unrecognised reports 'other' rather than being
+// echoed, so a driver that grows a new message later cannot leak one through
+// this hole. Same bar as dbVars in /api/health: names and classes yes, values
+// never.
+const FAULT_CODES = new Set([
+  '28P01',  // the password was refused
+  '28000',  // the role, or its authentication method, was refused
+  '3D000',  // no such database
+  '42P01',  // answering, but the migrations are not there
+  '53300',  // too many connections
+  '57P03',  // the server is still starting up
+  'ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN',
+  'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'CERT_HAS_EXPIRED',
+]);
+
+/** Drizzle wraps the driver error, so the code is not always on the top one. */
+function faultCode(err: unknown): string {
+  for (let e: any = err, depth = 0; e && depth < 5; e = e.cause, depth += 1) {
+    const c = typeof e.code === 'string' ? e.code : '';
+    if (c && FAULT_CODES.has(c)) return c;
+  }
+  return 'other';
+}
+
+let lastFault: string | null = null;
+
+/** The class of the last refusal, or null when the register last answered. */
+export function lastRegisterFault(): string | null {
+  return lastFault;
+}
+
+export type RegisterUrlShape =
+  | 'not_configured' | 'unparseable' | 'no_user' | 'pooled_host_bare_user' | 'ok';
+
 /**
- * Health probe for /api/health. Never throws.
+ * The SHAPE of the configured connection string — never any part of its value.
+ *
+ * There is one misconfiguration that reports itself as the wrong problem, and it
+ * is the one this federation hit. A TRANSACTION POOLER MULTIPLEXES MANY PROJECTS
+ * ONTO ONE HOSTNAME, so the username has to say which project the session
+ * belongs to: the tenant is carried in the role, as `<role>.<project-ref>`.
+ * Handed a bare role the pooler cannot route the session at all — and it
+ * refuses rather than guessing, with `password authentication failed`. That
+ * sends an operator to reset a password which was never wrong, and the reset
+ * does not fix it, so they reset it again.
+ *
+ * Reporting the shape turns that into one sentence. No host, no role, no
+ * project reference and no password leaves: the return value is one of five
+ * fixed words.
+ */
+export function connectionShape(url: string = databaseUrl()): RegisterUrlShape {
+  if (!url) return 'not_configured';
+  let u: URL;
+  try { u = new URL(url); } catch { return 'unparseable'; }
+  let user = u.username || '';
+  try { user = decodeURIComponent(user); } catch { /* leave it as written */ }
+  if (!user) return 'no_user';
+  if (/(^|\.)pooler\./i.test(u.hostname) && !user.includes('.')) return 'pooled_host_bare_user';
+  return 'ok';
+}
+
+/** * Health probe for /api/health. Never throws.
  *
  * TWO THINGS THIS GETS RIGHT THAT THE OBVIOUS VERSION DOES NOT.
  *
@@ -212,11 +288,13 @@ export async function databaseHealthy(): Promise<boolean> {
   try {
     const { sql: raw } = await import('drizzle-orm');
     await db().execute(raw`select 1 from _mmakf_migrations limit 1`);
+    lastFault = null;
     return true;
-  } catch {
-    // Unreachable, unmigrated, or refusing us. All three are "not healthy",
-    // and the operator finds out which from the server log rather than from a
-    // connection string echoed to whoever called the endpoint.
+  } catch (err) {
+    // Unreachable, unmigrated, or refusing us. All three are "not healthy" and
+    // all three need a different fix, so the CLASS is kept — see FAULT_CODES
+    // above for what may leave and why the message never does.
+    lastFault = faultCode(err);
     return false;
   }
 }
