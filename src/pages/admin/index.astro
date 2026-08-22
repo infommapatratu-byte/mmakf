@@ -2,11 +2,34 @@
 import Base from '@/layouts/Base.astro';
 import ListPanel from '@/components/ListPanel.astro';
 import { getAll } from '@/lib/storage';
-import { isAuthenticated } from '@/lib/auth';
+import { identify } from '@/lib/session';
+import { canAnywhere } from '@/lib/rbac';
 
 export const prerender = false;
 
-const authed = isAuthenticated(Astro.request.headers.get('cookie'));
+// THE FRONT DOOR ONLY ACCEPTED THE SHARED OFFICE PASSWORD.
+//
+// This read isAuthenticated(), which checks the mmakf_admin cookie and nothing
+// else — the LEGACY shared-password session. A per-person account signs in to a
+// mmakf_user cookie, so the sequence was: correct email, correct password, 200
+// from /api/auth/login, cookie set, location.reload() — and this page rendering
+// the sign-in form again, because it had never heard of that cookie.
+//
+// Nothing reported it. The console had no error to show: from here the caller
+// simply was not signed in. An officer with a valid SUPER_ADMIN account and the
+// right password could reissue that password all evening and never see anything
+// but the form. Every OTHER page under /admin already went through identify()
+// (§75); only the door you land on did not.
+//
+// GATED ON content:write, NOT content:read, and the difference is the whole
+// security of the change. content:read is held by every legacy unit code down
+// to club level, so gating on it would hand the national editorial console to a
+// dojo's access code. content:write is held by the legacy admin principal and
+// by SUPER_ADMIN, and by no unit level at all — so this admits exactly who it
+// admitted before, plus the real accounts that were always meant to replace
+// them. Verified against GRANTS rather than assumed.
+const identity = await identify(Astro.request.headers.get('cookie'));
+const authed = !!identity?.principal && canAnywhere(identity.principal, 'content:write');
 const data = authed ? await getAll() : null;
 
 let leadList: any[] = [];
