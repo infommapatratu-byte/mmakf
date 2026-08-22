@@ -4,7 +4,7 @@ import Icon from '@/components/Icon.astro';
 import PageHero from '@/components/PageHero.astro';
 import EnrollCTA from '@/components/EnrollCTA.astro';
 import { get } from '@/lib/storage';
-import { profileHref } from '@/lib/people';
+import { profileHref, lineageSteps } from '@/lib/people';
 
 export const prerender = false;
 
@@ -13,6 +13,10 @@ const leadership = await get<any[]>('leadership');
 const achievements = await get<any[]>('achievements');
 const testimonials = await get<any[]>('testimonials');
 const programs = await get<any[]>('programs');
+
+// See lineageSteps() for why this is read from the record rather than
+// written out here, and for what it deliberately does not claim.
+const lineage = lineageSteps(leadership, fed.founded);
 
 const dojoKun = [
   { jp: 'Jinkaku kansei ni tsutomuru koto',   en: 'Seek perfection of character' },
@@ -94,20 +98,26 @@ const dojoKun = [
     <div class="container">
       <div class="section-head fade">
         <div class="eyebrow">Heritage</div>
-        <h2 class="display-2">One unbroken <em class="r">transmission</em>.</h2>
+        {/*
+          WAS “One unbroken transmission.” — which claims a continuity of
+          teaching that one named master and one conferred name do not
+          establish. Overstating it is the exact failure docs/CLAIMS-AUDIT.md
+          exists to catch, and it would be a worse one now that a real person
+          is named beneath it.
+        */}
+        <h2 class="display-2">From master to <em class="r">faculty</em>.</h2>
         <div class="rule"></div>
+        <p class="body-txt" style="max-width:60ch;margin-top:16px">
+          Shotokan Karate-Do is the style the federation practises and examines today.
+        </p>
       </div>
       <div class="grid grid-3">
-        {[
-          { num: '01', h: 'Shotokan Karate-Do',           sub: 'The discipline',                    d: 'The style MMAKF teaches and examines. The federation has not published a transmission lineage, so none is claimed here.' },
-          { num: '02', h: 'Shihan Pramod Kumar Pathak',   sub: 'VI Dan · Grandmaster · Soke',       d: `Founder of MMAKF (${fed.founded}). The federation's senior technical authority. Conferred the title \"Junior Tiger Lee\" in 2021 — his own title, not a lineage.` },
-          { num: '03', h: 'Active Senseis',               sub: 'III–IV Dan · Federation Faculty',   d: "Sensei Vikas, Sensei Dhiraj and Sensei Sumitra — the active generation transmitting the system to today's students." },
-        ].map((l) => (
+        {lineage.map((l) => (
           <div class="card fade">
             <div style="font-family:var(--font-display);font-size:2.4rem;font-weight:600;color:var(--numeral);line-height:1;margin-bottom:16px">{l.num}</div>
-            <div class="card-title">{l.h}</div>
+            <div class="card-title">{l.name}</div>
             <div style="font-family:var(--font-display);font-size:.68rem;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin-bottom:14px">{l.sub}</div>
-            <div class="card-body">{l.d}</div>
+            <div class="card-body">{l.body}</div>
           </div>
         ))}
       </div>

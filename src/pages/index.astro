@@ -4,6 +4,7 @@ import Icon from '@/components/Icon.astro';
 import EnrollCTA from '@/components/EnrollCTA.astro';
 import { getAll } from '@/lib/storage';
 import { upcomingEvents } from '@/lib/events';
+import { lineageSteps } from '@/lib/people';
 
 export const prerender = false;
 
@@ -18,6 +19,11 @@ const events = upcomingEvents(data.events);
 const news = data.news;
 const achievements = data.achievements;
 const gallery = (data.gallery || []).filter((g: any) => g.img);
+
+// Computed in src/lib/people.ts, and NOT written out again here — /about
+// carried its own copy of these three cards and the two drifted. See that
+// function for what this claims and what it deliberately does not.
+const lineage = lineageSteps(data.leadership, fed.founded);
 ---
 
 {/*
@@ -275,38 +281,19 @@ const gallery = (data.gallery || []).filter((g: any) => g.img);
         <h2 class="display-2">Our <em>lineage</em> &amp; legacy.</h2>
         <div class="rule gold center"></div>
         <p class="lead" style="margin:0 auto">
-          Three generations of instructors, from the founder to the faculty teaching today.
+          From the master who named this federation&rsquo;s founder to the faculty teaching
+          today. Shotokan Karate-Do is the style MMAKF practises and examines.
         </p>
       </div>
       <div class="lineage-grid">
-        <div class="lineage-step fade">
-          <div class="lineage-num">01</div>
-          <div class="lineage-h">Shotokan Karate-Do</div>
-          <div class="lineage-sub">The discipline</div>
-          <div class="body-txt mt-4">
-            The style MMAKF teaches and examines. The federation has not published a
-            transmission lineage, so this site does not claim one.
+        {lineage.map((l) => (
+          <div class="lineage-step fade">
+            <div class="lineage-num">{l.num}</div>
+            <div class="lineage-h">{l.name}</div>
+            <div class="lineage-sub">{l.sub}</div>
+            <div class="body-txt mt-4">{l.body}</div>
           </div>
-        </div>
-        <div class="lineage-step fade">
-          <div class="lineage-num">02</div>
-          <div class="lineage-h">Shihan Pramod Kumar Pathak</div>
-          <div class="lineage-sub">VI Dan · Grandmaster · Soke</div>
-          <div class="body-txt mt-4">
-            Founder of MMAKF (1983) and the federation&rsquo;s senior technical authority.
-            Conferred the title &ldquo;Junior Tiger Lee&rdquo; in 2021 &mdash; his own title,
-            not the name of a lineage.
-          </div>
-        </div>
-        <div class="lineage-step fade">
-          <div class="lineage-num">03</div>
-          <div class="lineage-h">Active Senseis</div>
-          <div class="lineage-sub">III–IV Dan · Federation Faculty</div>
-          <div class="body-txt mt-4">
-            Sensei Vikas, Sensei Dhiraj, and Sensei Sumitra — the active generation
-            transmitting the system to today's students.
-          </div>
-        </div>
+        ))}
       </div>
     </div>
   </section>
