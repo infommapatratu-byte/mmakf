@@ -628,7 +628,7 @@ if (authed) {
     .lp-item-name { font-family: var(--font-display); font-weight: 600; font-size: 0.98rem; color: var(--white); }
     .lp-item-meta { color: var(--muted); font-size: 0.78rem; margin-top: 4px; }
     .lp-item-actions { display: flex; gap: 8px; }
-    .lp-btn-del {
+    .lp-btn-del, .lp-btn-edit, .lp-btn-move {
       background: transparent;
       border: 1px solid var(--border-2);
       color: var(--off-white);
@@ -641,6 +641,31 @@ if (authed) {
       cursor: pointer;
     }
     .lp-btn-del:hover { border-color: var(--red); color: var(--red-2); }
+    .lp-btn-edit:hover { border-color: var(--gold); color: var(--gold); }
+    /* Square, because they carry an arrow rather than a word and a wide box
+       around a single glyph reads as a disabled control. */
+    .lp-btn-move { padding: 6px 10px; line-height: 1; }
+    .lp-btn-move:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
+    .lp-btn-move:disabled { opacity: .35; cursor: default; }
+    /* The row being edited stops pretending to be a row: the grid that put
+       actions on the right would squeeze the form into the first column. */
+    .lp-item.lp-edit { display: block; }
+    .lp-item:has(> .lp-thumb) { grid-template-columns: auto 1fr auto; }
+    .lp-thumb {
+      width: 52px; height: 52px; object-fit: cover;
+      border-radius: var(--radius); border: 1px solid var(--border);
+      background: var(--bg-2);
+    }
+    .lp-img-slot { margin-top: 8px; }
+    .lp-img-prev {
+      max-width: 100%; max-height: 140px; object-fit: contain;
+      border-radius: var(--radius); border: 1px solid var(--border);
+    }
+    .lp-img-warn {
+      font-size: .72rem; line-height: 1.55; color: var(--red-2);
+      border: 1px solid var(--border-2); border-radius: var(--radius);
+      padding: 8px 10px;
+    }
 
     .lp-form { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-top: 18px; }
     .lp-form .lp-form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
@@ -715,35 +740,180 @@ if (authed) {
         else data[rootKey] = rows;
       };
 
+      // WHICH ROW IS OPEN FOR EDITING, or -1.
+      //
+      // One at a time, deliberately. Every write here POSTs the WHOLE array
+      // back — the store holds one value per key — so two forms open at once
+      // would race, and whichever saved second would silently discard the
+      // other's change, with no error anywhere to say so.
+      let editIdx = -1;
+
+      // One writer for all four operations. Add, edit, delete and reorder are
+      // the same write, and they were not going to stay in step written out
+      // four times.
+      async function save(rows, okMsg, failMsg) {
+        const r = await fetch('/api/data/' + rootKey, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: bodyFor(rows),
+        }).catch(() => null);
+        if (r && r.ok) { commit(rows); render(); toast(okMsg); return true; }
+        toast(failMsg);
+        return false;
+      }
+
+      // WHICH HOSTS AN IMAGE MAY ACTUALLY COME FROM.
+      //
+      // Mirrors img-src in the Content-Security-Policy in vercel.json. A URL
+      // from anywhere else is not "probably fine" — the browser REFUSES to
+      // load it, on the public site and in here, and the only trace is a
+      // console warning no editor will ever read. Pasting a link and seeing
+      // nothing appear, with no explanation, is the failure this list exists
+      // to turn into a sentence.
+      const IMG_HOSTS = ['images.unsplash.com'];
+
+      function imageFieldLabel(f) {
+        return /img|image|photo|thumb|logo|cover/i.test(f.n) || /image|photo/i.test(f.l);
+      }
+
+      // null when it is not usable as an image at all; otherwise the URL and
+      // whether the policy will let it load.
+      function imageInfo(v) {
+        const url = String(v == null ? '' : v).trim();
+        if (!url) return null;
+        if (url.startsWith('/') || url.startsWith('data:')) return { url: url, allowed: true, host: '' };
+        let u;
+        try { u = new URL(url); } catch (err) { return null; }
+        if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+        return { url: url, allowed: IMG_HOSTS.indexOf(u.host) >= 0, host: u.host };
+      }
+
+      function previewHtml(info) {
+        if (!info) return '';
+        if (!info.allowed) {
+          return '<div class="lp-img-warn">This host is not allowed by the site policy, so the image will not load. '
+            + 'Allowed: images.unsplash.com, or a file under /public referenced as /name.jpg. '
+            + 'Host given: ' + esc(info.host) + '</div>';
+        }
+        return '<img class="lp-img-prev" src="' + esc(info.url) + '" alt="" loading="lazy" />';
+      }
+
+      function fieldControl(f, value, idx) {
+        const cid = panel.id + '-edit-' + idx + '-' + f.n;
+        const v = esc(String(value == null ? '' : value));
+        const label = '<label class="input-label" for="' + cid + '">' + esc(f.l) + '</label>';
+        const control = f.textarea
+          ? '<textarea class="input" id="' + cid + '" name="' + f.n + '" rows="3">' + v + '</textarea>'
+          : '<input class="input" id="' + cid + '" name="' + f.n + '" type="' + (f.type || 'text') + '" value="' + v + '" />';
+        const prev = imageFieldLabel(f)
+          ? '<div class="lp-img-slot" data-for="' + f.n + '">' + previewHtml(imageInfo(value)) + '</div>'
+          : '';
+        return '<div class="' + (f.full ? 'full' : '') + '">' + label + control + prev + '</div>';
+      }
+
       function render() {
         const rows = readRows();
         listEl.innerHTML = rows.map((r, i) => {
-          const main = fields[0]?.n;
+          // THE ROW BEING EDITED BECOMES THE FORM, in place. Not a modal: the
+          // rest of this console asks as little of JavaScript as it can, and a
+          // dialog needs focus trapping and an escape route before it is usable
+          // by anybody on a keyboard.
+          if (i === editIdx) {
+            return '<form class="lp-item lp-edit" data-idx="' + i + '" style="display:block">'
+              + '<div class="lp-form-grid">' + fields.map((f) => fieldControl(f, r[f.n], i)).join('') + '</div>'
+              + '<div style="margin-top:14px;display:flex;gap:10px">'
+              + '<button type="submit" class="btn btn-primary">Save</button>'
+              + '<button type="button" class="btn btn-ghost lp-btn-cancel">Cancel</button>'
+              + '</div></form>';
+          }
+          const main = fields.length ? fields[0].n : '';
           const secondary = fields.filter((f, idx) => idx > 0 && r[f.n] !== undefined && r[f.n] !== '').map((f) => esc(String(r[f.n]).slice(0, 70))).slice(0, 3).join(' · ');
-          return `<div class="lp-item">
-            <div class="lp-item-body">
-              <div class="lp-item-name">${esc(String(r[main] ?? ''))}</div>
-              <div class="lp-item-meta">${secondary}</div>
-            </div>
-            <div class="lp-item-actions">
-              <button class="lp-btn-del" data-idx="${i}">Delete</button>
-            </div>
-          </div>`;
+          const thumbField = fields.filter(imageFieldLabel)[0];
+          const thumb = thumbField ? imageInfo(r[thumbField.n]) : null;
+          return '<div class="lp-item">'
+            + (thumb && thumb.allowed ? '<img class="lp-thumb" src="' + esc(thumb.url) + '" alt="" loading="lazy" />' : '')
+            + '<div class="lp-item-body">'
+            + '<div class="lp-item-name">' + esc(String(r[main] == null ? '' : r[main])) + '</div>'
+            + '<div class="lp-item-meta">' + secondary + '</div>'
+            + '</div>'
+            + '<div class="lp-item-actions">'
+            + '<button class="lp-btn-move" data-idx="' + i + '" data-dir="-1" title="Move up" aria-label="Move up"' + (i === 0 ? ' disabled' : '') + '>&uarr;</button>'
+            + '<button class="lp-btn-move" data-idx="' + i + '" data-dir="1" title="Move down" aria-label="Move down"' + (i === rows.length - 1 ? ' disabled' : '') + '>&darr;</button>'
+            + '<button class="lp-btn-edit" data-idx="' + i + '">Edit</button>'
+            + '<button class="lp-btn-del" data-idx="' + i + '">Delete</button>'
+            + '</div></div>';
         }).join('');
+
+        listEl.querySelectorAll('button.lp-btn-edit').forEach((b) => {
+          b.addEventListener('click', () => { editIdx = +b.dataset.idx; render(); });
+        });
+
+        listEl.querySelectorAll('button.lp-btn-cancel').forEach((b) => {
+          b.addEventListener('click', () => { editIdx = -1; render(); });
+        });
+
+        // ORDER IS CONTENT. These arrays render in order on the public site, so
+        // without this the only way to move an entry was to delete it and retype
+        // it — which is how a phone number gets lost.
+        listEl.querySelectorAll('button.lp-btn-move').forEach((b) => {
+          b.addEventListener('click', async () => {
+            const idx = +b.dataset.idx;
+            const to = idx + (+b.dataset.dir);
+            const next = readRows().slice();
+            if (to < 0 || to >= next.length) return;
+            const moved = next.splice(idx, 1)[0];
+            next.splice(to, 0, moved);
+            b.disabled = true;
+            editIdx = -1;
+            await save(next, 'Moved', 'Move failed');
+          });
+        });
+
+        const editForm = listEl.querySelector('form.lp-edit');
+        if (editForm) {
+          editForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const idx = +editForm.dataset.idx;
+            const fd = new FormData(editForm);
+            const next = readRows().slice();
+            // SPREAD THE EXISTING ROW FIRST. These objects carry keys this panel
+            // never renders — ids, image paths, flags set elsewhere — and
+            // rebuilding from the form alone would drop every one of them.
+            const item = Object.assign({}, next[idx]);
+            fields.forEach((f) => {
+              let v = fd.get(f.n);
+              if (v == null) v = '';
+              if (f.type === 'number') v = Number(v) || 0;
+              item[f.n] = v;
+            });
+            next[idx] = item;
+            const btn = editForm.querySelector('button[type=submit]');
+            if (btn) btn.disabled = true;
+            editIdx = -1;
+            const ok = await save(next, 'Saved', 'Save failed');
+            // A failed save must not look like a cancelled one: the form comes
+            // back with the operator's typing still in it.
+            if (!ok) { editIdx = idx; render(); }
+          });
+          // The preview follows the field as it is typed, so a wrong host or a
+          // broken link is visible before Save rather than after publishing.
+          editForm.querySelectorAll('input, textarea').forEach((el) => {
+            const slot = editForm.querySelector('.lp-img-slot[data-for="' + el.name + '"]');
+            if (!slot) return;
+            el.addEventListener('input', () => { slot.innerHTML = previewHtml(imageInfo(el.value)); });
+          });
+          const first = editForm.querySelector('input, textarea');
+          if (first) first.focus();
+        }
+
         listEl.querySelectorAll('button.lp-btn-del').forEach((b) => {
           b.addEventListener('click', async () => {
             if (!confirm('Delete this item?')) return;
             const idx = +b.dataset.idx;
-            const rows = readRows().slice();
-            rows.splice(idx, 1);
+            const next = readRows().slice();
+            next.splice(idx, 1);
             b.disabled = true;
-            const r = await fetch('/api/data/' + rootKey, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: bodyFor(rows),
-            });
-            b.disabled = false;
-            if (r.ok) { commit(rows); render(); toast('Deleted'); }
-            else toast('Delete failed');
+            editIdx = -1;
+            await save(next, 'Deleted', 'Delete failed');
           });
         });
       }
