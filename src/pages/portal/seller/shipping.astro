@@ -1,0 +1,479 @@
+---
+// /portal/seller/shipping — where you ship, and what it costs.
+//
+// ─── WHY THIS PAGE LEADS WITH A WARNING ─────────────────────────────────────
+//
+// A seller with no shipping zone is quoted ZERO carriage at checkout and pays
+// for every delivery out of their own margin. That behaviour is deliberate —
+// refusing instead would have taken every existing seller off the marketplace
+// the day zones shipped — but it was also SILENT, and a cost that falls on
+// somebody without their knowing is the worst shape a defect can take.
+//
+// So the first thing on this page, for a seller who has configured nothing, is
+// how many orders they have already absorbed carriage on. Not an estimate of
+// what it cost them: what a parcel costs to send is a fact about their carrier
+// that MMAKF does not hold, and inventing a rupee figure would be exactly the
+// fabrication the rest of this codebase refuses.
+//
+// ─── AND WHY THE PREVIEW IS TRUSTWORTHY ─────────────────────────────────────
+//
+// The "what would a buyer pay?" box calls quoteCarriage() — the SAME function
+// checkout() calls to put a figure on a real order. It is not a preview
+// implementation. A second copy of the pricing would agree until it did not,
+// and the day it diverged the seller would be shown one number and their buyer
+// charged another, with both screens telling the truth about different code.
+
+import Base from '@/layouts/Base.astro';
+import { db } from '@/db';
+import { asc, eq } from 'drizzle-orm';
+import * as s from '@/db/schema';
+import { myZones, carriageExposure, UNZONED_SELLER_POLICY_NOT_SET } from '@/db/shipping';
+import { sellerContext, readableError, money, titleCase, SELLER_TABS } from './_gate';
+
+export const prerender = false;
+
+const ctx = await sellerContext(Astro.request.headers.get('cookie'));
+
+let zones: any[] = [];
+let exposure: any = null;
+let states: any[] = [];
+let pageError: string | null = ctx.loadError;
+
+if (ctx.gate === 'seller' && ctx.approved && !pageError) {
+  try {
+    // No seller id passed. Both resolve the shop from the session.
+    zones = await myZones(db(), ctx.identity!.principal);
+    exposure = await carriageExposure(db(), ctx.identity!.principal);
+    states = await db()
+      .select({ state: s.stateUnits.state })
+      .from(s.stateUnits).where(eq(s.stateUnits.status, 'active'))
+      .orderBy(asc(s.stateUnits.state));
+  } catch (err: any) {
+    pageError = readableError(err, 'Your shipping settings');
+  }
+}
+
+/** What each method kind means, in the seller's terms rather than the enum's. */
+const KINDS: { value: string; label: string; hint: string }[] = [
+  { value: 'flat', label: 'Flat rate', hint: 'One price, whatever the basket.' },
+  { value: 'free', label: 'Free', hint: 'You carry the cost and say so.' },
+  { value: 'free_above', label: 'Free above a total', hint: 'Flat price, waived once the basket reaches a figure you set.' },
+  { value: 'per_item', label: 'Per item', hint: 'A base price plus an amount for each item.' },
+  { value: 'by_weight', label: 'By weight', hint: 'A base price plus an amount per kilogram. Needs weights on your variants.' },
+];
+
+const describeMethod = (m: any): string => {
+  const base = money(m.priceMinor);
+  switch (m.kind) {
+    case 'free': return 'Free';
+    case 'free_above': return `${base}, free above ${money(m.freeAboveMinor)}`;
+    case 'per_item': return `${base} plus ${money(m.perItemMinor)} an item`;
+    case 'by_weight': return `${base} plus ${money(m.perKgMinor)} a kilogram`;
+    default: return base;
+  }
+};
+
+const describeZone = (z: any): string => {
+  const st: string[] = Array.isArray(z.states) ? z.states : [];
+  const pc: string[] = Array.isArray(z.postcodePrefixes) ? z.postcodePrefixes : [];
+  if (!st.length && !pc.length) return 'Everywhere';
+  const parts: string[] = [];
+  if (st.length) parts.push(st.join(', '));
+  if (pc.length) parts.push(`postcodes starting ${pc.join(', ')}`);
+  return parts.join(' — ');
+};
+---
+
+<Base
+  title="Shipping — MMAKF marketplace"
+  description="Where you ship to, what you charge for carriage, and what a buyer would be quoted."
+>
+  <section>
+    <div class="container">
+
+      {ctx.gate !== 'seller' && (
+        <div class="card"><div class="eyebrow">Seller area</div>
+        <h1 class="display-2" style="margin-top:14px">Shipping</h1>
+        <p>Sign in with a personal account that holds an approved seller record.</p></div>
+      )}
+
+      {ctx.gate === 'seller' && (
+        <>
+          <div class="eyebrow">MMAKF marketplace</div>
+          <h1 class="display-1" style="margin-top:14px">Shipping</h1>
+
+          <nav class="tabs" aria-label="Seller area">
+            {SELLER_TABS.map((t) => (
+              <a href={t.href} aria-current={t.href === '/portal/seller/shipping' ? 'page' : undefined}>{t.label}</a>
+            ))}
+          </nav>
+
+          {pageError && <div class="card" role="alert"><p>{pageError}</p></div>}
+
+          {!ctx.approved && (
+            <div class="card"><p>MMAKF has not approved this seller account, so there is nothing to ship.</p></div>
+          )}
+
+          {ctx.approved && exposure && (
+            <>
+              {/* ── The warning that was missing ─────────────────────────── */}
+              {!exposure.configured && (
+                <div class="card tone-wait" role="status">
+                  <div class="eyebrow">You are paying for carriage</div>
+                  <h2 class="h3">
+                    {exposure.absorbedOrders > 0
+                      ? `${exposure.absorbedOrders} order${exposure.absorbedOrders === 1 ? '' : 's'} so far have shipped with no carriage charged.`
+                      : 'No carriage is being charged on your orders.'}
+                  </h2>
+                  <p>{exposure.note}</p>
+                  <p class="muted">
+                    MMAKF does not know what your parcels cost to send, so there is no figure here for what
+                    this has cost you — only the count of orders it applied to. Add a zone below and buyers
+                    are charged from the next order onward.
+                  </p>
+                  <p class="muted"><strong>Note:</strong> {UNZONED_SELLER_POLICY_NOT_SET}</p>
+                </div>
+              )}
+
+              {exposure.configured && exposure.uncoveredStates.length > 0 && !exposure.coversEverywhere && (
+                <div class="card">
+                  <div class="eyebrow">Not covered</div>
+                  <h2 class="h4">Buyers in these states cannot order from you</h2>
+                  <p>{exposure.uncoveredStates.join(', ')}</p>
+                  <p class="muted">
+                    A basket containing your items is refused at checkout for an address you do not cover,
+                    with the reason given to the buyer. Add a zone if you want that business.
+                  </p>
+                </div>
+              )}
+
+              {/* ── Zones ────────────────────────────────────────────────── */}
+              <h2 class="h3">Your zones ({zones.length})</h2>
+
+              {zones.length === 0 && (
+                <div class="card"><p class="muted">None yet. Nothing below is filled in for you.</p></div>
+              )}
+
+              {zones.map((z: any) => (
+                <article class="card">
+                  <header class="row between">
+                    <div>
+                      <h3 class="h4" style="margin:0">{z.name}</h3>
+                      <p class="muted" style="margin:4px 0">{describeZone(z)} · checked in order {z.priority}</p>
+                    </div>
+                    <button class="btn btn-small" data-zone-off={z.id}>Withdraw zone</button>
+                  </header>
+
+                  {z.methods.length === 0 ? (
+                    <p class="warn">
+                      This zone has no method, so buyers here are still charged nothing. A zone says where
+                      you ship; a method says what it costs.
+                    </p>
+                  ) : (
+                    <table>
+                      <caption class="sr-only">Methods in {z.name}</caption>
+                      <thead><tr>
+                        <th scope="col">Method</th><th scope="col">Cost</th>
+                        <th scope="col">Carrier</th><th scope="col">Days</th><th scope="col"></th>
+                      </tr></thead>
+                      <tbody>
+                        {z.methods.map((m: any) => (
+                          <tr>
+                            <th scope="row">{m.name}<div class="muted">{titleCase(m.kind)}</div></th>
+                            <td>{describeMethod(m)}</td>
+                            <td>{m.carrier ?? '—'}</td>
+                            <td>{m.minDays != null && m.maxDays != null ? `${m.minDays}–${m.maxDays}` : '—'}</td>
+                            <td><button class="btn btn-small" data-method-off={m.id}>Withdraw</button></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                  <p class="hint">
+                    The cheapest method that applies is the one a buyer is charged. Offering them a choice
+                    is a decision MMAKF has not made; charging the dearest would be this system asking your
+                    customers for more than it had to.
+                  </p>
+
+                  <details>
+                    <summary>Add a method to this zone</summary>
+                    <form class="method-form" data-zone={z.id}>
+                      <div class="two-up">
+                        <div>
+                          <label for={`mname-${z.id}`}>Name the buyer sees</label>
+                          <input id={`mname-${z.id}`} name="name" required maxlength="80" placeholder="Standard delivery" />
+                        </div>
+                        <div>
+                          <label for={`mkind-${z.id}`}>How it is priced</label>
+                          <select id={`mkind-${z.id}`} name="kind" required>
+                            {KINDS.map((k) => <option value={k.value}>{k.label}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <ul class="hint">{KINDS.map((k) => <li><strong>{k.label}:</strong> {k.hint}</li>)}</ul>
+
+                      <div class="two-up">
+                        <div>
+                          <label for={`mprice-${z.id}`}>Price, in rupees</label>
+                          <input id={`mprice-${z.id}`} name="priceRupees" required inputmode="decimal" placeholder="60.00" />
+                        </div>
+                        <div>
+                          <label for={`mfree-${z.id}`}>Free above, in rupees</label>
+                          <input id={`mfree-${z.id}`} name="freeAboveRupees" inputmode="decimal" placeholder="2000.00" />
+                        </div>
+                      </div>
+                      <div class="two-up">
+                        <div>
+                          <label for={`mkg-${z.id}`}>Per kilogram, in rupees</label>
+                          <input id={`mkg-${z.id}`} name="perKgRupees" inputmode="decimal" />
+                        </div>
+                        <div>
+                          <label for={`mitem-${z.id}`}>Per item, in rupees</label>
+                          <input id={`mitem-${z.id}`} name="perItemRupees" inputmode="decimal" />
+                        </div>
+                      </div>
+                      <div class="two-up">
+                        <div>
+                          <label for={`mcarrier-${z.id}`}>Carrier</label>
+                          <input id={`mcarrier-${z.id}`} name="carrier" maxlength="80" placeholder="India Post" />
+                        </div>
+                        <div>
+                          <label for={`mdays-${z.id}`}>Delivery estimate, in working days</label>
+                          <div class="row">
+                            <input id={`mdays-${z.id}`} name="minDays" type="number" min="0" max="90" placeholder="3" style="width:6em" />
+                            <span aria-hidden="true">–</span>
+                            <label class="sr-only" for={`mmax-${z.id}`}>Longest estimate</label>
+                            <input id={`mmax-${z.id}`} name="maxDays" type="number" min="0" max="90" placeholder="7" style="width:6em" />
+                          </div>
+                        </div>
+                      </div>
+                      <p class="hint">
+                        An estimate is shown to buyers as a range, never as a promised date. A date MMAKF
+                        cannot keep is a complaint waiting to be made.
+                      </p>
+                      <button class="btn btn-primary btn-small" type="submit">Add method</button>
+                    </form>
+                  </details>
+                </article>
+              ))}
+
+              {/* ── New zone ─────────────────────────────────────────────── */}
+              <details class="card" open={zones.length === 0}>
+                <summary><strong>Add a zone</strong></summary>
+                <form id="zone-form" style="margin-top:12px">
+                  <label for="zname">Name</label>
+                  <input id="zname" name="name" required maxlength="80" placeholder="Jharkhand and Bihar" />
+                  <p class="hint">For your own reference. Buyers never see it.</p>
+
+                  <fieldset>
+                    <legend>States this zone covers</legend>
+                    <p class="hint">
+                      Tick none to cover everywhere. A zone that names states will not match an address
+                      whose state is blank — the alternative would quote a Jharkhand rate for a parcel to
+                      Kerala.
+                    </p>
+                    <div class="checks">
+                      {states.map((st: any) => (
+                        <label class="choice">
+                          <input type="checkbox" name="states" value={st.state} />
+                          <span>{st.state}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+
+                  <label for="zprefixes">Postcode prefixes</label>
+                  <input id="zprefixes" name="postcodePrefixes" maxlength="200" placeholder="82, 83" />
+                  <p class="hint">Comma-separated, one to six digits each. “82” covers every postcode starting 82. Leave blank for all.</p>
+
+                  <label for="zpriority">Checked in order</label>
+                  <input id="zpriority" name="priority" type="number" min="0" max="10000" value="100" />
+                  <p class="hint">Lower is checked first. Put a narrow zone before a broad one, or the broad one wins.</p>
+
+                  <p id="zone-error" class="error" role="alert" hidden></p>
+                  <button class="btn btn-primary" type="submit">Add zone</button>
+                </form>
+              </details>
+
+              {/* ── Preview ──────────────────────────────────────────────── */}
+              <div class="card">
+                <div class="eyebrow">Check</div>
+                <h2 class="h3">What would a buyer pay?</h2>
+                <p class="muted">
+                  This runs the same function checkout does. It is not a preview of the calculation — it
+                  <em> is</em> the calculation.
+                </p>
+                <form id="preview-form" class="row">
+                  <div>
+                    <label for="pstate">State</label>
+                    <select id="pstate" name="state">
+                      <option value="">Not stated</option>
+                      {states.map((st: any) => <option value={st.state}>{st.state}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label for="ppostcode">Postcode</label>
+                    <input id="ppostcode" name="postcode" maxlength="12" placeholder="834001" />
+                  </div>
+                  <div>
+                    <label for="psubtotal">Basket, in rupees</label>
+                    <input id="psubtotal" name="subtotalRupees" inputmode="decimal" value="1000.00" />
+                  </div>
+                  <div>
+                    <label for="pitems">Items</label>
+                    <input id="pitems" name="itemCount" type="number" min="1" max="99" value="1" style="width:5em" />
+                  </div>
+                  <div>
+                    <label for="pweight">Weight, grams</label>
+                    <input id="pweight" name="weightGrams" type="number" min="0" max="200000" value="0" style="width:7em" />
+                  </div>
+                  <button class="btn btn-small" type="submit">Quote it</button>
+                </form>
+                <p id="preview-out" role="status"></p>
+              </div>
+
+              <p id="page-error" class="error" role="alert" hidden></p>
+            </>
+          )}
+        </>
+      )}
+
+    </div>
+  </section>
+</Base>
+
+<script>
+  import { formatMinor } from '@/lib/inr';
+
+  const pageError = document.getElementById('page-error');
+  const say = (m: string) => {
+    if (!pageError) { window.alert(m); return; }
+    pageError.textContent = m; pageError.hidden = false;
+    pageError.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  async function post(action: string, body: Record<string, unknown> = {}) {
+    const r = await fetch(`/api/marketplace/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const b = await r.json().catch(() => ({}));
+    return { ok: r.ok && b.ok, body: b };
+  }
+  const reloadOr = (res: any, fallback: string) => {
+    if (res.ok) { window.location.reload(); return; }
+    say(res.body.error || fallback);
+  };
+
+  document.getElementById('zone-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const f = new FormData(form);
+    const prefixes = String(f.get('postcodePrefixes') ?? '')
+      .split(',').map((x) => x.trim()).filter(Boolean);
+    const res = await post('shipping/zone', {
+      name: f.get('name'),
+      states: f.getAll('states').map(String),
+      postcodePrefixes: prefixes,
+      priority: f.get('priority') ? Number(f.get('priority')) : 100,
+    });
+    if (res.ok) { window.location.reload(); return; }
+    const el = document.getElementById('zone-error')!;
+    el.textContent = res.body.error || 'Could not add the zone.'; el.hidden = false;
+  });
+
+  document.querySelectorAll('.method-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(form as HTMLFormElement);
+      const opt = (k: string) => {
+        const v = String(f.get(k) ?? '').trim();
+        return v ? v : undefined;
+      };
+      const num = (k: string) => {
+        const v = String(f.get(k) ?? '').trim();
+        return v ? Number(v) : null;
+      };
+      reloadOr(await post('shipping/method', {
+        zoneId: Number((form as HTMLElement).dataset.zone),
+        name: f.get('name'),
+        kind: f.get('kind'),
+        priceRupees: f.get('priceRupees'),
+        freeAboveRupees: opt('freeAboveRupees'),
+        perKgRupees: opt('perKgRupees'),
+        perItemRupees: opt('perItemRupees'),
+        carrier: opt('carrier') ?? null,
+        minDays: num('minDays'),
+        maxDays: num('maxDays'),
+      }), 'Could not add the method.');
+    });
+  });
+
+  document.querySelectorAll('[data-zone-off]').forEach((b) => b.addEventListener('click', async () => {
+    const reason = window.prompt('Withdrawing this zone changes what buyers are charged. Why?');
+    if (!reason) return;
+    reloadOr(await post('shipping/zone-off', {
+      zoneId: Number((b as HTMLElement).dataset.zoneOff), reason,
+    }), 'Could not withdraw the zone.');
+  }));
+
+  document.querySelectorAll('[data-method-off]').forEach((b) => b.addEventListener('click', async () => {
+    const reason = window.prompt('Withdrawing this method changes what buyers are charged. Why?');
+    if (!reason) return;
+    reloadOr(await post('shipping/method-off', {
+      methodId: Number((b as HTMLElement).dataset.methodOff), reason,
+    }), 'Could not withdraw the method.');
+  }));
+
+  document.getElementById('preview-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target as HTMLFormElement);
+    const out = document.getElementById('preview-out')!;
+    out.textContent = 'Quoting…';
+    const res = await post('shipping/preview', {
+      state: f.get('state') || null,
+      postcode: f.get('postcode') || null,
+      subtotalRupees: f.get('subtotalRupees'),
+      itemCount: Number(f.get('itemCount')) || 1,
+      weightGrams: Number(f.get('weightGrams')) || 0,
+    });
+    if (!res.ok) { out.textContent = res.body.error || 'Could not quote that address.'; return; }
+    const q = res.body.result;
+    if (q.notServiceable) {
+      out.textContent = 'You do not cover that address — a basket with your items in it would be refused at checkout.';
+      return;
+    }
+    if (q.absorbed) {
+      out.textContent = 'Nothing would be charged, because you have published no zone. You would pay the carriage.';
+      return;
+    }
+    // ONE rupee formatter, shared with every other client script. This was
+    // `Math.floor(q.amountMinor / 100)` inline — exact, and still arithmetic on
+    // money in a file that cannot import the server-side formatINR().
+    const rupees = formatMinor(q.amountMinor);
+    const days = q.minDays != null && q.maxDays != null ? `, ${q.minDays}–${q.maxDays} working days` : '';
+    out.textContent = `${rupees} — ${q.methodName} in “${q.zoneName}”${q.carrier ? ` via ${q.carrier}` : ''}${days}.`;
+  });
+</script>
+
+<style>
+  .tabs { display: flex; gap: 16px; margin: 18px 0; flex-wrap: wrap; }
+  .tabs a { padding: 6px 0; border-bottom: 2px solid transparent; text-decoration: none; }
+  .tabs a[aria-current='page'] { border-bottom-color: currentColor; font-weight: 600; }
+  .two-up { display: grid; gap: 12px; grid-template-columns: 1fr; }
+  @media (min-width: 640px) { .two-up { grid-template-columns: 1fr 1fr; } }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .row.between { justify-content: space-between; align-items: flex-start; }
+  .checks { display: grid; gap: 4px; grid-template-columns: 1fr 1fr; }
+  @media (min-width: 900px) { .checks { grid-template-columns: repeat(4, 1fr); } }
+  .choice { display: flex; gap: 8px; align-items: center; }
+  .muted { opacity: 0.75; }
+  .warn { font-weight: 600; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
+  .error { color: #b00020; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); }
+  fieldset { border: 1px solid currentColor; border-radius: 8px; padding: 12px; margin: 12px 0; }
+  legend { padding: 0 6px; font-weight: 600; }
+  .btn-small { padding: 4px 10px; font-size: 0.9em; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style>

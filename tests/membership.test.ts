@@ -67,23 +67,23 @@ beforeAll(async () => {
 describe('standing is DERIVED, never stored', () => {
   it('a membership whose term has passed reads as lapsed with no job having run', async () => {
     const p = await person('Lapsed Member');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2024-01-01', validTo: '2024-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2024-01-01', validTo: '2024-12-31' });
 
     // Nothing has updated the row. The database still says status = 'active'.
     const [row] = await db.select().from(s.memberships).where(eq(s.memberships.personId, p.id));
     expect(row.status).toBe('active');
 
     // And yet the answer for today is correct, because it is computed.
-    const a = await standing(db, national, p.id, 'athlete', { asAt: '2026-06-01' });
+    const a = await standing(db, national, p.id, 'instructor', { asAt: '2026-06-01' });
     expect(a.standing).toBe('lapsed');
     expect(a.covered).toBe(false);
   });
 
   it('answers for a date IN THE PAST, which is the question asked after an incident', async () => {
     const p = await person('Historic Member');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2024-01-01', validTo: '2024-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2024-01-01', validTo: '2024-12-31' });
 
-    const during = await standing(db, national, p.id, 'athlete', { asAt: '2024-06-15' });
+    const during = await standing(db, national, p.id, 'instructor', { asAt: '2024-06-15' });
     expect(during.standing).toBe('in_good_standing');
     expect(during.covered).toBe(true);
     // A stored `expired` flag could never have answered this.
@@ -92,8 +92,8 @@ describe('standing is DERIVED, never stored', () => {
 
   it('echoes the date it answered for, so a cached page cannot mislead', async () => {
     const p = await person('Echo Member');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
-    const a = await standing(db, national, p.id, 'athlete', { asAt: '2026-03-03' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    const a = await standing(db, national, p.id, 'instructor', { asAt: '2026-03-03' });
     expect(a.asAt).toBe('2026-03-03');
   });
 
@@ -121,14 +121,14 @@ describe('"no expiry recorded" is its own answer', () => {
 describe('the distinctions a boolean would destroy', () => {
   it('lapsed and revoked are both "not a member" and are not the same thing', async () => {
     const lapsedP = await person('Just Lapsed');
-    await renew(db, ctx, { personId: lapsedP.id, category: 'athlete', validFrom: '2024-01-01', validTo: '2024-06-30' });
+    await renew(db, ctx, { personId: lapsedP.id, category: 'instructor', validFrom: '2024-01-01', validTo: '2024-06-30' });
 
     const revokedP = await person('Was Revoked');
-    const r = await renew(db, ctx, { personId: revokedP.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    const r = await renew(db, ctx, { personId: revokedP.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     await revoke(db, ctx, r.membershipId, 'Disciplinary outcome');
 
-    const a = await standing(db, national, lapsedP.id, 'athlete', { asAt: '2026-06-01' });
-    const b = await standing(db, national, revokedP.id, 'athlete', { asAt: '2026-06-01' });
+    const a = await standing(db, national, lapsedP.id, 'instructor', { asAt: '2026-06-01' });
+    const b = await standing(db, national, revokedP.id, 'instructor', { asAt: '2026-06-01' });
 
     expect(a.standing).toBe('lapsed');
     expect(b.standing).toBe('revoked');
@@ -141,11 +141,11 @@ describe('the distinctions a boolean would destroy', () => {
 
   it('a federation decision outranks the calendar', async () => {
     const p = await person('Suspended Today');
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     await suspend(db, ctx, r.membershipId, 'Pending investigation');
 
     // The dates are current. The membership is not.
-    const a = await standing(db, national, p.id, 'athlete', { asAt: '2026-06-01' });
+    const a = await standing(db, national, p.id, 'instructor', { asAt: '2026-06-01' });
     expect(a.standing).toBe('suspended');
     expect(a.covered).toBe(false);
     expect(a.explanation).toMatch(/not a lapse/);
@@ -153,18 +153,18 @@ describe('the distinctions a boolean would destroy', () => {
 
   it('reinstatement returns a suspended membership to active, and needs a reason', async () => {
     const p = await person('Reinstated');
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     await suspend(db, ctx, r.membershipId, 'Pending investigation');
 
     await expect(reinstate(db, ctx, r.membershipId, '  ')).rejects.toThrow(/reason/i);
     await reinstate(db, ctx, r.membershipId, 'Investigation closed, no case to answer');
 
-    expect((await standing(db, national, p.id, 'athlete', { asAt: '2026-06-01' })).standing).toBe('in_good_standing');
+    expect((await standing(db, national, p.id, 'instructor', { asAt: '2026-06-01' })).standing).toBe('in_good_standing');
   });
 
   it('only a suspended membership can be reinstated', async () => {
     const p = await person('Never Suspended');
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     await expect(reinstate(db, ctx, r.membershipId, 'x')).rejects.toThrow(/Only a suspended/);
   });
 
@@ -174,15 +174,15 @@ describe('the distinctions a boolean would destroy', () => {
     const p = await person('Mixed Categories');
     const r = await renew(db, ctx, { personId: p.id, category: 'official', validFrom: '2024-01-01', validTo: '2024-12-31' });
     await revoke(db, ctx, r.membershipId, 'Licence withdrawn');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
 
     expect((await standing(db, national, p.id, 'official', { asAt: '2026-06-01' })).standing).toBe('revoked');
-    expect((await standing(db, national, p.id, 'athlete', { asAt: '2026-06-01' })).standing).toBe('in_good_standing');
+    expect((await standing(db, national, p.id, 'instructor', { asAt: '2026-06-01' })).standing).toBe('in_good_standing');
   });
 
   it('never registered is distinct from lapsed', async () => {
     const p = await person('No Membership');
-    const a = await standing(db, national, p.id, 'athlete', { asAt: '2026-06-01' });
+    const a = await standing(db, national, p.id, 'instructor', { asAt: '2026-06-01' });
     expect(a.standing).toBe('never_registered');
     expect(a.membership).toBeNull();
   });
@@ -191,19 +191,19 @@ describe('the distinctions a boolean would destroy', () => {
 describe('picking which membership speaks for the person', () => {
   it('a renewal makes the person current even though an older term lapsed', async () => {
     const p = await person('Renewed After Gap');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2024-01-01', validTo: '2024-12-31' });
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2024-01-01', validTo: '2024-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
 
     // Reporting "the most recent row" would be right here by luck. Reporting
     // "the strongest answer" is right by construction.
-    const a = await standing(db, national, p.id, 'athlete', { asAt: '2026-06-01' });
+    const a = await standing(db, national, p.id, 'instructor', { asAt: '2026-06-01' });
     expect(a.standing).toBe('in_good_standing');
     expect(a.membership!.validFrom).toBe('2026-01-01');
   });
 
   it('resolveStanding prefers good standing over a lapsed row regardless of order', () => {
-    const lapsed = { id: 1, category: 'athlete', status: 'expired', validFrom: '2024-01-01', validTo: '2024-12-31' };
-    const current = { id: 2, category: 'athlete', status: 'active', validFrom: '2026-01-01', validTo: '2026-12-31' };
+    const lapsed = { id: 1, category: 'instructor', status: 'expired', validFrom: '2024-01-01', validTo: '2024-12-31' };
+    const current = { id: 2, category: 'instructor', status: 'active', validFrom: '2026-01-01', validTo: '2026-12-31' };
     for (const rows of [[lapsed, current], [current, lapsed]]) {
       expect(resolveStanding(rows, '2026-06-01').standing).toBe('in_good_standing');
     }
@@ -214,27 +214,27 @@ describe('renewal will not invent a term', () => {
   it('REFUSES when validTo is omitted entirely', async () => {
     const p = await person('No Term Given');
     await expect(
-      renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01' } as any)
+      renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01' } as any)
     ).rejects.toThrow(/will not assume a term/);
   });
 
   it('ACCEPTS an explicit null, because that is a stated decision', async () => {
     const p = await person('Explicit Open Ended');
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: null });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: null });
     expect(r.membershipId).toBeGreaterThan(0);
   });
 
   it('refuses a term that ends before it begins', async () => {
     const p = await person('Backwards Term');
     await expect(
-      renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-06-01', validTo: '2026-01-01' })
+      renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-06-01', validTo: '2026-01-01' })
     ).rejects.toThrow(/cannot end before it begins/);
   });
 
   it('refuses a malformed date rather than coercing it', async () => {
     const p = await person('Bad Date');
     await expect(
-      renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '01/01/2026', validTo: null })
+      renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '01/01/2026', validTo: null })
     ).rejects.toThrow(/ISO date/);
   });
 
@@ -249,8 +249,8 @@ describe('renewal will not invent a term', () => {
 describe('a gap is reported, never hidden', () => {
   it('reports the days a person was uncovered between two terms', async () => {
     const p = await person('Gap Member');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2025-01-01', validTo: '2025-12-31' });
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-03-01', validTo: '2026-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2025-01-01', validTo: '2025-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-03-01', validTo: '2026-12-31' });
 
     // 2026-01-01 to 2026-02-28 inclusive = 59 days uncovered.
     expect(r.previous!.gapDays).toBe(59);
@@ -260,15 +260,15 @@ describe('a gap is reported, never hidden', () => {
 
   it('reports a gap of zero for a seamless renewal', async () => {
     const p = await person('Seamless');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2025-01-01', validTo: '2025-12-31' });
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2025-01-01', validTo: '2025-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     expect(r.previous!.gapDays).toBe(0);
   });
 
   it('reports an overlap when the new term starts early', async () => {
     const p = await person('Early Renewal');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2025-01-01', validTo: '2025-12-31' });
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2025-11-01', validTo: '2026-10-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2025-01-01', validTo: '2025-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2025-11-01', validTo: '2026-10-31' });
     expect(r.overlapsPrevious).toBe(true);
     expect(r.previous!.gapDays).toBe(0);
   });
@@ -276,21 +276,21 @@ describe('a gap is reported, never hidden', () => {
   it('reports NULL rather than 0 when the previous term had no end', async () => {
     // Zero would claim continuity this module cannot establish.
     const p = await person('Following Open Ended');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2020-01-01', validTo: null });
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2020-01-01', validTo: null });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     expect(r.previous!.gapDays).toBeNull();
   });
 
   it('reports no previous for a first membership', async () => {
     const p = await person('First Ever');
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     expect(r.previous).toBeNull();
   });
 
   it('supersedes the old term WITHOUT rewriting its dates', async () => {
     const p = await person('History Preserved');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2024-01-01', validTo: '2024-12-31' });
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2024-01-01', validTo: '2024-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
 
     const rows = await db.select().from(s.memberships).where(eq(s.memberships.personId, p.id));
     const old = rows.find((r: any) => String(r.validFrom).startsWith('2024'));
@@ -304,19 +304,19 @@ describe('a gap is reported, never hidden', () => {
 describe('a revocation cannot be undone by issuing a new card', () => {
   it('REFUSES to renew over a revoked membership', async () => {
     const p = await person('Revoked Then Renewed');
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     await revoke(db, ctx, r.membershipId, 'Serious breach');
 
     // Otherwise any administrator could reverse a federation decision by
     // filling in a form — which is exactly the control revocation provides.
     await expect(
-      renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2027-01-01', validTo: '2027-12-31' })
+      renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2027-01-01', validTo: '2027-12-31' })
     ).rejects.toThrow(/undo it without the decision that reversed it/);
   });
 
   it('every state change requires a recorded reason', async () => {
     const p = await person('Reason Required');
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     for (const fn of [suspend, revoke]) {
       await expect(fn(db, ctx, r.membershipId, '')).rejects.toThrow(/reason/i);
       await expect(fn(db, ctx, r.membershipId, '   ')).rejects.toThrow(/reason/i);
@@ -325,7 +325,7 @@ describe('a revocation cannot be undone by issuing a new card', () => {
 
   it('writes the reason to the audit trail, not only to the row', async () => {
     const p = await person('Audited Revocation');
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     await revoke(db, ctx, r.membershipId, 'Recorded for the audit');
 
     // Scoped to THIS membership — earlier tests in this file revoke too, and
@@ -346,11 +346,11 @@ describe('there is only ONE path to issuing a membership', () => {
     // reverse a federation decision by filling in a form. It now delegates.
     const { issueMembership } = await import('../src/db/federation');
     const p = await person('Legacy Path');
-    const r = await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    const r = await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
     await revoke(db, ctx, r.membershipId, 'Serious breach');
 
     await expect(
-      issueMembership(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2027-01-01', validTo: '2027-12-31' })
+      issueMembership(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2027-01-01', validTo: '2027-12-31' })
     ).rejects.toThrow(/undo it without the decision that reversed it/);
   });
 
@@ -358,14 +358,14 @@ describe('there is only ONE path to issuing a membership', () => {
     const { issueMembership } = await import('../src/db/federation');
     const p = await person('Legacy No Term');
     await expect(
-      issueMembership(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01' } as any)
+      issueMembership(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01' } as any)
     ).rejects.toThrow(/will not assume a term/);
   });
 
   it('and still returns the { id } shape its callers expect', async () => {
     const { issueMembership } = await import('../src/db/federation');
     const p = await person('Legacy Shape');
-    const m = await issueMembership(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: null });
+    const m = await issueMembership(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: null });
     expect(m.id).toBeGreaterThan(0);
   });
 });
@@ -373,15 +373,15 @@ describe('there is only ONE path to issuing a membership', () => {
 describe('scope', () => {
   it('a state administrator cannot read another state\'s standing', async () => {
     const p = await person('Jharkhand Person', JH);
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
-    await expect(standing(db, brAdmin(), p.id, 'athlete')).rejects.toThrow(/Forbidden/);
-    await expect(standing(db, jhAdmin(), p.id, 'athlete')).resolves.toBeTruthy();
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    await expect(standing(db, brAdmin(), p.id, 'instructor')).rejects.toThrow(/Forbidden/);
+    await expect(standing(db, jhAdmin(), p.id, 'instructor')).resolves.toBeTruthy();
   });
 
   it('a state administrator cannot renew in another state', async () => {
     const p = await person('Jharkhand Renewal', JH);
     await expect(
-      renew(db, { principal: brAdmin() }, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: null })
+      renew(db, { principal: brAdmin() }, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: null })
     ).rejects.toThrow(/Forbidden/);
   });
 });
@@ -389,11 +389,11 @@ describe('scope', () => {
 describe('the lapsing list', () => {
   beforeAll(async () => {
     const a = await person('Lapses In Ten', JH);
-    await renew(db, ctx, { personId: a.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-06-11' });
+    await renew(db, ctx, { personId: a.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-06-11' });
     const b = await person('Lapses In Sixty', JH);
-    await renew(db, ctx, { personId: b.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-07-31' });
+    await renew(db, ctx, { personId: b.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-07-31' });
     const c = await person('Bihar Lapses Soon', BR);
-    await renew(db, { principal: national }, { personId: c.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-06-05' });
+    await renew(db, { principal: national }, { personId: c.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-06-05' });
   });
 
   it('lists only what lapses inside the window, soonest first', async () => {
@@ -442,11 +442,11 @@ describe('the lapsing list', () => {
 describe('history shows everything, including what expired', () => {
   it('returns every term with the standing it had on the date asked about', async () => {
     const p = await person('Full History');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2024-01-01', validTo: '2024-12-31' });
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2024-01-01', validTo: '2024-12-31' });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31' });
 
     const h = await history(db, national, p.id, { asAt: '2024-06-01' });
-    const athlete = h.byCategory.find((c) => c.category === 'athlete')!;
+    const athlete = h.byCategory.find((c) => c.category === 'instructor')!;
     expect(athlete.terms.length).toBe(2);
     // As at mid-2024 the 2024 term was current and the 2026 one had not begun.
     expect(athlete.terms.find((t: any) => t.validFrom === '2024-01-01')!.standingAsAt).toBe('in_good_standing');
@@ -456,9 +456,9 @@ describe('history shows everything, including what expired', () => {
 
   it('omits categories the person never held, rather than printing empty ones', async () => {
     const p = await person('One Category Only');
-    await renew(db, ctx, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: null });
+    await renew(db, ctx, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: null });
     const h = await history(db, national, p.id);
-    expect(h.byCategory.map((c) => c.category)).toEqual(['athlete']);
+    expect(h.byCategory.map((c) => c.category)).toEqual(['instructor']);
   });
 });
 

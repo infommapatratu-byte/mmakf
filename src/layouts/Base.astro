@@ -169,7 +169,16 @@ const orgSchema = {
     <meta property="og:url" content={canonical} />
     <meta property="og:site_name" content="MMAKF — Modern Martial Arts Karate-Do Federation of India" />
     <meta property="og:locale" content="en_IN" />
+    {/* The image the card declares. `summary_large_image` shipped with NO
+        og:image and no twitter:image, so every share of every MMAKF page —
+        WhatsApp, X, LinkedIn, Slack — rendered a blank card. A card format that
+        promises artwork and supplies none is worse than `summary`: the platform
+        reserves the space and shows an empty box beside the federation's name.
+        The crest is the one image that is true of every page. */}
+    <meta property="og:image" content={CREST_ABSOLUTE} />
+    <meta property="og:image:alt" content="The MMAKF crest" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content={CREST_ABSOLUTE} />
     <link rel="canonical" href={canonical} />
     {/* admin.mmakf.in is never indexed. The header is belt to robots.txt's
         braces — a header travels with the response, and cannot be missed by a

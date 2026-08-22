@@ -110,7 +110,7 @@ const {
   createSchedule, draftVersion, publishVersion, defineSeason,
 } = await import('@/db/scheduling');
 
-const { tlsFor } = await import('./db-tls.mjs');
+const { tlsFor, tlsHint } = await import('./db-tls.mjs');
 const client = postgres(url, { max: 1, prepare: false, connect_timeout: 15, idle_timeout: 20, ...tlsFor(url) });
 const db = drizzle(client, { schema: s });
 
@@ -240,6 +240,27 @@ try {
   console.log(`\nDemonstration register: ${dojos.length} clubs`);
   for (const d of dojos) console.log(`  ${d.code}  ${d.name}`);
   console.log('\nOpen /dojos with the same DATABASE_URL to see them.');
+} catch (err) {
+  // A seed that stopped part way used to end as an unhandled rejection: node
+  // printed a stack out of the driver and not one word about the run. Worse, the
+  // close below then rejected on its own — there is nothing to close on a
+  // connection that never opened — and that second failure is the one left on
+  // screen, having buried the first. So the fault is caught and stated once
+  // here, and the close is allowed to fail in silence, because by then it has
+  // nothing left to tell anyone.
+  console.error(`\nFAILED: ${err.message}`);
+
+  // A certificate failure reads nothing like what it is, so nobody goes back to
+  // re-check a password that was never at fault. The refusal at the top of this
+  // file admits loopback only and tlsFor() leaves TLS off there, so today this
+  // cannot fire — it is written anyway, because the day that refusal is relaxed
+  // is exactly the day nobody remembers to come back and add it.
+  const hint = tlsHint(err);
+  if (hint) console.error(hint);
+
+  // Not process.exit(): the close below is what releases the socket, and the
+  // exit code still has to reach whoever ran this from a shell script.
+  process.exitCode = 1;
 } finally {
-  await client.end({ timeout: 5 });
+  await client.end({ timeout: 5 }).catch(() => {});
 }

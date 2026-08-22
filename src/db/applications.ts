@@ -31,7 +31,7 @@
 // is received, not that somebody will call within 48 hours. No programme is
 // described as available that is not published.
 
-import { and, asc, desc, eq, inArray, isNull, isNotNull, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, isNotNull, notInArray, or, sql } from 'drizzle-orm';
 import crypto from 'node:crypto';
 import * as o from './operations.schema';
 import * as e from './engagement.schema';
@@ -40,6 +40,11 @@ import * as e from './engagement.schema';
 import { stateUnits } from './schema';
 import { allocateFederationId, writeAudit, type AuditContext } from './federation';
 import { activeFramework, computeFee } from './fees';
+// The federation has FINISHED with these. One definition, in the module that
+// wrote the reasoning down — an application the office has declined is not an
+// application waiting for a quotation, and two lists that drifted apart would
+// have one screen chasing schools another screen had already answered.
+import { CLOSED_APPLICATION_STATUSES } from './auto-quote';
 import {
   captureLead, resolveInstitution, submitTrainingRequest, isEngagementError,
   type Audience, type LeadSource, AUDIENCES,
@@ -1045,7 +1050,7 @@ async function findDuplicate(db: DB, app: any): Promise<{ id: number; ref: strin
       sql`${o.institutionApplications.id} <> ${app.id}`,
       inArray(o.institutionApplications.status, [
         'submitted', 'acknowledged', 'under_review', 'information_requested',
-        'program_design', 'quoted', 'proposed', 'approved', 'contracted',
+        'program_design', 'awaiting_quotation', 'quoted', 'proposed', 'approved', 'contracted',
       ])
     ))
     .orderBy(desc(o.institutionApplications.id))
@@ -1057,6 +1062,11 @@ async function findDuplicate(db: DB, app: any): Promise<{ id: number; ref: strin
 
 export const REVIEW_STATUSES = [
   'acknowledged', 'under_review', 'information_requested', 'program_design',
+  // Reachable by a human as well as by the automation (migration 0040). An
+  // administrator who has read an application and knows only the training
+  // office can price it should be able to say so in the same word the engine
+  // uses — two vocabularies for one state is how a queue ends up half visible.
+  'awaiting_quotation',
   'quoted', 'proposed', 'approved', 'contracted', 'declined', 'expired',
 ] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
@@ -1074,6 +1084,11 @@ const APPLICANT_WORDING: Record<ReviewStatus, string> = {
   under_review: 'MMAKF is reviewing your requirements.',
   information_requested: 'MMAKF needs a little more information from you.',
   program_design: 'MMAKF is designing a programme for your institution.',
+  // NO FIGURE, NO DATE, and both omissions are deliberate. There is no amount
+  // to give — that is what this state means — and the federation has published
+  // no turnaround, so the sentence says who has it and stops.
+  awaiting_quotation:
+    'MMAKF has your requirements and the training office is preparing your quotation.',
   quoted: 'A quotation has been prepared for your institution.',
   proposed: 'A proposal has been sent to your institution.',
   approved: 'Your programme has been approved.',
@@ -1220,6 +1235,135 @@ export async function applicationQueue(
     .where(and(...where))
     .orderBy(desc(o.institutionApplications.leadScore), desc(o.institutionApplications.submittedAt))
     .limit(Math.min(opts.limit ?? 50, MAX_QUEUE_ROWS));
+}
+
+export interface AwaitingQuotationRow {
+  id: number;
+  ref: string;
+  institutionName: string;
+  status: string;
+  submittedAt: unknown;
+  city: string | null;
+  stateName: string | null;
+  participantCount: number | null;
+  ownerRole: string | null;
+  /** False when the application produced no training request at all. */
+  hasRequest: boolean;
+}
+
+export interface AwaitingQuotation {
+  /** What this account can reach. 'none' is not the same statement as "there are none". */
+  scope: 'all' | 'scoped' | 'none';
+  /** The WHOLE queue in scope, counted in the same predicate that listed it. */
+  total: number;
+  /** The first `limit` of them, oldest first. */
+  rows: AwaitingQuotationRow[];
+  limit: number;
+  /** True when `total` exceeds what `rows` holds. */
+  truncated: boolean;
+}
+
+/**
+ * THE NEGATIVE JOIN: open applications that have reached no quotation at all.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY IT IS A FUNCTION AND NOT A QUERY IN THE PAGE
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * applicationQueue() answers "what is in this table?". It cannot answer this,
+ * because the answer is about a row that DOES NOT EXIST — an application with no
+ * quotation is invisible on /admin/quotes and indistinguishable on
+ * /admin/applications from one that has been quoted. /admin/pipeline wrote the
+ * query itself, which meant the federation's scope predicate for institutional
+ * applications lived in two places and a change to one would silently not reach
+ * the other. It lives here now, beside the queue it belongs with, and the page
+ * calls it.
+ *
+ * It is also the single number that says what today's federation is waiting on.
+ * With no fee framework published, computeFee() can price nothing, so every open
+ * application lands here — and that claim is only worth making if a test can
+ * make it, publish a framework, and watch the number move with no code change.
+ * tests/loop-visible.test.ts does exactly that.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT THE PREDICATE IS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * A LEFT JOIN from the application's training request to `quotes`, kept where
+ * `quotes.id IS NULL`. That also catches an application which produced no
+ * training request at all — that one has no quotation either, and for a worse
+ * reason, so `hasRequest` says which it is rather than merging the two.
+ *
+ * Drafts are excluded because they are the applicant's unfinished business.
+ * Declined, withdrawn and expired applications are excluded because they have
+ * been ANSWERED: counting them would inflate the only figure on that page
+ * anybody acts on, and hand somebody a list of schools to chase that the
+ * federation has already replied to.
+ */
+export async function applicationsAwaitingQuotation(
+  db: DB, principal: Principal, opts: { limit?: number } = {}
+): Promise<AwaitingQuotation> {
+  assertCanAnywhere(principal, 'engagement:read');
+  const limit = Math.min(Math.max(opts.limit ?? 100, 1), MAX_QUEUE_ROWS);
+  const scopes = visibleScopes(principal, 'engagement:read');
+
+  if (scopes.kind === 'none') {
+    return { scope: 'none', total: 0, rows: [], limit, truncated: false };
+  }
+
+  const where: any[] = [
+    sql`${o.institutionApplications.status} <> 'draft'`,
+    notInArray(o.institutionApplications.status, CLOSED_APPLICATION_STATUSES as any),
+    isNull(e.quotes.id),
+  ];
+
+  if (scopes.kind === 'scoped') {
+    const clauses: any[] = [];
+    if (scopes.states.length) clauses.push(inArray(o.institutionApplications.stateUnitId, scopes.states));
+    if (scopes.districts.length) clauses.push(inArray(o.institutionApplications.districtUnitId, scopes.districts));
+    if (scopes.institutions.length) clauses.push(inArray(o.institutionApplications.institutionId, scopes.institutions));
+    // A dojo binding lands here with nothing to contribute: an institutional
+    // application does not sit inside a dojo. Refusing is the fail-closed
+    // reading; an empty or() would be no WHERE at all, which widens to every row.
+    if (!clauses.length) return { scope: 'none', total: 0, rows: [], limit, truncated: false };
+    where.push(or(...clauses));
+  }
+
+  const rows = await db
+    .select({
+      id: o.institutionApplications.id,
+      ref: o.institutionApplications.ref,
+      institutionName: o.institutionApplications.institutionName,
+      status: o.institutionApplications.status,
+      submittedAt: o.institutionApplications.submittedAt,
+      city: o.institutionApplications.city,
+      stateName: o.institutionApplications.stateName,
+      participantCount: o.institutionApplications.participantCount,
+      ownerRole: o.institutionApplications.ownerRole,
+      hasRequest: sql<boolean>`${o.institutionApplications.requestId} is not null`,
+    })
+    .from(o.institutionApplications)
+    .leftJoin(e.quotes, eq(e.quotes.requestId, o.institutionApplications.requestId))
+    .where(and(...where))
+    .orderBy(asc(o.institutionApplications.submittedAt), asc(o.institutionApplications.id))
+    .limit(limit);
+
+  // Counted separately and in the SAME predicate, so the headline figure is the
+  // whole queue and not the length of the page of it that was listed.
+  const [counted] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(o.institutionApplications)
+    .leftJoin(e.quotes, eq(e.quotes.requestId, o.institutionApplications.requestId))
+    .where(and(...where));
+
+  const total = Number(counted?.n ?? 0);
+  return {
+    scope: scopes.kind === 'all' ? 'all' : 'scoped',
+    total,
+    rows: rows as AwaitingQuotationRow[],
+    limit,
+    truncated: total > rows.length,
+  };
 }
 
 export async function applicationDetail(db: DB, principal: Principal, applicationId: number) {

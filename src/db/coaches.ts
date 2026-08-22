@@ -746,6 +746,19 @@ export async function recommendCoaches(
 ) {
   assertCanAnywhere(ctx.principal, 'coach:assign');
 
+  // THE PROGRAMME HAS TO BE PAID FOR, and paid for over the window being
+  // staffed. The federation's engine may run only against a programme a
+  // verified payment activated — recommending coaches for something nobody has
+  // bought puts real people's working weeks against work that will not happen,
+  // and the recommendation is the step everyone downstream trusts.
+  //
+  // Checked at BOTH ENDS of the criteria window rather than at "now": a
+  // programme paid for until March takes no coach for an April session, and the
+  // check that would miss that is the one that asks about today.
+  const { assertProgramActive } = await import('./activation');
+  await assertProgramActive(db, input.programId, input.criteria.startsAt);
+  await assertProgramActive(db, input.programId, input.criteria.endsAt);
+
   const ranked = await rankCandidates(db, ctx.principal, input.criteria);
   const eligible = ranked.filter((c) => c.eligible).slice(0, input.take ?? 3);
 

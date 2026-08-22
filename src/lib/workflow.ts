@@ -122,6 +122,29 @@ export interface StepSpec {
    * nobody is told.
    */
   optional?: boolean;
+  /**
+   * RUN THIS STEP AGAIN ON EVERY ATTEMPT, even though it already succeeded.
+   *
+   * A resumed run is the one place this engine reasons about a world that has
+   * moved. It skips the steps that succeeded and runs the rest exactly as
+   * written — which is right for effects (do not send the email twice) and
+   * wrong for facts (a person may have decided something in the days between
+   * the failure and the sweep). A run that stalled after pricing an application
+   * and resumed after somebody declined it would carry on and tell the school
+   * about a quotation for an application the federation had refused.
+   *
+   * So a step may declare itself a GUARD: re-checked every attempt, and by
+   * failing it stops the remainder of the run. A guard MUST BE READ-ONLY — it
+   * runs once per attempt, so anything it writes is written again — and it must
+   * be cheap, because it runs before every resume.
+   *
+   * Correcting the workflow definition does not help here: `sweepRetries()`
+   * re-reads the definition VERSION the run started under, so runs already in
+   * flight keep the steps they had. A guard is only a guard for the runs
+   * dispatched after it exists; the actions themselves still refuse
+   * independently, which is why src/db/automations.ts checks in both places.
+   */
+  recheck?: boolean;
 }
 
 export interface WorkflowSpec {
@@ -355,7 +378,9 @@ export async function runWorkflow(
   for (let seq = 0; seq < req.spec.steps.length; seq++) {
     const step = req.spec.steps[seq];
 
-    if (succeeded.has(seq)) {
+    // `recheck` steps are the exception: they are read-only guards and their
+    // whole purpose is to be asked again on a resume. See StepSpec.recheck.
+    if (succeeded.has(seq) && !step.recheck) {
       outcome.push({ seq, action: step.action, status: 'already_done' });
       continue;
     }

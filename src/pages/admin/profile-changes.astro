@@ -259,7 +259,8 @@ const fmtDate = (v: Date | string | null) => {
   {readFailed && (
     <ErrorState
       title="The change queue could not be read"
-      description="The register is configured but did not answer."
+      safe="Nothing was decided and no record changed. Reading this queue writes nothing."
+      body="The register is configured but did not answer."
       detail={failureDetail}
       retryHref={SELF}
     />
@@ -268,12 +269,20 @@ const fmtDate = (v: Date | string | null) => {
   {!notConfigured && !readFailed && rows.length === 0 && (
     <EmptyState
       title="No governed changes are waiting"
-      description="Members can correct most of their own profile without review. Only a name, a date of birth, a gender or a nationality arrives here."
+      body="Members can correct most of their own profile without review — only a name, a date of birth, a gender or a nationality arrives here. Note that no surface calls requestProfileChange() yet, so this queue stays empty until one does."
+      action={{ label: 'Back to the member register', href: h('/admin/membership') }}
     />
   )}
 
   {rows.map((r) => {
-    const isMine = myUserId != null && r.requestedByUserId === myUserId;
+    // WITHHELD FOR AN UNATTRIBUTABLE CREDENTIAL TOO, not just for a match.
+    //
+    // `myUserId != null && …` would have offered the control to the shared office
+    // login for its own request, because a null userId matches nothing. The
+    // module now refuses that outright (`unattributable_decider`), so offering
+    // the button would be offering one that always errors.
+    const unattributable = myUserId == null || r.requestedByUserId == null;
+    const isMine = unattributable || r.requestedByUserId === myUserId;
     return (
       <article class="req">
         <header class="req__head">
@@ -322,12 +331,20 @@ const fmtDate = (v: Date | string | null) => {
         )}
 
         {isMine ? (
-          /* The module refuses a self-decision, so offering the control would
-             be offering a button that always errors. Said, not hidden. */
+          /* The module refuses both of these, so offering the control would be
+             offering a button that always errors. Said, not hidden — and the two
+             reasons are DIFFERENT facts and get different sentences. */
           <p class="notice">
-            You filed this request. It must be decided by somebody else — a
-            governed change approved by the person who asked for it is an
-            ordinary edit with extra steps.
+            {unattributable
+              ? myUserId == null
+                ? 'This screen is open under a shared credential, which identifies no individual. '
+                  + 'A governed change must be decided by a named account — one that can be shown '
+                  + 'to be somebody other than whoever filed the request. Sign in with your own account.'
+                : 'This request was filed by a credential that identifies no individual, so no '
+                  + 'decision on it could be shown to have been taken by somebody else. It must be '
+                  + 're-filed from a named account.'
+              : 'You filed this request. It must be decided by somebody else — a governed change '
+                + 'approved by the person who asked for it is an ordinary edit with extra steps.'}
           </p>
         ) : (
           <form method="POST" action={SELF} class="req__decide">

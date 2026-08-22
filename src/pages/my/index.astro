@@ -29,6 +29,7 @@ import { AcademyError, courseProgress, type CourseProgressReport } from '@/db/ac
 import { ForbiddenError } from '@/lib/rbac';
 import { liveNow, upcomingClasses } from '@/lib/youtube';
 import { resolveStanding, todayIso, type Standing } from '@/db/membership';
+import { dependantsOf } from '@/db/identity';
 
 export const prerender = false;
 
@@ -61,6 +62,10 @@ type Gate = 'no_database' | 'signed_out' | 'shared_credential' | 'no_person' | '
 
 let gate: Gate = 'ok';
 let person: any = null;
+/** How many people this member holds a VERIFIED relationship to. Gates the link. */
+let dependants = 0;
+/** Asserted claims awaiting a decision. Offers the link without conferring anything. */
+let pendingClaims = 0;
 let loadError: string | null = null;
 
 let passport: AthletePassport | null = null;
@@ -125,6 +130,43 @@ if (!configured) {
           )
           .orderBy(s.competitionEvents.startsOn)
           .limit(25);
+
+        // Does this member act for anybody?
+        //
+        // Asked so that /my/family is OFFERED to the people it is for and to
+        // nobody else. A permanent "My family" button on every member's page
+        // would tell a nineteen-year-old athlete the federation thinks they
+        // have dependants, and would lead to an empty page — which reads as a
+        // fault in their account rather than as the absence of a relationship.
+        //
+        // AN ASSERTED CLAIM COUNTS TOWARDS OFFERING THE LINK.
+        //
+        // dependantsOf() returns VERIFIED relationships only, and counting those
+        // alone left /my/family reachable only by typing the URL for the one
+        // person who most needs it: a parent who has filed a claim and is waiting
+        // on it. That page's "claims awaiting the federation's decision" section
+        // is the only place the answer lives. The claim still confers nothing —
+        // /my/family withholds every fact behind an unverified relationship — so
+        // offering the link discloses nothing it should not.
+        try {
+          const [verified, claimed] = await Promise.all([
+            dependantsOf(db(), person.id),
+            db().select({ id: s.personRelationships.id })
+              .from(s.personRelationships)
+              .where(and(
+                eq(s.personRelationships.holderPersonId, person.id),
+                eq(s.personRelationships.status, 'asserted'),
+              ))
+              .limit(1),
+          ]);
+          dependants = verified.length;
+          pendingClaims = claimed.length;
+        } catch {
+          // A relationship register that cannot be read is not a reason to fail
+          // the member's own page. The link is simply not offered.
+          dependants = 0;
+          pendingClaims = 0;
+        }
 
         const enrolments = await db()
           .select({ enrolment: s.enrolments, course: s.courses })
@@ -404,6 +446,11 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
             <a class="btn btn-gold" href="/my/passport">Open my athlete passport</a>
             <a class="btn btn-ghost" href="/my/courses" style="margin-left:10px">My courses</a>
             <a class="btn btn-ghost" href="/my/notifications" style="margin-left:10px">My notifications</a>
+            {(dependants > 0 || pendingClaims > 0) && (
+              <a class="btn btn-ghost" href="/my/family" style="margin-left:10px">
+                {dependants > 0 ? `My family (${dependants})` : 'My family — claim pending'}
+              </a>
+            )}
             <a class="btn btn-ghost" href="/live" style="margin-left:10px">Live classroom</a>
           </div>
         </>

@@ -2,6 +2,101 @@
 
 Content-key and schema migrations are recorded here (MASTER-SPEC §5.5).
 
+## 2.1.1 — 2026-08-22 — The belt ladder the federation actually awards
+
+Two corrections to `beltGrading` and `syllabus`, both reported by the federation
+against the live site.
+
+**THERE IS NO PURPLE BELT.** The kyu table published a Purple belt at 5th Kyu and
+the kata syllabus carried it twice more, as `Blue → Purple` and
+`Purple → Brown 3`. MMAKF awards no purple belt: 6th and 5th Kyu are both Blue,
+the second being a grade passed with the colour retained, and Brown 3 begins at
+4th Kyu as it always did. Ten kyu grades and the 5th Kyu examination fee are
+unchanged — only the colour was wrong. The swatch array in
+`src/pages/belt-system.astro` is a SECOND, INDEPENDENT encoding of the same
+ladder, keyed by position rather than by rank, so it had to be corrected in step;
+that duplication is now noted in the file against the day somebody edits one and
+not the other.
+
+**THE DAN LADDER RAN TO SIX AND STOPS AT TEN.** `beltGrading.dan` listed Shodan
+to Rokudan and glossed VI Dan as "Grandmaster level (Shihan)". Shotokan runs to
+Judan, and a federation publishing six is telling every senior karateka it holds
+no grade left to give them. All ten are now published, with the same
+n-years-after-the-previous rule the first six already used; the top two say they
+are conferred rather than examined. No migration is needed —
+`rank_records.grade_ordinal` and `grade_definitions.ordinal` were already
+documented as `dan: 1..10`.
+
+STILL OPEN, deliberately not changed here: `/about`, `/`, `/governance`, `README.md`
+and the MASTER-SPEC glossary each style the founder's VI Dan as
+"Grandmaster · Soke". That is a claim about a person's own grade, not about the
+ladder, and AUDIT-REGISTER P1-8 already holds it. Extending the ladder makes the
+wording harder to defend, so P1-8 wants a decision from the federation rather
+than an edit from here.
+
+## 2.1.0 — 2026-08-17 — Closing the five gaps the engine named (migration 0049)
+
+`docs/domains/scheduling.md` listed, by name, five things the scheduling engine
+deliberately did not do. All five are now built.
+
+**Attendance was being read and never written.** `session_attendance` had existed
+since the education wave and was READ by `src/db/grading.ts` — which counts a
+candidate's sessions since their last grade when deciding whether they may be
+examined — and by `src/db/athletes.ts`. NOTHING IN THE REPOSITORY EVER WROTE A
+ROW, so the count was always zero. `src/db/attendance.ts` is the writer, using
+the tables that already exist: `training_sessions` for the sheet, joined to an
+occurrence by the new `training_sessions.class_session_id`. A separate
+attendance table would have left grading blind to every class the engine ran.
+Three states — present, absent and NOT MARKED — with the third as the default,
+because filling in gaps invents training somebody did not do. An amendment
+records the value it replaced in the audit row. An `INSTRUCTOR` may mark THE
+SESSION THEY TEACH through a check against `class_sessions.coach_person_id`, and
+holds no `attendance:write` at all.
+
+**A revocable personal calendar feed.** `src/pages/calendar.ics.ts` refused to
+build one for a stated reason — it "needs a per-user secret in the URL and its
+own revocation story". `src/lib/calendar-feed.ts` is both halves:
+`calendar_feed_tokens` stores a SHA-256 of a 32-byte secret and never the secret,
+which is returned once and is absent from the audit trail too; revocation bites
+on the next poll; and unknown, revoked and malformed tokens all return the same
+404 so a URL cannot enumerate live ones. `/my/calendar/[secret].ics` serves it
+with `private, no-store`. A COACH feed carries BUSY BLOCKS ONLY — no class name,
+no venue, no student — because a teaching calendar is routinely shared and a year
+of named classes in it is a movement pattern for an adult who works with children.
+
+**A federation-wide announcement that cannot be sent by accident.**
+`src/lib/notifications.ts` still refuses to fan out above club scope
+automatically. `src/db/schedule-announce.ts` is the deliberate act it named: the
+audience is COUNTED AND FROZEN at draft time, the administrator TYPES the figure
+they were shown, and above 200 recipients a second person must agree — through
+`src/lib/approvals.ts`, which already has the once-only guard, not a second
+implementation. `sent_count` is recorded apart from `audience_count`, so somebody
+leaving the unit between draft and send is reported rather than hidden.
+
+**Windows that cross midnight.** Migration 0032's rule is UNCHANGED — one row
+still never means two days — but `setRules()` now performs the split itself:
+22:00–02:00 becomes 22:00–24:00 on the day and 00:00–02:00 on the next, wrapping
+Sunday onto Monday. `24:00` is storable only as a CLOSING time, and
+`zonedInstant()` maps it to the following midnight so the two halves abut
+exactly. Asking an administrator to enter two rows is how a timetable ends up
+with one half moved and the other left behind.
+
+**The admin resource view.** `/admin/timetable` is a grid of rooms against days
+for one week, plus the register at each class and a report of classes that ran
+with nobody marked. An empty cell means nothing is booked in that room — not that
+the room is open, which is a schedule and is said so.
+
+**Authority** — `DOJO_ADMIN` gains `attendance:read/write` (a club must be able
+to record who was at its own class) and `notification:read/send` (a club must be
+able to tell its own families the Sunday moved; the scope binding limits it to
+that club, and the threshold still applies). `INSTRUCTOR` gains
+`attendance:read`. `mass_notification` joins `APPROVAL_ACTIONS`.
+
+**Tests** — `tests/attendance.test.ts` (21), `tests/calendar-feed.test.ts` (18),
+`tests/schedule-announce.test.ts` (21), and seven more in
+`tests/scheduling.test.ts` for the overnight split. Migration
+`0050_data_api_lockdown.sql` puts the two new tables behind RLS.
+
 ## 2.0.0 — 2026-08-17 — The federation scheduling engine (migration 0032)
 
 **The defect.** MMAKF's opening hours lived in two English sentences on the
@@ -63,10 +158,47 @@ reported and left where they are.
 domain-event catalogue. The second fans out to everyone holding a place on the
 session, carrying the class and the time and NOT the reason.
 
-**Tests** — `tests/scheduling.test.ts` (58) and `tests/schedule-bootstrap.test.ts`
-(16). Documented in `docs/domains/scheduling.md`, including what was
-deliberately not built: calendar adapters, club-level change notification,
-nearby-club search, `/clubs/[slug]`, and rescheduling.
+**Club discovery and club pages** — `/clubs` is the SEARCH (currently-affiliated
+clubs, filtered by city, PIN code, age, audience, level, discipline and online
+availability, ordered by straight-line distance only where a venue carries real
+coordinates); `/dojos` remains the REGISTER, which also lists lapsed units.
+`/clubs/[slug]` is a club's own page — affiliation standing first, then ITS OWN
+published week, its classes, its rooms and its credentialed instructors. The
+instructor list is an INNER join on `instructor_quals`; a left join would have
+published every child at the club under "Who teaches here". A lapsed club has no
+page and returns a real 404. The sitemap expands only clubs that are affiliated
+AND carry a slug an administrator set.
+
+**Moving a class** — `rescheduleSession()` creates the successor and CARRIES
+EVERY LIVE BOOKING ONTO IT: a member whose Tuesday moved still has a place, and
+that is a different thing to tell them than a cancellation. The new time is
+checked exactly as a generated one is; `force` overrides and writes what it
+overrode to the audit row.
+
+**Finding a time for a school or corporate** — `deliveryOptions()` returns starts
+that satisfy facility available + instructor available + the client's own window
++ nothing else on the room + nothing else on the coach. `durationMinutes` is
+required with no default, for the reason src/db/booking.ts gives about session
+length.
+
+**Personal schedules and calendars** — `/my/schedule` shows a member their four
+weeks (cancelled and moved sessions included, struck through, with what
+happened) and what their club has open to book; it takes no identifier of any
+kind. `/clubs/[slug]/schedule.ics` is an always-anonymous subscribable feed of
+published occurrences and closures — no instructor per occurrence, no closure
+reasons, no seat counts.
+
+**Notification** — `CLASS_SESSION_RESCHEDULED` joins the catalogue, and
+`SCHEDULE_PUBLISHED` now fans out to the CLUB's own members via `persons.dojo_id`.
+It resolves to nobody for a national, state or district publication: "every
+member in the country" is not a fan-out this system performs because one
+administrator saved a form.
+
+**Tests** — `tests/scheduling.test.ts` (76), `tests/schedule-bootstrap.test.ts`
+(16) and `tests/clubs.test.ts` (18). Documented in `docs/domains/scheduling.md`,
+including what remains deliberately unbuilt: Google/Outlook two-way sync,
+federation-wide change notification, class-session attendance, and a window
+crossing midnight.
 
 ## 1.9.0 — 2026-08-11 — Real transactions + multi-agent audit remediation
 

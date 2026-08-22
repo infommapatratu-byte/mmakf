@@ -316,6 +316,25 @@ export async function startAstroDev(opts: StartOptions): Promise<DevServer> {
     proc.stdout?.on('data', (d) => (log += d));
     proc.stderr?.on('data', (d) => (log += d));
 
+    /**
+     * ANSI CODES ARE WHY THIS STRIPS BEFORE MATCHING, and the bug it caused was
+     * genuinely hard to see: the error said the server never came up while the
+     * log printed underneath it said
+     *
+     *   astro  v5.18.2  ready in 12779 ms
+     *
+     * The server was up. The regex was `ready in\s+\d+`, and astro's real output
+     * is `ready in\x1b[22m 12779`, so `\s+` never matched the escape sequence
+     * sitting between the words and the number. Detection then fell back to
+     * fetching the probe path — which compiles the page and its whole import
+     * graph — and under a loaded machine that could exceed the request timeout
+     * on every attempt until the window closed.
+     *
+     * Worse, it was INTERMITTENT: astro colourises based on TTY detection, so
+     * whether the escape codes appear at all depends on how the run was piped.
+     * The same tree passed and failed on alternate runs.
+     */
+    const strip = (s: string) => s.replace(/\[[0-9;]*m/g, '');
     const READY_LINE = /ready in\s+\d+/i;
     const until = Date.now() + (opts.readyTimeoutMs ?? 120_000);
     const probe = opts.probePath ?? '/';
@@ -324,7 +343,7 @@ export async function startAstroDev(opts: StartOptions): Promise<DevServer> {
       if (proc.exitCode !== null) {
         throw new Error(`astro dev exited with ${proc.exitCode} before serving:\n${log.slice(-3000)}`);
       }
-      if (READY_LINE.test(log)) break;
+      if (READY_LINE.test(strip(log))) break;
       try {
         const r = await fetch(base + probe, { signal: AbortSignal.timeout(30_000) });
         if (r.status) { await r.text(); break; }
@@ -334,6 +353,27 @@ export async function startAstroDev(opts: StartOptions): Promise<DevServer> {
       }
       await sleep(400);
     }
+
+    // ── WARM THE FIRST COMPILE ────────────────────────────────────────────
+    //
+    // "Listening" is not "able to answer". Astro dev compiles a route and its
+    // whole import graph on first request, and this project's graph is large:
+    // the shotokan library, the kata canon, every db module a page touches.
+    //
+    // The old readiness probe fetched a page and therefore paid that cost
+    // before any test ran — accidentally, but usefully. Trusting the ready LINE
+    // instead made boot detection reliable and handed the cold compile to the
+    // first TEST, which fetches with a 40s budget and duly timed out on
+    // /training/individual and /training/estimate: two routes with nothing
+    // wrong with them, failing because they happened to be first in the list.
+    //
+    // So the warm-up is explicit now rather than a side effect. Failure here is
+    // IGNORED: a probe path that legitimately errors — /live during a database
+    // outage is one, and is the thing that suite measures — must not stop the
+    // suite that is about to assert exactly that.
+    try {
+      await fetch(base + probe, { signal: AbortSignal.timeout(90_000) }).then((r) => r.text());
+    } catch { /* the tests will report it far better than this line could */ }
 
     return { base, log: () => log, stop };
   } catch (err) {

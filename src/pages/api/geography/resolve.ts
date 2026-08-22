@@ -142,7 +142,22 @@ export const GET: APIRoute = async ({ request, url }) => {
 
       const rows = await childrenOf(d, parentId, countryId ?? undefined);
       const active = rows.filter((a: any) => a.status === 'active');
-      return json({ loaded: active.length > 0, areas: active.map(shape) });
+
+      // `loaded` DESCRIBES THE REGISTER, NOT THIS ANSWER.
+      //
+      // It used to be `active.length > 0`, which reported a perfectly loaded
+      // LEAF area as loaded:false — and this file's own header tells callers to
+      // fall back to free text on exactly that flag. So a form asking for the
+      // children of a district that legitimately has none abandoned the register
+      // at the one point the register had a correct answer for it.
+      //
+      // Emptiness is carried by `areas: []` alone, which is what it means.
+      const anyAreas = await d
+        .select({ id: g.adminAreas.id })
+        .from(g.adminAreas)
+        .limit(1);
+
+      return json({ loaded: anyAreas.length > 0, areas: active.map(shape) });
     }
 
     // ── Resolution ──────────────────────────────────────────────────────────

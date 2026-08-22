@@ -63,7 +63,7 @@ import crypto from 'node:crypto';
 import { and, desc, eq } from 'drizzle-orm';
 import { db, isConfigured } from '@/db';
 import * as s from '@/db/schema';
-import { confirmPayment, markWebhookProcessed, recordWebhook } from '@/db/orders';
+import { confirmPayment, federationToday, markWebhookProcessed, recordWebhook } from '@/db/orders';
 import { writeAudit, type AuditContext } from '@/db/federation';
 import { createTask } from '@/db/tasks';
 import { razorpay, type VerifiedPayment } from '@/lib/payments';
@@ -485,7 +485,10 @@ async function applyRefund(dbi: any, ctx: AuditContext, body: any, processed: bo
 
     const order = (await tx.select().from(s.orders)
       .where(eq(s.orders.id, payment.orderId)).limit(1))[0];
-    const today = new Date().toISOString().slice(0, 10);
+    // The federation's own date. A refund posted at 02:00 IST is a refund on
+    // that day in India, and /admin/revenue nets it off within a period whose
+    // ends are computed in Asia/Kolkata. See federationToday() in src/db/orders.ts.
+    const today = federationToday();
 
     // Double entry, and never by deleting the original postings: the sale
     // happened and the refund happened, and the accounts must show both.

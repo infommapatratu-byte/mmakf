@@ -113,18 +113,26 @@ beforeAll(async () => {
   DOJO = dj.id;
 
   // The federation's published fees. Nothing in the code ships a rupee figure.
+  //
+  // AN INSTRUCTOR MEMBERSHIP, and the category is load-bearing. These fixtures
+  // were an ATHLETE membership, which createOrder() now refuses to price at all
+  // and configureTerm() refuses to record a term for: a student does not pay a
+  // membership fee for being a student. An instructor acts for the federation,
+  // so this is a charge MMAKF genuinely makes, and every assertion below —
+  // activation, replay, revocation, the term nobody stated — is the same test
+  // of the same engine on a membership that may exist.
   await db.insert(s.feeSchedule).values([
-    { code: 'membership.athlete.annual', label: 'Athlete membership (annual)', kind: 'membership', amountPaise: 50000, effectiveFrom: '2026-01-01', active: true },
-    { code: 'membership.unconfigured', label: 'Membership, term not stated', kind: 'membership', amountPaise: 40000, effectiveFrom: '2026-01-01', active: true },
+    { code: 'membership.instructor.annual', label: 'Instructor membership (annual)', kind: 'membership', amountPaise: 50000, effectiveFrom: '2026-01-01', active: true },
+    { code: 'membership.instructor.unconfigured', label: 'Instructor membership, term not stated', kind: 'membership', amountPaise: 40000, effectiveFrom: '2026-01-01', active: true },
     { code: 'entry.national', label: 'National championship entry', kind: 'event_entry', amountPaise: 80000, effectiveFrom: '2026-01-01', active: true },
     { code: 'booking.coaching', label: 'Personal coaching session', kind: 'course', amountPaise: 120000, effectiveFrom: '2026-01-01', active: true },
   ]);
 
   // What that membership fee BUYS — the federation's decision, recorded.
   await configureTerm(db, ctx(), {
-    feeCode: 'membership.athlete.annual', subject: 'membership',
-    membershipCategory: 'athlete', termMonths: 12,
-    approvedBy: 'Executive Committee', notes: 'Annual athlete membership.',
+    feeCode: 'membership.instructor.annual', subject: 'membership',
+    membershipCategory: 'instructor', termMonths: 12,
+    approvedBy: 'Executive Committee', notes: 'Annual instructor membership.',
   });
 
   const [ev] = await db.insert(s.competitionEvents).values({
@@ -149,7 +157,7 @@ describe('an entitlement is created ONLY from a server-verified payment', () => 
     const personId = await makePerson('Hopeful Payer');
     const order = await createOrder(db, null, {
       personId, email: 'hopeful@example.in',
-      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
     });
     // The browser's claim, in its strongest form: a payment attempt was even
     // opened at the gateway. It is still not a capture.
@@ -171,7 +179,7 @@ describe('an entitlement is created ONLY from a server-verified payment', () => 
   it('refuses an order whose payment is captured but whose confirmation never finished', async () => {
     const personId = await makePerson('Half Confirmed');
     const order = await createOrder(db, null, {
-      personId, lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      personId, lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
     });
     const payment = await beginPayment(db, order.id, {
       provider: 'razorpay', providerOrderId: `order_${crypto.randomBytes(5).toString('hex')}`,
@@ -186,7 +194,7 @@ describe('an entitlement is created ONLY from a server-verified payment', () => 
 
   it('an entitlement cannot be written without a payment — the schema says so', async () => {
     const order = await createOrder(db, null, {
-      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
     });
     const [line] = await db.select().from(s.orderLines).where(eq(s.orderLines.orderId, order.id));
     await expect(db.insert(s.entitlements).values({
@@ -201,7 +209,7 @@ describe('a captured membership fee reaches the register', () => {
   it('issues the membership, and the member then verifies', async () => {
     const personId = await makePerson('New Member');
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
       { personId }
     );
 
@@ -212,11 +220,11 @@ describe('a captured membership fee reaches the register', () => {
     expect(ent.paymentId).toBeTruthy();
     expect(ent.invoiceId).toBeTruthy();
     // WHICH published fee priced it, frozen at activation.
-    expect(ent.feeVersion).toMatch(/^membership\.athlete\.annual@2026-01-01#\d+$/);
+    expect(ent.feeVersion).toMatch(/^membership\.instructor\.annual@2026-01-01#\d+$/);
     expect(ent.activatedBy).toBe('system:entitlement-activation');
 
     // The register — the thing /verify reads.
-    const answer = await standing(db, admin, personId, 'athlete');
+    const answer = await standing(db, admin, personId, 'instructor');
     expect(answer.standing).toBe('in_good_standing');
     expect(answer.membership!.id).toBe(ent.subjectId);
 
@@ -227,7 +235,7 @@ describe('a captured membership fee reaches the register', () => {
   it('emits a domain event and writes an audit row for the activation', async () => {
     const personId = await makePerson('Audited Member');
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
       { personId }
     );
     const [ent] = await entitlementsOf(order.id);
@@ -248,7 +256,7 @@ describe('a captured membership fee reaches the register', () => {
   it('will not invent a term the federation has not published', async () => {
     const personId = await makePerson('Unconfigured Fee');
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.unconfigured' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.unconfigured' }],
       { personId }
     );
 
@@ -264,7 +272,7 @@ describe('a captured membership fee reaches the register', () => {
   });
 
   it('blocks rather than issuing when the order names no person', async () => {
-    const { order } = await payFor([{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }]);
+    const { order } = await payFor([{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }]);
     const [ent] = await entitlementsOf(order.id);
     expect(ent.status).toBe('blocked');
     expect(ent.reason).toMatch(/names no person/i);
@@ -273,12 +281,12 @@ describe('a captured membership fee reaches the register', () => {
   it('a payment does not reverse a revocation', async () => {
     const personId = await makePerson('Revoked Member');
     await db.insert(s.memberships).values({
-      personId, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31',
+      personId, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31',
       status: 'revoked', revokedReason: 'Disciplinary decision.',
     });
 
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
       { personId }
     );
     const [ent] = await entitlementsOf(order.id);
@@ -297,7 +305,7 @@ describe('a replay does not duplicate anything', () => {
   it('re-running activation issues ONE membership and ONE entitlement', async () => {
     const personId = await makePerson('Replayed Member');
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
       { personId }
     );
 
@@ -314,7 +322,7 @@ describe('a replay does not duplicate anything', () => {
   it('a replayed webhook capture confirms once and issues once', async () => {
     const personId = await makePerson('Webhook Replay');
     const order = await createOrder(db, null, {
-      personId, lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      personId, lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
     });
     const payment = await beginPayment(db, order.id, {
       provider: 'razorpay', providerOrderId: `order_${crypto.randomBytes(5).toString('hex')}`,
@@ -334,7 +342,7 @@ describe('a replay does not duplicate anything', () => {
   it('the guard is a database constraint, not a code path', async () => {
     const personId = await makePerson('Constraint Proof');
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
       { personId }
     );
     const [ent] = await entitlementsOf(order.id);
@@ -361,7 +369,7 @@ describe('a captured entry fee clears the entry — only if eligibility still ho
   async function memberInGoodStanding(name: string) {
     const personId = await makePerson(name);
     await db.insert(s.memberships).values({
-      personId, category: 'athlete', validFrom: '2026-01-01', validTo: '2030-12-31', status: 'active',
+      personId, category: 'instructor', validFrom: '2026-01-01', validTo: '2030-12-31', status: 'active',
     });
     return personId;
   }
@@ -469,7 +477,7 @@ describe('a completed refund reverses the entitlement', () => {
   it('revokes the membership, keeps the record, and states why', async () => {
     const personId = await makePerson('Refunded Member');
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
       { personId }
     );
     const [before] = await entitlementsOf(order.id);
@@ -497,7 +505,7 @@ describe('a completed refund reverses the entitlement', () => {
     // A refunded membership is a REVOKED membership with a history.
     const [membership] = await db.select().from(s.memberships).where(eq(s.memberships.id, before.subjectId));
     expect(membership.status).toBe('revoked');
-    const answer = await standing(db, admin, personId, 'athlete');
+    const answer = await standing(db, admin, personId, 'instructor');
     expect(answer.standing).toBe('revoked');
 
     const events = await db.select().from(s.domainEvents)
@@ -508,7 +516,7 @@ describe('a completed refund reverses the entitlement', () => {
   it('returns a cleared entry to fee_pending rather than deleting it', async () => {
     const personId = await makePerson('Refunded Competitor');
     await db.insert(s.memberships).values({
-      personId, category: 'athlete', validFrom: '2026-01-01', validTo: '2030-12-31', status: 'active',
+      personId, category: 'instructor', validFrom: '2026-01-01', validTo: '2030-12-31', status: 'active',
     });
     const [entry] = await db.insert(s.eventEntries).values({
       entryNo: `MMAKF-ENT-2026-${String(Math.floor(Math.random() * 899999) + 100000)}`,
@@ -533,7 +541,7 @@ describe('a completed refund reverses the entitlement', () => {
   it('refuses to reverse anything on a refund that has not completed', async () => {
     const personId = await makePerson('Intending Refund');
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
       { personId }
     );
     const [payment] = await db.select().from(s.payments)
@@ -550,7 +558,7 @@ describe('a completed refund reverses the entitlement', () => {
   it('a PARTIAL refund withdraws nothing, and says so', async () => {
     const personId = await makePerson('Part Refunded');
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
       { personId }
     );
     const [payment] = await db.select().from(s.payments)
@@ -569,7 +577,7 @@ describe('a completed refund reverses the entitlement', () => {
   it('completing the same refund twice posts one reversal', async () => {
     const personId = await makePerson('Double Completed');
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
       { personId }
     );
     const [payment] = await db.select().from(s.payments)
@@ -592,7 +600,7 @@ describe('a completed refund reverses the entitlement', () => {
 describe('what a fee buys is configured, never inferred', () => {
   it('refuses a term with no length and no explicit open-ended decision', async () => {
     await expect(configureTerm(db, ctx(), {
-      feeCode: 'membership.nothing.stated', subject: 'membership', membershipCategory: 'athlete',
+      feeCode: 'membership.nothing.stated', subject: 'membership', membershipCategory: 'instructor',
     })).rejects.toThrow(/no default/i);
   });
 
@@ -607,15 +615,15 @@ describe('what a fee buys is configured, never inferred', () => {
     // one src/db/fees.ts uses for the pricing rules themselves: whoever edits a
     // rule changes every future outcome silently.
     await expect(configureTerm(db, ctx(athlete), {
-      feeCode: 'membership.athlete.forged', subject: 'membership', membershipCategory: 'athlete', termMonths: 120,
+      feeCode: 'membership.instructor.forged', subject: 'membership', membershipCategory: 'instructor', termMonths: 120,
     })).rejects.toThrow();
     expect(await db.select().from(s.entitlementTerms)
-      .where(eq(s.entitlementTerms.feeCode, 'membership.athlete.forged'))).toHaveLength(0);
+      .where(eq(s.entitlementTerms.feeCode, 'membership.instructor.forged'))).toHaveLength(0);
   });
 
   it('records an open-ended entitlement as a decision, not as a blank', async () => {
     const row = await configureTerm(db, ctx(), {
-      feeCode: 'membership.life', subject: 'membership', membershipCategory: 'athlete', openEnded: true,
+      feeCode: 'membership.life', subject: 'membership', membershipCategory: 'instructor', openEnded: true,
       approvedBy: 'General Council',
     });
     expect(row.openEnded).toBe(true);
@@ -657,7 +665,7 @@ describe('reads are gated and useful', () => {
     // activation. Nothing else would ever have looked at it again.
     const personId = await makePerson('Never Activated');
     const { order } = await payFor(
-      [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      [{ kind: 'membership', description: 'x', feeCode: 'membership.instructor.annual' }],
       { personId }
     );
     await db.delete(s.entitlements).where(eq(s.entitlements.orderId, order.id));

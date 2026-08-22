@@ -18,14 +18,79 @@ import {
   TYPE_FIELDS,
   CONSENTS,
   MINOR_AGE,
+  isOffered,
+  optionsFor,
+  EMPTY_GEOGRAPHY,
+  type RegistrationGeography,
   type FieldDef,
   type MembershipType,
 } from '@/lib/registration';
+import { isConfigured, db } from '@/db';
+import * as geoSchema from '@/db/geography.schema';
+import { childrenOf } from '@/db/geography';
+import { eq } from 'drizzle-orm';
 
 export const prerender = false;
 
 const fed = await get('federation');
 const stateUnits = (await get<any[]>('stateUnits')) || [];
+
+// ─── The civil geography this render is prepared to offer ───────────────────
+//
+// THE TABLES SHIP EMPTY. Migration 0025 seeds no country and no area, on
+// purpose — a seeded district is indistinguishable six months later from one
+// somebody verified. So the ordinary answer here today is "nothing", and the
+// form must degrade to the free-text district and city rather than render a
+// select with no options in it.
+//
+// isOffered() is what enforces that, and it is called by BOTH this page and the
+// validator in src/lib/registration.ts. A field that is not offered is not
+// rendered AND not required, so the two cannot disagree about whether an
+// applicant was asked something.
+//
+// Only the TOP RUNG is loaded here. Narrowing to the states of a chosen country
+// and the districts of a chosen state needs an answer the applicant has not
+// given yet; /api/geography/resolve serves those as the reader descends, and
+// the server re-derives them on submission rather than trusting what came back.
+let geo: RegistrationGeography = EMPTY_GEOGRAPHY;
+if (isConfigured()) {
+  try {
+    const d = db();
+    const countries = await d
+      .select({ id: geoSchema.countries.id, iso2: geoSchema.countries.iso2, name: geoSchema.countries.name })
+      .from(geoSchema.countries)
+      .where(eq(geoSchema.countries.status, 'active'));
+
+    // One country is the ordinary case for a national federation, and when
+    // there is exactly one there is nothing to choose — so its top rung is
+    // loaded straight away and the country select disappears by way of
+    // isOffered() rather than by way of a special case here.
+    let states: Array<{ value: string; label: string }> = [];
+    if (countries.length === 1) {
+      const top = await childrenOf(d, null, countries[0].id);
+      states = top
+        .filter((a: any) => a.status === 'active')
+        .map((a: any) => ({ value: String(a.id), label: a.name }));
+    }
+
+    geo = {
+      loaded: countries.length > 0,
+      countries: countries.length > 1
+        ? countries.map((c: any) => ({ value: c.iso2, label: c.name }))
+        : [],
+      states,
+      districts: [],
+      // Only ever non-empty on a re-render that follows an ambiguous locality,
+      // which is a submission the server answers — never a first render.
+      localityCandidates: [],
+    };
+  } catch {
+    // A register that cannot be read is not a reason to refuse a registration.
+    // The free-text location carries the applicant, exactly as it does on a
+    // deployment where the map has never been loaded.
+    geo = EMPTY_GEOGRAPHY;
+  }
+}
 
 // The state list the SERVER validates against — same source, same values.
 const states: string[] = stateUnits
@@ -106,7 +171,11 @@ const blocks: Block[] = [
     kind: 'core',
     prefix: 'core',
     legend: 'About the applicant',
-    groups: groupFields(CORE_FIELDS),
+    // Filtered through the SAME predicate the validator uses. A register-backed
+    // select with nothing in it is neither shown nor demanded — which is what
+    // stops today's empty geography tables producing a required dropdown that
+    // no answer could satisfy.
+    groups: groupFields(CORE_FIELDS.filter((f) => isOffered(f, states, geo))),
   },
   ...MEMBERSHIP_TYPES.map((t): Block => ({
     kind: 'type',
@@ -305,7 +374,11 @@ const isFull = (f: FieldDef) =>
                         const errId = `${id}-err`;
                         const helpId = `${id}-help`;
                         const describedBy = f.help ? `${helpId} ${errId}` : errId;
-                        const opts = f.name === 'state' ? states : (f.options ?? []);
+                        // ONE options function, shared with the validator. What
+                        // makes a submitted value acceptable is membership of
+                        // the list this returned — a select is a suggestion to a
+                        // browser and nothing more.
+                        const opts = optionsFor(f, states, geo);
                         return (
                           <div class:list={['reg-field', { full: isFull(f) }]}>
                             {f.type === 'checkbox' ? (
@@ -342,7 +415,7 @@ const isFull = (f: FieldDef) =>
                                     autocomplete={AUTOCOMPLETE[f.name]}
                                   >
                                     <option value="">Choose…</option>
-                                    {opts.map((o) => <option value={o}>{o}</option>)}
+                                    {opts.map((o) => <option value={o.value}>{o.label}</option>)}
                                   </select>
                                 ) : f.type === 'textarea' ? (
                                   <textarea
@@ -877,6 +950,59 @@ const isFull = (f: FieldDef) =>
     }
 
     if (btn) { btn.disabled = false; btn.textContent = 'Submit Application'; }
+
+    // ── THE AMBIGUOUS LOCALITY IS A QUESTION, SO IT GETS A CONTROL ──────────
+    //
+    // /api/register answers an ambiguous place name with 400 and
+    // code 'locality_ambiguous', carrying the candidates. It has no `fields`
+    // key, so before this branch existed it fell through to the generic failure
+    // handler below: the applicant read "More than one place answers to what you
+    // typed. Which one did you mean?" followed by "If this continues, please
+    // call <office>" — a designed question dressed as a fault, with nothing to
+    // answer it with and an identical response on every retry.
+    //
+    // The select is built HERE from what the server returned, rather than
+    // rendered server-side, because the candidates are only known once a
+    // submission has been made. `unresolvedValue` is offered as a real answer:
+    // somebody whose village is not in the register must be able to say so and
+    // still register, and the validator now accepts it.
+    if (res.status === 400 && data && data.code === 'locality_ambiguous'
+        && Array.isArray(data.candidates) && data.candidates.length) {
+      const fieldName = String(data.field || 'cityAreaId');
+      let wrap = document.getElementById('locality-choice');
+      if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.id = 'locality-choice';
+        wrap.className = 'reg-field full';
+        // Placed immediately after the free-text city input the applicant typed
+        // into, so the question sits beside the answer it is about.
+        const cityInput = regForm.querySelector('[name="city"]');
+        const anchor = cityInput?.closest('.reg-field') ?? null;
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(wrap, anchor.nextSibling);
+        else regForm.appendChild(wrap);
+      }
+      const esc2 = (v: any) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      wrap.innerHTML =
+        '<label class="input-label" for="f-locality-choice">Which of these did you mean?</label>' +
+        '<select class="input" id="f-locality-choice" name="' + esc2(fieldName) + '" required>' +
+        '<option value="">Choose…</option>' +
+        data.candidates.map((c: any) =>
+          '<option value="' + esc2(c.value ?? c.id) + '">' + esc2(c.label ?? c.name) + '</option>').join('') +
+        (data.unresolvedValue
+          ? '<option value="' + esc2(data.unresolvedValue) + '">None of these — record it as I typed it</option>'
+          : '') +
+        '</select>' +
+        '<p class="input-help">More than one place in the register answers to that name. ' +
+        'Choosing wrongly would file you in the wrong district, so the federation asks rather ' +
+        'than picks.</p>';
+
+      if (banner) banner.textContent = String(data.error || 'Which place did you mean?');
+      const sel = document.getElementById('f-locality-choice');
+      sel?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      (sel as HTMLSelectElement | null)?.focus({ preventScroll: true });
+      return;
+    }
 
     if (res.status === 400 && data && data.fields) {
       if (banner) banner.textContent = String(data.error || 'Please correct the highlighted fields.');

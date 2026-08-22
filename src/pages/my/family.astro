@@ -498,11 +498,20 @@ const nothingAtAll = dependants.length === 0 && pending.length === 0;
             <div class="eyebrow">Family</div>
             <h1 class="display-2" style="margin-top:14px">Who you may <em class="r">act for</em>.</h1>
             <div class="rule"></div>
+            {/* QUALIFIED. This claimed to show "exactly what you have been
+                granted, and exactly what you have not", while the ledger covers
+                the five capabilities this page can render. A guardian granted
+                give_consent, view_medical or view_safeguarding read a sentence
+                claiming completeness about a list that did not mention them —
+                and those last two are the ones gated twice precisely because
+                they are the sensitive ones. */}
             <p class="lead">
               The federation grants authority over another person’s record one
               capability at a time, and never as a consequence of being their
-              parent. Each person below shows exactly what you have been granted,
-              and exactly what you have not.
+              parent. Each person below shows what you have been granted, and what
+              you have not, of the five this page can display. Consent, medical
+              and safeguarding access are recorded separately and are not shown
+              here — ask the federation office what you hold.
             </p>
           </div>
 

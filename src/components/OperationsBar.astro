@@ -339,6 +339,32 @@ const currentOrg = orgList[0] ?? null;
     document.dispatchEvent(new CustomEvent('mmakf:command-palette:open'));
   });
 
+  // SIGN OUT, WHICH WAS NOT SIGNING ANYBODY OUT.
+  //
+  // The control is an <a href="/api/auth/logout">, and that endpoint exports
+  // POST and nothing else. A plain link issues a GET, src/middleware.ts passes
+  // non-mutating methods straight through, and no GET handler exists — so the
+  // operator was sent to an error page WITH THEIR SESSION COOKIE INTACT. On a
+  // shared federation-office machine the next person at the keyboard inherited
+  // it. AdminShell mounts this bar on every admin screen, so it was the only
+  // sign-out most of those pages offered.
+  //
+  // It stays an <a> with a real href rather than becoming a <form> so that the
+  // menu markup and keyboard behaviour are unchanged; the handler below is what
+  // makes it do what it says. `keepalive` so the request survives the
+  // navigation that follows it.
+  document.addEventListener('click', (e) => {
+    const t = (e.target as HTMLElement | null)?.closest('[data-signout]');
+    if (!t) return;
+    e.preventDefault();
+    fetch('/api/auth/logout', { method: 'POST', keepalive: true })
+      // Whatever the endpoint said, the browser leaves the admin surface. A
+      // failed logout that leaves the operator sitting on an admin page looking
+      // signed in is the worse of the two outcomes.
+      .catch(() => {})
+      .then(() => { window.location.assign('/'); });
+  });
+
   // A <details> menu left open when focus leaves it is a menu that covers the
   // page until the next click lands somewhere unrelated.
   document.addEventListener('keydown', (e) => {

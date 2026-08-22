@@ -53,6 +53,35 @@ import * as inv from '@/db/inventory';
 import * as so from '@/db/seller-orders';
 import * as fin from '@/db/marketplace-finance';
 import * as ret from '@/db/returns';
+import * as trust from '@/db/marketplace-trust';
+import * as ship from '@/db/shipping';
+import * as docs from '@/db/seller-documents';
+import * as policy from '@/db/marketplace-policy';
+import * as schema from '@/db/schema';
+import { eq } from 'drizzle-orm';
+
+/**
+ * The person record behind the session, or null.
+ *
+ * The ONLY source of a buyer's identity on this route. A `personId` accepted
+ * from the request body would let any signed-in caller attribute an order to
+ * anybody else in the register — see the note on the `checkout` handler.
+ *
+ * Null is a legitimate answer: a user account need not have a person record
+ * (a shared credential has none, and a new account may not yet be linked), and
+ * an order with no person is an order identified by its contact details, which
+ * is what `orders.email` is for.
+ */
+async function personForSession(ctx: AuditContext): Promise<number | null> {
+  const userId = ctx.principal?.userId ?? null;
+  if (userId == null) return null;
+  const row = (await db()
+    .select({ personId: schema.users.personId })
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1))[0];
+  return row?.personId ?? null;
+}
 
 export const prerender = false;
 
@@ -526,7 +555,19 @@ const HANDLERS: Record<string, Handler> = {
   // The cart names WHAT and HOW MANY. There is no price field on CartLine, so
   // a tampered price is not rejected — it has nowhere to go. Every figure is
   // resolved from `listing_variants` server-side.
-  'checkout': (ctx, b) => so.checkout(db(), ctx, {
+  // `personId` IS NOT TAKEN FROM THE BODY, and that is a fix rather than a
+  // style choice. It used to be `optInt(b, 'personId')`, so any signed-in
+  // caller could place an order and have it recorded against ANY OTHER person
+  // in the register — a `personId` they guessed or read off a public profile.
+  // The order, both seller orders and the buyer contact rows all carried that
+  // number, so somebody else's record acquired a purchase they never made, and
+  // the seller was shown their name.
+  //
+  // It is resolved from the SESSION instead, by the same users→persons lookup
+  // /live uses. /seller/apply already states the rule this restores: "the
+  // applicant is whoever is signed in … applying on somebody else's behalf is
+  // not refused — it cannot be expressed."
+  'checkout': async (ctx, b) => so.checkout(db(), ctx, {
     lines: Array.isArray(b.lines)
       ? (b.lines as any[]).map((l) => ({
           variantId: Number(l?.variantId),
@@ -536,7 +577,7 @@ const HANDLERS: Record<string, Handler> = {
     buyerName: optStr(b, 'buyerName'),
     email: optStr(b, 'email'),
     phone: optStr(b, 'phone'),
-    personId: optInt(b, 'personId'),
+    personId: await personForSession(ctx),
     shipTo: (b.shipTo && typeof b.shipTo === 'object') ? (b.shipTo as any) : null,
     eventId: optInt(b, 'eventId'),
   }),
@@ -802,6 +843,155 @@ const HANDLERS: Record<string, Handler> = {
     authority: optStr(b, 'authority'),
     disputeId: optInt(b, 'disputeId'),
   }),
+
+  // ── Shipping zones and methods ────────────────────────────────────────────
+  //
+  // THE CARRIAGE A SELLER CHARGES IS MONEY, so every amount here goes through
+  // the one rupee→paise conversion above. A paise-denominated field is refused
+  // for the same reason a price is: a caller that could send paise directly has
+  // its own conversion, and two conversions is two rounding rules.
+  //
+  // `shipping/preview` is a READ exposed as a POST because it carries an
+  // address, and it calls the SAME function checkout() calls. A seller shown one
+  // figure and their buyer charged another is a complaint nobody can resolve,
+  // because both screens would be telling the truth about different code.
+
+  'shipping/zone': (ctx, b) => ship.createZone(db(), ctx, {
+    name: str(b, 'name'),
+    states: Array.isArray(b.states) ? (b.states as string[]) : null,
+    postcodePrefixes: Array.isArray(b.postcodePrefixes) ? (b.postcodePrefixes as string[]) : null,
+    priority: optInt(b, 'priority') ?? 100,
+  }),
+
+  'shipping/zone-off': (ctx, b) =>
+    ship.deactivateZone(db(), ctx, reqInt(b, 'zoneId'), str(b, 'reason')),
+
+  'shipping/method': (ctx, b) => ship.createMethod(db(), ctx, reqInt(b, 'zoneId'), {
+    name: str(b, 'name'),
+    kind: str(b, 'kind') as any,
+    priceMinor: minorFrom(b, 'priceRupees', 'priceMinor', 'the carriage price'),
+    freeAboveMinor: b.freeAboveRupees === undefined || b.freeAboveRupees === null
+      ? null : minorFrom(b, 'freeAboveRupees', 'freeAboveMinor', 'the free-above threshold'),
+    perKgMinor: b.perKgRupees === undefined || b.perKgRupees === null
+      ? null : minorFrom(b, 'perKgRupees', 'perKgMinor', 'the per-kilogram rate'),
+    perItemMinor: b.perItemRupees === undefined || b.perItemRupees === null
+      ? null : minorFrom(b, 'perItemRupees', 'perItemMinor', 'the per-item rate'),
+    carrier: optStr(b, 'carrier'),
+    minDays: optInt(b, 'minDays'),
+    maxDays: optInt(b, 'maxDays'),
+  }),
+
+  'shipping/method-off': (ctx, b) =>
+    ship.deactivateMethod(db(), ctx, reqInt(b, 'methodId'), str(b, 'reason')),
+
+  // A READ, exposed as a POST because it carries an address. The same function
+  // checkout() calls — not a preview implementation of it.
+  'shipping/preview': (ctx, b) => ship.previewCarriage(db(), ctx.principal, {
+    subtotalMinor: minorFrom(b, 'subtotalRupees', 'subtotalMinor', 'the basket total'),
+    itemCount: optInt(b, 'itemCount') ?? 1,
+    weightGrams: optInt(b, 'weightGrams') ?? 0,
+  }, { state: optStr(b, 'state'), postcode: optStr(b, 'postcode') }),
+  // ── Verification documents ────────────────────────────────────────────────
+  //
+  // THE STORAGE KEY NEVER COMES BACK OUT OF THIS ROUTE except through
+  // 'document/ref', which asks src/db/seller-documents.ts for authority first
+  // and writes an audit row for the read. Every other document act returns
+  // summaries with no key in them at all — a key in a list response is a
+  // trader's PAN card one careless template away from being published.
+  //
+  // The BYTES do not pass through here. src/lib/uploads.ts validates and stores
+  // them under the 'seller_verification' purpose, which is classified
+  // 'restricted'; this records that it happened.
+
+  'document/attach': (ctx, b) => docs.attachDocument(db(), ctx, {
+    kind: str(b, 'kind') as any,
+    label: optStr(b, 'label'),
+    storageKey: str(b, 'storageKey'),
+    mimeType: optStr(b, 'mimeType'),
+    sizeBytes: optInt(b, 'sizeBytes'),
+  }),
+
+  // Resolves ONE key, for ONE caller, and audits the read.
+  'document/ref': (ctx, b) => docs.documentDownloadRef(db(), ctx, reqInt(b, 'documentId')),
+
+  // ── Policy documents ──────────────────────────────────────────────────────
+  //
+  // NO POLICY TEXT ORIGINATES HERE OR IN THE MODULE BEHIND IT. 'policy/register'
+  // creates the eight NAMES the schema's enum already carries; the body of every
+  // document is written by MMAKF and arrives through 'policy/draft'.
+
+  'policy/register': (ctx) => policy.registerPolicies(db(), ctx),
+
+  'policy/draft': (ctx, b) => policy.draftPolicyVersion(db(), ctx, {
+    policyId: reqInt(b, 'policyId'),
+    body: str(b, 'body'),
+    effectiveFrom: str(b, 'effectiveFrom'),
+  }),
+
+  // Seals the text. There is no act that edits a published body — a correction
+  // is a new version, which is the only honest way to change a document people
+  // have already agreed to.
+  'policy/publish': (ctx, b) => policy.publishPolicyVersion(db(), ctx, reqInt(b, 'versionId')),
+
+  'policy/mandatory': (ctx, b) => policy.setPolicyMandatory(
+    db(), ctx, reqInt(b, 'policyId'), Boolean(b.mandatory), str(b, 'reason'),
+  ),
+
+  // The seller's own act. Takes a VERSION, never a policy code: accepting "the
+  // seller agreement" is not a fact, and accepting version 3 of it is.
+  'policy/accept': (ctx, b) =>
+    policy.acceptPolicy(db(), ctx, reqInt(b, 'policyVersionId'), ctx.ip ?? null),
+
+  // ── Reviews and performance ───────────────────────────────────────────────
+  //
+  // A REVIEW NAMES A PURCHASE, and the purchase is what proves the reviewer
+  // bought it. There is no `listingId` on `review/product` and no `sellerId` on
+  // `review/seller` — an order line and a seller order carry both, and taking
+  // them instead is what makes an unverified review unrepresentable rather than
+  // merely refused.
+  'review/product': (ctx, b) => trust.leaveProductReview(db(), ctx, {
+    orderLineId: reqInt(b, 'orderLineId'),
+    rating: reqInt(b, 'rating'),
+    title: optStr(b, 'title'),
+    body: optStr(b, 'body'),
+  }),
+
+  'review/seller': (ctx, b) => trust.leaveSellerReview(db(), ctx, {
+    sellerOrderId: reqInt(b, 'sellerOrderId'),
+    ratingOverall: reqInt(b, 'ratingOverall'),
+    ratingDelivery: optInt(b, 'ratingDelivery'),
+    ratingCommunication: optInt(b, 'ratingCommunication'),
+    ratingPackaging: optInt(b, 'ratingPackaging'),
+    ratingAccuracy: optInt(b, 'ratingAccuracy'),
+    body: optStr(b, 'body'),
+  }),
+
+  'review/moderate': (ctx, b) => trust.moderateReview(db(), ctx, {
+    kind: str(b, 'kind') as 'product' | 'seller',
+    reviewId: reqInt(b, 'reviewId'),
+    status: str(b, 'status') as 'published' | 'rejected' | 'hidden',
+    reason: optStr(b, 'reason'),
+  }),
+
+  'review/reply': (ctx, b) => trust.replyToReview(db(), ctx, {
+    kind: str(b, 'kind') as 'product' | 'seller',
+    reviewId: reqInt(b, 'reviewId'),
+    reply: str(b, 'reply'),
+  }),
+
+  // Computes evidence and files it. It suspends nobody: every enforcement
+  // action in this marketplace is taken by a person, against a record.
+  'performance/compute': (ctx, b) => trust.computeSellerPerformance(db(), ctx, {
+    sellerId: reqInt(b, 'sellerId'),
+    periodStart: str(b, 'periodStart'),
+    periodEnd: str(b, 'periodEnd'),
+  }),
+
+  'fraud/review': (ctx, b) => trust.reviewFraudSignal(db(), ctx, reqInt(b, 'signalId'), {
+    status: str(b, 'status') as any,
+    reason: str(b, 'reason'),
+    actionTaken: optStr(b, 'actionTaken'),
+  }),
 };
 
 // ─── Status mapping ─────────────────────────────────────────────────────────
@@ -833,7 +1023,9 @@ const NOT_FOUND = new Set([
   'unknown_variant', 'unknown_case', 'unknown_flag', 'unknown_brand',
   'unknown_rule', 'unknown_version', 'unknown_settlement', 'unknown_payout',
   'unknown_seller_order', 'unknown_return', 'unknown_dispute', 'unknown_item',
-  'unknown_authorisation', 'no_stock_record',
+  'unknown_authorisation', 'no_stock_record', 'unknown_review', 'unknown_line',
+  'not_your_purchase', 'not_your_review', 'not_your_zone', 'not_your_method',
+  'unknown_document', 'unknown_policy',
   // THE ISOLATION ERRORS. 404 and not 403, deliberately — see above. A seller
   // asking about another seller's order gets the same answer as one asking
   // about an order that does not exist, because distinguishing them tells an
@@ -844,7 +1036,7 @@ const NOT_FOUND = new Set([
 
 const CONFLICT = new Set([
   'already_applied', 'bad_transition',
-  'already_decided', 'already_published', 'already_paid',
+  'already_decided', 'already_published', 'already_paid', 'already_reviewed',
   'duplicate_location', 'slug_taken', 'last_variant',
   // Stock the buyer cannot have. 409 rather than 400: nothing about the
   // REQUEST was wrong — the world changed underneath it, and a client may
@@ -853,6 +1045,7 @@ const CONFLICT = new Set([
   // Money the federation has not been told how to handle. Also a conflict with
   // the world rather than a bad request.
   'unresolved_commission', 'no_verified_account', 'not_closed', 'not_approved',
+  'nothing_to_accept', 'not_published',
   'not_open', 'nothing_payable', 'window_closed', 'non_returnable',
 ]);
 

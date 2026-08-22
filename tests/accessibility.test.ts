@@ -415,17 +415,87 @@ describe('WCAG 1.3.1 — a data table names its columns', () => {
     expect(offenders).toEqual([]);
   });
 
+  // A table wider than a 320px viewport must not push the PAGE sideways; the
+  // scroll belongs to the table.
+  //
+  // THE MEDIA-QUERY FALSE POSITIVE. This used to scan the raw file for any
+  // `min-width: NNNpx` and call the table wide. `@media (min-width: 900px)` is
+  // a GRID BREAKPOINT and says nothing whatever about how wide a table is, so
+  // four admin pages whose tables are every one of them `width: 100%` were
+  // reported as offenders — and the only available "fix" would have been to
+  // wrap a table that already fits in a scroller it does not need. A check that
+  // correct code cannot satisfy teaches people to silence it.
+  //
+  // So the media CONDITION is stripped before the search, while the rules
+  // INSIDE the block are kept: a table given `min-width: 700px` at a breakpoint
+  // is still a wide table and still has to scroll.
+  //
+  // And the pattern is WIDER than it was, not narrower — a plain `width: 900px`
+  // on a table overflows a phone exactly as a min-width does, and went
+  // unchecked before.
+  // `(?:^|[^-\w])` is load-bearing: without it the pattern matches the TAIL of
+  // `max-width:` and `border-left-width:`. A max-width is a constraint — the
+  // exact opposite of a wide table — and matching it flagged two pages that
+  // hold no raw table at all.
+  const WIDE_PX = /(?:^|[^-\w])(?:min-)?width:\s*(3[2-9]\d|[4-9]\d\d|\d{4,})px/;
+  const withoutMediaConditions = (src: string) => src.replace(/@media[^{]*\{/g, '{');
+
+  /**
+   * A RAW html table, case-sensitively.
+   *
+   * The old check was case-insensitive, so `<Table …>` — the shared DataTable
+   * component — read as a table this page had written itself. It has not: the
+   * component supplies its own `.tbl-scroll` wrapper (proved by the test
+   * below), and asking every page that uses it to add a second scroller is
+   * asking for a defect. Astro components are capitalised; raw elements are
+   * not, and that distinction is exactly the one being drawn here.
+   */
+  const RAW_TABLE = /<table\b/;
+
+  it('the shared DataTable supplies its own scroll container', () => {
+    // The premise the exemption above rests on. If this ever stops being true,
+    // every page that delegates to <Table> loses its horizontal scroll at once
+    // and the check below would not notice — so it is asserted here rather
+    // than assumed in a comment.
+    const table = read('src/components/DataTable/Table.astro');
+    expect(table).toMatch(/tbl-scroll/);
+    expect(RAW_TABLE.test(table)).toBe(true);
+  });
+
   it('every wide table sits inside a horizontal-scroll container (1.4.10)', () => {
-    // A table with a min-width wider than a 320px viewport must not push the
-    // page sideways; the scroll belongs to the table.
     const offenders: string[] = [];
     for (const f of TEMPLATES) {
       const src = read(f);
-      if (!/<table\b/i.test(markupOf(src))) continue;
-      const wide = /min-width:\s*(3[2-9]\d|[4-9]\d\d|\d{4,})px/.test(src);
+      if (!RAW_TABLE.test(markupOf(src))) continue;
+      const wide = WIDE_PX.test(withoutMediaConditions(src));
       if (wide && !/tbl-scroll|overflow-x:\s*auto/.test(src)) offenders.push(f);
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('the wide-table check is not fooled by a breakpoint, a max-width, or <Table>', () => {
+    // The three regressions that produced the rewrite above, pinned directly so
+    // the loose heuristic cannot come back.
+
+    // 1. A grid breakpoint says nothing about how wide a table is.
+    expect(WIDE_PX.test(withoutMediaConditions(
+      'table { width: 100%; } @media (min-width: 900px) { .grid { grid-template-columns: repeat(3, 1fr); } }'
+    ))).toBe(false);
+
+    // 2. A max-width is a constraint, not a width.
+    expect(WIDE_PX.test(withoutMediaConditions('.form { max-width: 900px; }'))).toBe(false);
+    expect(WIDE_PX.test(withoutMediaConditions('.card { border-left-width: 3px; }'))).toBe(false);
+
+    // 3. The shared component is not a raw table.
+    expect(RAW_TABLE.test('<Table columns={cols} rows={rows} />')).toBe(false);
+    expect(RAW_TABLE.test('<table><tr><th scope="col">A</th></tr></table>')).toBe(true);
+
+    // And a table that really is wide is still caught — inside a breakpoint …
+    expect(WIDE_PX.test(withoutMediaConditions(
+      '@media (min-width: 900px) { table { min-width: 720px; } }'
+    ))).toBe(true);
+    // … and as a plain width, which the old pattern missed entirely.
+    expect(WIDE_PX.test(withoutMediaConditions('table { width: 960px; }'))).toBe(true);
   });
 });
 

@@ -166,11 +166,15 @@ describe('the second person must independently hold the authority', () => {
   });
 
   it('binds each named act to an authority nobody can hold by accident', async () => {
-    // The seven acts the directive names, and nothing else.
+    // The acts under two-person control, and nothing else. Seven came from the
+    // governance directive; 'mass_notification' was added with the scheduling
+    // engine, where src/lib/notifications.ts refuses to fan out above club scope
+    // and named a circular as "a different act with a different approval path".
+    // This is that path — see src/db/schedule-announce.ts.
     expect(Object.keys(APPROVAL_ACTIONS).sort()).toEqual([
       'certificate_revocation', 'dan_grade_approval', 'disciplinary_outcome',
-      'financial_settlement', 'national_team_selection', 'policy_publication',
-      'result_correction',
+      'financial_settlement', 'mass_notification', 'national_team_selection',
+      'policy_publication', 'result_correction',
     ]);
     // A finance officer can second a settlement but not a Dan grade.
     const settlement = await requestApproval(db, ctxOf(fedAdmin), {

@@ -55,6 +55,7 @@ import { MarketplaceError } from '@/db/marketplace';
 import { applyFactor } from '@/db/fees';
 import { reserveForLine, commitReservations, releaseReservations, dispatchReservations } from '@/db/inventory';
 import { freezeCommissionForLine, refreshSellerOrderCommission, accrueSellerOrder, SLA_NOT_SET } from '@/db/marketplace-finance';
+import { quoteCarriage } from '@/db/shipping';
 
 type DB = any;
 
@@ -112,26 +113,50 @@ export interface CheckoutResult {
   expiresAt: Date;
 }
 
+interface PricedGroup {
+  seller: any;
+  priced: any[];
+  subtotal: number;
+  tax: number;
+}
+
+/** A basket resolved and priced against the catalogue. No side effects. */
+interface PricedCart {
+  groups: Map<number, PricedGroup>;
+  shippingBySeller: Map<number, number>;
+  subtotal: number;
+  tax: number;
+  shipping: number;
+  total: number;
+}
+
 /**
- * Turn a cart into one order and one seller order per seller.
+ * Steps 1 and 2 of a checkout, WITHOUT writing anything.
  *
- * ORDER OF OPERATIONS, and each step is where it is for a reason:
+ * ─── WHY THIS IS A FUNCTION AND NOT THE FIRST HALF OF checkout() ────────────
  *
- *   1. Resolve and validate EVERY line against the public catalogue predicate.
- *      A variant on an unapproved, quarantined or suspended-seller listing is
- *      not purchasable, and the check is the SAME SQL the shop uses — so an
- *      item that cannot be seen cannot be bought by guessing its id.
- *   2. Group by seller and price each group.
- *   3. Create the order, then the seller orders, then the lines.
- *   4. Reserve stock per line. THIS CAN FAIL, and it must fail here rather
- *      than after a payment page has been opened.
- *   5. Freeze commission per line, or record a gap.
+ * A buyer has to be shown what they are about to pay BEFORE an order exists.
+ * Until this was extracted there was no way to answer "what does this basket
+ * cost?" except by calling checkout(), which allocates an order number, writes
+ * seller orders and reserves stock — so a page that merely wanted to display a
+ * total would have created an order every time somebody looked at it, and held
+ * forty-five minutes of somebody else's stock for each look.
  *
- * Nothing is charged by this function. It produces an order awaiting payment,
- * which is what the existing payment spine in src/db/orders.ts then handles.
+ * The alternative — a second implementation of the pricing for display — is the
+ * one thing this module must not have. The price a buyer is shown and the price
+ * they are charged would then be two computations that agree until they do not,
+ * and the day they diverge is the day MMAKF is charging a figure it did not
+ * quote. One function, two callers.
+ *
+ * EVERY REFUSAL HERE IS A REFUSAL AT CHECKOUT TOO, for the same reason: an item
+ * that cannot be priced for display cannot be bought, and the buyer finds out
+ * while looking rather than after paying.
  */
-export async function checkout(db: DB, ctx: AuditContext | null, input: CheckoutInput): Promise<CheckoutResult> {
-  const lines = Array.isArray(input?.lines) ? input.lines : [];
+async function priceCart(
+  db: DB,
+  lines: CartLine[],
+  shipTo: Record<string, unknown> | null
+): Promise<PricedCart> {
   if (!lines.length) throw new MarketplaceError('empty_cart', 'A checkout needs at least one item.');
   if (lines.length > MAX_CART_LINES) {
     throw new MarketplaceError('cart_too_large', `A basket may hold at most ${MAX_CART_LINES} lines.`);
@@ -181,13 +206,7 @@ export async function checkout(db: DB, ctx: AuditContext | null, input: Checkout
   }
 
   // ── 2. Group by seller ───────────────────────────────────────────────────
-  interface Group {
-    seller: any;
-    priced: any[];
-    subtotal: number;
-    tax: number;
-  }
-  const groups = new Map<number, Group>();
+  const groups = new Map<number, PricedGroup>();
 
   for (const r of rows) {
     const qty = wanted.get(r.variant.id)!;
@@ -202,11 +221,17 @@ export async function checkout(db: DB, ctx: AuditContext | null, input: Checkout
     const rate = Number.isInteger(r.listing.taxRateBps) ? r.listing.taxRateBps : 0;
     // THROUGH applyFactor(), not a local Math.round.
     //
-    // tests/money-safety.test.ts allows exactly one hand-rolled rounding outside
-    // applyFactor() — the one in src/db/orders.ts, recorded there as "FINDING 4
-    // — a SECOND rounding implementation". Adding a third would make the rule
-    // meaningless and would put a different rounding on the marketplace's tax
-    // from the one on the federation's own.
+    // This note used to say that tests/money-safety.test.ts allowed exactly one
+    // hand-rolled rounding outside applyFactor() — the inline expression in
+    // src/db/orders.ts, recorded there as "FINDING 4". IT NOW ALLOWS NONE. That
+    // expression became taxOnMinor() in src/db/fees.ts and its exemption was
+    // deleted from the allow-list rather than updated, so the rule is stricter
+    // than this comment described and a second rounding anywhere is now a test
+    // failure rather than a documented debt.
+    //
+    // The reason for routing through the shared primitive is unchanged and is
+    // the one that matters: the marketplace's tax and the federation's own must
+    // round identically, and two implementations of one rule drift.
     //
     // Basis points × 100 is parts-per-million: 1200 bps (12%) is 120_000 ppm.
     // applyFactor does the multiply in BigInt and rounds half up, which is what
@@ -214,7 +239,13 @@ export async function checkout(db: DB, ctx: AuditContext | null, input: Checkout
     // amounts, and half-even makes that depend on the preceding digit.
     const lineTax = applyFactor(lineTotal, rate * 100);
 
-    const g = groups.get(r.seller.id) ?? { seller: r.seller, priced: [], subtotal: 0, tax: 0 };
+    // TYPED, so the empty array is not inferred as never[]. Without the
+    // annotation TypeScript widens the fallback object independently of the
+    // Map, and every push into it becomes an error about assigning to never —
+    // which reads as a fault in the line being pushed rather than in the
+    // initialiser that actually caused it.
+    const g: PricedGroup = groups.get(r.seller.id)
+      ?? { seller: r.seller, priced: [], subtotal: 0, tax: 0 };
     g.priced.push({
       variantId: r.variant.id,
       listingId: r.listing.id,
@@ -227,6 +258,23 @@ export async function checkout(db: DB, ctx: AuditContext | null, input: Checkout
       taxMinor: lineTax,
       totalMinor: lineTotal + lineTax,
       goodsMinor: lineTotal,
+      /**
+       * THE VARIANT'S WEIGHT, carried onto the priced line because the carriage
+       * step below sums `p.weightGrams` and nothing was putting it here.
+       *
+       * The effect of its absence was silent and one-directional: every parcel
+       * was quoted as if it weighed nothing, so a seller whose zone prices by
+       * weight band always got the lightest band. Carriage came out too low,
+       * MMAKF charged the buyer too little, and the seller absorbed the
+       * difference — with no error anywhere, because zero is a perfectly valid
+       * weight to a banding rule.
+       *
+       * Null stays null-as-zero. A variant whose weight nobody recorded must not
+       * acquire an invented one: quoteCarriage() already handles a seller with
+       * no zones by absorbing the cost, and a guessed weight would instead
+       * produce a real charge the seller never set.
+       */
+      weightGrams: Number.isInteger(r.variant.weightGrams) ? r.variant.weightGrams : 0,
     });
     g.subtotal += lineTotal;
     g.tax += lineTax;
@@ -238,7 +286,16 @@ export async function checkout(db: DB, ctx: AuditContext | null, input: Checkout
   // as one would be a discount MMAKF is paying for without being asked.
   const shippingBySeller = new Map<number, number>();
   for (const [sellerId, g] of groups) {
-    shippingBySeller.set(sellerId, await resolveShipping(db, sellerId, g.subtotal, input.shipTo ?? null));
+    // The basket shape a weight- or item-based method needs. Computed from the
+    // priced lines rather than passed in, so a caller cannot understate a
+    // parcel to reduce its carriage.
+    const itemCount = g.priced.reduce((n: number, p: any) => n + p.quantity, 0);
+    const weightGrams = g.priced.reduce(
+      (n: number, p: any) => n + (Number.isInteger(p.weightGrams) ? p.weightGrams * p.quantity : 0), 0);
+    shippingBySeller.set(
+      sellerId,
+      await resolveShipping(db, sellerId, g.subtotal, shipTo, { itemCount, weightGrams }),
+    );
   }
 
   const subtotal = [...groups.values()].reduce((n, g) => n + g.subtotal, 0);
@@ -250,6 +307,120 @@ export async function checkout(db: DB, ctx: AuditContext | null, input: Checkout
   if (!Number.isSafeInteger(total)) {
     throw new MarketplaceError('bad_total', 'Order total is beyond the range this system will price.');
   }
+
+  return { groups, shippingBySeller, subtotal, tax, shipping, total };
+}
+
+// ─── Preview ────────────────────────────────────────────────────────────────
+
+export interface CartPreviewLine {
+  variantId: number;
+  description: string;
+  quantity: number;
+  unitPriceMinor: number;
+  taxRateBps: number;
+  taxMinor: number;
+  totalMinor: number;
+}
+
+export interface CartPreviewSeller {
+  sellerId: number;
+  sellerName: string;
+  storeSlug: string | null;
+  lines: CartPreviewLine[];
+  subtotalMinor: number;
+  taxMinor: number;
+  shippingMinor: number;
+  totalMinor: number;
+}
+
+export interface CartPreview {
+  sellers: CartPreviewSeller[];
+  subtotalMinor: number;
+  taxMinor: number;
+  shippingMinor: number;
+  totalMinor: number;
+  currency: string;
+}
+
+/**
+ * What this basket costs, priced by the server, WITHOUT creating anything.
+ *
+ * The buyer's basket holds variant ids and quantities and nothing else — there
+ * is no price field in it, so a tampered price has nowhere to be written. Every
+ * figure below is read from the catalogue by priceCart(), the same function
+ * checkout() prices with.
+ *
+ * SPLIT BY SELLER, because that is what the buyer is actually agreeing to: a
+ * basket from three sellers is three consignments, three carriage charges and
+ * three separate obligations, and presenting one merged total would hide both
+ * the carriage and the fact that three different traders are involved.
+ *
+ * No principal. There is no such thing as a basket that is priced one way for
+ * one anonymous visitor and another way for another, and a principal parameter
+ * would invite a caller to pass one and quietly widen what is purchasable.
+ */
+export async function cartPreview(
+  db: DB,
+  lines: CartLine[],
+  shipTo: Record<string, unknown> | null = null
+): Promise<CartPreview> {
+  const priced = await priceCart(db, Array.isArray(lines) ? lines : [], shipTo);
+
+  const sellers: CartPreviewSeller[] = [...priced.groups.entries()].map(([sellerId, g]) => {
+    const shippingMinor = priced.shippingBySeller.get(sellerId) ?? 0;
+    return {
+      sellerId,
+      sellerName: g.seller.tradingName,
+      storeSlug: g.seller.storeSlug ?? null,
+      lines: g.priced.map((l: any) => ({
+        variantId: l.variantId,
+        description: l.description,
+        quantity: l.quantity,
+        unitPriceMinor: l.unitPriceMinor,
+        taxRateBps: l.taxRateBps,
+        taxMinor: l.taxMinor,
+        totalMinor: l.totalMinor,
+      })),
+      subtotalMinor: g.subtotal,
+      taxMinor: g.tax,
+      shippingMinor,
+      totalMinor: g.subtotal + g.tax + shippingMinor,
+    };
+  });
+
+  return {
+    sellers,
+    subtotalMinor: priced.subtotal,
+    taxMinor: priced.tax,
+    shippingMinor: priced.shipping,
+    totalMinor: priced.total,
+    currency: 'INR',
+  };
+}
+
+/**
+ * Turn a cart into one order and one seller order per seller.
+ *
+ * ORDER OF OPERATIONS, and each step is where it is for a reason:
+ *
+ *   1. Resolve and validate EVERY line against the public catalogue predicate,
+ *      then group by seller and price each group. Both are priceCart() above,
+ *      which cartPreview() also calls — so the figure a buyer is SHOWN and the
+ *      figure they are CHARGED come from one computation and cannot diverge.
+ *      A variant on an unapproved, quarantined or suspended-seller listing is
+ *      not purchasable, and the check is the SAME SQL the shop uses.
+ *   2. Create the order, then the seller orders, then the lines.
+ *   3. Reserve stock per line. THIS CAN FAIL, and it must fail here rather
+ *      than after a payment page has been opened.
+ *   4. Freeze commission per line, or record a gap.
+ *
+ * Nothing is charged by this function. It produces an order awaiting payment,
+ * which /api/shop/pay.ts then begins against the existing order id.
+ */
+export async function checkout(db: DB, ctx: AuditContext | null, input: CheckoutInput): Promise<CheckoutResult> {
+  const { groups, shippingBySeller, subtotal, tax, shipping, total } =
+    await priceCart(db, Array.isArray(input?.lines) ? input.lines : [], input.shipTo ?? null);
 
   // ── 3. Write the order and its seller orders ─────────────────────────────
   const orderNo = await allocateFederationId(db, 'ORD');
@@ -389,54 +560,42 @@ export async function checkout(db: DB, ctx: AuditContext | null, input: Checkout
 }
 
 /**
- * Carriage for one seller's part of a basket.
+ * Carriage for one seller’s part of a basket.
  *
- * RETURNS ZERO WHEN THE SELLER HAS CONFIGURED NOTHING, and that is a decision
- * worth being explicit about: the alternative — refusing the sale — would take
- * every existing seller off the marketplace on the day this shipped, because
- * none of them has a shipping zone yet. A seller who has said nothing about
- * carriage is treated as including it, which is what the shop did before, and
- * `/portal/seller/shipping` reports that no zones are configured.
+ * DELEGATES TO src/db/shipping.ts, and that indirection is the entire point.
+ * This function used to hold its own copy of the zone matcher and the method
+ * pricer. The seller’s preview on /portal/seller/shipping needed the same
+ * logic, and a second implementation of “what will this cost?” is the one that
+ * drifts — into a seller being shown one figure and their buyer charged
+ * another, which is a complaint nobody can resolve because both screens are
+ * telling the truth about different code.
+ *
+ * THE ZERO IS UNCHANGED AND STILL DELIBERATE. A seller who has published no
+ * zone is quoted nothing and absorbs the carriage. Refusing instead would have
+ * taken every existing seller off the marketplace the day zones shipped. What
+ * is new is that the silence is over: carriageExposure() tells the seller what
+ * they are giving away, and UNZONED_SELLER_POLICY_NOT_SET records that whether
+ * to refuse is a federation decision nobody has made.
  */
 async function resolveShipping(
-  db: DB, sellerId: number, subtotalMinor: number, shipTo: Record<string, unknown> | null
+  db: DB, sellerId: number, subtotalMinor: number, shipTo: Record<string, unknown> | null,
+  basket: { itemCount: number; weightGrams: number },
 ): Promise<number> {
-  const zones = await db.select().from(s.shippingZones).where(and(
-    eq(s.shippingZones.sellerId, sellerId), eq(s.shippingZones.active, true),
-  )).orderBy(asc(s.shippingZones.priority), asc(s.shippingZones.id));
-  if (!zones.length) return 0;
+  const quote = await quoteCarriage(db, sellerId, {
+    subtotalMinor, itemCount: basket.itemCount, weightGrams: basket.weightGrams,
+  }, shipTo as any);
 
-  const state = String((shipTo as any)?.state ?? '').trim().toLowerCase();
-  const postcode = String((shipTo as any)?.postcode ?? '').trim();
-
-  const zone = zones.find((z: any) => {
-    const states: string[] = Array.isArray(z.states) ? z.states : [];
-    const prefixes: string[] = Array.isArray(z.postcodePrefixes) ? z.postcodePrefixes : [];
-    const stateOk = !states.length || (state && states.some((x) => String(x).toLowerCase() === state));
-    const pcOk = !prefixes.length || (postcode && prefixes.some((p) => postcode.startsWith(String(p))));
-    return stateOk && pcOk;
-  });
-  if (!zone) {
+  // A seller WITH zones, none of which reaches this address, is a refusal the
+  // buyer can act on — remove the items or use another address. A seller with
+  // NO zones is the absorbed case above and is not a refusal at all.
+  if (quote.notServiceable) {
     throw new MarketplaceError(
       'not_serviceable',
       'This seller does not ship to that address. Remove their items or choose another address.'
     );
   }
-
-  const methods = await db.select().from(s.shippingMethods).where(and(
-    eq(s.shippingMethods.zoneId, zone.id), eq(s.shippingMethods.active, true),
-  )).orderBy(asc(s.shippingMethods.priceMinor));
-  if (!methods.length) return 0;
-
-  const m = methods[0];
-  switch (m.kind) {
-    case 'free': return 0;
-    case 'free_above':
-      return Number.isInteger(m.freeAboveMinor) && subtotalMinor >= m.freeAboveMinor ? 0 : m.priceMinor;
-    default: return m.priceMinor;
-  }
+  return quote.amountMinor;
 }
-
 // ─── Payment ────────────────────────────────────────────────────────────────
 
 /**

@@ -58,6 +58,27 @@ describe('the surfaces exist and the menu offers them', () => {
     }
   });
 
+  it('/my/family is reachable — a page nobody can navigate to is an orphan', () => {
+    // It shipped as one. `guardianCan()` was wired correctly and no file in the
+    // repository linked to the page, so the only way to reach it was to type
+    // the path. A surface that cannot be navigated to has not been delivered.
+    const linkers = ['src/pages/my/index.astro', 'src/lib/surface.ts', 'src/pages/portal/_sections.ts']
+      .filter((f) => existsSync(f))
+      .filter((f) => read(f).includes('/my/family'));
+
+    expect(linkers.length, '/my/family is linked from nowhere').toBeGreaterThan(0);
+  });
+
+  it('offers the family link ONLY to somebody who has dependants', () => {
+    // A permanent "My family" button would tell every member the federation
+    // believes they have dependants, and would lead to an empty page — which
+    // reads as a fault in their account rather than as the absence of a
+    // relationship.
+    const s = read('src/pages/my/index.astro');
+    expect(s).toMatch(/dependants\s*>\s*0/);
+    expect(s).toMatch(/dependantsOf\(/);
+  });
+
   it('the admin menu offers both queues, each gated on its own action', () => {
     const modules = ADMIN_GROUPS.flatMap((g) => g.modules);
     const dup = modules.find((m) => m.href === '/admin/duplicates');

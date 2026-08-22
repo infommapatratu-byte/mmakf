@@ -224,75 +224,273 @@ others.
 |---|---|
 | `/schedule` | The hombu dojo's week, labelled as the hombu dojo's, with a link to the club directory. Engine first, editorial strings as fallback. |
 | `/facilities` | The headquarters building's hours, same precedence. |
-| `/admin/schedules` | The editor: owner picker, resolved week, seasons, versions, the seven-day grid, special days, and the migration panel. |
+| `/clubs` | **Find a club** — the search. Filters by state, district, city, age, audience, level, discipline and online availability, all derived from what clubs have actually published. Nearby by PIN code, city, or a browser location the reader presses a button for. |
+| `/clubs/[slug]` | A club's own page: standing and charter validity first, then **its own** published week, its classes, its rooms and its credentialed instructors. |
+| `/clubs/[slug]/schedule.ics` | The club's subscribable timetable — anonymous, published occurrences and closures only. |
+| `/my/schedule` | A member's own four weeks: what they hold, what moved, what was cancelled, and what their club has open to book. |
+| `/admin/schedules` | The editor: owner picker, resolved week, seasons, versions, the seven-day grid, special days, occurrence generation, cancel/reschedule, and the migration panel. |
 
-Both public pages catch and log a database failure rather than 500 — the
-editorial strings are a complete answer on their own, and losing the register
-must not take the timetable off the internet.
+Both public timetable pages catch and log a database failure rather than 500 —
+the editorial strings are a complete answer on their own, and losing the
+register must not take the timetable off the internet.
+
+### /clubs is not /dojos
+
+Two questions, two surfaces, one register:
+
+- **/dojos** is the affiliation **register**. *Is the club my child already
+  trains at affiliated, today?* It lists lapsed units, with standing in words,
+  because the reader most in need of it is a parent of a child already
+  somewhere.
+- **/clubs** is the **search**. *Where can my child train?* It offers currently
+  affiliated clubs only. Recommending a club whose charter expired is the
+  federation vouching for something it has withdrawn.
+
+### Distance, honestly
+
+`nearbyClubs()` orders by great-circle distance **only** where the venue carries
+real coordinates; every other club follows in name order with `distanceKm: null`,
+and the page labels distances straight-line. A PIN code is an **area match**, not
+a distance: `postal_codes` maps a code to an `admin_areas` row and carries no
+coordinates, so inventing one for the centre of a postal district would publish a
+measurement nobody took. Location is asked for by a button press, never read on
+load.
+
+### What a club page will not publish
+
+No telephone number, no email address, no instructor contact details — the
+federation removed its own published personal numbers from fourteen places on
+this site, and republishing a club's under a different heading would undo that.
+
+The instructor list is an **INNER** join on `instructor_quals`. A left join — the
+natural way to write it — would publish the name of every member at the club,
+including every child, under the heading *"Who teaches here"*.
+
+A lapsed, suspended or revoked club has **no page**: `clubProfile()` returns null
+and the route answers a real 404, not a soft one. A soft 404 is indexed.
 
 ---
 
-## Migrating the published hours
+## Moving and cancelling
 
-`src/db/schedule-bootstrap.ts`, run from `/admin/schedules` by an administrator
-holding `schedule:publish`. It is an admin action rather than a CLI script
-because `schedule_versions` refuses a published row with no publisher — a script
-would put a name on a record belonging to somebody who was not there.
+- `cancelSession()` releases every place, attaches the reason to each booking,
+  and publishes `CLASS_SESSION_CANCELLED`.
+- `rescheduleSession()` creates the successor, **carries every live booking onto
+  it**, links the rows, and publishes `CLASS_SESSION_RESCHEDULED`. A member whose
+  Tuesday moved still has a place; a member whose Tuesday was cancelled does not,
+  and the difference is what they are told.
+- The new time is checked exactly as a generated one is — room open, inside the
+  room's hours, no coach or venue conflict. `force` is the only way past, it is
+  never a default, and what was overridden is written to the audit row.
 
-`planMigration()` returns exactly what would be written and writes nothing;
-`applyMigration()` re-plans before writing, so the “will not overwrite” refusal
-is true at the moment of writing rather than at the moment of rendering.
+## Finding a time for a school or corporate
 
-**Four refusals**, each a test in `tests/schedule-bootstrap.test.ts`:
+`deliveryOptions()` returns every start satisfying all of: **facility available +
+instructor available + inside the client's own window + nothing else on the room
++ nothing else on the coach**. Starts are on a 15-minute grid inside each open
+window.
 
-1. **Not at national scope.** A national schedule is inherited by every
-   unconfigured unit — which would publish Patratu's clock as the default for
-   every affiliated club in the country.
-2. **Does not touch the editorial record.** The two strings stay. Pages fall back
-   to them anywhere the engine has no answer, so nothing goes dark between the
-   migration and somebody checking the rendering.
-3. **Will not overwrite** a club that already has an operating schedule.
-4. **Will not guess a class length.** The editorial `schedule` array records a
-   start and no finish (`'6:00 AM'`). Those rows are **reported and not
-   migrated** — how long a class runs is federation policy nobody has set, and
-   an invented duration would afterwards read as the federation's decision.
+`durationMinutes` is **required with no default** — how long MMAKF's school
+sessions run is federation policy nobody has set, and a default would appear in a
+quotation as though the federation had decided it. The same refusal
+`src/db/booking.ts` makes about session length, notice period and cancellation
+windows.
 
-Season dates come from `DIRECTIVE_SEASONS` — the windows stated as an **example**
-in the federation's own instruction (01-Apr–30-Sep, 01-Oct–31-Mar). Every
-surface that offers them says so, and moving a season afterwards moves every
-rule bound to it.
+## Who is told
+
+| Event | Audience | Resolved from |
+|---|---|---|
+| `CLASS_SESSION_CANCELLED` | everyone holding a place | `bookings.class_session_id` |
+| `CLASS_SESSION_RESCHEDULED` | everyone holding a place | same |
+| `SCHEDULE_PUBLISHED` | the **club's** own members | `persons.dojo_id`, active only |
+
+`SCHEDULE_PUBLISHED` resolves to **nobody** for a national, state or district
+publication. Not because those changes do not matter, but because "every member
+in the country" is a fan-out this system must never perform on the strength of
+one administrator saving a form. A national announcement is a circular, which is
+a different act with a different approval path.
+
+Notification bodies carry the class and the time and **never the reason**: a
+notification travels through channels the federation does not control, and
+"cancelled — instructor bereavement" is not a sentence to put in an SMS to two
+hundred families. `SCHEDULE_PUBLISHED` carries no times at all — half a timetable
+is worse than none, and the link goes to the page that has all of it.
+
+## Calendar
+
+`/clubs/[slug]/schedule.ics` is **always anonymous**, for the reason
+`/calendar.ics` sets out at length: a calendar client fetches with no cookies and
+no way to sign in, so a session-scoped feed works in a browser and then quietly
+does nothing in the app that subscribes — except on the day somebody shares the
+URL. The feed carries published occurrences and closures, not the instructor
+against each occurrence (a year of one named person's whereabouts), not the
+closure reasons, and not the remaining places (a number cached at poll time is a
+number that is wrong when it is read).
+
+A cancelled session is published with `STATUS:CANCELLED` rather than dropped, so
+a subscriber's existing entry changes instead of lingering for ever.
+
+A **personal** feed — "my classes" — needs a per-user secret in the URL and its
+own revocation story. Until the federation asks for that, `/my/schedule` is where
+a member reads their own.
+
+## SEO
+
+`/clubs/[slug]` is expanded into the sitemap from `publishableClubs()`, which
+returns clubs that are **currently affiliated AND carry a slug an administrator
+set**. Both halves matter: the first stops a lapsed club being advertised as the
+federation's recommendation; the second stops a URL being minted from a name that
+will change and break a link a parent bookmarked. The federation's instruction is
+explicit — *"DO NOT generate fake location pages. Only index real verified
+locations."*
+
+`tests/clubs.test.ts` asserts that every URL the sitemap advertises resolves,
+which is what stops the two implementations drifting.
+
+---
+
+## Attendance
+
+`session_attendance` had existed since the education wave and was **read** by
+`src/db/grading.ts` (to count a candidate's sessions since their last grade) and
+by `src/db/athletes.ts`. **Nothing wrote it** — so grading was counting a number
+that was always zero.
+
+`src/db/attendance.ts` is the writer. It uses the tables that already exist:
+`training_sessions` for the sheet, `session_attendance` for the marks, joined to
+an occurrence by `training_sessions.class_session_id` (migration 0049, unique
+when set). A separate `class_session_attendance` table would have left grading
+blind to every class the engine ran — a defect that surfaces years later as a
+candidate refused a grading they had trained for. `tests/attendance.test.ts`
+asserts the existing join still sees it.
+
+Four rules:
+
+1. **One register per occurrence.** A second call amends; it does not duplicate.
+2. **Present is never assumed.** Three states — present, absent, **not marked** —
+   and the third is the default. Filling in gaps would invent training somebody
+   did not do, or deny training they did.
+3. **An amendment records what it replaced.** `session_attendance` has no
+   `correctedFrom` column, so the value goes into the audit row.
+4. **No register at a class that did not happen.** Cancelled is refused; so is a
+   class that has not started, unless `allowFuture` is passed explicitly for a
+   camp registered from a signed list.
+
+**Authority:** `attendance:write` in the club's scope — *or* the coach teaching
+that very occurrence, checked against `class_sessions.coach_person_id`. An
+`INSTRUCTOR` holds `attendance:read` and not `attendance:write`, so the row is
+what lets them mark their own class and nothing else.
+
+`missingRegisters()` lists classes that ran with nobody marked. Without it, a
+class whose instructor forgot the register is indistinguishable from a class
+nobody attended.
+
+## Personal calendar feeds
+
+`src/pages/calendar.ics.ts` refused to build a per-user feed for a stated reason:
+one "needs a per-user secret in the URL and its own revocation story".
+`src/lib/calendar-feed.ts` is both halves.
+
+- **The secret is never stored.** `calendar_feed_tokens.token_hash` is a SHA-256
+  of it, as `users.mfa_recovery_hashes` treats recovery codes. Returned once, at
+  creation; not recoverable, and not in the audit trail either.
+- **32 bytes from `randomBytes`**, base64url. SHA-256 rather than a slow hash
+  deliberately: the input is 256 bits of entropy, not a password, and a slow hash
+  would add latency to every calendar poll and defend against nothing.
+- **Revocation is immediate** — resolution reads `status` on every fetch — and is
+  a status, not a delete.
+- **Unknown, revoked and malformed all return the same `null`,** so a URL cannot
+  enumerate live tokens.
+- **Ten live tokens per person.** A member with forty cannot say which leaked.
+
+Two scopes. `own_classes` carries the class, the time and the room. `coach_diary`
+carries **busy blocks only** — "MMAKF (busy)", no class name, no venue, no
+student — because a teaching calendar is routinely shared with a family or an
+employer, and a year of named classes in it is a movement pattern for an adult
+who works with children.
+
+Served at `/my/calendar/[secret].ics` with `Cache-Control: private, no-store`,
+`X-Robots-Tag: noindex`, and 404 for anything that does not resolve.
+
+## Federation-wide announcements
+
+`src/lib/notifications.ts` resolves `SCHEDULE_PUBLISHED` to a **club's** own
+members and to **nobody** above that, because "every member of the federation is
+a fan-out this system must never perform on the strength of one administrator
+saving a form" — and it named a circular as "a different act with a different
+approval path". `src/db/schedule-announce.ts` is that path.
+
+Four safeties, in the order they bite:
+
+1. **The audience is counted and frozen at draft time.** An administrator
+   authorises a *number*, not a promise.
+2. **Above `TWO_PERSON_THRESHOLD` (200) it takes two people** — through
+   `src/lib/approvals.ts`, which already has the once-only execution guard, not a
+   second implementation. `mass_notification` joins its registry.
+3. **The confirmed count is typed, not clicked.** A figure that does not match
+   the frozen one means a stale page, and the send is refused.
+4. **It cannot write to anybody twice.** `queue()` deduplicates on
+   `(domainEventId, personId, channel)` — its only deduplication — so the
+   announcement publishes `SCHEDULE_ANNOUNCED` first and stamps every
+   notification with that event's id.
+
+`sent_count` is recorded separately from `audience_count`: somebody may have left
+the unit in between, and the gap is reported rather than hidden. A national
+announcement reaches every *placed, active* person; somebody an intake created
+and never placed is not written to. An institution reaches nobody — a client is
+not a member.
+
+## Windows that cross midnight
+
+Migration 0032 refused to make `22:00–02:00` expressible, because "one row
+meaning two days would make every downstream date calculation ambiguous". **That
+rule is unchanged.** What migration 0049 changed is who does the arithmetic:
+`setRules()` accepts a crossing window and **splits it** into `22:00–24:00` on
+the day and `00:00–02:00` on the next, wrapping Sunday onto Monday.
+
+`24:00` is storable only as a *closing* time — the CHECK on `opens_at` is
+untouched, because a window cannot begin at the end of a day. `zonedInstant()`
+converts it to the following midnight, so the first half's end instant is exactly
+the second half's start: the two abut, with no gap and no overlap.
+
+Asking an administrator to enter two rows was the alternative, and it is how a
+timetable ends up with one half of a window moved and the other left behind.
+
+## The admin resource view
+
+`/admin/timetable` is a grid of **rooms against days** for one week, plus the
+register at each class. A date-ordered list answers "what is on" and makes
+somebody read forty rows to answer "is this room free on Thursday evening"; a
+grid answers it by looking.
+
+An empty cell means *nothing is booked in that room that day* — **not** that the
+room is open. Opening hours are a schedule, and the page says so rather than
+letting a blank read as availability.
 
 ---
 
 ## Not built
 
-Named because a gap somebody knows about is a decision and a gap nobody knows
-about is a defect.
-
-- **Calendar adapters.** `calendar_connections`, `calendar_events` and
-  `calendar_sync_log` exist and are not driven by this engine.
-  `SCHEDULE_PUBLISHED` is on the domain feed with a declared payload, which is
-  the hook a sync consumer attaches to.
-- **Club-level change notification.** `CLASS_SESSION_CANCELLED` fans out to
-  everyone holding a place, because that audience is a query. “Everyone who
-  trains at this club” is not a query this system can answer honestly yet, so
-  `SCHEDULE_PUBLISHED` carries **no consumer** rather than fanning out to a list
-  somebody guessed at.
-- **Club discovery by distance.** `venues.latitude` / `longitude` /
-  `area_id` exist and are unpopulated; there is no nearby-club search.
-- **Public per-club pages.** `dojos.slug` and `venues.slug` exist for
-  `/clubs/[slug]`; the route is not built. `/dojos` remains the directory.
-- **Rescheduling.** `class_sessions.rescheduled_to_session_id` exists;
-  `cancelSession()` is implemented and a reschedule helper is not.
-- **A window crossing midnight.** Not expressible, deliberately — 22:00–02:00 is
-  two windows on two days, and one row meaning both makes every downstream date
-  calculation ambiguous.
+- **Google / Outlook two-way sync.** `calendar_connections`, `calendar_events`
+  and `calendar_sync_log` exist and are still not driven. The read side is now
+  complete — a club feed, a member feed and a coach busy feed, all iCal — which
+  is what a subscription-based integration actually needs. A *push* integration
+  additionally needs OAuth credentials this deployment does not hold, and
+  `src/lib/youtube.ts` sets the precedent for how those would be stored
+  (AES-256-GCM, `encryptToken`). `SCHEDULE_PUBLISHED` and `SCHEDULE_ANNOUNCED`
+  are the hooks a push consumer attaches to.
+- **Attendance-derived grading eligibility rules.** The count is now real;
+  what number of sessions MMAKF requires for each grade is federation policy
+  nobody has set, and `src/db/grading.ts` continues to report the count rather
+  than invent a threshold.
 
 ---
 
 ## Tests
 
-`tests/scheduling.test.ts` (58) and `tests/schedule-bootstrap.test.ts` (16).
+`tests/scheduling.test.ts` (83), `tests/schedule-bootstrap.test.ts` (16),
+`tests/clubs.test.ts` (18), `tests/attendance.test.ts` (21),
+`tests/calendar-feed.test.ts` (18) and `tests/schedule-announce.test.ts` (21).
 
 Covered: HQ / Club A / Club B as three different weeks · closed vs unconfigured ·
 inheritance at every level and room-level override · the federation's rows
@@ -305,5 +503,22 @@ cross-club and national authority refusals · class inside facility hours ·
 refusals reported · idempotent generation · online vs hybrid venue rules · coach
 and venue double-booking · coach availability · capacity under a five-way race ·
 cancellation returning the seat · the cancellation notification reaching the
-booked student without the reason · and the source greps for hard-coded times,
-weekdays and season names.
+booked student without the reason · rescheduling carrying bookings onto the new
+time · a move refused outside the room hours and on a closed day · an override
+recorded in the audit trail · delivery options for a school inside the client’s
+own window and against a coach’s diary · a personal week showing what moved
+rather than a gap · a club’s own members told and the country not · a search that
+refuses to offer a lapsed club · a club page that lists instructors and not
+students · a distance that is measured or absent, never guessed · a PIN code as
+an area rather than a coordinate · a sitemap that advertises only URLs that
+resolve · an overnight window split across two days whose halves abut exactly ·
+24:00 refused as an opening time · a register that amends rather than
+duplicates and records what it replaced · an unmarked person who is not an
+absent person · a coach who may mark their own class and not another · the
+existing grading join still seeing every mark · a feed secret that is absent
+from the database and from the audit trail · revocation that bites on the next
+poll · an unknown, revoked and malformed token that are indistinguishable · an
+announcement audience counted and frozen · a typed confirmation that refuses a
+stale figure · a large fan-out that waits for a second person · what actually
+went out recorded apart from what was promised · and the source greps for
+hard-coded times, weekdays and season names.

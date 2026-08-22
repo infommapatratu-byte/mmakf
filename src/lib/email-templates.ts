@@ -157,6 +157,59 @@ It sets out how the figure was arrived at, line by line:
 {{portalUrl}}${SIGNATURE}`,
   },
 
+  // ── The automatic first quotation (migration 0040) ──
+  //
+  // Two templates, because there are two true things to say and neither may be
+  // said with the other's words.
+  //
+  // NEITHER CARRIES A FIGURE. `quote_ready` above does not either, and for a
+  // stronger reason here: these are sent by an automation, and a template with
+  // an amount placeholder is a place where a null becomes "₹" or, far worse,
+  // "₹0". The quotation itself carries the figure and the line-by-line working
+  // that explains it; the message carries the reference and the way in.
+  //
+  // Nor does either promise when. The federation has published no service
+  // standard, and the second of these — sent precisely when a person has to do
+  // something before there is a price — is exactly where an invented one would
+  // have been most tempting.
+  application_quotation_ready: {
+    key: 'application_quotation_ready', topic: 'institution',
+    requires: ['contactName', 'institutionName', 'ref', 'quoteRef', 'statusUrl'],
+    subject: 'Your MMAKF quotation — {{quoteRef}}',
+    body: `Dear {{contactName}},
+
+MMAKF has prepared a quotation for {{institutionName}} from the requirements you
+sent us. You do not need to send them again.
+
+Application: {{ref}}
+Quotation: {{quoteRef}}
+
+It sets out how the figure was arrived at, line by line:
+{{statusUrl}}
+
+If anything about your requirements has changed, reply to this message and say
+so, and the quotation will be prepared again.${SIGNATURE}`,
+  },
+
+  application_quotation_pending: {
+    key: 'application_quotation_pending', topic: 'institution',
+    requires: ['contactName', 'institutionName', 'ref', 'statusUrl'],
+    subject: 'MMAKF is preparing your quotation — {{ref}}',
+    body: `Dear {{contactName}},
+
+MMAKF has everything it asked for about {{institutionName}}, and your
+requirements are now with the federation's training office, which is preparing
+your quotation.
+
+Application: {{ref}}
+
+There is no figure to show you yet, and MMAKF would rather say that than send
+you one it has not decided. You can follow the application here:
+{{statusUrl}}
+
+If the training office needs anything further, somebody will write to you.${SIGNATURE}`,
+  },
+
   proposal_ready: {
     key: 'proposal_ready', topic: 'institution',
     requires: ['contactName', 'institutionName', 'proposalRef', 'portalUrl'],

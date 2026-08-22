@@ -103,7 +103,17 @@ const DICTIONARY: Record<string, StatusMeaning> = {
   acknowledged:         { label: 'Acknowledged', tone: 'progress', meaning: 'MMAKF has confirmed receipt to the applicant.' },
   information_requested:{ label: 'Information requested', tone: 'warn', meaning: 'Waiting on the institution to supply something.', actionable: true },
   program_design:       { label: 'Programme design', tone: 'progress', meaning: 'Being configured into a deliverable programme.' },
+  // ACTIONABLE, and that is the whole reason it exists. Somebody in the training
+  // office has to price this — either because no published rule covered it, or
+  // because a rule that did fire wants a second pair of eyes — and until they
+  // do, the institution has been told a quotation is coming and has no figure.
+  // Counted as outstanding work on /admin so it cannot sit unnoticed.
+  awaiting_quotation:   { label: 'Awaiting quotation', tone: 'waiting', meaning: 'The federation has the requirements and a person has to set the price.', actionable: true },
   quoted:               { label: 'Quoted', tone: 'progress', meaning: 'A quotation has been issued and is with the institution.' },
+  // ── The automatic first quotation (application_quote_outcome) ────────────
+  // 'quoted' and 'awaiting_approval' above are shared with the quote lifecycle
+  // and mean the same thing here, which is why they are not repeated.
+  manual_quote_required: { label: 'Manual quotation required', tone: 'waiting', meaning: 'No published fee rule priced this. There is NO figure — the training office prepares one.', actionable: true },
   proposed:             { label: 'Proposed', tone: 'progress', meaning: 'A formal proposal is with the institution.' },
   contracted:           { label: 'Contracted', tone: 'good', meaning: 'Agreed and signed.' },
   declined:             { label: 'Declined', tone: 'bad', meaning: 'The institution did not proceed.', terminal: true },
@@ -984,6 +994,23 @@ const DICTIONARY: Record<string, StatusMeaning> = {
     meaning: 'No longer governs any date. Kept, because the days it did govern were worked out from it.',
     terminal: true,
   },
+
+  // ── Training enrolment (migration 0045) ──────────────────────────────────
+  //
+  // training_enrolment_status is ('active', 'transferred', 'ended'). The first
+  // two of those this dictionary already knew; `transferred` it did not, and it
+  // is NOT a synonym for `ended`.
+  //
+  // A student who moved to another batch has not stopped training. Rendering
+  // the two the same way would make every transfer read as a dropout — in the
+  // chip on the screen, and in whatever retention figure somebody eventually
+  // counts off these rows. Terminal for THIS enrolment; neutral in tone,
+  // because nothing went wrong and the student is still on the mat.
+  transferred: {
+    label: 'Transferred', tone: 'neutral',
+    meaning: 'Moved to another course or batch. This enrolment is closed and the student continues under the new one.',
+    terminal: true,
+  },
 };
 
 /**
@@ -1595,9 +1622,13 @@ export function toneVars(tone: Tone): string {
 export const LIFECYCLES: Record<string, readonly string[]> = {
   application: [
     'draft', 'submitted', 'acknowledged', 'under_review', 'information_requested',
-    'program_design', 'quoted', 'proposed', 'approved', 'contracted',
+    'program_design', 'awaiting_quotation', 'quoted', 'proposed', 'approved', 'contracted',
     'declined', 'withdrawn', 'expired',
   ],
+  // What the automation decided about an application's price (migration 0040).
+  // Ordered by how good the news is, which is the order an operator working the
+  // queue meets them in: priced and sent, priced and held, not priced at all.
+  application_quote: ['quoted', 'awaiting_approval', 'manual_quote_required'],
   lead: ['new', 'qualifying', 'qualified', 'quoted', 'proposed', 'won', 'lost', 'dormant', 'disqualified'],
   task: ['open', 'in_progress', 'blocked', 'done', 'cancelled'],
   ticket: ['open', 'assigned', 'in_progress', 'waiting_user', 'waiting_internal', 'escalated', 'resolved', 'closed'],

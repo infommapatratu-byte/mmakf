@@ -78,6 +78,16 @@ export const EXCLUSIONS: Record<string, string> = {
     'response, so a sitemap entry would contradict the page. /learn links to it for the clients ' +
     'who need it.',
   '/checkout': 'A transactional step that only means anything with a basket behind it; on its own it renders the reasons it cannot take an order.',
+  '/shop/checkout':
+    'The MARKETPLACE basket — a different basket from /checkout, because the two ' +
+    'catalogues are two id spaces and merging them would charge somebody for the wrong ' +
+    'item. Excluded for the same reason /checkout is: it holds one visitor\'s own basket ' +
+    'in their own browser, so to a crawler it is a page that says "your basket is empty" ' +
+    'and to a searcher it is a dead end. /shop and the product pages are what should meet ' +
+    'them, and both link here. Recorded here rather than by declaring /shop in ' +
+    'PUBLIC_SECTIONS, because the section\'s two other routes are dynamic and already ' +
+    'carry their own expansion policies — leaving it undeclared keeps the next static ' +
+    'page added under /shop an error until somebody classifies it on purpose.',
   '/unit': 'The Unit Portal sign-in. Same class of surface as /admin — an access-code gate, not a page for readers.',
   '/calendar.ics': 'A subscription feed, not a page. It is linked from /calendar, which is what a reader should find.',
   '/sitemap.xml': 'The sitemap does not list itself; robots.txt is how a crawler is told where it is.',
@@ -98,8 +108,31 @@ export const DYNAMIC_ROUTE_POLICY: Record<string, string> = {
   '/shotokan/techniques/[slug]': 'Expanded from TECHNIQUES in src/data/shotokan. These are the technique reference pages — substantive editorial content about public martial-arts knowledge, and exactly the kind of page §45 asks to be indexable. The set is small, fixed and editorial, with no register of real people behind it, which is what makes expanding it safe.',
   '/shotokan/kumite/[slug]': 'Expanded from SYSTEMS and CONCEPTS in src/data/shotokan, for the same reason as the technique pages: fixed, editorial, and about the sport rather than about any person.',
   '/clubs/[slug]': 'Expanded from the affiliation register, and ONLY from clubs that are currently affiliated AND carry a slug an administrator set — see publishableClubs() in src/db/clubs.ts. Both halves matter. Expanding lapsed clubs would put the federation\'s recommendation behind a charter that has expired; minting a slug from a name would publish a URL that moves the next time somebody corrects a spelling, breaking a link a parent had bookmarked. The federation\'s instruction is explicit: "DO NOT generate fake location pages. Only index real verified locations."',
+  '/my/calendar/[secret].ics':
+    'NOT expanded, and it also sits inside /my, which is a PRIVATE prefix — so this entry is belt '
+    + 'and braces. The dynamic segment is a BEARER SECRET: expanding it would publish the very '
+    + 'credential that reads one member diary. The route sets X-Robots-Tag: noindex on its own '
+    + 'response and answers 404 for anything that does not resolve.',
   '/clubs/[slug]/schedule.ics': 'NOT expanded. A subscription feed is not a page, for the same reason /calendar.ics is excluded — the club page is what a reader should find, and it links to the feed.',
+  '/pay/[token]': 'NOT expanded, and there is nothing to expand: each URL is one institution\'s invoice, and the token in it IS the authorisation — it is minted from 24 random bytes and handed to that institution alone. Listing these would publish every payment link the federation has issued. The page sets X-Robots-Tag: noindex on its own response for the same reason, so even a link shared by accident does not become a search result. Nothing links to it from the site; the federation sends it to the client that owes the money.',
   '/learn/applications/[ref]': 'NOT expanded, and never should be. Each URL is one institution\'s own submission, reachable only with the private token issued to it. Listing these would publish the reference numbers of every applicant.',
+  '/shop/category/[...path]':
+    'Expanded from publishableCategoryPaths() in src/db/marketplace-browse.ts — category paths '
+    + 'carrying at least one item that satisfies publicListingPredicate(), plus their ancestors, '
+    + 'and only nodes that are themselves active. The same predicate the grid, the counts and the '
+    + 'product page resolve through, so an unapproved or quarantined item cannot pull a category '
+    + 'into the sitemap that its own page would then render empty. The INNER JOIN is the point: an '
+    + 'adopted taxonomy has twenty-six nodes on the day it is adopted and almost nothing filed '
+    + 'under most of them, and advertising all twenty-six would put a set of thin doorway pages on '
+    + 'the domain MMAKF itself publishes from. Those pages still answer 200 and stay linked '
+    + 'from their parent — they are simply not advertised. Filtered and paginated variants are excluded by the '
+    + 'page itself, which sets X-Robots-Tag: noindex whenever a filter or a page number is applied; '
+    + 'the bare category URL is the one listed here. Capped at SITEMAP_CATEGORY_CAP, and the cap '
+    + 'reports when it bites.',
+  '/shop/product/[ref]':
+    'Expanded from publishableListings() in src/db/marketplace.ts, and ONLY through publicListingPredicate() — the same five-condition predicate the shop index and the product page itself resolve through. That reuse is the safety property: a draft, rejected, quarantined or edited-since-approval item, or one whose seller is suspended or whose shop is closed, is absent from the sitemap for exactly the reason it 404s on the page, because one query decides both. Building this list from `select ref from listings` would invite a crawler to index every unapproved item in the marketplace under the federation\'s own domain, and Google would keep them. Capped at SITEMAP_LISTING_CAP and the cap reports when it bites.',
+  '/shop/seller/[slug]':
+    'Expanded from publishableStorefronts() in src/db/marketplace.ts — sellers with a store slug an administrator set who carry at least one listing satisfying publicListingPredicate(). Approval and shop-open state are not re-stated here: they are two of that predicate\'s own five conditions, so a suspended seller and a closed shop leave the sitemap through the same query that empties their storefront. The inventory condition is an INNER JOIN onto listings rather than a status filter, because a storefront with nothing on it is a thin doorway page — a trading name, a tagline, and nothing a searcher wanted — and a domain full of them is penalised. The slug requirement matches publishableClubs(): a URL minted from a trading name moves the next time somebody corrects a spelling.',
 };
 
 // ── path rules ──────────────────────────────────────────────────────────────

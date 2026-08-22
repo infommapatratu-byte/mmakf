@@ -281,9 +281,17 @@ describe('ONE SUBMISSION, EVERYTHING DERIVED — the federation’s actual deman
   it('creates the review task in that role’s queue', async () => {
     const tasks = await db.select().from(o.tasks)
       .where(and(eq(o.tasks.subjectKind, 'institution_application'), eq(o.tasks.subjectId, result.applicationId)));
-    expect(tasks).toHaveLength(1);
-    expect(tasks[0].assignedRole).toBe('TRAINING_OPERATIONS');
-    expect(tasks[0].templateCode).toBe('REVIEW_INSTITUTION_APPLICATION');
+    // TWO, since migration 0040: the review, and the quotation the fee engine
+    // could not produce because MMAKF has published no fee framework. Both are
+    // real work and both belong to the training office; naming them here rather
+    // than asserting a count keeps this test honest about which is which.
+    const review = tasks.find((t: any) => t.templateCode === 'REVIEW_INSTITUTION_APPLICATION');
+    expect(review).toBeTruthy();
+    expect(review.assignedRole).toBe('TRAINING_OPERATIONS');
+    const quote = tasks.find((t: any) => t.templateCode === 'PREPARE_MANUAL_QUOTATION');
+    expect(quote, 'nobody was asked to price this application').toBeTruthy();
+    expect(quote.assignedRole).toBe('TRAINING_OPERATIONS');
+    expect(tasks).toHaveLength(2);
   });
 
   it('sets NO deadline, because the federation has published no service standard', async () => {
@@ -326,10 +334,14 @@ describe('ONE SUBMISSION, EVERYTHING DERIVED — the federation’s actual deman
 
   it('shows the applicant a timeline, and nothing internal', async () => {
     const view = await applicantStatus(db, result.ref, result.accessToken);
-    expect(view.status).toBe('acknowledged');
+    // 'awaiting_quotation' since migration 0040. The application was
+    // acknowledged and then moved on the same submission, because the fee
+    // engine ran and found that MMAKF has published nothing to price it with.
+    expect(view.status).toBe('awaiting_quotation');
     const kinds = view.timeline.map((t: any) => t.kind);
     expect(kinds).toContain('submitted');
     expect(kinds).toContain('acknowledged');
+    expect(kinds).toContain('awaiting_quotation');
     // Routing and scoring are internal. The school is not shown how it was
     // triaged.
     expect(kinds).not.toContain('routed');
@@ -367,11 +379,19 @@ describe('re-running the automation does not double anything', () => {
     const countMsgs = async () => (await db.select({ n: sql<number>`count(*)::int` }).from(g.notifications)
       .where(eq(g.notifications.recipientEmail, 'hr@tsr.example')))[0].n;
 
-    expect(await countTasks()).toBe(1);
-    expect(await countMsgs()).toBe(1);
+    // WHATEVER THE FIRST SUBMISSION PRODUCED IS THE BASELINE, and the test is
+    // that it does not grow. Since migration 0040 one submission produces two
+    // tasks and two messages — review plus quotation, acknowledgement plus
+    // "your quotation is being prepared" — and pinning the number to 1 would
+    // make this test about how many automations exist rather than about whether
+    // re-running doubles them, which is the property it is here to guard.
+    const tasksAfterFirst = await countTasks();
+    const msgsAfterFirst = await countMsgs();
+    expect(tasksAfterFirst).toBeGreaterThan(0);
+    expect(msgsAfterFirst).toBeGreaterThan(0);
 
     // The retry sweep, and a straight re-dispatch, both re-enter the same run.
-    const { dispatch } = await import('../src/db/automations');
+    const { dispatch, dispatchRequirementsComplete } = await import('../src/db/automations');
     const again = await dispatch(db, {
       trigger: 'INSTITUTION_APPLICATION_SUBMITTED',
       idempotencyKey: `application:${first.applicationId}`,
@@ -383,8 +403,16 @@ describe('re-running the automation does not double anything', () => {
 
     expect(again[0].status).toBe('skipped');
     expect(again[0].skipReason).toBe('already_succeeded');
-    expect(await countTasks()).toBe(1);
-    expect(await countMsgs()).toBe(1);
+
+    // And the quotation half, which is a separate run under a separate key.
+    const requote = await dispatchRequirementsComplete(db, {
+      applicationId: first.applicationId, ref: first.ref, accessToken: first.accessToken,
+    });
+    expect(requote[0].status).toBe('skipped');
+    expect(requote[0].skipReason).toBe('already_succeeded');
+
+    expect(await countTasks()).toBe(tasksAfterFirst);
+    expect(await countMsgs()).toBe(msgsAfterFirst);
   });
 });
 
@@ -930,7 +958,12 @@ describe('coaches', () => {
   it('re-checks availability at confirmation, not only at recommendation', async () => {
     const [program] = await db.insert(e.trainingPrograms).values({
       code: 'MMAKF-PRG-2026-000002', title: 'Confirmation test', status: 'scheduled',
+      // The paid period. The assignment engine refuses to run against a
+      // programme nobody has bought — see src/db/activation.ts — so the money
+      // path below is part of the setup rather than decoration.
+      startsOn: '2026-11-01', endsOn: '2026-12-31',
     }).returning();
+    await payForProgramme(program.id);
 
     const window = { startsAt: new Date('2026-11-05T09:00:00Z'), endsAt: new Date('2026-11-05T10:00:00Z') };
     const rec = await recommendCoachesFor(program.id, window);
@@ -947,6 +980,38 @@ describe('coaches', () => {
       confirmAssignment(db, cmCtx, rec.recommended[0].id, window)
     ).rejects.toThrow(/no longer free/);
   });
+
+  /**
+   * The real money path — order, payment attempt, VERIFIED capture — because
+   * the coach assignment engine will not run against a programme no payment has
+   * activated, and faking the entitlement row would test the fake.
+   */
+  async function payForProgramme(programId: number) {
+    const { createOrder, beginPayment, confirmPayment } = await import('../src/db/orders');
+    const feeCode = `program.test.${programId}`;
+    await db.insert(s.feeSchedule).values({
+      code: feeCode, label: 'Test programme', kind: 'program',
+      amountPaise: 100000, effectiveFrom: '2026-01-01', active: true,
+    });
+    const order = await createOrder(db, null, {
+      email: 'client@example.in',
+      lines: [{ kind: 'program', feeCode, refType: 'program', refId: programId, description: 'Programme' }],
+    });
+    const payment = await beginPayment(db, order.id, {
+      provider: 'razorpay',
+      providerOrderId: `order_test_${programId}`,
+      amountPaise: order.totalPaise,
+      idempotencyKey: `idem_test_${programId}`,
+    });
+    await confirmPayment(db, null, {
+      providerPaymentId: `pay_test_${programId}`,
+      providerOrderId: payment.providerOrderId,
+      amountPaise: order.totalPaise,
+      currency: 'INR',
+      status: 'captured',
+      method: 'upi',
+    } as any);
+  }
 
   async function recommendCoachesFor(programId: number, window: { startsAt: Date; endsAt: Date }) {
     const { recommendCoaches } = await import('../src/db/coaches');

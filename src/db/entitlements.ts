@@ -44,13 +44,15 @@
 // stays taken until a human refunds it. The two unacceptable answers are
 // activating anyway and recording nothing.
 
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import * as s from './schema';
 import { writeAudit, type AuditContext } from './federation';
 import { isUniqueViolation } from './pgerror';
 import { assertCan, assertCanAnywhere, type Principal } from '@/lib/rbac';
 import { publish } from '@/lib/domain-events';
+import { federationToday } from './orders';
 import { renew, type Category } from './membership';
+import { isStudentMembershipCategory } from './student-rule';
 import { checkEntryEligibility, entriesAreLocked } from './competition';
 
 type DB = any; // drizzle client (postgres.js in prod, PGlite in tests)
@@ -149,6 +151,15 @@ export interface TermInput {
   membershipCategory?: Category | null;
   termMonths?: number | null;
   openEnded?: boolean;
+  /**
+   * The supporting resources this fee includes — the technical library, live
+   * classes, named courses. Validated here against the closed vocabulary in
+   * src/db/activation.ts, so a typo is a form error rather than a school that
+   * paid for library access and silently got none.
+   *
+   * Omitted or empty grants NOTHING. Absence is never expanded into "all of it".
+   */
+  resources?: unknown;
   notes?: string | null;
   approvedBy?: string | null;
 }
@@ -188,12 +199,58 @@ export async function configureTerm(db: DB, ctx: AuditContext, input: TermInput)
     );
   }
 
+  // ── A STUDENT DOES NOT PAY A MEMBERSHIP FEE FOR BEING A STUDENT ──
+  //
+  // The SECOND half of the refusal, and the half that closes the smuggling
+  // route. createOrder() reads a `fee_schedule` row and refuses to charge one
+  // that names a student — but it reads the FEE, and this table is where the
+  // fee's MEANING is recorded separately from its name. Without this,
+  //
+  //   fee_schedule:      membership.coach.annual — 'Coach membership (annual)'
+  //   entitlement_terms: membership.coach.annual — membershipCategory 'athlete'
+  //
+  // prices and charges cleanly under a legitimate coach name, and then
+  // decideMembership() hands renew() the category off THIS row and mints an
+  // athlete membership. The name is not the decision; this row is.
+  //
+  // src/db/revenue.ts already reported an athlete membership as withdrawn on
+  // 17 August 2026 and said "nothing can create another". This is the sentence
+  // becoming true.
+  //
+  // History untouched: terms recorded before today keep their rows, the
+  // memberships they issued keep theirs, and every report and /verify lookup
+  // still reads both. Only a NEW configuration is refused.
+  if (input.subject === 'membership' && isStudentMembershipCategory(input.membershipCategory)) {
+    throw new EntitlementError(
+      'student_membership_refused',
+      `A fee cannot be configured to buy a '${String(input.membershipCategory)}' membership. ` +
+      'A student does not pay a membership fee for being a student — they pay for TRAINING, and an ' +
+      'account, a profile, an enrolment and a place in a class are what having a student means rather ' +
+      'than products to be sold. If this fee buys training, record it as subject "program" with the ' +
+      'term and the resources it includes, and the payment will activate that. The membership register ' +
+      'remains open to the categories that act for the federation — instructor, official — and to dojos.'
+    );
+  }
+
+  // Refused at the point somebody typed it. See parseResourceGrants() on why a
+  // resource list is validated at configuration time and not at activation time.
+  const { parseResourceGrants } = await import('./activation');
+  const resources = parseResourceGrants(input.resources ?? null);
+  if (resources.length && input.subject !== 'program') {
+    throw new EntitlementError(
+      'resources_not_applicable',
+      `Supporting resources are granted by a PROGRAMME entitlement, and this term is for '${input.subject}'. ` +
+      'Granting the technical library off the back of a grading fee is not a decision this system will infer.'
+    );
+  }
+
   const values = {
     feeCode,
     subject: input.subject,
     membershipCategory: (input.membershipCategory ?? null) as any,
     termMonths: openEnded ? null : (termMonths as number),
     openEnded,
+    resources: (input.resources == null ? null : resources) as any,
     notes: input.notes ?? null,
     approvedBy: input.approvedBy ?? null,
     setByUserId: ctx.principal.userId ?? null,
@@ -206,7 +263,10 @@ export async function configureTerm(db: DB, ctx: AuditContext, input: TermInput)
 
   await writeAudit(db, ctx, {
     entityType: 'entitlement_term', entityId: row.id, action: 'update',
-    newValue: { feeCode, subject: input.subject, termMonths: values.termMonths, openEnded },
+    newValue: {
+      feeCode, subject: input.subject, termMonths: values.termMonths, openEnded,
+      resources: resources.map((r) => `${r.kind}${r.resourceId ? `:${r.resourceId}` : ''}`),
+    },
   });
   return row;
 }
@@ -234,6 +294,12 @@ const SUBJECT_BY_REF_TYPE: Record<string, Subject> = {
   course: 'course',
   certificate: 'certificate',
   document: 'document',
+  // Both spellings, because `training_programs` is the table and 'program' is
+  // what a caller writes. A refType this map does not recognise falls through
+  // to `kind`, and a programme billed as a course would be activated as a
+  // course — which is why both are named rather than one being "obvious".
+  program: 'program',
+  training_program: 'program',
 };
 
 const SUBJECT_BY_KIND: Record<string, Subject> = {
@@ -242,6 +308,7 @@ const SUBJECT_BY_KIND: Record<string, Subject> = {
   grading: 'grading',
   course: 'course',
   certificate: 'certificate',
+  program: 'program',
 };
 
 /**
@@ -285,9 +352,31 @@ export interface ActivationReport {
   outcomes: ActivationOutcome[];
 }
 
-/** A decision taken from reads alone, BEFORE anything is written. */
-type Decision =
-  | { activate: true; act: (tx: DB) => Promise<number | null>; detail: Record<string, unknown> }
+/**
+ * A decision taken from reads alone, BEFORE anything is written.
+ *
+ * EXPORTED since migration 0039, because src/db/activation.ts returns one for
+ * the programme subject. It is a return type and not an entry point: the only
+ * thing that builds a LineContext is activateForOrder(), which refuses to run
+ * without a verified capture, so a caller holding this type still cannot
+ * activate anything.
+ *
+ * `act` receives the entitlement's OWN id, because the claim is written before
+ * it runs — see claimAndAct(). A programme's resource grants hang off that id,
+ * and there is no way to know it before the row exists.
+ */
+export type Decision =
+  | {
+      activate: true;
+      act: (tx: DB, entitlementId: number) => Promise<number | null>;
+      detail: Record<string, unknown>;
+      /**
+       * THE PERIOD PAID FOR, where the subject has one. Written onto the
+       * entitlement row so a later fee-schedule edit cannot re-date it.
+       */
+      validFrom?: string | null;
+      validTo?: string | null;
+    }
   | { activate: false; reason: string; detail: Record<string, unknown> };
 
 /**
@@ -370,7 +459,7 @@ export async function activateForOrder(
   };
 }
 
-interface LineContext {
+export interface LineContext {
   order: any;
   line: any;
   subject: Subject;
@@ -416,7 +505,7 @@ async function activateLine(db: DB, ctx: AuditContext, c: LineContext): Promise<
  */
 async function claimAndAct(tx: DB, ctx: AuditContext, c: LineContext): Promise<ActivationOutcome> {
   const decision = await decide(tx, c);
-  const feeVersion = await resolveFeeVersion(tx, c.line);
+  const feeVersion = await resolveFeeVersion(tx, c.line, c.order);
 
   const [row] = await tx.insert(s.entitlements).values({
     subject: c.subject,
@@ -427,6 +516,11 @@ async function claimAndAct(tx: DB, ctx: AuditContext, c: LineContext): Promise<A
     invoiceId: c.invoice?.id ?? null,
     feeVersion,
     status: decision.activate ? 'active' : 'blocked',
+    // The period the payer bought, on the row (migration 0039). Null where the
+    // subject has none — a certificate fee buys a certificate, not an interval
+    // — and null on a blocked row, where nothing was issued to have a period.
+    validFrom: decision.activate ? (decision.validFrom ?? null) : null,
+    validTo: decision.activate ? (decision.validTo ?? null) : null,
     activatedAt: decision.activate ? c.now : null,
     activatedBy: ctx.principal.label,
     activatedByUserId: ctx.principal.userId ?? null,
@@ -436,7 +530,7 @@ async function claimAndAct(tx: DB, ctx: AuditContext, c: LineContext): Promise<A
 
   let subjectId: number | null = null;
   if (decision.activate) {
-    subjectId = await decision.act(tx);
+    subjectId = await decision.act(tx, row.id);
     if (subjectId != null) {
       await tx.update(s.entitlements)
         .set({ subjectId, updatedAt: new Date() })
@@ -449,6 +543,8 @@ async function claimAndAct(tx: DB, ctx: AuditContext, c: LineContext): Promise<A
     newValue: {
       subject: c.subject, subjectId,
       status: decision.activate ? 'active' : 'blocked',
+      validFrom: decision.activate ? (decision.validFrom ?? null) : null,
+      validTo: decision.activate ? (decision.validTo ?? null) : null,
       orderNo: c.order.orderNo, paymentId: c.payment.id,
       reason: decision.activate ? null : decision.reason,
     },
@@ -462,6 +558,8 @@ async function claimAndAct(tx: DB, ctx: AuditContext, c: LineContext): Promise<A
       subject: c.subject, subjectId,
       orderId: c.order.id, orderLineId: c.line.id, paymentId: c.payment.id,
       personId: c.order.personId ?? null,
+      validFrom: decision.activate ? (decision.validFrom ?? null) : null,
+      validTo: decision.activate ? (decision.validTo ?? null) : null,
       reason: decision.activate ? null : decision.reason,
     },
     // The same logical fact republished — by a webhook retry that got past the
@@ -484,7 +582,7 @@ async function blockOutside(db: DB, ctx: AuditContext, c: LineContext, reason: s
     subject: c.subject, subjectId: null,
     orderId: c.order.id, orderLineId: c.line.id, paymentId: c.payment.id,
     invoiceId: c.invoice?.id ?? null,
-    feeVersion: await resolveFeeVersion(db, c.line),
+    feeVersion: await resolveFeeVersion(db, c.line, c.order),
     status: 'blocked', activatedBy: ctx.principal.label, reason,
     detail: { conflict: true } as any,
   }).returning();
@@ -513,10 +611,24 @@ async function blockOutside(db: DB, ctx: AuditContext, c: LineContext, reason: s
  * was not priced from the schedule at all — never a fabricated version string,
  * for the same reason an unknown amount is never rendered as zero.
  */
-async function resolveFeeVersion(db: DB, line: any): Promise<string | null> {
+async function resolveFeeVersion(db: DB, line: any, order?: any): Promise<string | null> {
   if (!line.feeCode) return line.variantId ? `variant:${line.variantId}` : null;
+  // THE FEE THAT WAS IN FORCE ON THE DAY THE ORDER WAS RAISED, which is the row
+  // createOrder() actually priced this line from. "The newest active row" is a
+  // different question and gave a different answer: a fee entered in advance
+  // for next April sorts first the moment it is entered, so an entitlement
+  // issued today would have been stamped with a fee that had not started, and
+  // an entitlement issued after a fee closed would name the closed one. Either
+  // is a false statement about a payment that has already been taken — the
+  // record says somebody was charged under a fee they were not.
+  const on = federationToday(order?.createdAt ? new Date(order.createdAt) : new Date());
   const fee = (await db.select().from(s.feeSchedule)
-    .where(and(eq(s.feeSchedule.code, line.feeCode), eq(s.feeSchedule.active, true)))
+    .where(and(
+      eq(s.feeSchedule.code, line.feeCode),
+      eq(s.feeSchedule.active, true),
+      lte(s.feeSchedule.effectiveFrom, on),
+      or(isNull(s.feeSchedule.effectiveTo), gte(s.feeSchedule.effectiveTo, on)),
+    ))
     .orderBy(desc(s.feeSchedule.effectiveFrom)).limit(1))[0];
   return fee ? `${fee.code}@${isoDate(fee.effectiveFrom)}#${fee.id}` : null;
 }
@@ -528,6 +640,16 @@ async function decide(tx: DB, c: LineContext): Promise<Decision> {
     case 'membership': return decideMembership(tx, c);
     case 'event_entry': return decideEventEntry(tx, c);
     case 'booking': return decideBooking(tx, c);
+    // The programme decision lives in src/db/activation.ts, which is where the
+    // period, the resource grants and the access check that reads them are
+    // kept together. Imported dynamically for the reason orders.ts imports this
+    // module dynamically: activation.ts reaches into the operations tables and
+    // the coach engine, and a static import would drag both into every module
+    // that only wanted to issue a membership.
+    case 'program': {
+      const { decideProgram } = await import('./activation');
+      return decideProgram(tx, c);
+    }
     default: return decideRecordOnly(tx, c);
   }
 }
@@ -585,6 +707,37 @@ async function decideMembership(tx: DB, c: LineContext): Promise<Decision> {
   }
 
   const category = term.membershipCategory as Category;
+
+  // ── THE GATE THAT DOES NOT DEPEND ON WHO WROTE THE ROW ──
+  //
+  // configureTerm() refuses to RECORD that a fee buys an athlete membership.
+  // This refuses to ACT on one, and the difference between the two is the whole
+  // argument of src/db/student-rule.ts: a guard on the authoring function stops
+  // an author and stops nothing else. `entitlement_terms` rows arrive from
+  // seeds, migrations, restored backups and operators' INSERTs — and rows
+  // configured BEFORE the refusal existed are already sitting in the table,
+  // where every future payment would keep minting athlete memberships off them.
+  //
+  // IT BLOCKS RATHER THAN THROWS, deliberately. By this point the money has
+  // been taken and verified. An exception here would unwind the transaction
+  // that records a payment which really happened, and a ledger edited to make a
+  // new rule look tidy is a falsified ledger. A blocked entitlement leaves the
+  // order, the payment, the invoice and the ledger exactly as they are, grants
+  // nothing, says why in a sentence a treasurer can act on, and is listed by
+  // blockedEntitlements() so it can be refunded.
+  if (isStudentMembershipCategory(category)) {
+    return {
+      activate: false,
+      reason:
+        `The term for '${term.feeCode}' admits the payer to the '${category}' register, and a student ` +
+        'does not pay a membership fee for being a student. What a student buys is TRAINING, and an ' +
+        'account, a profile, an enrolment and a place in a class are what having a student means rather ' +
+        'than products to be sold. This payment is recorded and refundable; no membership has been issued. ' +
+        'If the fee buys training, configure it as a programme term — the payment will activate that instead.',
+      detail: { feeCode: term.feeCode, category, personId },
+    };
+  }
+
   // The term runs from the day the money was taken, not the day this ran. A
   // reconcile sweep three days later must not shorten what the member bought.
   const validFrom = isoDate(c.order.paidAt ?? c.payment.capturedAt ?? c.now)!;
@@ -608,6 +761,10 @@ async function decideMembership(tx: DB, c: LineContext): Promise<Decision> {
 
   return {
     activate: true,
+    // Recorded on the entitlement as well as on the membership. The membership
+    // is the credential; the entitlement is what the payment bought, and after
+    // 0039 it can say for how long without anyone joining two tables to find out.
+    validFrom, validTo,
     detail: { personId, category, validFrom, validTo, feeCode: term.feeCode, termMonths: term.termMonths ?? null, openEnded: term.openEnded },
     act: async (db: DB) => {
       const result = await renew(db, systemEntitlementContext(), {
@@ -944,6 +1101,15 @@ async function reverseSubject(tx: DB, ctx: AuditContext, ent: any, reason: strin
       oldValue: { status: 'confirmed' },
       newValue: { status: 'fee_pending', reason },
     });
+    return;
+  }
+
+  if (ent.subject === 'program') {
+    // The grants close with the entitlement, inside this same transaction, so
+    // the training and every door it opened stop together or not at all. The
+    // rows are not deleted — see revokeProgramGrants().
+    const { revokeProgramGrants } = await import('./activation');
+    await revokeProgramGrants(tx, ctx, ent.id, reason, now);
     return;
   }
 

@@ -44,7 +44,7 @@ beforeAll(async () => {
   );
   // Generous, because this hook may now WAIT for its turn at the lock behind
   // another live suite as well as booting a server of its own.
-}, 600_000);
+}, 900_000);
 
 afterAll(async () => {
   // Awaited: stop() holds the dev-server lock until the child has genuinely
@@ -162,6 +162,19 @@ describe('/sitemap.xml, served', () => {
     }
   });
 
+  // THE BUDGETS BELOW ARE 900s, NOT 300s, AND THE REASON IS WORTH RECORDING.
+  //
+  // Each of these loops fetches EVERY URL the sitemap advertises, and in dev
+  // each first request compiles the route and its whole import graph. The
+  // sitemap used to advertise about sixty URLs. It now advertises over a
+  // hundred and fifty: /kata/[slug] was missing an expansion policy and so
+  // contributed nothing, and the technique and kumite pages did not exist.
+  // Fixing that was right — those are the pages a student searching for a form
+  // actually lands on — and it roughly tripled the work this suite does.
+  //
+  // Sampling would be the cheap answer and would gut the guard: the whole
+  // claim is that a route nobody requested is a route nobody built. So the
+  // suite stays exhaustive and the budget matches what exhaustive now costs.
   it('advertises no URL that answers anything but 200', async () => {
     const bad: string[] = [];
     for (const p of paths) {
@@ -169,7 +182,7 @@ describe('/sitemap.xml, served', () => {
       if (r.status !== 200) bad.push(`${p} -> ${r.status}`);
     }
     expect(bad).toEqual([]);
-  }, 300_000);
+  }, 900_000);
 
   it('advertises no URL that tells crawlers not to index it', async () => {
     const contradictions: string[] = [];
@@ -179,7 +192,7 @@ describe('/sitemap.xml, served', () => {
       if (/noindex/i.test(tag)) contradictions.push(`${p} -> ${tag}`);
     }
     expect(contradictions).toEqual([]);
-  }, 300_000);
+  }, 900_000);
 
   it('is not vacuous: /application really does carry that header', async () => {
     // Proving the previous test can fail. /application sets X-Robots-Tag on its

@@ -48,7 +48,7 @@ import { isConfigured, db } from '@/db';
 import * as sch from '@/db/scheduling.schema';
 import * as ops from '@/db/operations.schema';
 import { clubProfile } from '@/db/clubs';
-import { todayIso, addDays, publicTimetable } from '@/db/scheduling';
+import { todayIso, addDays, publicExceptionsBetween } from '@/db/scheduling';
 import { SITE_ORIGIN } from '@/lib/seo';
 
 export const prerender = false;
@@ -171,19 +171,27 @@ export const GET: APIRoute = async ({ params, url }) => {
 
   // Closures and altered days, as all-day events. A club that is shut on the
   // 15th is a thing a member needs in their calendar quite as much as a class.
-  const week = await publicTimetable(database, { purpose: 'training', dojoId: profile.club.id }, from, to);
-  for (const day of week) {
-    for (const exception of day.exceptions) {
-      lines.push('BEGIN:VEVENT');
-      lines.push(`UID:exception-${exception.id}@mmakf.in`);
-      lines.push(`DTSTAMP:${stampUtc(now)}`);
-      lines.push(`DTSTART;VALUE=DATE:${stampDate(day.date)}`);
-      lines.push(`DTEND;VALUE=DATE:${stampDate(addDays(day.date, 1))}`);
-      lines.push(`SUMMARY:${esc(`${profile.club.name}: ${EXCEPTION_WORDS[exception.kind] ?? exception.kind}`)}`);
-      lines.push(`URL:${origin}/clubs/${profile.club.slug}`);
-      lines.push('TRANSP:TRANSPARENT');
-      lines.push('END:VEVENT');
-    }
+  // TWO RESOLUTIONS AND ONE SELECT, not one full day-resolution per day.
+  //
+  // This called publicTimetable() across the whole 134-day window and then used
+  // nothing from it but `day.exceptions`. timetable() resolves day by day —
+  // re-walking the inheritance chain, the seasons and the rules for each — so a
+  // single fetch of this feed issued somewhere between nine hundred and two
+  // thousand sequential queries to emit a handful of all-day events, on a
+  // public endpoint that calendar clients re-poll on their own schedule.
+  const exceptions = await publicExceptionsBetween(
+    database, { purpose: 'training', dojoId: profile.club.id }, from, to
+  );
+  for (const { date, exception } of exceptions) {
+    lines.push('BEGIN:VEVENT');
+    lines.push(`UID:exception-${exception.id}@mmakf.in`);
+    lines.push(`DTSTAMP:${stampUtc(now)}`);
+    lines.push(`DTSTART;VALUE=DATE:${stampDate(date)}`);
+    lines.push(`DTEND;VALUE=DATE:${stampDate(addDays(date, 1))}`);
+    lines.push(`SUMMARY:${esc(`${profile.club.name}: ${EXCEPTION_WORDS[exception.kind] ?? exception.kind}`)}`);
+    lines.push(`URL:${origin}/clubs/${profile.club.slug}`);
+    lines.push('TRANSP:TRANSPARENT');
+    lines.push('END:VEVENT');
   }
 
   lines.push('END:VCALENDAR');

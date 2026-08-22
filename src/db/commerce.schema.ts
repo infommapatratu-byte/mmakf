@@ -54,8 +54,24 @@ export const orderLineKind = pgEnum('order_line_kind', [
   'grading',            // examination fee
   'course',             // academy course
   'certificate',        // certificate issue or replacement
+  // A training programme delivered to an institution (migration 0039). Its own
+  // kind rather than 'course' or 'other': entitlements.activationBacklog() —
+  // the query that finds paid lines nothing was issued against — filters on
+  // this column, and a programme billed as 'other' would be invisible in the
+  // one place built to make an undelivered purchase visible.
+  'program',
   'donation',
   'other',
+  // A STUDENT'S OWN TRAINING (migration 0045). Last in the list because
+  // `ALTER TYPE ... ADD VALUE` appends, and this array is the mirror of what
+  // Postgres holds rather than a preference about ordering.
+  //
+  // The value existed in the DATABASE and not in this file, so every
+  // `eq(orderLines.kind, 'training')` in src/db/orders.ts was a type error and
+  // the tree did not compile. A student does not pay a membership fee for
+  // being a student; 'training' is the line they DO pay on, and it cannot be
+  // the one kind the type system refuses to name.
+  'training',
 ]);
 
 export const paymentStatus = pgEnum('payment_status', [
@@ -425,6 +441,19 @@ export const ledgerEntries = pgTable('ledger_entries', {
   amountPaise: integer('amount_paise').notNull(),
   currency: text('currency').notNull().default('INR'),
   orderId: integer('order_id').references(() => orders.id),
+  /**
+   * WHICH LINE this entry was posted for (migration 0044).
+   *
+   * The account already carries the line KIND — `income.grading` — and that is
+   * not the same thing. An order with two 'other' lines posts two credits to
+   * `income.other`, and without this column nothing distinguishes them, so a
+   * revenue report cannot say what was sold. src/db/revenue.ts reports such an
+   * entry as not attributable rather than picking one.
+   *
+   * NULLABLE, and never backfilled. A row written before 0044 has no recorded
+   * line and deciding one retrospectively would be rewriting the ledger.
+   */
+  orderLineId: integer('order_line_id').references(() => orderLines.id),
   paymentId: integer('payment_id').references(() => payments.id),
   refundId: integer('refund_id').references(() => refunds.id),
   settlementId: integer('settlement_id').references(() => settlements.id),
@@ -436,4 +465,5 @@ export const ledgerEntries = pgTable('ledger_entries', {
 }, (t) => ({
   accountIdx: index('ledger_account_idx').on(t.account, t.occurredOn),
   orderIdx: index('ledger_order_idx').on(t.orderId),
+  orderLineIdx: index('ledger_order_line_idx').on(t.orderLineId),
 }));

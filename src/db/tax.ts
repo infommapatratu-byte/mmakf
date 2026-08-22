@@ -340,15 +340,22 @@ export function taxSnapshot(c: TaxComputation): Record<string, unknown> {
 export async function stampInvoiceTax(db: DB, invoiceId: number, c: TaxComputation) {
   const [invoice] = await db.select().from(s.invoices).where(eq(s.invoices.id, invoiceId)).limit(1);
   if (!invoice) throw new TaxError('unknown_invoice', 'No such invoice.');
-  if (invoice.taxSnapshot != null) {
+
+  // In the statement, for the reason stampInvoice() in src/db/currency.ts gives
+  // at length: a read-then-write leaves a window in which two callers both see
+  // an unstamped invoice and the second one overwrites a tax working the
+  // customer has already been shown.
+  const [stamped] = await db.update(s.invoices).set({ taxSnapshot: taxSnapshot(c) })
+    .where(and(eq(s.invoices.id, invoiceId), isNull(s.invoices.taxSnapshot)))
+    .returning({ id: s.invoices.id });
+
+  if (!stamped) {
     throw new TaxError(
       'already_frozen',
       `Invoice ${invoice.invoiceNo} already carries its tax working and keeps it. ` +
       'A tax correction is a credit note and a new invoice, not an edit.'
     );
   }
-  await db.update(s.invoices).set({ taxSnapshot: taxSnapshot(c) })
-    .where(eq(s.invoices.id, invoiceId));
   return (await db.select().from(s.invoices).where(eq(s.invoices.id, invoiceId)).limit(1))[0];
 }
 

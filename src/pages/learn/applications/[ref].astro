@@ -33,7 +33,36 @@
 // differently.
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// NO DATE IS PROMISED
+// AND NOW: THE REST OF THE CHAIN, AND THE QUOTATION ITEMISED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A timeline says what has happened. It does not say what the request IS — and
+// a school that has been quoted wants the quotation, not a line reading
+// "quotation issued". So this page now also reads, for this one application and
+// no other:
+//
+//   · the quotation raised against the training request it produced, at its
+//     current version, ITEMISED — the fee engine records the rule, the
+//     quantity, the unit amount, the factor and the running total for every
+//     line, and a total with no working shown is a number to be argued with;
+//   · the agreement, if one has been signed, and the programme, if delivery has
+//     started.
+//
+// WHICH VERSIONS ARE THE APPLICANT'S TO SEE, AND WHICH ARE NOT.
+// A quote version at `draft` or `awaiting_approval` is INTERNAL. It is a figure
+// the federation is still deciding about — in the second case, a figure a rule
+// deliberately held for a second person to look at — and showing it here would
+// hand the applicant a number nobody has agreed to and would quietly defeat the
+// approval that fee module exists to enforce. The predicate is in the WHERE
+// clause, and it is the same set of statuses the client portal honours:
+// issued, accepted, rejected, expired, superseded.
+//
+// Where a NEWER internal version exists, this page says a revision is being
+// prepared and shows no figure for it. Saying nothing would leave the school
+// reading a superseded amount as though it were current.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// NO DATE IS PROMISED, AND NO AMOUNT IS INVENTED
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // MMAKF has published no service standard for institutional applications, so
@@ -41,12 +70,41 @@
 // page says what has happened. It never says when the next thing will, and it
 // never marks anything late — there is no published deadline for anything here
 // to be late against.
+//
+// MMAKF has also published no fee framework. computeFee() can therefore price
+// nothing, every application ends at "a quotation will be prepared", and this
+// page shows NO AMOUNT AT ALL for one — not a placeholder, not an estimate and
+// above all not a zero, because zero reads as FREE and is the most expensive
+// misunderstanding available here. A quote version carrying
+// requiresManualQuote has no number, and what is printed in its place is the
+// fact that no published rule covered the request.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE SECOND READ OF THE APPLICATION ROW
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// applicantStatus() does not return the application's id or its training
+// request, and it should not: it is the applicant's view and neither is a fact
+// about their case that they need. But the quotation hangs off the request, so
+// this page reads those two columns itself — AFTER applicantStatus() has
+// already verified the key in constant time and thrown if it did not match.
+//
+// That ordering is the whole safety argument and it is not incidental. The
+// second read runs only on the authenticated path, so it introduces no oracle:
+// a wrong key never reaches it. And it selects TWO COLUMNS BY NAME rather than
+// the row, so the owner, the lead score, the routing decision and the access
+// token itself never enter this process at all — the same rule applicantStatus()
+// follows, applied to the query this page had to write for itself.
 
 import Base from '@/layouts/Base.astro';
 import Status from '@/components/Status.astro';
 import CaseTimeline from '@/components/CaseTimeline.astro';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import * as ops from '@/db/operations.schema';
 import { applicantStatus, TOTAL_STEPS } from '@/db/applications';
+import { formatINR, PPM } from '@/db/fees';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 
 export const prerender = false;
@@ -62,13 +120,50 @@ const justSent = Astro.url.searchParams.get('sent') === '1';
 // here rather than trusted to a default:
 //
 //   · no-store, because a shared or cached copy of this page is a copy of one
-//     school's contact details and requirements;
+//     school's contact details, requirements AND — now — the amount it has been
+//     quoted;
 //   · no-referrer, because every link a reader follows off this page would
 //     otherwise carry the key to wherever they went, in the Referer header.
 Astro.response.headers.set('Cache-Control', 'no-store, private');
 
+// KEPT OUT OF SEARCH BY A HEADER, NOT BY A <meta> IN THE TEMPLATE.
+//
+// This page used to say so with `<meta name="robots" … slot="head" />`. Base.astro
+// defines exactly ONE slot — an unnamed `<slot />` inside its main landmark —
+// and Astro silently DISCARDS content addressed to a named slot a layout does
+// not define.
+// So the directive never reached the document, and the page said "never indexed"
+// in a comment while shipping no robots directive at all.
+//
+// Base.astro's own noindex does not cover it either: that fires on
+// `isPrivatePath()`, and /learn/applications is not one of PRIVATE_PREFIXES —
+// correctly, because /learn is a public section. The route is kept out of the
+// sitemap, which is what hid the gap: tests/seo-live.test.ts only inspects URLs
+// the sitemap advertises.
+//
+// What this page renders is ONE institution's own submission — its contact
+// rows, its requirements, its case timeline and its quoted amounts — reachable
+// with the key in the address. An applicant who pastes that link into a forum
+// or a shared document must not thereby publish their application.
+//
+// A response header cannot be dropped by a layout change, which is why the
+// three sibling private surfaces (/pay/[token], /application, /learn/portal)
+// all set it this way.
+Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+Astro.response.headers.set('Referrer-Policy', 'no-referrer');
+
 let view: any = null;
 let failure: string | null = null;
+
+// The commercial half of the case, all of it null until a row says otherwise.
+let quoteRef: string | null = null;
+let quoted: any = null;              // the current version the applicant may see
+let quoteLines: any[] = [];
+let revisionInProgress = false;      // a newer version exists and is internal
+let firstQuotationInProgress = false; // a quotation exists and none is issued yet
+let agreement: any = null;           // contracts row
+let programme: any = null;           // training_programs row
+let commercialProblem: string | null = null;
 
 if (!isConfigured()) {
   failure = 'The federation’s database is not reachable from this deployment, so this application cannot be looked up.';
@@ -82,9 +177,175 @@ if (!isConfigured()) {
   }
 }
 
+/**
+ * The statuses of a quote version the applicant may be shown.
+ *
+ * `draft` and `awaiting_approval` are absent and their absence is the point:
+ * a number the federation has not issued is not a number the applicant has
+ * been given, and a version a rule held for approval is one the federation has
+ * deliberately not agreed to yet.
+ */
+const VISIBLE_QUOTE_STATUSES = ['issued', 'accepted', 'rejected', 'expired', 'superseded'] as const;
+const INTERNAL_QUOTE_STATUSES = ['draft', 'awaiting_approval'] as const;
+
 // A draft is not an application. It has been started and not sent, and the only
-// useful thing this page can offer is the way back into the form.
+// useful thing this page can offer is the way back into the form — so nothing
+// commercial is read for one either.
 const isDraft = !!view && view.status === 'draft';
+
+if (view && !isDraft) {
+  try {
+    // TWO COLUMNS, BY NAME. See the note at the top of this file.
+    const [row] = await db()
+      .select({
+        id: ops.institutionApplications.id,
+        requestId: ops.institutionApplications.requestId,
+      })
+      .from(ops.institutionApplications)
+      .where(eq(ops.institutionApplications.ref, view.ref))
+      .limit(1);
+
+    if (row?.requestId != null) {
+      // Every version of the one quotation raised against this request, oldest
+      // first. Quotes are never edited — they are re-versioned — so "the
+      // quotation" is the newest version the applicant is entitled to see, and
+      // the older ones keep their own figures for the record.
+      const versions = await db()
+        .select({
+          quoteRef: s.quotes.ref,
+          quoteId: s.quotes.id,
+          id: s.quoteVersions.id,
+          version: s.quoteVersions.version,
+          status: s.quoteVersions.status,
+          subtotalMinor: s.quoteVersions.subtotalMinor,
+          discountMinor: s.quoteVersions.discountMinor,
+          concessionMinor: s.quoteVersions.concessionMinor,
+          taxMinor: s.quoteVersions.taxMinor,
+          totalMinor: s.quoteVersions.totalMinor,
+          currency: s.quoteVersions.currency,
+          requiresManualQuote: s.quoteVersions.requiresManualQuote,
+          validUntil: s.quoteVersions.validUntil,
+          issuedAt: s.quoteVersions.issuedAt,
+        })
+        .from(s.quoteVersions)
+        .innerJoin(s.quotes, eq(s.quoteVersions.quoteId, s.quotes.id))
+        .where(eq(s.quotes.requestId, row.requestId))
+        .orderBy(asc(s.quotes.id), asc(s.quoteVersions.version));
+
+      if (versions.length) {
+        const visible = versions.filter((v: any) =>
+          (VISIBLE_QUOTE_STATUSES as readonly string[]).includes(String(v.status)));
+        quoted = visible.length ? visible[visible.length - 1] : null;
+
+        // ── THE REFERENCE COMES OFF THE VERSION BEING SHOWN ────────────────
+        //
+        // It used to come off `versions[0]`, and that was only ever right
+        // because a request was assumed to have one quotation. `quotes` has no
+        // unique index on request_id — migration 0048 adds one, and until it is
+        // APPLIED to a deployment the rows this reads may still contain two
+        // quotations for one request, each numbering its versions from 1. This
+        // page would then have printed one quotation's reference beside another
+        // quotation's amount: a school reading a reference the federation would
+        // look up and find a different figure against.
+        //
+        // A reference and a figure are only ever safe to print together when
+        // they come off the same row. So they do. And every comparison below is
+        // confined to the quotation being shown, because "version 2" of one
+        // quotation says nothing about version 1 of another.
+        quoteRef = quoted ? quoted.quoteRef : versions[versions.length - 1].quoteRef;
+
+        const sameQuote = (v: any) =>
+          quoted == null || Number(v.quoteId) === Number(quoted.quoteId);
+
+        const internal = versions.filter((v: any) =>
+          (INTERNAL_QUOTE_STATUSES as readonly string[]).includes(String(v.status)));
+
+        // A newer internal version means the federation is working on a
+        // revision. The applicant is told THAT and given no figure for it.
+        revisionInProgress = quoted != null
+          && internal.filter(sameQuote).some((v: any) => Number(v.version) > Number(quoted.version));
+
+        // A quotation exists and nothing has ever been issued from it. Also
+        // said outright: a school that has been told "we are quoting you" and
+        // sees nothing here would reasonably think the page is broken.
+        firstQuotationInProgress = quoted == null && internal.length > 0;
+
+        if (quoted && !quoted.requiresManualQuote) {
+          // The arithmetic, in the order it was performed. sortOrder is the
+          // sequence the fee engine wrote, so the running total climbs down the
+          // page exactly as it climbed through the computation.
+          quoteLines = await db()
+            .select({
+              sortOrder: s.quoteLines.sortOrder,
+              kind: s.quoteLines.kind,
+              label: s.quoteLines.label,
+              quantity: s.quoteLines.quantity,
+              unitAmountMinor: s.quoteLines.unitAmountMinor,
+              factorPpm: s.quoteLines.factorPpm,
+              amountMinor: s.quoteLines.amountMinor,
+              runningTotalMinor: s.quoteLines.runningTotalMinor,
+              sourceKind: s.quoteLines.sourceKind,
+            })
+            .from(s.quoteLines)
+            .where(eq(s.quoteLines.quoteVersionId, quoted.id))
+            .orderBy(asc(s.quoteLines.sortOrder));
+          // `ruleCode` and `because` are DELIBERATELY not selected. They are the
+          // federation's own rule identifiers and the raw condition keys that
+          // matched — "participants 80 is within 50–100; mode is on_campus" —
+          // written for an administrator reading /admin/quotes. What makes the
+          // figure legible to a school is the label, the count, the unit price
+          // and the running total, and those are here.
+        }
+      }
+    }
+
+    if (row?.id != null) {
+      const [c] = await db()
+        .select({
+          ref: ops.contracts.ref,
+          status: ops.contracts.status,
+          startsOn: ops.contracts.startsOn,
+          endsOn: ops.contracts.endsOn,
+          signedAt: ops.contracts.signedAt,
+          programId: ops.contracts.programId,
+        })
+        .from(ops.contracts)
+        .where(and(
+          eq(ops.contracts.applicationId, row.id),
+          // A draft agreement is internal for the same reason a draft quotation
+          // is: it is a document the federation is still writing.
+          inArray(ops.contracts.status, ['issued', 'signed', 'active', 'completed', 'terminated', 'expired'])
+        ))
+        .orderBy(asc(ops.contracts.id))
+        .limit(1);
+      agreement = c ?? null;
+
+      if (c?.programId != null) {
+        const [p] = await db()
+          .select({
+            code: s.trainingPrograms.code,
+            title: s.trainingPrograms.title,
+            status: s.trainingPrograms.status,
+            startsOn: s.trainingPrograms.startsOn,
+            endsOn: s.trainingPrograms.endsOn,
+            sessionsPlanned: s.trainingPrograms.sessionsPlanned,
+          })
+          .from(s.trainingPrograms)
+          .where(eq(s.trainingPrograms.id, c.programId))
+          .limit(1);
+        programme = p ?? null;
+      }
+    }
+  } catch {
+    // A commercial read that failed must not take the status page down with it.
+    // The stage and the timeline are the reason the school opened this address.
+    commercialProblem =
+      'The quotation and agreement records for this application could not be read just now. ' +
+      'Nothing has changed and nothing has been lost — this was a read that failed. ' +
+      'The progress below is unaffected.';
+  }
+}
+
 const resumeStep = Math.min(Math.max(Number(view?.stepReached) || 1, 1), TOTAL_STEPS);
 const resumeHref = view
   ? `${h('/learn/apply')}?ref=${encodeURIComponent(view.ref)}&k=${encodeURIComponent(token)}&step=${resumeStep}`
@@ -96,16 +357,168 @@ function when(v: unknown): string {
   if (Number.isNaN(d.getTime())) return '';
   return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
 }
+
+/**
+ * Money, or nothing at all.
+ *
+ * null rather than a zero when there is no figure — see the note at the top.
+ */
+const money = (minor: unknown, currency: unknown = 'INR'): string | null => {
+  if (minor == null || typeof minor !== 'number' || !Number.isFinite(minor)) return null;
+  const cur = String(currency || 'INR');
+  return cur === 'INR' ? formatINR(minor) : `${cur} ${(minor / 100).toFixed(2)}`;
+};
+
+/** One line of the quotation, in the words the fee engine's own record supports. */
+function lineWorking(l: any): string {
+  if (l.kind === 'multiplier' || l.kind === 'tax') {
+    return `× ${(Number(l.factorPpm) / PPM).toFixed(4)}`;
+  }
+  if (l.quantity != null) {
+    return `${l.quantity} × ${formatINR(Number(l.unitAmountMinor ?? 0))}`;
+  }
+  return '';
+}
+
+// ─── The chain, as the applicant sees it ────────────────────────────────────
+//
+// EVERY STAGE IS EVIDENCED BY A ROW. Nothing below infers one stage from
+// another: "accepted" is not assumed because an agreement exists, and
+// "in delivery" is not assumed because an agreement was signed. Each is a
+// predicate over a stored value, and where there is no row the stage is simply
+// not reached.
+//
+// It is drawn as the route the federation's process takes and said, in words,
+// not to be a promise that this application travels all of it. That is the
+// honest form: CaseTimeline deliberately renders no forward rail because a
+// stage drawn ahead of a case reads as a commitment it will be reached, which
+// is false for every application that is declined or withdrawn. So the ladder
+// below is labelled as the route, a stage that has not happened carries no date
+// and no estimate, and when the case has ENDED the remaining stages are not
+// drawn at all.
+
+const ENDED_STATUSES = ['declined', 'withdrawn', 'expired'];
+const hasEnded = !!view && ENDED_STATUSES.includes(String(view.status));
+
+// The stored status values that mean a person at MMAKF has the case open. Read
+// from the column, not inferred from the passage of time.
+const IN_HAND = [
+  'acknowledged', 'under_review', 'information_requested',
+  'program_design', 'quoted', 'proposed', 'approved', 'contracted',
+];
+
+interface AppStage {
+  key: string;
+  label: string;
+  reached: boolean;
+  /** What is true, in the applicant's words. Never a forecast. */
+  detail: string;
+}
+
+const stages: AppStage[] = !view || isDraft ? [] : [
+  {
+    key: 'sent',
+    label: 'Sent',
+    reached: !!view.submittedAt,
+    detail: view.submittedAt
+      ? `Received by MMAKF on ${when(view.submittedAt)}.`
+      : 'Not recorded as sent.',
+  },
+  {
+    key: 'in-hand',
+    label: 'With the federation',
+    reached: IN_HAND.includes(String(view.status)),
+    detail: IN_HAND.includes(String(view.status))
+      ? 'Someone at MMAKF has this application open.'
+      : 'Nobody at MMAKF has picked this up yet.',
+  },
+  {
+    key: 'quoted',
+    label: 'Quotation issued',
+    reached: !!quoted,
+    detail: quoted
+      ? (quoted.requiresManualQuote
+          ? `Quotation ${quoteRef} was raised and carries no amount — see below.`
+          : `Quotation ${quoteRef}, version ${quoted.version}, is set out below.`)
+      : firstQuotationInProgress
+        ? 'A quotation is being prepared. Nothing has been issued to you yet.'
+        : 'No quotation has been issued.',
+  },
+  {
+    key: 'acceptance',
+    label: 'Waiting on you',
+    reached: !!quoted && String(quoted.status) === 'issued',
+    detail: quoted && String(quoted.status) === 'issued'
+      ? 'The quotation stands and MMAKF is waiting for your answer.'
+      : 'Nothing is waiting on you.',
+  },
+  {
+    key: 'accepted',
+    label: 'Accepted',
+    reached: !!quoted && String(quoted.status) === 'accepted',
+    detail: quoted && String(quoted.status) === 'accepted'
+      ? 'Your acceptance is recorded against the quotation.'
+      : 'No acceptance is recorded.',
+  },
+  {
+    key: 'payment',
+    label: 'Payment',
+    // NEVER REACHED, TODAY, FOR ANY APPLICATION — and that is a property of the
+    // records rather than of this page. No invoice, order or payment in this
+    // system carries a column pointing at an institutional application or its
+    // agreement, so there is nothing this page could read that would make the
+    // stage true. Rather than draw a stage that silently never turns, it is
+    // drawn with the reason said in the applicant's own terms.
+    reached: false,
+    detail: 'MMAKF has not asked you for a payment through this page, and this page cannot show one. Any amount that becomes due will be invoiced to you directly by the federation office.',
+  },
+  {
+    key: 'agreement',
+    label: 'Agreement in place',
+    reached: !!agreement,
+    detail: agreement
+      ? `Agreement ${agreement.ref}${agreement.signedAt ? `, signed ${when(agreement.signedAt)}` : ''}.`
+      : 'No agreement has been signed.',
+  },
+  {
+    key: 'delivery',
+    label: 'In delivery',
+    reached: String(programme?.status) === 'running',
+    detail: String(programme?.status) === 'running'
+      ? `Programme ${programme.code} is running.`
+      : programme
+        ? `Programme ${programme.code} is recorded and is not running.`
+        : 'No programme has started.',
+  },
+  {
+    key: 'complete',
+    label: 'Complete',
+    reached: String(programme?.status) === 'completed' || String(agreement?.status) === 'completed',
+    detail: String(programme?.status) === 'completed' || String(agreement?.status) === 'completed'
+      ? 'Delivery is recorded as finished.'
+      : 'Not finished.',
+  },
+];
+
+// When the case has ended, the route stops at the last thing that actually
+// happened. Drawing the remaining rungs would be describing a journey this
+// application is not going to take.
+const lastReached = stages.reduce((m, st, i) => (st.reached ? i : m), -1);
+const shownStages = hasEnded ? stages.slice(0, lastReached + 1) : stages;
+
+const reductions = quoted
+  ? Number(quoted.discountMinor ?? 0) + Number(quoted.concessionMinor ?? 0)
+  : 0;
 ---
 
 <Base
   title={`Application ${ref} — MMAKF`}
   description="The status of an MMAKF training application."
 >
-  {/* A private page. Never indexed, never cached by an intermediary, and never
-      a source of a Referer header carrying the key in the address. */}
-  <meta name="robots" content="noindex, nofollow" slot="head" />
-  <meta name="referrer" content="no-referrer" slot="head" />
+  {/* The noindex and no-referrer directives are set as RESPONSE HEADERS in the
+      frontmatter above, not as <meta slot="head"> here. Base.astro defines no
+      named head slot, so Astro discarded both of these silently and this page
+      shipped with no robots directive at all. */}
 
   <div class="st">
     <div class="container st-inner">
@@ -171,6 +584,16 @@ function when(v: unknown): string {
                 <dd>{when(view.lastUpdateAt)}</dd>
               </div>
             )}
+            {/* The reference of a quotation that has actually been ISSUED.
+                Deliberately not shown while one is only being prepared: a
+                reference the school has received no document for is a number
+                they would quote down the telephone and nobody would recognise. */}
+            {quoted && quoteRef && (
+              <div>
+                <dt>Quotation</dt>
+                <dd><code>{quoteRef}</code></dd>
+              </div>
+            )}
             {/* Rendered ONLY when the federation has actually undertaken a
                 response time. It has published none, so this row is normally
                 absent — rather than showing an invented date. */}
@@ -181,6 +604,230 @@ function when(v: unknown): string {
               </div>
             )}
           </dl>
+
+          {commercialProblem && (
+            <p class="st-note st-note-boxed" role="status">{commercialProblem}</p>
+          )}
+
+          {/* ── THE ROUTE ────────────────────────────────────────────────── */}
+          {!isDraft && shownStages.length > 0 && (
+            <section class="st-chain-sec">
+              <h2 class="st-h2">Where your request is</h2>
+              <p class="st-lede">
+                {hasEnded
+                  ? 'This application has been closed. The steps below are the ones it actually reached; MMAKF has drawn no further ones, because there are none to come.'
+                  : 'This is the route an MMAKF training request takes. A step is ticked when something has actually been recorded against it — it is not a schedule, and reaching one step is not a promise of the next.'}
+              </p>
+
+              <ol class="st-chain">
+                {shownStages.map((st) => (
+                  <li class:list={['st-step', st.reached ? 'is-done' : 'is-todo']}>
+                    <span class="st-mark" aria-hidden="true">{st.reached ? '✓' : ''}</span>
+                    <div class="st-step-body">
+                      <p class="st-step-label">
+                        {st.label}
+                        <span class="st-step-state">{st.reached ? 'Done' : 'Not yet'}</span>
+                      </p>
+                      <p class="st-step-detail">{st.detail}</p>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
+
+          {/* ── THE QUOTATION ───────────────────────────────────────────── */}
+          {!isDraft && (
+            <section class="st-quote-sec">
+              <h2 class="st-h2">Your quotation</h2>
+
+              {!quoted ? (
+                <p class="st-lede">
+                  {firstQuotationInProgress
+                    ? 'MMAKF has started a quotation for this request and has not issued it to you yet. When it is issued it will appear here, itemised — every line, what it is for and how it was worked out.'
+                    : 'No quotation has been issued for this application yet. When one is, it will appear here in full: every line, what it is for and how it was worked out. Until then there is no amount, and this page will not show you one.'}
+                </p>
+              ) : quoted.requiresManualQuote ? (
+                <>
+                  {/* NO FIGURE. Not a zero, not a range, not an estimate. */}
+                  <div class="st-manual" role="note">
+                    <strong>This quotation carries no amount.</strong>
+                    <p>
+                      No published MMAKF fee rule covered what you asked for, so
+                      nothing was calculated and there is no figure to show you.
+                      MMAKF will price this request by hand and send you the
+                      amount separately.
+                    </p>
+                    <p>
+                      This is not a fault and it is not an amount of nothing. It
+                      means the federation has not published a fee that applies
+                      to your request.
+                    </p>
+                  </div>
+                  <dl class="st-facts">
+                    <div>
+                      <dt>Quotation</dt>
+                      <dd><code>{quoteRef}</code> version {quoted.version}</dd>
+                    </div>
+                    <div>
+                      <dt>Status</dt>
+                      <dd><Status value={quoted.status} domain="quote" withMeaning={false} /></dd>
+                    </div>
+                  </dl>
+                </>
+              ) : (
+                <>
+                  <dl class="st-facts">
+                    <div>
+                      <dt>Quotation</dt>
+                      <dd><code>{quoteRef}</code> version {quoted.version}</dd>
+                    </div>
+                    <div>
+                      <dt>Status</dt>
+                      <dd><Status value={quoted.status} domain="quote" withMeaning={false} /></dd>
+                    </div>
+                    {quoted.issuedAt && (
+                      <div>
+                        <dt>Issued</dt>
+                        <dd>{when(quoted.issuedAt)}</dd>
+                      </div>
+                    )}
+                    {/* Only when one was actually set. MMAKF has published no
+                        standard quotation validity, so most carry none — and a
+                        quotation with no expiry date does not expire. */}
+                    {quoted.validUntil && (
+                      <div>
+                        <dt>Valid until</dt>
+                        <dd>{when(quoted.validUntil)}</dd>
+                      </div>
+                    )}
+                  </dl>
+
+                  {quoteLines.length === 0 ? (
+                    <p class="st-lede">
+                      This quotation has a total and no recorded working. MMAKF
+                      can explain how it was reached — write to the address below
+                      quoting the reference.
+                    </p>
+                  ) : (
+                    <div class="st-table-wrap">
+                      <table class="st-table">
+                        <caption class="sr-only">
+                          Quotation {quoteRef} version {quoted.version}, line by line
+                        </caption>
+                        <thead>
+                          <tr>
+                            <th scope="col">What it is for</th>
+                            <th scope="col" class="num">Working</th>
+                            <th scope="col" class="num">Amount</th>
+                            <th scope="col" class="num">Running total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {quoteLines.map((l: any) => (
+                            <tr class:list={[l.amountMinor < 0 && 'is-credit']}>
+                              <th scope="row">{l.label}</th>
+                              <td class="num">{lineWorking(l) || '—'}</td>
+                              <td class="num">{money(l.amountMinor, quoted.currency)}</td>
+                              <td class="num">{money(l.runningTotalMinor, quoted.currency)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr>
+                            <th scope="row" colspan="3">Subtotal</th>
+                            <td class="num">{money(quoted.subtotalMinor, quoted.currency)}</td>
+                          </tr>
+                          {/* Stored NEGATIVE, so it prints with its own sign and
+                              the arithmetic above still adds up on the page. */}
+                          {reductions !== 0 && (
+                            <tr>
+                              <th scope="row" colspan="3">Reductions applied</th>
+                              <td class="num">{money(reductions, quoted.currency)}</td>
+                            </tr>
+                          )}
+                          {Number(quoted.taxMinor ?? 0) !== 0 && (
+                            <tr>
+                              <th scope="row" colspan="3">Tax</th>
+                              <td class="num">{money(quoted.taxMinor, quoted.currency)}</td>
+                            </tr>
+                          )}
+                          <tr class="is-total">
+                            <th scope="row" colspan="3">Total</th>
+                            <td class="num">{money(quoted.totalMinor, quoted.currency)}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+
+                  <p class="st-note">
+                    Every line above is the federation's own record of how this
+                    figure was reached, in the order it was worked out. Nothing
+                    on this page is rounded or restated: the amounts are the ones
+                    stored against the quotation.
+                  </p>
+                </>
+              )}
+
+              {revisionInProgress && (
+                <p class="st-note st-note-boxed" role="status">
+                  MMAKF is preparing a revised version of this quotation. It has
+                  not been issued, so no amount for it is shown here — the figures
+                  above are the ones that stand until a revision reaches you.
+                </p>
+              )}
+            </section>
+          )}
+
+          {/* ── DELIVERY ────────────────────────────────────────────────── */}
+          {!isDraft && (agreement || programme) && (
+            <section class="st-quote-sec">
+              <h2 class="st-h2">Agreement and delivery</h2>
+              <dl class="st-facts">
+                {agreement && (
+                  <>
+                    <div>
+                      <dt>Agreement</dt>
+                      <dd>
+                        <code>{agreement.ref}</code>
+                        {' '}<Status value={agreement.status} domain="contract" withMeaning={false} />
+                      </dd>
+                    </div>
+                    {agreement.startsOn && (
+                      <div>
+                        <dt>Runs from</dt>
+                        <dd>{when(agreement.startsOn)}{agreement.endsOn ? ` to ${when(agreement.endsOn)}` : ''}</dd>
+                      </div>
+                    )}
+                  </>
+                )}
+                {programme && (
+                  <>
+                    <div>
+                      <dt>Programme</dt>
+                      <dd>
+                        {programme.title} <code>{programme.code}</code>
+                        {' '}<Status value={programme.status} domain="program" withMeaning={false} />
+                      </dd>
+                    </div>
+                    {programme.startsOn && (
+                      <div>
+                        <dt>Delivery dates</dt>
+                        <dd>{when(programme.startsOn)}{programme.endsOn ? ` to ${when(programme.endsOn)}` : ''}</dd>
+                      </div>
+                    )}
+                    {programme.sessionsPlanned != null && (
+                      <div>
+                        <dt>Sessions planned</dt>
+                        <dd>{programme.sessionsPlanned}</dd>
+                      </div>
+                    )}
+                  </>
+                )}
+              </dl>
+            </section>
+          )}
 
           <section class="st-timeline">
             <h2 class="st-h2">Progress</h2>
@@ -247,6 +894,69 @@ function when(v: unknown): string {
   .st-facts dt { color: var(--muted); font-size: .9rem; }
   .st-facts dd { margin: 0; }
 
+  /* ── The route ──────────────────────────────────────────────────────────
+     A ladder of steps REACHED. A step that has not happened carries no date
+     and no estimate — the federation has published no service standard, and a
+     greyed-out step with a date beside it would be a promise nobody made. */
+  .st-chain-sec { margin-top: var(--space-12); }
+  .st-chain { list-style: none; margin: var(--space-6) 0 0; padding: 0; }
+  .st-step {
+    display: grid; grid-template-columns: 1.6rem minmax(0, 1fr);
+    gap: 0 var(--space-4); padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .st-step:first-child { border-top: 1px solid var(--border); }
+  .st-mark {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.35rem; height: 1.35rem; margin-top: 2px;
+    border: 1px solid var(--border); border-radius: 50%;
+    font-size: .8rem; line-height: 1;
+  }
+  .st-step.is-done .st-mark { border-color: var(--gold); color: var(--gold); }
+  .st-step-label {
+    margin: 0; display: flex; flex-wrap: wrap; align-items: baseline;
+    gap: var(--space-2) var(--space-3);
+  }
+  .st-step-state {
+    font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted);
+  }
+  .st-step.is-todo .st-step-label { color: var(--muted); }
+  .st-step-detail {
+    margin: 4px 0 0; color: var(--muted);
+    font-size: var(--text-sm); line-height: var(--leading-relaxed); max-width: 58ch;
+  }
+
+  /* ── The quotation ─────────────────────────────────────────────────────── */
+  .st-quote-sec { margin-top: var(--space-12); }
+
+  .st-manual {
+    padding: var(--space-5); margin: var(--space-5) 0 0;
+    border-left: 3px solid var(--gold); background: var(--card);
+    line-height: var(--leading-normal);
+  }
+  .st-manual strong { display: block; margin-bottom: var(--space-2); }
+  .st-manual p { margin: 0 0 var(--space-3); color: var(--muted); line-height: var(--leading-relaxed); }
+  .st-manual p:last-child { margin-bottom: 0; }
+
+  /* A quotation is wide and a phone is not. It scrolls inside its own box
+     rather than pushing the page sideways. */
+  .st-table-wrap { margin: var(--space-6) 0 0; overflow-x: auto; }
+  .st-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+  .st-table th, .st-table td { padding: 11px var(--space-3); text-align: left; }
+  .st-table thead th {
+    font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 400;
+  }
+  .st-table tbody th { font-weight: 400; }
+  .st-table tbody tr { border-bottom: 1px solid var(--border); }
+  .st-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .st-table tbody tr.is-credit td, .st-table tbody tr.is-credit th { color: var(--gold-2); }
+  .st-table tfoot th, .st-table tfoot td { color: var(--muted); }
+  .st-table tfoot tr.is-total th, .st-table tfoot tr.is-total td {
+    color: var(--white); border-top: 1px solid var(--border); font-size: 1.02rem;
+  }
+
   .st-timeline { margin-top: var(--space-12); }
 
   .st-note {
@@ -257,6 +967,10 @@ function when(v: unknown): string {
     line-height: var(--leading-relaxed);
     max-width: 60ch;
     font-size: var(--text-sm);
+  }
+  .st-note-boxed {
+    border-top: 0; border-left: 3px solid var(--gold);
+    background: var(--card); padding: var(--space-4) var(--space-5);
   }
 
   .st-help { margin-top: var(--space-12); padding-top: var(--space-6); border-top: 1px solid var(--border); }

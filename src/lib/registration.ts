@@ -500,6 +500,25 @@ export function validateApplication(
           continue;
         }
         if (field.optionsFrom) {
+          // "NONE OF THESE — RECORD IT AS I TYPED IT."
+          //
+          // UNRESOLVED_CHOICE is the honest answer for somebody whose village is
+          // genuinely not in the register, and it was ADVERTISED by
+          // /api/register's ambiguity response while being REJECTED here — so the
+          // documented way out of an ambiguous locality was the one answer that
+          // could not be given. An applicant in that position could not complete
+          // a registration at all.
+          //
+          // Accepted only for the register-backed AREA fields, and it records NO
+          // id: the free-text locality carries the place, `localityText` keeps
+          // the applicant's own words, and the address lands in the
+          // re-resolution backlog unresolvedAddresses() exists to work through.
+          // That is the designed fallback in src/db/geography.ts, not a hole.
+          const AREA_SOURCES = ['geoStates', 'geoDistricts', 'localityCandidates'];
+          if (value === UNRESOLVED_CHOICE && AREA_SOURCES.includes(field.optionsFrom)) {
+            continue;                        // nothing written to `cleaned`
+          }
+
           // NEVER trust an id that arrived in the body. `civilDistrictAreaId`
           // is an admin_areas primary key, and a submitted one is accepted only
           // because it is in the list this server built for this submission —

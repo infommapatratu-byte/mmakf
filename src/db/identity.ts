@@ -50,7 +50,7 @@ import { MINOR_AGE } from '@/lib/registration';
 import { publish, type PublishInput } from '@/lib/domain-events';
 import { log } from '@/lib/observability';
 import {
-  assertCan, assertCanAnywhere, can, canAnywhere, visibleScopes,
+  assertCan, assertCanAnywhere, can, canAnywhere, visibleScopes, ForbiddenError,
   type Principal,
 } from '@/lib/rbac';
 
@@ -1030,7 +1030,20 @@ export async function guardianCan(
 }
 
 /** The children (or other subjects) a person holds a VERIFIED relationship to. */
-export async function dependantsOf(db: DB, guardianPersonId: number) {
+export async function dependantsOf(db: DB, guardianPersonId: number, asOf: Date = new Date()) {
+  // THE VALIDITY WINDOW IS APPLIED HERE TOO, and it was not.
+  //
+  // guardianCan() enforces validFrom/validTo; this function used to filter on
+  // status alone. A relationship that is verified but not yet in force — or one
+  // whose validTo has passed — therefore reached /my/family, which rendered a
+  // card headed "verified" and then, correctly, showed every granted capability
+  // as "Not granted", because guardianCan() was refusing on the window.
+  //
+  // "Not granted" and "granted but not in force" are different facts, and that
+  // page's whole promise is that what it shows is exactly what the reader holds.
+  // Two functions disagreeing about which relationships are live is how a screen
+  // ends up telling a parent they were refused something nobody refused them.
+  const today = asOf.toISOString().slice(0, 10);
   return db
     .select({
       relationshipId: idn.personRelationships.id,
@@ -1045,6 +1058,14 @@ export async function dependantsOf(db: DB, guardianPersonId: number) {
     .where(and(
       eq(idn.personRelationships.holderPersonId, guardianPersonId),
       eq(idn.personRelationships.status, 'verified'),
+      or(
+        isNull(idn.personRelationships.validFrom),
+        sql`${idn.personRelationships.validFrom} <= ${today}`,
+      ),
+      or(
+        isNull(idn.personRelationships.validTo),
+        sql`${idn.personRelationships.validTo} >= ${today}`,
+      ),
     ))
     .orderBy(asc(s.persons.fullName));
 }
@@ -1065,6 +1086,101 @@ export async function guardiansOf(db: DB, principal: Principal, subjectPersonId:
     .innerJoin(s.persons, eq(s.persons.id, idn.personRelationships.holderPersonId))
     .where(eq(idn.personRelationships.subjectPersonId, subjectPersonId))
     .orderBy(asc(idn.personRelationships.id));
+}
+
+/**
+ * Claimed relationships awaiting a decision, scope-filtered in SQL.
+ *
+ * SCOPED ON THE SUBJECT, not the holder. Authority over a guardianship is
+ * authority over the CHILD's record — assertRelationship() and
+ * decideRelationship() both check the subject's placement — so a queue filtered
+ * on the adult would show a reviewer claims about children they hold nothing
+ * over, and hide claims about children they do.
+ *
+ * `status` is a parameter rather than hard-coded to 'asserted' so the same
+ * function serves the pending queue and the register of decided relationships a
+ * reviewer needs in order to grant capabilities on one.
+ */
+export async function relationshipQueue(
+  db: DB,
+  principal: Principal,
+  opts: {
+    status?: Array<(typeof idn.relationshipStatus.enumValues)[number]>;
+    limit?: number;
+    afterId?: number | null;
+  } = {}
+) {
+  assertCanAnywhere(principal, 'guardian:verify');
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+  const statuses = opts.status ?? ['asserted'];
+
+  const scopes = visibleScopes(principal, 'guardian:verify');
+  if (scopes.kind === 'none') return [];
+
+  const conditions: any[] = [inArray(idn.personRelationships.status, statuses)];
+  if (opts.afterId) conditions.push(sql`${idn.personRelationships.id} > ${opts.afterId}`);
+
+  if (scopes.kind === 'scoped') {
+    const states = scopes.states.length ? scopes.states : [-1];
+    const districts = scopes.districts.length ? scopes.districts : [-1];
+    const dojos = scopes.dojos.length ? scopes.dojos : [-1];
+    conditions.push(sql`EXISTS (
+      SELECT 1 FROM persons p
+      WHERE p.id = ${idn.personRelationships.subjectPersonId}
+        AND (
+          p.state_unit_id IN ${states}
+          OR p.district_unit_id IN ${districts}
+          OR p.dojo_id IN ${dojos}
+        )
+    )`);
+  }
+
+  return db
+    .select({
+      id: idn.personRelationships.id,
+      type: idn.personRelationships.type,
+      status: idn.personRelationships.status,
+      evidence: idn.personRelationships.evidence,
+      assertedByUserId: idn.personRelationships.assertedByUserId,
+      createdAt: idn.personRelationships.createdAt,
+      validFrom: idn.personRelationships.validFrom,
+      validTo: idn.personRelationships.validTo,
+      holderPersonId: idn.personRelationships.holderPersonId,
+      subjectPersonId: idn.personRelationships.subjectPersonId,
+    })
+    .from(idn.personRelationships)
+    .where(and(...conditions))
+    .orderBy(asc(idn.personRelationships.createdAt), asc(idn.personRelationships.id))
+    .limit(limit);
+}
+
+/** The capabilities currently held on a relationship. Drives the grant screen. */
+export async function capabilitiesOn(db: DB, relationshipId: number) {
+  const rows = await db
+    .select({
+      id: idn.guardianAuthorizations.id,
+      capability: idn.guardianAuthorizations.capability,
+      expiresAt: idn.guardianAuthorizations.expiresAt,
+      grantedAt: idn.guardianAuthorizations.grantedAt,
+    })
+    .from(idn.guardianAuthorizations)
+    .where(and(
+      eq(idn.guardianAuthorizations.relationshipId, relationshipId),
+      eq(idn.guardianAuthorizations.status, 'active'),
+    ));
+  return rows;
+}
+
+/**
+ * Which capabilities need MORE than 'guardian:verify', for a screen that has to
+ * decide whether to OFFER a control.
+ *
+ * Exported so the page and grantGuardianCapability() read one map. A page with
+ * its own copy would offer a control the module then refuses, or — worse — stop
+ * offering one the module would allow, and nobody would notice which.
+ */
+export function extraActionFor(capability: GuardianCapability): 'medical:read' | 'safeguarding:write' | null {
+  return DOUBLE_GATED[capability] ?? null;
 }
 
 // ─── Consent ────────────────────────────────────────────────────────────────
@@ -1480,6 +1596,17 @@ export async function decideDuplicate(
   if (input.decision === 'merged' && input.mergedIntoId == null) {
     throw new IdentityError('no_target', 'A merge decision must name the surviving record.');
   }
+  // The symmetric refusal, and it was missing.
+  //
+  // Only `no_target` and `bad_target` used to constrain this field, so a
+  // 'distinct' decision could be filed WITH a surviving record — writing a row,
+  // an audit entry and a restricted-feed event that each read "these are two
+  // different people, and the surviving record is #2". The status was right and
+  // everything beside it contradicted the status.
+  if (input.decision === 'distinct' && input.mergedIntoId != null) {
+    throw new IdentityError('target_on_distinct',
+      'A decision that these are two different people cannot also name a surviving record.');
+  }
 
   const c = (await db.select().from(idn.duplicateCandidates)
     .where(eq(idn.duplicateCandidates.id, input.candidateId)).limit(1))[0];
@@ -1505,7 +1632,27 @@ export async function decideDuplicate(
     const permitted = parties.some((p: any) => can(ctx.principal, 'duplicate:review', {
       stateUnitId: p.stateUnitId, districtUnitId: p.districtUnitId, dojoId: p.dojoId,
     }));
-    if (!permitted) assertCanAnywhere(ctx.principal, 'duplicate:review');
+    // THIS LINE USED TO READ `if (!permitted) assertCanAnywhere(…)`.
+    //
+    // That is the same gate this function already asserted at the top, with the
+    // same principal and the same action and no resource — so it could not
+    // possibly fail, the branch was dead, and the per-record check above it had
+    // no effect whatsoever. The comment promised protection the code did not
+    // provide: an administrator scoped to one state, to whom duplicateQueue()
+    // correctly returns nothing, could decide any candidate by id — and the ids
+    // are small sequential integers printed on the review page.
+    //
+    // A REFUSAL, not a re-assertion. This is the IDOR the comment above names.
+    if (!permitted) throw new ForbiddenError('duplicate:review');
+  } else {
+    // A non-person subject has no `persons` row to scope against, so there is
+    // nothing to check it with. Nothing raises institution candidates today;
+    // rather than leave the block silently unguarded for whoever adds them,
+    // require national reach until somebody designs the scope rule for them.
+    // Fail closed on the case that does not exist yet, not open.
+    if (!can(ctx.principal, 'duplicate:review', {})) {
+      throw new ForbiddenError('duplicate:review');
+    }
   }
 
   await db.update(idn.duplicateCandidates).set({
@@ -1677,8 +1824,34 @@ export async function decideProfileChange(
   // The decider must not be the requester. A change to a date of birth approved
   // by the person who asked for it is not a governed change; it is an edit with
   // extra steps.
-  if (r.requestedByUserId != null && ctx.principal.userId != null
-      && r.requestedByUserId === ctx.principal.userId) {
+  //
+  // AN UNATTRIBUTABLE ACTOR FAILS THIS TEST RATHER THAN PASSING IT.
+  //
+  // The first version of this guard was `r.requestedByUserId != null &&
+  // ctx.principal.userId != null && …`, which meant a credential that identifies
+  // no individual skipped the rule entirely. identify() returns userId === null
+  // for the shared office password, so ONE shared login could file a change of
+  // date of birth and then approve its own request — the exact two-person
+  // control this function exists to impose, defeated by the absence of a name
+  // rather than by anybody's authority.
+  //
+  // A four-eyes rule cannot be satisfied by a credential that cannot be shown to
+  // be two people. So the refusal comes first, and it is refused on both sides:
+  // a request filed by nobody in particular cannot be decided, and nobody in
+  // particular cannot decide.
+  if (ctx.principal.userId == null) {
+    throw new IdentityError('unattributable_decider',
+      'A governed change must be decided by a named account. This credential identifies no '
+      + 'individual, so it cannot be shown to be somebody other than the person who filed the '
+      + 'request. Sign in with your own account.');
+  }
+  if (r.requestedByUserId == null) {
+    throw new IdentityError('unattributable_requester',
+      'This request was filed by a credential that identifies no individual, so no decision on '
+      + 'it can be shown to have been taken by somebody else. It must be re-filed from a named '
+      + 'account.');
+  }
+  if (r.requestedByUserId === ctx.principal.userId) {
     throw new IdentityError('self_decision',
       'A change request must be decided by somebody other than the person who filed it.');
   }

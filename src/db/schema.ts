@@ -445,6 +445,17 @@ export * from './benchmarks.schema';
 // system ends up believing that a captured payment is, by itself, a membership.
 export * from './entitlement.schema';
 
+// THE TRAINING PRODUCT — what a STUDENT buys, as opposed to what a member is
+// issued. Separate from entitlement.schema.ts because the two answer different
+// questions: that one joins a payment to a membership, an entry or a booking,
+// and this one is the right to train — held by a named person, at a club, in a
+// discipline, for a period, under a named price version. A student pays for
+// TRAINING and never for membership, and these tables are where that stops
+// being a policy statement and becomes a shape: there is no foreign key
+// between any of them and `memberships`, in either direction, so the check
+// this system must never contain has nothing to be written against.
+export * from './training-products.schema';
+
 // The fee catalogue — what the federation may charge for, as records rather
 // than paragraphs. Every entry carries a code, a category, a unit and a display
 // policy, and NOT ONE carries an amount: amounts belong to a versioned fee
@@ -527,3 +538,20 @@ export * from './policy.schema';
 // is mandatory (technical_citations), rights and endorsement are separate axes,
 // and 'unverified' is a state the schema is comfortable storing.
 export * from './library.schema';
+
+// PRACTICE RECORDS — what a student says about their own training, and what an
+// instructor has asked them to work on. Kept apart from technical.schema.ts for
+// the reason §44 gives: watching Bassai Dai does not make Bassai Dai completed.
+// Nothing in practice.schema.ts references the grading engine in either
+// direction, its vocabulary has no terminal state a student can put themselves
+// into, and every mark is labelled a self-report at the row level — so a tick a
+// member gave themselves can never be mistaken for an examination result.
+export * from './practice.schema';
+
+// MULTI-ANGLE RECORDINGS — one performance, several cameras, and the offset
+// between them. A relationship rather than columns on media_assets, because
+// synchronising two views is a fact about the pair and an offset has no home on
+// a single row. Empty today, and the surfaces say so: MMAKF has filmed no
+// multi-angle material, and an angle nobody wrote down stays `unknown` rather
+// than being guessed from a thumbnail.
+export * from './media-angles.schema';

@@ -1,0 +1,369 @@
+---
+// /admin/marketplace/commissions — what MMAKF charges, and on what.
+//
+// ─── THE TWO-STEP IS THE WHOLE POINT OF THIS PAGE ───────────────────────────
+//
+// A rate is DRAFTED and then PUBLISHED, by two acts. The resolver filters on
+// `published_at IS NOT NULL` in SQL, so a draft cannot reach a live checkout
+// half-written no matter what this page does. That is what makes it safe to
+// prepare a rate here and argue about it before it takes effect.
+//
+// ─── AND THE TWO QUESTIONS THE FORM WILL NOT ANSWER FOR YOU ─────────────────
+//
+// Whether commission is charged on SHIPPING and on TAX. Both are required, both
+// have no default, and the form refuses to submit without them — because they
+// are the single most common source of dispute between a marketplace and its
+// sellers, they differ by real money on every order, and there is no answer
+// that is right for everyone.
+
+import AdminShell from '@/components/AdminShell.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { asc, desc, eq, sql } from 'drizzle-orm';
+import * as s from '@/db/schema';
+import { canAnywhere } from '@/lib/rbac';
+import { heldForCommission, COMMISSION_NOT_CONFIGURED } from '@/db/marketplace-finance';
+import { categoryTree } from '@/db/catalogue';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+const mayWrite = principal ? canAnywhere(principal, 'marketplace:commission') : false;
+
+let rules: any[] = [];
+let versionsBy = new Map<number, any[]>();
+let sellers: any[] = [];
+let categories: any[] = [];
+let gaps: any[] = [];
+let loadError: string | null = null;
+
+if (configured && principal && canAnywhere(principal, 'marketplace:read')) {
+  try {
+    rules = await db().select().from(s.commissionRules)
+      .orderBy(desc(s.commissionRules.priority), asc(s.commissionRules.id)).limit(200);
+    const versions = await db().select().from(s.commissionRuleVersions)
+      .orderBy(desc(s.commissionRuleVersions.version));
+    for (const v of versions) {
+      if (!versionsBy.has(v.ruleId)) versionsBy.set(v.ruleId, []);
+      versionsBy.get(v.ruleId)!.push(v);
+    }
+    sellers = await db().select({ id: s.sellers.id, ref: s.sellers.ref, tradingName: s.sellers.tradingName })
+      .from(s.sellers).where(eq(s.sellers.status, 'approved')).orderBy(asc(s.sellers.tradingName)).limit(500);
+    categories = await categoryTree(db());
+    gaps = await heldForCommission(db(), principal, 100);
+  } catch (err: any) {
+    console.error('[admin/marketplace/commissions]', err);
+    loadError = 'The commission rules could not be read. The fault has been logged; nothing has been changed.';
+  }
+}
+
+const bps = (v: number | null) => (v == null ? '—' : `${(v / 100).toFixed(2)}%`);
+const money = (m: number | null | undefined) => (m == null ? '—' : `₹${Math.floor(m / 100).toLocaleString('en-IN')}.${String(m % 100).padStart(2, '0')}`);
+const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+/** What a rule constrains, in words, so its reach is obvious at a glance. */
+function scopeOf(r: any): string {
+  const parts: string[] = [];
+  if (r.sellerId) parts.push(`seller #${r.sellerId}`);
+  if (r.sellerTier) parts.push(`tier “${r.sellerTier}”`);
+  if (r.sellerType) parts.push(`${titleCase(r.sellerType)} sellers`);
+  if (r.categoryId) parts.push(`category #${r.categoryId}${r.categorySubtree ? ' and beneath' : ''}`);
+  if (r.listingId) parts.push(`item #${r.listingId}`);
+  if (r.campaignCode) parts.push(`campaign ${r.campaignCode}`);
+  return parts.length ? parts.join(' · ') : 'Everything — the marketplace-wide rate';
+}
+---
+
+<AdminShell title="Commission" action="marketplace:read">
+  <section>
+    <div class="container">
+      <p><a href="/admin/marketplace">← Marketplace console</a></p>
+
+      {loadError && <div class="card" role="alert"><p>{loadError}</p></div>}
+
+      <div class="card">
+        <div class="eyebrow">How a rate is chosen</div>
+        <p>
+          Every rule whose <strong>pinned</strong> axes match the sale is a candidate; a rule that leaves an
+          axis blank does not constrain it. Among candidates the winner is the highest
+          <strong> priority</strong>, then the <strong>most specific</strong> — the one pinning most axes —
+          then the lowest id. All three are in the query, so a commission cannot change because the
+          database reorganised its rows.
+        </p>
+        <p>
+          The rate that applies is <strong>frozen onto the order line at checkout</strong> and never
+          recomputed. Changing a rate today cannot reprint last quarter’s statements.
+        </p>
+      </div>
+
+      {gaps.length > 0 && (
+        <div class="card tone-wait">
+          <div class="eyebrow">Held</div>
+          <h2 class="h3">{gaps.length} sale{gaps.length === 1 ? '' : 's'} have no rate.</h2>
+          <p>{COMMISSION_NOT_CONFIGURED}</p>
+          <ul>
+            {gaps.slice(0, 12).map((g: any) => (
+              <li>{g.sellerName} — {g.sellerOrderNo} — {money(g.gap.amountAtRiskMinor)} — {titleCase(g.gap.reason)}</li>
+            ))}
+          </ul>
+          {mayWrite && <p><button class="btn" id="reresolve">Re-check every held sale</button></p>}
+        </div>
+      )}
+
+      {/* ── New rule ────────────────────────────────────────────────────── */}
+      {mayWrite && (
+        <details class="card">
+          <summary><strong>Create a rule</strong></summary>
+          <form id="rule-form" style="margin-top:12px">
+            <div class="two-up">
+              <div>
+                <label for="code">Code</label>
+                <input id="code" name="code" required maxlength="80" placeholder="marketplace.default" />
+              </div>
+              <div>
+                <label for="label">Label</label>
+                <input id="label" name="label" required maxlength="120" placeholder="Marketplace default" />
+              </div>
+            </div>
+
+            <p class="hint">
+              Leave every axis below blank for the marketplace-wide rate. Pin one to make the rule apply
+              only where it matches.
+            </p>
+
+            <div class="two-up">
+              <div>
+                <label for="sellerId">Only this seller</label>
+                <select id="sellerId" name="sellerId">
+                  <option value="">Any seller</option>
+                  {sellers.map((x: any) => <option value={x.id}>{x.tradingName} ({x.ref})</option>)}
+                </select>
+              </div>
+              <div>
+                <label for="categoryId">Only this category</label>
+                <select id="categoryId" name="categoryId">
+                  <option value="">Any category</option>
+                  {categories.map((c: any) => <option value={c.id}>{'— '.repeat(c.depth)}{c.name}</option>)}
+                </select>
+                <p class="hint">Matches the category and everything beneath it.</p>
+              </div>
+            </div>
+
+            <div class="two-up">
+              <div><label for="sellerTier">Only this tier</label><input id="sellerTier" name="sellerTier" maxlength="60" /></div>
+              <div><label for="priority">Priority</label><input id="priority" name="priority" type="number" value="100" min="0" max="10000" /></div>
+            </div>
+
+            <p id="rule-error" class="error" role="alert" hidden></p>
+            <button class="btn btn-primary" type="submit">Create the rule</button>
+            <p class="hint">A rule carries no rate. The rate is a version, drafted and published separately.</p>
+          </form>
+        </details>
+      )}
+
+      {/* ── The rules ───────────────────────────────────────────────────── */}
+      <h2 class="h3">Rules ({rules.length})</h2>
+      {rules.length === 0 && (
+        <div class="card">
+          <p class="warn">No commission rule exists.</p>
+          <p>
+            Every sale on the marketplace is being recorded and held. Nothing is charged at a rate this
+            system chose, and nothing can be settled until MMAKF sets one.
+          </p>
+        </div>
+      )}
+
+      {rules.map((r: any) => {
+        const vs = versionsBy.get(r.id) ?? [];
+        const live = vs.find((v: any) => v.publishedAt);
+        return (
+          <article class="card">
+            <header class="row between">
+              <div>
+                <h3 class="h4" style="margin:0">{r.label}</h3>
+                <p class="muted" style="margin:4px 0"><code>{r.code}</code> · priority {r.priority} · {scopeOf(r)}</p>
+              </div>
+              <div>{live
+                ? <span class="pill pill-good">{bps(live.rateBps)} live</span>
+                : <span class="pill pill-wait">No published rate</span>}</div>
+            </header>
+
+            {vs.length > 0 && (
+              <table>
+                <caption class="sr-only">Versions of {r.label}</caption>
+                <thead><tr>
+                  <th scope="col">Ver</th><th scope="col">Rate</th><th scope="col">Flat</th>
+                  <th scope="col">On shipping</th><th scope="col">On tax</th>
+                  <th scope="col">From</th><th scope="col">State</th><th scope="col"></th>
+                </tr></thead>
+                <tbody>
+                  {vs.map((v: any) => (
+                    <tr>
+                      <th scope="row">{v.version}</th>
+                      <td>{bps(v.rateBps)}</td>
+                      <td>{money(v.flatMinor)}</td>
+                      <td>{v.chargedOnShipping === null ? '—' : v.chargedOnShipping ? 'Yes' : 'No'}</td>
+                      <td>{v.chargedOnTax === null ? '—' : v.chargedOnTax ? 'Yes' : 'No'}</td>
+                      <td>{v.effectiveFrom}</td>
+                      <td>{v.publishedAt ? <span class="pill pill-good">Published</span> : <span class="pill">Draft</span>}</td>
+                      <td>
+                        {!v.publishedAt && mayWrite && (
+                          <button class="btn btn-small" data-publish={v.id}>Publish</button>
+                        )}
+                        {v.publishedAt && v.authority && <span class="muted">{v.authority}</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {mayWrite && (
+              <details>
+                <summary>Draft a rate for this rule</summary>
+                <form class="version-form" data-rule={r.id}>
+                  <div class="two-up">
+                    <div>
+                      <label for={`rate-${r.id}`}>Rate, in basis points</label>
+                      <input id={`rate-${r.id}`} name="rateBps" type="number" min="0" max="10000" placeholder="1250 = 12.5%" />
+                    </div>
+                    <div>
+                      <label for={`flat-${r.id}`}>Flat charge, in rupees</label>
+                      <input id={`flat-${r.id}`} name="flatRupees" inputmode="decimal" placeholder="optional" />
+                    </div>
+                  </div>
+
+                  <fieldset>
+                    <legend>What the rate is charged on</legend>
+                    <p class="hint">
+                      Both are required and neither has a default. They differ by real money on every order
+                      and are the commonest thing a marketplace and its sellers end up arguing about.
+                    </p>
+                    <div class="row">
+                      <label><input type="radio" name="chargedOnShipping" value="true" required /> Charge on carriage</label>
+                      <label><input type="radio" name="chargedOnShipping" value="false" required /> Goods only</label>
+                    </div>
+                    <div class="row">
+                      <label><input type="radio" name="chargedOnTax" value="true" required /> Charge on tax</label>
+                      <label><input type="radio" name="chargedOnTax" value="false" required /> Not on tax</label>
+                    </div>
+                  </fieldset>
+
+                  <div class="two-up">
+                    <div>
+                      <label for={`from-${r.id}`}>Effective from</label>
+                      <input id={`from-${r.id}`} name="effectiveFrom" type="date" required />
+                    </div>
+                    <div>
+                      <label for={`to-${r.id}`}>Effective to</label>
+                      <input id={`to-${r.id}`} name="effectiveTo" type="date" />
+                    </div>
+                  </div>
+
+                  <button class="btn btn-primary btn-small" type="submit">Save as a draft</button>
+                  <p class="hint">Saved as a draft. A draft is never applied to a sale; publishing is a second act, and it asks for the authority behind the rate.</p>
+                </form>
+              </details>
+            )}
+          </article>
+        );
+      })}
+
+      <p id="page-error" class="error" role="alert" hidden></p>
+    </div>
+  </section>
+</AdminShell>
+
+<script>
+  const pageError = document.getElementById('page-error');
+  const say = (m: string) => {
+    if (!pageError) { window.alert(m); return; }
+    pageError.textContent = m; pageError.hidden = false;
+    pageError.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  async function post(action: string, body: Record<string, unknown> = {}) {
+    const r = await fetch(`/api/marketplace/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const b = await r.json().catch(() => ({}));
+    return { ok: r.ok && b.ok, body: b };
+  }
+  const reloadOr = (res: any, fallback: string) => {
+    if (res.ok) { window.location.reload(); return; }
+    say(res.body.error || fallback);
+  };
+
+  document.getElementById('rule-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target as HTMLFormElement);
+    const n = (k: string) => (f.get(k) ? Number(f.get(k)) : null);
+    const res = await post('commission/rule', {
+      code: f.get('code'), label: f.get('label'),
+      sellerId: n('sellerId'), categoryId: n('categoryId'),
+      sellerTier: f.get('sellerTier') || null, priority: n('priority') ?? 100,
+    });
+    if (res.ok) { window.location.reload(); return; }
+    const el = document.getElementById('rule-error')!;
+    el.textContent = res.body.error || 'Could not create the rule.'; el.hidden = false;
+  });
+
+  document.querySelectorAll('.version-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(form as HTMLFormElement);
+      const flat = String(f.get('flatRupees') ?? '').trim();
+      reloadOr(await post('commission/draft', {
+        ruleId: Number((form as HTMLElement).dataset.rule),
+        rateBps: f.get('rateBps') ? Number(f.get('rateBps')) : null,
+        ...(flat ? { flatRupees: flat } : {}),
+        // Sent as real booleans. draftCommissionVersion() refuses anything else,
+        // and that refusal is the reason the radios have no default.
+        chargedOnShipping: f.get('chargedOnShipping') === 'true',
+        chargedOnTax: f.get('chargedOnTax') === 'true',
+        effectiveFrom: f.get('effectiveFrom'),
+        effectiveTo: f.get('effectiveTo') || null,
+      }), 'Could not save the draft.');
+    });
+  });
+
+  document.querySelectorAll('[data-publish]').forEach((b) => b.addEventListener('click', async () => {
+    const authority = window.prompt(
+      'Publishing this rate makes it apply to every matching sale from its effective date.\n\n' +
+      'What is the authority behind it — the resolution, the meeting, the contract?'
+    );
+    if (!authority) return;
+    reloadOr(await post('commission/publish', {
+      versionId: Number((b as HTMLElement).dataset.publish), authority,
+    }), 'Could not publish the rate.');
+  }));
+
+  document.getElementById('reresolve')?.addEventListener('click', async () => {
+    const res = await post('commission/reresolve');
+    if (res.ok) {
+      window.alert(`Examined ${res.body.result?.examined ?? 0}; ${res.body.result?.resolved ?? 0} now have a rate.`);
+      window.location.reload(); return;
+    }
+    say(res.body.error || 'Could not re-check the held sales.');
+  });
+</script>
+
+<style>
+  .two-up { display: grid; gap: 12px; grid-template-columns: 1fr; }
+  @media (min-width: 640px) { .two-up { grid-template-columns: 1fr 1fr; } }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+  .row.between { justify-content: space-between; align-items: flex-start; }
+  .pill { padding: 2px 10px; border-radius: 999px; border: 1px solid currentColor; font-size: 0.85em; white-space: nowrap; }
+  .muted { opacity: 0.75; }
+  .warn { font-weight: 600; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
+  .error { color: #b00020; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); }
+  fieldset { border: 1px solid currentColor; border-radius: 8px; padding: 12px; margin: 12px 0; }
+  legend { padding: 0 6px; font-weight: 600; }
+  .btn-small { padding: 4px 10px; font-size: 0.9em; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style>

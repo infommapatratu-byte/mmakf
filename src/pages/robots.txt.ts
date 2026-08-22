@@ -23,9 +23,20 @@
  * does not waste its budget on pages that will only ever show it a sign-in
  * form, and they name only paths the site's own footer already links to.
  *
- * NOTE: `public/robots.txt` still exists and is served by the static layer
- * ahead of this route. It is outside this stream's ownership; the exact
- * deletion needed to bring this endpoint into service is recorded in `notes`.
+ * public/robots.txt IS GONE, AND THAT IS WHAT PUT THIS FILE INTO SERVICE.
+ *
+ * It shadowed this route for as long as it existed — the static layer answers
+ * before the SSR route — so everything above was written, tested and never
+ * served. What was actually served said `Allow: /` with two Disallow lines, and
+ * `/my` and `/portal` were therefore advertised to crawlers as fair game: every
+ * member's own area, and every client portal, on a file the header of this very
+ * module already described as the defect it was built to fix.
+ *
+ * The lesson is not about robots. A static file in public/ silently outranks a
+ * route of the same name, and nothing in the build says so. If a future
+ * /sitemap.xml or /manifest.webmanifest ever appears in public/, it will
+ * shadow its endpoint the same way and just as quietly.
+ * tests/seo.test.ts now fails if any file in public/ collides with a route.
  */
 
 import type { APIRoute } from 'astro';

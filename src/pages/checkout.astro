@@ -17,6 +17,11 @@ import PageHero from '@/components/PageHero.astro';
 import { get } from '@/lib/storage';
 import { isConfigured, db, schema as s } from '@/db';
 import { formatINR } from '@/db/orders';
+import {
+  isCheckoutError, isPayable, parseCheckoutRequest, priceCheckout,
+  type PayableCheckout, type UnpayableCheckout,
+} from '@/db/checkout';
+import { isPriced } from '@/db/fee-catalogue';
 import { paymentStatusReport } from '@/lib/payments';
 import { eq } from 'drizzle-orm';
 
@@ -29,6 +34,56 @@ const tel = phone.replace(/[^\d+]/g, '');
 
 const pay = paymentStatusReport();
 const dbReady = isConfigured();
+
+// ─── The services basket, priced entirely on the server ──────────────────────
+//
+// A student or a parent arrives from a service page with what they want named
+// in the URL — ?service=CODE&for=Aarav&service=CODE&for=Diya, one pair per
+// child. The BROWSER names the services; every figure below is computed by
+// src/db/checkout.ts against the fee framework in force on the server's own
+// clock.
+//
+// THERE IS NO QUERY PARAMETER FOR A PRICE, and there is nowhere for one to
+// land: parseCheckoutRequest() builds the request from a whitelist, and the
+// pricing DATE is never taken from the request either — a buyer who could pick
+// the date could pick the cheapest framework the federation ever published.
+//
+// Today this block renders "pricing unavailable — request a quotation" for
+// everything, because MMAKF has published no fee framework. That sentence is
+// the truth, and it is the whole point that it is printed rather than a zero.
+const wantedServices = Astro.url.searchParams.getAll('service').filter(Boolean).slice(0, 20);
+const wantedFor = Astro.url.searchParams.getAll('for');
+
+let svcPayable: PayableCheckout | null = null;
+let svcUnpayable: UnpayableCheckout | null = null;
+let svcError: string | null = null;
+
+if (wantedServices.length) {
+  if (!dbReady) {
+    svcError = 'The federation’s fee register is not connected on this deployment, so nothing can be priced here. Nothing has been charged.';
+  } else {
+    try {
+      const parsed = parseCheckoutRequest({
+        items: wantedServices.map((code, i) => ({
+          serviceCode: code,
+          quantity: 1,
+          beneficiaryLabel: typeof wantedFor[i] === 'string' ? wantedFor[i] : null,
+        })),
+        discountCodes: Astro.url.searchParams.getAll('code'),
+      });
+      const quote = await priceCheckout(db(), parsed.request);
+      if (isPayable(quote)) svcPayable = quote;
+      else svcUnpayable = quote;
+    } catch (err) {
+      svcError = isCheckoutError(err)
+        ? err.message
+        : 'That basket could not be read. Nothing has been charged.';
+      console.error('[checkout] services basket failed', err);
+    }
+  }
+}
+
+const svcLines = svcPayable?.lines ?? svcUnpayable?.lines ?? [];
 
 /** variantId → what the buyer is choosing, priced from the catalogue. */
 type CatalogueEntry = {
@@ -116,6 +171,106 @@ const payNote = pay.automatic
     title={`Order <em>checkout</em>.`}
     lead="Review your basket, give us the delivery details, and place the order. The federation prices the order — the total shown when you place it is the one that counts."
   />
+
+  {(svcError || svcLines.length > 0) && (
+    <section>
+      <div class="container">
+        <div class="co-breakdown fade">
+          <div class="co-card-h">What the federation charges for this</div>
+
+          {svcError && <p class="body-txt">{svcError}</p>}
+
+          {svcLines.map((l) => (
+            <div class="co-line">
+              <div class="co-line-what">
+                <strong>{l.name}</strong>
+                {l.beneficiaryLabel && <span class="co-line-for"> — for {l.beneficiaryLabel}</span>}
+                {l.unitCount > 1 && <span class="co-line-for"> ({l.unitIndex} of {l.unitCount})</span>}
+                <div class="co-line-meta">
+                  {[l.unitOfSale, l.frequency].filter(Boolean).map((x) => String(x).replace(/_/g, ' ')).join(' · ')}
+                </div>
+                <div class="co-line-meta">{l.termLabel}</div>
+                {/* Every rule that produced this line, and the condition that
+                    matched it. "Why is it that much?" is answered here rather
+                    than by asking the office. */}
+                {l.detail.map((d) => (
+                  <div class="co-line-why">
+                    {d.label}
+                    {d.quantity != null && d.unitAmountMinor != null && (
+                      <Fragment> — {d.quantity} × {formatINR(d.unitAmountMinor)}</Fragment>
+                    )}
+                    {d.because && <Fragment> — {d.because}</Fragment>}
+                  </div>
+                ))}
+              </div>
+              <div class="co-line-amount">
+                {isPriced(l.fee)
+                  ? formatINR(l.fee.amountMinor)
+                  : <span class="co-unpriced">{l.fee.notice}</span>}
+              </div>
+            </div>
+          ))}
+
+          {/* A reduction is ALWAYS its own line with its own reason. A family
+              rate folded into the children's prices is a lump sum wearing a
+              breakdown's clothes. */}
+          {svcPayable && svcPayable.reductions.map((r) => (
+            <div class="co-line co-line-reduction">
+              <div class="co-line-what">
+                <strong>{r.label}</strong>
+                <div class="co-line-why">{r.because}</div>
+              </div>
+              <div class="co-line-amount">{formatINR(r.amountMinor)}</div>
+            </div>
+          ))}
+
+          {svcPayable && (
+            <Fragment>
+              <div class="co-line">
+                <div class="co-line-what">Subtotal</div>
+                <div class="co-line-amount">{formatINR(svcPayable.subtotalMinor)}</div>
+              </div>
+              {svcPayable.taxMinor !== 0 && (
+                <div class="co-line">
+                  <div class="co-line-what">Tax</div>
+                  <div class="co-line-amount">{formatINR(svcPayable.taxMinor)}</div>
+                </div>
+              )}
+              <div class="co-line co-line-total">
+                <div class="co-line-what">Total</div>
+                <div class="co-line-amount">{formatINR(svcPayable.totalMinor)}</div>
+              </div>
+              <p class="co-note">
+                Priced by {svcPayable.frameworkCode} v{svcPayable.frameworkVersion} on {svcPayable.asAt}.
+                The federation calculates this total. Nothing your browser sends can change it, and the
+                amount charged is compared against this figure before anything is fulfilled.
+              </p>
+            </Fragment>
+          )}
+
+          {svcUnpayable && (
+            <Fragment>
+              <p class="co-block-h" style="margin-top:20px">{svcUnpayable.notice}</p>
+              <p class="co-note">
+                No total is shown because the federation has not published one. That is not the same as free,
+                and it is not zero. To buy this, request a quotation
+                {email && <Fragment> — <a href={`mailto:${email}`}>{email}</a></Fragment>}
+                {phone && <Fragment> · <a href={`tel:${tel}`}>{phone}</a></Fragment>}, or ask at the dojo desk.
+              </p>
+            </Fragment>
+          )}
+
+          {(svcPayable?.refusedCodes.length || svcUnpayable?.refusedCodes.length) ? (
+            <ul class="co-refused">
+              {(svcPayable?.refusedCodes ?? svcUnpayable?.refusedCodes ?? []).map((r) => (
+                <li>{r.code} — {r.reason}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  )}
 
   {state !== 'ready' ? (
     <section>
@@ -275,6 +430,72 @@ const payNote = pay.automatic
     margin-bottom: 12px;
   }
   .co-block a { color: var(--gold-2); }
+
+  /* ── The server-computed services breakdown ── */
+  .co-breakdown {
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    padding: 28px 32px;
+    max-width: 860px;
+    margin-bottom: 40px;
+  }
+  .co-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 24px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .co-line:last-child { border-bottom: 0; }
+  .co-line-what { flex: 1 1 auto; color: var(--white); font-size: 0.95rem; }
+  .co-line-for { color: var(--muted); font-weight: 400; }
+  .co-line-meta {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.04em;
+  }
+  .co-line-why {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.65;
+    padding-left: 12px;
+    border-left: 1px solid var(--border-2);
+  }
+  .co-line-amount {
+    flex: 0 0 auto;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--white);
+    font-size: 0.95rem;
+  }
+  .co-line-reduction .co-line-amount { color: var(--gold-2); }
+  .co-line-total { border-top: 2px solid var(--gold); font-weight: 600; }
+  .co-line-total .co-line-what,
+  .co-line-total .co-line-amount { font-size: 1.05rem; }
+  /* Never a figure, never a dash standing in for one. */
+  .co-unpriced {
+    display: block;
+    max-width: 320px;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.6;
+    text-align: right;
+  }
+  .co-refused {
+    margin-top: 16px;
+    padding-left: 18px;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.7;
+  }
+  @media (max-width: 640px) {
+    .co-line { flex-direction: column; gap: 8px; }
+    .co-line-amount, .co-unpriced { text-align: left; max-width: none; }
+  }
 
   .co-basket { margin-top: 8px; }
   .co-note { margin-top: 14px; color: var(--muted); font-size: 0.84rem; line-height: 1.7; }

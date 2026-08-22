@@ -865,32 +865,41 @@ route actually writes.
 
 ## 2.22 The location engine and the identity foundation
 
-**Added 17 August 2026 (migration 0025). Classification: REAL+PARTIALLY WIRED —
-complete at the domain layer, UNWIRED at every surface.**
+**Added 17 August 2026 (migration 0025), surfaced and joined up the same day.
+Classification: REAL+WIRED end to end, with NOTIFICATION and WORKFLOW absent.**
 
-Stated first because it is what a reader most needs to know: `src/db/geography.ts`
-and `src/db/identity.ts` are gated, audited and covered by 99 passing tests, and
-**no file under `src/pages` imports either of them.** By this document's own
-rule — a link is REAL only if a specific file does the work — the public and
-admin links below are absent, not weak.
+~~The break, stated first: a membership registration still does not create a
+`persons` row.~~ **Closed the same day** by `src/db/provisioning.ts`, called from
+the approval path. The strikethrough stays because this document's value is that
+it can be checked against what it previously claimed.
+
+The chain now runs: `/registration` → validated intake → Redis queue → an
+administrator's decision → `provisionFromRegistration()` → person, address,
+contacts, consent, guardian claim, duplicate check → `issueMembership()` for an
+issuable category. Every step idempotent; every partial outcome reported to the
+office in words rather than swallowed.
+
+**What a reader should not over-read.** `verifyContact()` still has no caller, so
+every contact in the register is honestly unverified — there is no email or SMS
+transport to prove one through. And nothing consumes the domain events.
 
 | Link | State |
 |---|---|
-| PUBLIC UI | **ABSENT.** Registration still collects a free-text city (`src/lib/registration.ts` `CORE_FIELDS`). |
-| AUTH | n/a at the domain layer; every write takes an `AuditContext` carrying a `Principal`. |
-| API | **ABSENT.** No endpoint. |
-| VALIDATION | REAL — `GeographyError` / `IdentityError` with codes and fields, one normaliser used on both sides of every lookup. |
+| PUBLIC UI | REAL — `/registration` renders `LOCATION_FIELDS` through `isOffered()`, so the empty geography register produces free text rather than an unanswerable select. |
+| AUTH | n/a for the lookup (deliberately — see API); every write takes an `AuditContext` carrying a `Principal`. |
+| API | REAL — `src/pages/api/geography/resolve.ts`. **Unauthenticated by design and rate limited**: there is no `geo:read` action because resolving an address happens where the caller holds nothing. It reads only the map — a test asserts it cannot reach `addresses` or `persons`. |
+| VALIDATION | REAL — `GeographyError` / `IdentityError` with codes and fields; one normaliser on both sides of every lookup; `isOffered()` shared by the renderer and the validator, so "what was asked" and "what is accepted" cannot disagree. |
 | SERVICE | REAL — `geography.ts` (≈17 exported functions), `identity.ts` (≈28). |
 | DATABASE | REAL — Postgres, 12 tables + 8 columns on `persons`. RLS enabled by `0026_data_api_lockdown.sql`. |
-| EVENT | **ABSENT.** No `domain_events` row is published. `PersonVerified`, `RoleAssigned` and the rest named in the brief are not emitted. |
-| WORKFLOW | **ABSENT.** |
-| AUTOMATION | PARTIAL — `detectPersonDuplicates()` raises candidates, and nothing calls it on the intake path yet. |
-| NOTIFICATION | **ABSENT.** |
+| EVENT | REAL — twelve types on the catalogue, published from `db/identity.ts` through `announce()`, which logs rather than throwing so the feed cannot break the fact. Every floor is `restricted` and every `publicFields` is empty: these events concern children. |
+| WORKFLOW | **ABSENT.** Nothing runs `lib/workflow.ts` off them. |
+| AUTOMATION | REAL — `provisionFromRegistration()` runs on approval and calls `detectPersonDuplicates()`, which RAISES and never blocks. Idempotent: a retried approval creates no second person. |
+| NOTIFICATION | **ABSENT.** The events are published; no consumer reacts. Queue item 2. |
 | CALENDAR | n/a. |
-| AUDIT | REAL — `writeAudit()` on every privileged mutation, and **deliberately without the payload**: contact values and address lines are excluded, because an audit trail is read by more people than the record itself. |
-| ADMIN UI | **ABSENT.** `duplicateQueue()` and `profileChangeQueue()` have no page. |
-| USER UI | **ABSENT.** No parent surface; the `PARENT` role still has nowhere to go. |
-| TEST | REAL — `tests/geography.test.ts` (37), `tests/identity.test.ts` (62). |
+| AUDIT | REAL — `writeAudit()` on every privileged mutation, and **deliberately without the payload**: contact values and address lines are excluded, because an audit trail is read by more people than the record itself. A test greps the audit rows for the fixture's telephone, email and street. |
+| ADMIN UI | REAL — `/admin/duplicates` (`duplicate:review`), `/admin/profile-changes` (`profilechange:decide`) and `/admin/guardianships` (`guardian:verify`), all scope-filtered in SQL, all in `ADMIN_GROUPS`. |
+| USER UI | REAL — `/my/family`, which takes no identifier and gates every field on `guardianCan()`. Linked from `/my` for anybody with a dependant **or a pending claim**. |
+| TEST | REAL — `geography` (37), `identity` (62), `identity-surfaces` (29), `identity-review-fixes` (16), `provisioning` (26), `admin-guardianships` (21), plus `routes-live` over HTTP (155). |
 
 ### The separation this domain is built on
 
@@ -1124,54 +1133,205 @@ in the same document.
 
 # Addendum — the marketplace platform (migration 0029)
 
-Traced 17 August 2026 by reading the code.
+Traced 17 August 2026 by reading the code. **Re-traced after the surfaces were
+built**; the first version of this addendum recorded `PUBLIC UI ✗` on every row,
+which was true when written.
 
-**The headline finding, stated plainly: the marketplace engine is REAL and the
-SURFACES DO NOT EXIST.** Every row below is honest about which links are joined.
-
-| Feature | PUBLIC UI | AUTH | API | VALIDATION | DB | AUDIT | TEST |
+| Feature | UI | AUTH | API | VALIDATION | DB | AUDIT | TEST |
 |---|---|---|---|---|---|---|---|
-| Seller registration | ✗ none | ✓ | ✗ | ✓ `registerAsSeller` | ✓ | ✓ | ✓ |
-| Seller verification | ✗ none | ✓ `marketplace:verify` | ✗ | ✓ reason required on refusal | ✓ | ✓ | partial |
-| Brand authorisation | ✗ none | ✓ `marketplace:brand` | ✗ | ✓ claim ≠ verified | ✓ | ✓ | ✓ |
-| Badges | ✗ none | ✓ `marketplace:review` | ✗ | ✓ derived cannot be granted | ✓ | ✓ | ✓ |
-| Taxonomy + product policy | ✗ none | ✓ `marketplace:review` | ✗ | ✓ strictest ancestor | ✓ | ✓ | ✓ |
-| Variants | ✗ none | ✓ owner-only | ✗ | ✓ returns listing to review | ✓ | ✓ | ✓ |
-| Inventory | ✗ none | ✓ owner-only | ✗ | ✓ CHECK + conditional UPDATE | ✓ | ✓ | ✓ |
-| Multi-seller checkout | ✗ none | ✓ | ✗ | ✓ server-priced, public predicate | ✓ | ✓ | ✓ |
-| Fulfilment lifecycle | ✗ none | ✓ owner-only | ✗ | ✓ transition table | ✓ | ✓ | ✓ |
-| Commission | ✗ none | ✓ `marketplace:commission` | ✗ | ✓ basis required, publish separate | ✓ | ✓ | ✓ |
-| Settlement + payout | ✗ none | ✓ `marketplace:settle` | ✗ | ✓ blocked on unresolved commission | ✓ | ✓ | ✓ |
-| Returns | ✗ none | ✓ buyer / owner | ✗ | ✓ frozen eligibility, refund ceiling | ✓ | ✓ | ✗ |
-| Disputes | ✗ none | ✓ `marketplace:dispute` | ✗ | ✓ reasons required | ✓ | ✓ | ✗ |
-| Quarantine | ✗ n/a — removal | ✓ `marketplace:suspend` | ✗ | ✓ reason required | ✓ | ✓ | ✓ |
-| Reviews / performance | ✗ none | — | ✗ | schema only | ✓ tables | — | ✗ |
-| Public storefront | ✗ none | n/a | ✗ | ✓ allow-list, not redaction | ✓ | n/a | ✗ |
+| Seller registration | ✓ `/seller/apply` | ✓ | ✓ `seller/register` | ✓ | ✓ | ✓ | ✓ |
+| Seller verification | ✓ Seller 360 | ✓ `marketplace:verify` | ✓ `verification/decide` | ✓ reason on refusal | ✓ | ✓ | partial |
+| Brand authorisation | ✓ Seller 360 | ✓ `marketplace:brand` | ✓ `brand/claim`,`brand/decide` | ✓ claim ≠ verified | ✓ | ✓ | ✓ |
+| Badges | ✓ Seller 360 + storefront | ✓ `marketplace:review` | ✓ `badge/grant` | ✓ derived cannot be granted | ✓ | ✓ | ✓ |
+| Taxonomy + policy | ✓ console | ✓ `marketplace:review` | ✓ `taxonomy/adopt` | ✓ strictest ancestor | ✓ | ✓ | ✓ |
+| Variants | ✓ `/portal/seller/products` | ✓ owner-only | ✓ `variant/*` | ✓ returns item to review | ✓ | ✓ | ✓ |
+| Inventory | ✓ `/portal/seller/products` | ✓ owner-only | ✓ `stock/*` | ✓ CHECK + conditional UPDATE | ✓ | ✓ | ✓ |
+| Checkout + split | ✓ `/shop/product/[ref]` | ✓ | ✓ `checkout` | ✓ server-priced, public predicate | ✓ | ✓ | ✓ |
+| Fulfilment | ✓ `/portal/seller/orders` | ✓ owner-only | ✓ `order/*` | ✓ transition table | ✓ | ✓ | ✓ |
+| Commission | ✓ `/admin/marketplace/commissions` | ✓ `marketplace:commission` | ✓ `commission/*` | ✓ basis required, publish separate | ✓ | ✓ | ✓ |
+| Settlement + payout | ✓ `/admin/marketplace/settlements` | ✓ `marketplace:settle` | ✓ `settlement/*`,`payout/*` | ✓ blocked on unresolved commission | ✓ | ✓ | ✓ |
+| Returns | ✓ `/portal/seller/orders` | ✓ buyer / owner | ✓ `return/*` | ✓ frozen eligibility, refund ceiling | ✓ | ✓ | ✓ |
+| Disputes | ✓ console + seller orders | ✓ `marketplace:dispute` | ✓ `dispute/*` | ✓ reasons required | ✓ | ✓ | ✓ |
+| Quarantine | ✓ console (removal) | ✓ `marketplace:suspend` | ✓ `listing/quarantine` | ✓ reason required | ✓ | ✓ | ✓ |
+| Reviews | ✓ product page | ✓ buyer, verified purchase | ✓ `review/*` | ✓ unique on the purchase | ✓ | ✓ | ✓ |
+| Performance | partial — 360 shows snapshots | ✓ `marketplace:read` | ✓ `performance/compute` | ✓ null below minimum sample | ✓ | ✓ | ✓ |
+| Storefront | ✓ `/shop/seller/[slug]` | n/a | n/a | ✓ allow-list, not redaction | ✓ | n/a | — |
+| Shipping zones | **✗ none** | — | ✗ | ✓ read at checkout | ✓ | — | — |
+| Bulk import | **✗ none** | — | ✗ | ✗ | ✓ tables | — | — |
+| Policy documents | **✗ none** | — | ✗ | — | ✓ tables | — | — |
 
-## The links that ARE joined, and are worth recording
+## The links worth recording
 
-**Public visibility is one SQL predicate, used by both the shop and checkout.**
-`publicListingPredicate()` has five conditions and `checkout()` resolves the
-cart against it — not against a re-implementation. An item that cannot be seen
-cannot be bought by guessing its id, and the two rules cannot drift apart
-because there is only one of them. Asserted for both suspension and quarantine.
+**Public visibility is one SQL predicate, and now four callers use it.** The
+shop, `checkout()`, `/shop/product/[ref]` and `myListings()`. The last was
+found drifting during this work — it carried three hand-copied conditions while
+the predicate had grown to five — and now interpolates the predicate itself.
+That is the failure mode the original comment promised to prevent, arriving by
+the route it did not cover: not somebody editing the copy, but somebody editing
+the original.
 
 **Seller isolation is a SQL filter on a denormalised column**, applied twice on
-the order path (`seller_orders.seller_id` and `order_lines.seller_id`). No
-seller-facing function takes a `sellerId`.
+the order path. No seller-facing function takes a `sellerId`, and the surfaces
+have no field in which to send one.
 
-**The oversell guard is in the engine, not the application.** A CHECK constraint
-plus a conditional UPDATE. The test bypasses every function in the module,
-writes the bad state directly, and asserts the database refuses it.
+**The oversell guard is in the engine.** A CHECK constraint plus a conditional
+UPDATE. The test bypasses every function in the module and asserts the database
+refuses the write.
 
-**Money that nobody has priced does not move.** An unresolved commission leaves
-`commission_minor` NULL — not 0 — and `closeSettlement()` refuses. Asserted.
+**Money that nobody has priced does not move.** `commission_minor` stays NULL,
+`closeSettlement()` refuses, and both the seller's money page and the admin
+console say so in the module's own words.
 
-## The links that are NOT joined
+**A badge is a row.** The storefront and the product page render badges from
+`badgesFor()` with the *basis* beside each. The seller's own tagline is rendered
+as their words. A test writes "Official MMAKF Product Supplier" into the tagline
+and asserts the grants table is still empty.
 
-**PUBLIC UI is absent for every row.** No `.astro` page, no API route. The
-engine is reachable only from tests. This is recorded as a finding, not as a
-plan: at the time of writing, a seller cannot apply and an administrator cannot
-approve one through any surface that exists.
+## The links that are still absent
 
-**`src/db/returns.ts` has no test file.** The only 0029 module without one.
+- **No shipping-zone surface**, so every seller resolves to zero carriage at
+  checkout. Not a data fault — a missing page — and it is costing sellers money.
+- **No bulk-import pipeline**, no **policy authoring**, no **category landing
+  pages**, no **notifications** for marketplace events.
+
+---
+
+# Notifications — the runner, added 17 August 2026
+
+## EVENT → NOTIFICATION was severed for the whole system
+
+Every part existed and was tested. The join did not exist.
+
+- `publish()` — called from seven modules, appending to `domain_events`. Real.
+- `NOTIFIABLE` — seventeen event types with declared audiences. Real.
+- `notifyForEvent()` — resolves recipients, writes rows, dedupes on the domain
+  event id. Real, and **called by nothing outside its own test**.
+- `/my/notifications` — a member-facing inbox, linked from `/my` and the command
+  palette. Real, and **empty**.
+
+`grep -rn "consume(" src scripts` returned only the definition. The cursor for
+the `notifications` consumer had never advanced. Seven NOTIFIABLE types have
+live producers today — `CERTIFICATE_ISSUED`, `CLASS_SESSION_CANCELLED`,
+`CLASS_SESSION_RESCHEDULED`, `SCHEDULE_PUBLISHED`, `PROGRAM_ACCESS_REVOKED`,
+`MEMBERSHIP_EXPIRING`, `ENTITLEMENT_EXPIRING` — so events the catalogue promises
+will reach members were being appended and silently going nowhere.
+
+The concrete failure: an administrator cancels a class through
+`/admin/schedules`; `cancelSession()` releases every booking on it and publishes
+`CLASS_SESSION_CANCELLED` in the same transaction; nobody holding a place is
+ever told.
+
+## Now joined
+
+`src/pages/api/cron/reconcile.ts` — the one scheduled route this project is
+allowed on its plan — gained two steps:
+
+| Step | Call | Guarantee |
+|---|---|---|
+| 4 | `consume(db, 'notifications', notifyForEvent, { maxClassification: 'member' })` | Capped so an inbox writer is never handed an event above member level; the cursor stops immediately *before* a failing handler and `failedAtEventId` names it; `skippedEventIds` is reported, not just a count |
+| 5 | `deliverQueued(db)` | In-app rows marked sent; a channel with no transport configured stays queued and is counted, never marked sent on the strength of a credential nobody supplied |
+
+Both idempotent: `notifyForEvent()` dedupes on the domain event id, so a retried
+run cannot notify anybody twice.
+
+**Verdict: EVENT → NOTIFICATION is now REAL + WIRED** for every type that
+declares an audience. Guarded by `tests/notification-runner.test.ts` (8 tests),
+which asserts the route calls the drain, that the route is in `vercel.json`'s
+cron list, that `NOTIFIABLE ⊆ eventsFor('notifications')`, and that the cursor
+advances, does not re-deliver, and stops before a failure without skipping it.
+
+**Two stale comments corrected.** `scheduling.ts` and `domain-events.ts` both
+still said `SCHEDULE_PUBLISHED` "carries no consumer". That was true when
+written and false once the runner existed. The deliberate refusal that remains —
+not fanning out to "everyone who trains at this club", which is not a query this
+system can answer honestly — is now stated as the narrower thing it actually is.
+
+---
+
+# Scheduling API — added 17 August 2026
+
+The scheduling row above recorded API as **MISSING**. It is now REAL.
+`src/pages/api/schedules/[...action].ts`.
+
+## The verb divide, which is the design
+
+| Verb | Auth | Reaches | Cache |
+|---|---|---|---|
+| GET | none | `publishedWeek()`, `openingHoursOn(principal: null)`, `directoryDay()`, `directoryRange()`, `listSeasons()` | `max-age=30, s-maxage=60` |
+| POST | `identify()`, then the module's own scope check | seasons, schedules, versions, rules, publish/withdraw, exceptions | `no-store` |
+
+**GET is public because a published timetable IS public** — it is printed in HTML
+on `/facilities`, `/schedule`, `/dojos` and every club page. Refusing it over
+HTTP while printing it in markup would be a pretence, not a control.
+
+**No draft can escape through it.** Drafts are invisible to every read in the
+module, and the suite asserts that a drafted-but-unpublished version leaves a
+GET reporting `configured: false`.
+
+**No exception reason can escape either.** Public day reads pass
+`principal: null`, so the engine redacts the administrator's free text by
+construction and returns only the exception KIND. Asserted by fetching a day
+whose stored reason contains "panel confidential" and checking the whole
+serialised response for that string.
+
+## Actions
+
+Writes: `season`, `season/activate`, `season/move`, `create`, `draft`, `rules`,
+`publish`, `withdraw`, `exception`, `exception/remove`.
+Reads: `week`, `day`, `directory`, `directory-range`, `seasons`.
+
+| Link | Verdict | Evidence |
+|---|---|---|
+| PUBLIC UI | REAL | The reads are what a club's own site or a mobile client needs |
+| AUTH | REAL | `identify()`, never a cookie read. 401 before the database is touched |
+| API | REAL | This file |
+| VALIDATION | REAL | Shape only at the edge — ids, owner shape, purpose, a 400-rule array bound. Every judgement (overlap, reversed range, season collision) stays in the module |
+| SERVICE | REAL | One call per action into `src/db/scheduling.ts` / `schedule-directory.ts`. No scheduling policy is decided in the route |
+| AUTHORISATION | REAL | **No second model.** `assertMayWriteSchedule()` resolves the owner through `resourceForOwner()`, which carries dojo, district AND state ids, and hands it to the same `can()`. Already scope-aware for ids, so the IDOR gap `/api/grading` closes at the edge does not exist here |
+| AUDIT | REAL | Inherited — every service call writes its own audit row, with the caller's ip and a `shared:` authority when the credential is shared |
+| TEST | REAL | `tests/schedules-route.test.ts` — 22 tests |
+
+## What the tests caught
+
+**A shared credential cannot publish.** `publishVersion()` refuses a principal
+with no user id, so the legacy shared admin password can draft and cannot put a
+timetable in force. That surfaced as a failing test rather than as a design note,
+and is now asserted: a published version records who published it, and a password
+shared by an office names nobody. Months later a member asking when their class
+moved and who decided it has to get an answer.
+
+**`dojoIds=` empty resolved dojo zero.** `Number('')` is 0, and the first
+implementation's `Number.isInteger` filter let it through, so an empty parameter
+was answered for rather than refused. Now filtered to positive ids.
+
+## Multi-day batch resolution
+
+`directoryRange()` + the `directory-range` read. Capped at 14 days, and it
+returns a stated `standing` per club — `open` | `closed` | `not_published` —
+because a "find a club open this weekend" surface must not conflate *shut this
+weekend* with *nobody has heard from them*. The first says come back Monday; the
+second says telephone.
+
+It is `directoryDay()` per date, deliberately: the expensive part of resolution
+is the rules-and-seasons-for-a-weekday, which genuinely differ per day, and
+folding a fortnight into one query set would mean a THIRD implementation of the
+specificity arithmetic to save fourteen bounded round trips. The property that
+mattered is preserved — two thousand clubs over a fortnight cost what two clubs
+over a fortnight cost.
+
+## SCHEDULE_CHANGED — retired
+
+Defined, never emitted, no consumer, no payload contract, and its stated meaning
+("a session was moved or cancelled") is exactly what `CLASS_SESSION_CANCELLED`
+and `CLASS_SESSION_RESCHEDULED` mean — both of which have producers, a consumer
+and audiences `NOTIFIABLE` can resolve. A tombstone comment stands in its place
+so it is not re-added by somebody reading the gap as an omission.
+
+## deliverQueuedPush — wired
+
+Step 6 of the reconcile cron. Push rows queue rather than fail when VAPID keys
+are absent — correct, since a member's subscription is not invalidated by the
+operator not having configured a key — but nothing was retrying the backlog, and
+a backlog never retried is a backlog dropped slowly. No guard needed at the call
+site: `deliverQueuedPush()` checks `pushStatus()` itself and, unconfigured,
+retries nothing, marks nothing failed, and reports how deep the backlog is.

@@ -208,11 +208,28 @@ export const PUBLIC_NAV: NavItem[] = [
     children: [
       { href: '/shotokan', label: 'Shotokan' },
       { href: '/shotokan/kihon', label: 'Kihon library', note: 'Stances, punches, blocks, strikes and kicks' },
+      // FOUR PAGES THAT WERE BUILT AND LINKED FROM NOWHERE.
+      //
+      // /shotokan/techniques, /shotokan/kata, /shotokan/competition and
+      // /shotokan/live all answer 200, and all reach the sitemap — classifyRoute()
+      // calls a static public route public whether or not anything links to it.
+      // A SITEMAP ENTRY IS A NOMINATION, NOT A RECOMMENDATION: a page nothing
+      // links to is crawled last, ranked lowest, and cannot be found by a reader
+      // at all. This is the federation's most search-valuable content — its whole
+      // documented technical library — and the menu did not know it existed.
+      { href: '/shotokan/techniques', label: 'All techniques A–Z', note: 'Every documented technique, alphabetically' },
       { href: '/kata', label: 'Kata library' },
+      // NOT a duplicate of /kata. That page explains the twenty-six forms; this
+      // one maps them onto the technique library — which documented technique each
+      // form contains. The labels have to say so, or the menu offers the same word
+      // twice and a reader picks the wrong one.
+      { href: '/shotokan/kata', label: 'Kata in the technical library', note: 'Which documented techniques each form contains' },
       { href: '/shotokan/kumite', label: 'Kumite library', note: 'Partner practice, tactics and competition' },
+      { href: '/shotokan/competition', label: 'WKF competition rules', note: 'The kumite ruleset MMAKF competes under' },
       { href: '/shotokan/stances', label: 'Stances', note: 'Dachi-waza, compared side by side' },
       { href: '/shotokan/terminology', label: 'Terminology' },
       { href: '/shotokan/videos', label: 'Video source register', note: 'What was found, checked, and whether we may show it' },
+      { href: '/shotokan/live', label: 'Live technical sessions', note: 'How a live class is reviewed and mapped into the curriculum' },
       { href: '/belt-system', label: 'Grades and belts' },
       { href: '/regulations', label: 'Regulations' },
     ],
@@ -247,9 +264,16 @@ export const PUBLIC_NAV: NavItem[] = [
     ],
   },
   {
-    href: '/dojos', label: 'Network', primary: true,
+    href: '/clubs', label: 'Network', primary: true,
     children: [
-      { href: '/dojos', label: 'Affiliated centres' },
+      // FIRST, because it is the question most visitors arrive with. /clubs is
+      // the SEARCH — currently-affiliated clubs, with their own timings — and
+      // /dojos is the REGISTER, which also lists lapsed units so a parent can
+      // check the club their child already attends. Two different questions,
+      // and the search must not answer the register's by offering a club whose
+      // charter has expired.
+      { href: '/clubs', label: 'Find a club', note: 'Search by city, PIN code, age group or discipline' },
+      { href: '/dojos', label: 'Affiliation register', note: 'Is a club affiliated today? Includes lapsed units' },
       { href: '/affiliation', label: 'Affiliate a dojo' },
       { href: '/facilities', label: 'Headquarters' },
     ],
@@ -326,6 +350,13 @@ export const ADMIN_GROUPS: AdminGroup[] = [
     label: 'Training and engagement',
     modules: [
       { href: '/admin/applications', label: 'Applications', action: 'engagement:read' },
+      // The chain the registers either side of this entry cannot show, because
+      // the answer spans five tables and the most important part of it is a
+      // NEGATIVE join: the applications that reached no quotation at all. Gated
+      // on engagement:read because the chain starts at an application; the
+      // quotation, money and membership bands inside it are gated separately
+      // and say which action would open them.
+      { href: '/admin/pipeline', label: 'Pipeline', action: 'engagement:read' },
       { href: '/admin/leads', label: 'Leads and CRM', action: 'engagement:read' },
       { href: '/admin/programs', label: 'Programmes', action: 'program:read' },
       // Reading the pricing RULES, which is a different authority from reading
@@ -340,6 +371,17 @@ export const ADMIN_GROUPS: AdminGroup[] = [
       // without holding the venue register — the whole point of the scheduling
       // wave being that a club sets its own hours without asking the federation.
       { href: '/admin/schedules', label: 'Schedules and seasons', action: 'schedule:read' },
+      // THE FIRST WEEK, as opposed to every subsequent edit. Listed separately
+      // because the full editor is eleven expert forms and a club secretary
+      // opening it for the first time cannot use them — which is why, months
+      // after the engine shipped, only the headquarters had schedule rows.
+      { href: '/admin/schedules/start', label: 'Publish a club’s week', action: 'schedule:write' },
+      // WHEN AND WHERE, room by room, plus the register at each class. Gated on
+      // 'attendance:read' rather than 'schedule:read' because its load-bearing
+      // half is attendance: the grid is a convenience, and recording who was at
+      // a class is what src/db/grading.ts counts when deciding whether a
+      // candidate may be examined.
+      { href: '/admin/timetable', label: 'Timetable and registers', action: 'attendance:read' },
       { href: '/admin/attendance', label: 'Attendance', action: 'attendance:read' },
     ],
   },
@@ -352,6 +394,13 @@ export const ADMIN_GROUPS: AdminGroup[] = [
       // not set the prices, and whoever sets the prices does not need the
       // turnover.
       { href: '/admin/finance', label: 'Money dashboard', action: 'finance:read' },
+      // WHAT the money was for, as opposed to how much of it arrived. Its own
+      // entry rather than a tab on the dashboard, because the question it
+      // answers — which programmes carry the federation — is the one a
+      // committee asks, and a report nobody can find is a report that gets
+      // recreated by hand in a spreadsheet with a "student membership" column
+      // in it.
+      { href: '/admin/revenue', label: 'Revenue by category', action: 'finance:read' },
       { href: '/admin/reconciliation', label: 'Reconciliation', action: 'finance:read' },
       // OTHER ORGANISATIONS' FEES, and gated on its own action rather than on
       // finance:* — note who does not hold it: every institution role. A client
@@ -372,6 +421,12 @@ export const ADMIN_GROUPS: AdminGroup[] = [
       // on 'person:write': every dojo administrator holds that so they can
       // correct a telephone number, and deciding that two national identity
       // records describe one human being is a different kind of act.
+      // Who may act for a child, and what they may see of them. Its own action
+      // rather than 'person:write': a dojo administrator holds that to correct a
+      // telephone number, and attaching an adult to a child's record is not the
+      // same kind of act. SAFEGUARDING_OFFICER holds this and almost nothing
+      // else, which is the point.
+      { href: '/admin/guardianships', label: 'Guardianships', action: 'guardian:verify' },
       { href: '/admin/duplicates', label: 'Duplicate records', action: 'duplicate:review' },
       // Changes to the fields where an unreviewed edit silently changes an
       // outcome — a date of birth is a competition age category, a name is what
@@ -407,7 +462,14 @@ export const ADMIN_GROUPS: AdminGroup[] = [
       // that already happened — so this module reads and never writes, and it
       // is gated on notification:read rather than notification:send.
       { href: '/admin/notifications', label: 'Notification delivery', action: 'notification:read' },
-      { href: '/admin/listings', label: 'Marketplace', action: 'marketplace:read' },
+      // TWO ENTRIES, NOT ONE, and they are different jobs. `/admin/listings` is
+      // the item review queue — an editorial act, worked by whoever decides
+      // whether a gi may be advertised. `/admin/marketplace` is the console:
+      // seller applications, verification, held commission, disputes, brand
+      // authorisations. Folding them under one label sent everybody looking for
+      // a seller's record to a list of unreviewed photographs.
+      { href: '/admin/marketplace', label: 'Marketplace console', action: 'marketplace:read' },
+      { href: '/admin/listings', label: 'Item review', action: 'marketplace:review' },
     ],
   },
   {

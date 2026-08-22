@@ -1,0 +1,479 @@
+---
+// /shop/category/[...path] — the marketplace, browsable at last.
+//
+// ─── WHY THIS PAGE EXISTS ───────────────────────────────────────────────────
+//
+// The taxonomy is adopted, sellers file items under it, reviewers approve them
+// — and until this page there was nowhere to browse the result. The only public
+// routes into the marketplace were /shop/product/[ref], which needs the
+// reference of an item you had already found, and /shop/seller/[slug], which
+// needs to know whose shop it is. This is the third one, and it is the one a
+// buyer and a search engine can both start from.
+//
+// ─── EVERY QUERY GOES THROUGH THE PUBLIC PREDICATE ──────────────────────────
+//
+// Not one row is fetched and then filtered. src/db/marketplace-browse.ts puts
+// publicListingPredicate() — the same five conditions the product page, the
+// storefront, the checkout and the sitemap resolve through — inside the WHERE
+// of the row query, the count query and every facet count. That is why the
+// TOTAL on this page is trustworthy: an unapproved, quarantined, edited or
+// suspended item is absent from the number as well as from the grid.
+//
+// ─── THE FILTERS THAT ARE HERE, AND THE ONES THAT ARE NOT (§70) ─────────────
+//
+// Every control below appears only when the data can answer it: the discipline
+// select is built from the discipline values items in view actually claim, the
+// price bands are real prices of real items, and the in-stock box is absent
+// when everything in view is in stock. A control that cannot change the result
+// is a control that wastes a click and teaches the buyer the filters are fake.
+//
+// And there is NO "Beginner", "Competition" or "Training" control, because no
+// column on a listing records a skill level or an intended use. The page says
+// so in words rather than leaving a gap the next author fills with a `LIKE
+// '%beginner%'`. See LEVEL_FILTER_NOT_BACKED in the module.
+//
+// ─── SEO ────────────────────────────────────────────────────────────────────
+//
+// Base.astro emits the canonical from the PATH, so every filter combination of
+// this page canonicalises to the bare category URL — which is what stops an
+// infinite set of query strings competing with each other. This page adds a
+// noindex header whenever a filter or a page number is applied, for the same
+// reason: those URLs are navigation, not content. The bare category URL carries
+// no such header and is the one the sitemap advertises.
+//
+// AND AN EMPTY CATEGORY SAYS IT IS EMPTY. It does not pad itself with the
+// category name repeated, a list of sibling keywords, or "the best headgear in
+// India". A thin page that admits it is thin costs the federation nothing; a
+// thin page dressed as a full one costs the whole domain.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db } from '@/db';
+import { isMarketplaceError } from '@/db/marketplace';
+import {
+  browseCategory, categoryBreadcrumbs, childCategories, facets,
+  DEFAULT_PAGE_SIZE, LEVEL_FILTER_NOT_BACKED, AGE_BAND_NOT_SET,
+  AGE_UNSTATED_IS_NOT_ALL_AGES, FACET_COUNTS_ARE_UNCONDITIONAL,
+  type BrowseFilters, type BrowseSort,
+} from '@/db/marketplace-browse';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const rawPath = String(Astro.params.path ?? '').replace(/^\/+|\/+$/g, '');
+const q = Astro.url.searchParams;
+
+// ── The filters, read from the query string ────────────────────────────────
+//
+// `price` arrives as "<minMinor>-<maxMinor>" — INTEGER PAISE that this page's
+// own select emitted from figures the database produced. There is deliberately
+// no rupees→paise conversion anywhere on this page: rupeesToPaise() in
+// /api/marketplace is the only conversion in the marketplace, and a second one
+// is a second rounding rule.
+const bandParam = q.get('price') ?? '';
+const bandMatch = /^(\d+)-(\d+)$/.exec(bandParam);
+const ageParam = q.get('age') ?? '';
+const pageParam = Number(q.get('page') ?? '1');
+const pageNo = Number.isInteger(pageParam) && pageParam > 0 ? pageParam : 1;
+
+const filters: BrowseFilters = {
+  sort: (q.get('sort') || 'newest') as BrowseSort,
+  shotokan: q.get('shotokan') === '1',
+  discipline: q.get('discipline') || null,
+  sport: q.get('sport') || null,
+  inStock: q.get('stock') === '1',
+  age: /^\d{1,3}$/.test(ageParam) ? Number(ageParam) : null,
+  priceMinMinor: bandMatch ? Number(bandMatch[1]) : null,
+  priceMaxMinor: bandMatch ? Number(bandMatch[2]) : null,
+};
+
+const filtered = !!(filters.shotokan || filters.discipline || filters.sport
+  || filters.inStock || filters.age != null || bandMatch);
+
+// Navigation, not content. A crawler that indexed every filter combination
+// would index a combinatorial number of near-identical pages and spend the
+// federation's crawl budget on them.
+if (filtered || pageNo > 1) {
+  Astro.response.headers.set('X-Robots-Tag', 'noindex, follow');
+}
+
+let result: any = null;
+let crumbs: any[] = [];
+let children: any[] = [];
+let facetSet: any = null;
+let refusal: string | null = null;
+let loadError = false;
+
+if (configured) {
+  try {
+    if (rawPath) {
+      result = await browseCategory(db(), {
+        path: rawPath, filters, limit: DEFAULT_PAGE_SIZE, offset: (pageNo - 1) * DEFAULT_PAGE_SIZE,
+      });
+      if (result.category) {
+        crumbs = await categoryBreadcrumbs(db(), rawPath);
+        children = await childCategories(db(), rawPath);
+        facetSet = await facets(db(), rawPath);
+      }
+    } else {
+      children = await childCategories(db(), null);
+      facetSet = await facets(db(), null);
+    }
+  } catch (err: any) {
+    if (isMarketplaceError(err)) {
+      // The module writes its refusals for the person who hit them, so they are
+      // printed verbatim. Anything else is a fact about the server.
+      refusal = String(err.message);
+    } else {
+      console.error('[shop/category]', err);
+      loadError = true;
+    }
+  }
+}
+
+const node = result?.category ?? null;
+const isRoot = !rawPath;
+const notFound = configured && !loadError && !refusal && !isRoot && !node;
+if (notFound) Astro.response.status = 404;
+
+// ── Display helpers ────────────────────────────────────────────────────────
+//
+// NAMED FUNCTIONS IN THE FRONTMATTER, NOT TERNARIES IN THE MARKUP. esbuild
+// parses a template literal inside a chained ternary inside JSX as a type
+// annotation and fails the build — and these read better here anyway, where
+// they can be argued with.
+
+const money = (m: number, currency = 'INR') =>
+  `${currency === 'INR' ? '₹' : `${currency} `}${Math.floor(m / 100).toLocaleString('en-IN')}.${String(m % 100).padStart(2, '0')}`;
+
+function bandLabel(b: { minMinor: number; maxMinor: number; count: number }): string {
+  if (b.minMinor === b.maxMinor) return `${money(b.minMinor)} (${b.count})`;
+  return `${money(b.minMinor)} to ${money(b.maxMinor)} (${b.count})`;
+}
+
+function priceLabel(item: any): string {
+  const amount = money(item.priceMinor, item.currency);
+  return item.variantCount > 1 ? `from ${amount}` : amount;
+}
+
+function stockLabel(item: any): string {
+  return item.inStock ? '' : ' · out of stock';
+}
+
+function ageLabel(item: any): string {
+  if (item.ageMinYears != null && item.ageMaxYears != null) return `${item.ageMinYears}–${item.ageMaxYears} years`;
+  if (item.ageMinYears != null) return `${item.ageMinYears} years and over`;
+  if (item.ageMaxYears != null) return `up to ${item.ageMaxYears} years`;
+  // NOT "all ages". An unstated age is unstated, everywhere in this codebase.
+  return '';
+}
+
+function childHref(path: string): string {
+  return `/shop/category/${path}`;
+}
+
+/** A link to this page with one thing changed. Keeps every other filter. */
+function urlWith(changes: Record<string, string | null>): string {
+  const next = new URLSearchParams(q);
+  for (const [k, v] of Object.entries(changes)) {
+    if (v === null || v === '') next.delete(k);
+    else next.set(k, v);
+  }
+  const s = next.toString();
+  return s ? `${Astro.url.pathname}?${s}` : Astro.url.pathname;
+}
+
+const total: number = result?.total ?? 0;
+const shown: any[] = result?.items ?? [];
+const firstIndex = total === 0 ? 0 : (pageNo - 1) * DEFAULT_PAGE_SIZE + 1;
+const lastIndex = (pageNo - 1) * DEFAULT_PAGE_SIZE + shown.length;
+const lastPage = Math.max(1, Math.ceil(total / DEFAULT_PAGE_SIZE));
+
+const pageTitle = isRoot ? 'Browse the marketplace' : (node?.name ?? 'Category not found');
+const documentTitle = isRoot
+  ? 'Browse the MMAKF marketplace'
+  : (node ? `${node.name} — MMAKF marketplace` : 'Category not found — MMAKF');
+const documentDescription = isRoot
+  ? 'Every category in the MMAKF marketplace taxonomy, with the number of items on sale in each.'
+  : (node
+    ? (node.description || `${node.name} on sale through the MMAKF marketplace.`)
+    : 'No such category in the MMAKF marketplace.');
+
+const breadcrumbTrail = node
+  ? [{ name: 'Shop', url: '/shop' },
+     ...crumbs.map((c: any) => ({ name: c.name, url: `/shop/category/${c.path}` }))]
+  : undefined;
+---
+
+<Base title={documentTitle} description={documentDescription} breadcrumbs={breadcrumbTrail}>
+  <section>
+    <div class="container">
+
+      {!configured && (
+        <div class="card">
+          <h1 class="display-2">Not available on this deployment.</h1>
+          <p>The federation database is not configured here, so there is no catalogue to browse.</p>
+        </div>
+      )}
+
+      {configured && loadError && (
+        <div class="card" role="alert">
+          <h1 class="display-2">This category could not be loaded.</h1>
+          <p>The fault has been logged for the federation office. Please try again shortly.</p>
+        </div>
+      )}
+
+      {configured && refusal && (
+        <div class="card" role="alert">
+          <h1 class="display-2">That is not something this page can show.</h1>
+          <p>{refusal}</p>
+          <p><a href="/shop/category">Start again from the top of the catalogue</a>.</p>
+        </div>
+      )}
+
+      {notFound && (
+        <div class="card">
+          <h1 class="display-2">No such category.</h1>
+          <p>
+            It may have been retired by the federation, or the address may be wrong.
+            <a href="/shop/category"> Browse the catalogue</a>.
+          </p>
+        </div>
+      )}
+
+      {configured && !loadError && !refusal && (isRoot || node) && (
+        <>
+          <div class="eyebrow">MMAKF marketplace</div>
+          <h1 class="display-1" style="margin-top:12px">{pageTitle}</h1>
+          {node?.description && <p class="lede">{node.description}</p>}
+
+          {isRoot && (
+            <p class="lede">
+              The federation's adopted product taxonomy. Every count below is the number of items
+              currently on public sale in that category and everything beneath it.
+            </p>
+          )}
+
+          {/* ── The tree ───────────────────────────────────────────────── */}
+          {children.length > 0 && (
+            <nav class="children" aria-label="Categories">
+              <h2 class="h4">{isRoot ? 'Categories' : 'Inside this category'}</h2>
+              <ul>
+                {children.map((c: any) => (
+                  <li>
+                    <a href={childHref(c.path)}>{c.name}</a>
+                    <span class="muted"> ({c.itemCount})</span>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          )}
+
+          {isRoot && facetSet && (
+            <div class="card">
+              <h2 class="h4">What is on sale</h2>
+              <p>
+                {facetSet.total} item{facetSet.total === 1 ? '' : 's'} across the taxonomy,
+                {' '}{facetSet.inStock} of them with stock.
+              </p>
+              {facetSet.uncategorised != null && facetSet.uncategorised > 0 && (
+                <p class="muted">
+                  A further {facetSet.uncategorised} approved item{facetSet.uncategorised === 1 ? ' is' : 's are'}
+                  {' '}filed under no category at all, so {facetSet.uncategorised === 1 ? 'it does' : 'they do'} not
+                  appear on any page here. {facetSet.uncategorised === 1 ? 'It is' : 'They are'} still on sale, on
+                  {' '}{facetSet.uncategorised === 1 ? 'its' : 'their'} own item page and in
+                  {' '}{facetSet.uncategorised === 1 ? 'its' : 'their'} seller's shop.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* ── The filters ────────────────────────────────────────────── */}
+          {node && facetSet && facetSet.total > 0 && (
+            <form class="card filters" method="get" action={Astro.url.pathname}>
+              <h2 class="h4">Narrow this down</h2>
+              <p class="hint">{FACET_COUNTS_ARE_UNCONDITIONAL}</p>
+
+              <div class="grid">
+                <div class="field">
+                  <label for="sort">Order</label>
+                  <select id="sort" name="sort">
+                    <option value="newest" selected={filters.sort === 'newest'}>Most recently updated</option>
+                    <option value="price_asc" selected={filters.sort === 'price_asc'}>Lowest price first</option>
+                    <option value="price_desc" selected={filters.sort === 'price_desc'}>Highest price first</option>
+                  </select>
+                </div>
+
+                {facetSet.disciplines.length > 0 && (
+                  <div class="field">
+                    <label for="discipline">Discipline</label>
+                    <select id="discipline" name="discipline">
+                      <option value="">Any</option>
+                      {facetSet.disciplines.map((d: any) => (
+                        <option value={d.value} selected={filters.discipline === d.value}>
+                          {d.value} ({d.count})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {facetSet.sports.length > 0 && (
+                  <div class="field">
+                    <label for="sport">Sport</label>
+                    <select id="sport" name="sport">
+                      <option value="">Any</option>
+                      {facetSet.sports.map((d: any) => (
+                        <option value={d.value} selected={filters.sport === d.value}>
+                          {d.value} ({d.count})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {facetSet.priceBands.length > 1 && (
+                  <div class="field">
+                    <label for="price">Price</label>
+                    <select id="price" name="price">
+                      <option value="">Any</option>
+                      {facetSet.priceBands.map((b: any) => (
+                        <option
+                          value={`${b.minMinor}-${b.maxMinor}`}
+                          selected={bandParam === `${b.minMinor}-${b.maxMinor}`}
+                        >{bandLabel(b)}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {facetSet.ageStated > 0 && (
+                  <div class="field">
+                    <label for="age">Suitable for someone aged</label>
+                    <input id="age" name="age" type="number" min="0" max="120" step="1"
+                           value={filters.age == null ? '' : String(filters.age)} />
+                    <p class="hint">{AGE_UNSTATED_IS_NOT_ALL_AGES}</p>
+                  </div>
+                )}
+              </div>
+
+              <div class="checks">
+                {facetSet.shotokanRelevant > 0 && (
+                  <span class="check">
+                    <input id="shotokan" name="shotokan" type="checkbox" value="1" checked={filters.shotokan} />
+                    <label for="shotokan">Stated as relevant to Shotokan ({facetSet.shotokanRelevant})</label>
+                  </span>
+                )}
+                {facetSet.inStock > 0 && facetSet.inStock < facetSet.total && (
+                  <span class="check">
+                    <input id="stock" name="stock" type="checkbox" value="1" checked={filters.inStock} />
+                    <label for="stock">In stock only ({facetSet.inStock})</label>
+                  </span>
+                )}
+              </div>
+
+              <div class="actions">
+                <button class="btn btn-primary" type="submit">Apply</button>
+                {filtered && <a class="btn" href={Astro.url.pathname}>Clear</a>}
+              </div>
+
+              <details class="card">
+                <summary>What you cannot filter by here, and why</summary>
+                <p>{LEVEL_FILTER_NOT_BACKED}</p>
+                <p>{AGE_BAND_NOT_SET}</p>
+              </details>
+            </form>
+          )}
+
+          {/* ── The results ────────────────────────────────────────────── */}
+          {node && (
+            <>
+              <h2 class="h3">
+                {total === 0 ? 'Nothing on sale here' : `${total} item${total === 1 ? '' : 's'}`}
+              </h2>
+
+              {total === 0 && (
+                <div class="card">
+                  <p class="muted">
+                    Nothing is on public sale in this category at the moment.
+                    {filtered ? ' Try clearing the filters, or ' : ' '}
+                    <a href="/shop/category">browse the rest of the catalogue</a>.
+                  </p>
+                </div>
+              )}
+
+              {result?.excludedForUnstatedAge != null && result.excludedForUnstatedAge > 0 && (
+                <div class="card">
+                  <p class="muted">
+                    {result.excludedForUnstatedAge} further item{result.excludedForUnstatedAge === 1 ? '' : 's'} in
+                    this category {result.excludedForUnstatedAge === 1 ? 'is' : 'are'} not shown, because
+                    {' '}{result.excludedForUnstatedAge === 1 ? 'its seller' : 'their sellers'} stated no age
+                    suitability. {AGE_UNSTATED_IS_NOT_ALL_AGES}
+                  </p>
+                </div>
+              )}
+
+              {result?.limitCapped && (
+                <p class="hint">A page holds at most {result.limit} items; the rest are on the following pages.</p>
+              )}
+
+              {shown.length > 0 && (
+                <div class="items">
+                  {shown.map((it: any) => (
+                    <article class="card item">
+                      {it.image && <img src={it.image} alt={it.imageAlt ?? ''} width="240" height="240" loading="lazy" />}
+                      <h3 class="h4"><a href={`/shop/product/${it.ref}`}>{it.title}</a></h3>
+                      <p class="price">{priceLabel(it)}</p>
+                      <p class="muted">
+                        {it.sellerStoreSlug
+                          ? <a href={`/shop/seller/${it.sellerStoreSlug}`}>{it.sellerTradingName}</a>
+                          : it.sellerTradingName}
+                        {stockLabel(it)}
+                      </p>
+                      {it.brandSlug && (
+                        <p class="muted"><a href={`/shop/brand/${it.brandSlug}`}>{it.brandName}</a></p>
+                      )}
+                      {ageLabel(it) && <p class="muted">{ageLabel(it)}</p>}
+                    </article>
+                  ))}
+                </div>
+              )}
+
+              {total > 0 && (
+                <nav class="pager" aria-label="Pages">
+                  <p class="muted">Showing {firstIndex}–{lastIndex} of {total}</p>
+                  <div class="pagelinks">
+                    {pageNo > 1 && <a href={urlWith({ page: String(pageNo - 1) })} rel="prev">Previous</a>}
+                    <span class="muted">Page {pageNo} of {lastPage}</span>
+                    {pageNo < lastPage && <a href={urlWith({ page: String(pageNo + 1) })} rel="next">Next</a>}
+                  </div>
+                </nav>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .lede { font-size: 1.1rem; max-width: 62ch; }
+  .children ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 18px; }
+  .filters .grid { display: grid; gap: 14px; grid-template-columns: 1fr; }
+  @media (min-width: 720px) { .filters .grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (min-width: 1024px) { .filters .grid { grid-template-columns: repeat(3, 1fr); } }
+  .field { display: grid; gap: 4px; }
+  .field select, .field input { width: 100%; }
+  .checks { display: flex; flex-wrap: wrap; gap: 16px; margin: 14px 0; }
+  .check { display: inline-flex; align-items: center; gap: 8px; }
+  .actions { display: flex; gap: 10px; align-items: center; }
+  .items { display: grid; gap: 14px; grid-template-columns: 1fr; margin-top: 14px; }
+  @media (min-width: 640px) { .items { grid-template-columns: 1fr 1fr; } }
+  @media (min-width: 1000px) { .items { grid-template-columns: repeat(3, 1fr); } }
+  .item img { width: 100%; height: auto; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
+  .price { font-weight: 700; font-size: 1.1rem; margin: 6px 0; }
+  .pager { margin: 22px 0; }
+  .pagelinks { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .muted { opacity: 0.78; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
+</style>

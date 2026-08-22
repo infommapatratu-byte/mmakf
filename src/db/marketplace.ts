@@ -1444,3 +1444,121 @@ export async function publicListing(db: DB, ref: string) {
 
   return { ...row, media };
 }
+
+// ─── Sitemap eligibility ────────────────────────────────────────────────────
+//
+// WHY THIS LIVES HERE AND NOT IN THE SITEMAP ENDPOINT.
+//
+// /shop/product/[ref] and /shop/seller/[slug] are dynamic routes, and a dynamic
+// route contributes NOTHING to the sitemap until somebody writes down how its
+// URLs are found — see DYNAMIC_ROUTE_POLICY in src/lib/seo.ts. That default is
+// safe and it was, for these two routes, the wrong outcome: the federation's
+// marketplace was entirely undiscoverable.
+//
+// The failure it protects against is the opposite one, and it is worse. A
+// sitemap built by selecting every row in `listings` would hand a crawler the
+// URL of every DRAFT, REJECTED, QUARANTINED and EDITED-SINCE-APPROVAL item in
+// the marketplace — items no human at MMAKF has approved, published under the
+// federation's own domain, with the federation's own sitemap as the invitation.
+// Google would then keep them.
+//
+// So both functions below are built on `publicListingPredicate()` — THE SAME
+// five-condition predicate the shop, the product page and the storefront all
+// use. Not a re-statement of it, and not a filter applied afterwards. A
+// post-query filter is one refactor away from being dropped, and by then the
+// unapproved refs are in an array on their way into an XML document.
+//
+// Two consequences follow from reusing the predicate rather than copying it:
+//
+//   · The sitemap can never advertise a URL that 404s, because the page
+//     resolves through the same predicate. The set is identical by
+//     construction rather than by anybody remembering to keep them in step.
+//
+//   · Quarantining an item removes it from the next sitemap automatically. One
+//     column, one place.
+
+/**
+ * How many URLs of each kind the sitemap will carry.
+ *
+ * The protocol's own ceiling is 50,000 URLs per file. These are well under it
+ * and are deliberately explicit rather than absent: an unbounded SELECT over a
+ * table that grows with every approved item is a query that works in testing
+ * and times out the sitemap in production.
+ *
+ * Both functions REPORT truncation rather than silently dropping the tail —
+ * `truncated: true` is the signal that this codebase has outgrown a single
+ * sitemap and needs a sitemap index. A cap that hides itself reads, to whoever
+ * looks next, as "everything is in there".
+ */
+export const SITEMAP_LISTING_CAP = 5_000;
+export const SITEMAP_STOREFRONT_CAP = 2_000;
+
+export interface SitemapSlice<T> {
+  values: T[];
+  /** True when more rows qualified than the cap allowed. */
+  truncated: boolean;
+}
+
+/**
+ * The references of every listing a crawler may be invited to index.
+ *
+ * Ordered by `updatedAt` descending so that, if the cap ever bites, what
+ * survives is what changed most recently — the part of the catalogue a search
+ * engine most needs to re-read.
+ */
+export async function publishableListings(
+  db: DB,
+  cap: number = SITEMAP_LISTING_CAP
+): Promise<SitemapSlice<string>> {
+  const limit = Math.max(1, Math.floor(cap));
+  // One more than the cap, so truncation is MEASURED rather than assumed from
+  // the row count happening to equal the limit.
+  const rows = await db.select({ ref: s.listings.ref })
+    .from(s.listings)
+    .innerJoin(s.sellers, eq(s.sellers.id, s.listings.sellerId))
+    .where(publicListingPredicate() as SQL)
+    .orderBy(desc(s.listings.updatedAt), desc(s.listings.id))
+    .limit(limit + 1);
+
+  return {
+    values: rows.slice(0, limit).map((r: any) => String(r.ref)).filter(Boolean),
+    truncated: rows.length > limit,
+  };
+}
+
+/**
+ * The store slugs of every seller whose storefront is worth indexing.
+ *
+ * AN INNER JOIN ONTO LISTINGS, NOT A SELLER QUERY WITH A STATUS FILTER — and
+ * the difference is the whole point of the function. An approved seller with an
+ * open shop and no approved items renders a storefront with nothing on it. A
+ * sitemap full of those is a set of thin doorway pages: they carry a trading
+ * name and a tagline, no content a searcher wanted, and they are exactly what
+ * a search engine penalises a domain for. The join means a storefront enters
+ * the sitemap only once it has something to show.
+ *
+ * `store_slug IS NOT NULL` because the URL is the slug. A seller who has not
+ * chosen one has no address to advertise, and minting one from their trading
+ * name would publish a URL that moves the next time they correct a spelling —
+ * the same reasoning publishableClubs() applies in src/db/clubs.ts.
+ */
+export async function publishableStorefronts(
+  db: DB,
+  cap: number = SITEMAP_STOREFRONT_CAP
+): Promise<SitemapSlice<string>> {
+  const limit = Math.max(1, Math.floor(cap));
+  const rows = await db.selectDistinct({ slug: s.sellers.storeSlug })
+    .from(s.sellers)
+    .innerJoin(s.listings, eq(s.listings.sellerId, s.sellers.id))
+    .where(and(
+      publicListingPredicate() as SQL,
+      sql`${s.sellers.storeSlug} is not null`,
+    ))
+    .orderBy(asc(s.sellers.storeSlug))
+    .limit(limit + 1);
+
+  return {
+    values: rows.slice(0, limit).map((r: any) => String(r.slug)).filter(Boolean),
+    truncated: rows.length > limit,
+  };
+}

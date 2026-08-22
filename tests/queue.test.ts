@@ -66,7 +66,23 @@ describe('queue definitions', () => {
 describe('authority', () => {
   it('lets the authorised officer decide', async () => {
     const r = await decide(registrar, { queue: 'registrations', recordId: 'rec-1', toStatus: 'Under review' }, NOW);
-    expect(r).toEqual({ ok: true, recordId: 'rec-1', from: 'Received', to: 'Under review' });
+    expect(r.ok).toBe(true);
+    expect(r.recordId).toBe('rec-1');
+    expect(r.from).toBe('Received');
+    expect(r.to).toBe('Under review');
+  });
+
+  it('returns the DECIDED record, so an approval can provision from it', async () => {
+    // Added when `record` joined DecisionResult. src/pages/api/queue/decide.ts
+    // had been reading `result.record` since before the field existed, so it was
+    // undefined on every request and the membership path always fell into its
+    // "this application carries no linked person record" branch — an instruction
+    // that could not be followed, because nothing linked an application to a
+    // person. It is the decided row, not the row as it was read.
+    const r = await decide(registrar, { queue: 'registrations', recordId: 'rec-1', toStatus: 'Approved' }, NOW);
+    expect(r.record).toBeTruthy();
+    expect(String(r.record.id)).toBe('rec-1');
+    expect(r.record.status).toBe('Approved');
   });
 
   it('ATTACK: an athlete cannot approve their own application', async () => {

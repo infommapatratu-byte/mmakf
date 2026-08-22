@@ -1,0 +1,312 @@
+---
+// THE PAYMENT LINK — what an institution opens after accepting a quotation.
+//
+// The token in the URL is the whole of the authorisation, so this page shows
+// the narrowest thing that lets somebody pay: an order number, an invoice
+// number, one figure, a status, and — where a gateway is configured — a button.
+// It shows NO quotation inputs, NO contact rows, NO institution record and NO
+// fee rules. A link that leaks leaks an invoice, not a client file.
+//
+// FOUR STATES, EACH SAID PLAINLY RATHER THAN COLLAPSED INTO ONE:
+//
+//   PAID          the money is captured and reconciled. Not "you paid" because
+//                 the browser came back from a checkout — src/db/orders.ts is
+//                 explicit that returning from a payment page proves nothing.
+//   EXPIRED       the quotation this invoice came from has lapsed. Nothing is
+//                 charged, and the page says how to get a fresh quotation.
+//   PAYABLE       a provider is configured; the button opens its checkout.
+//   OWED, NO WAY  the invoice is real, the amount is owed, and this deployment
+//                 TO PAY ONLINE has no configured payment provider. This is
+//                 MMAKF's state today, and it is stated as a fact about the
+//                 deployment rather than dressed up as a temporary glitch.
+//
+// The fourth state is why this page exists in the shape it does. A Pay button
+// that cannot work is worse than no button: somebody presses it, nothing
+// happens, and they conclude the federation's systems are broken rather than
+// that they should telephone the office.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db } from '@/db';
+import { payPageByToken, type PayPageView } from '@/db/quote-to-order';
+import { get } from '@/lib/storage';
+
+export const prerender = false;
+
+// The URL carries a bearer secret. Never cached by anything shared, never
+// indexed, and never sent as a referrer to somebody else's host.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+Astro.response.headers.set('Referrer-Policy', 'no-referrer');
+
+const token = String(Astro.params.token ?? '');
+
+const fed = await get('federation');
+const officeEmail = String(fed?.contact?.email || '');
+const officePhone = String(fed?.contact?.phone || '');
+
+let view: PayPageView | null = null;
+let serviceDown = false;
+
+if (!isConfigured()) {
+  // A missing database is a fault in the SERVICE. It must never be rendered as
+  // "no such invoice", which is a statement about the institution's own record.
+  serviceDown = true;
+} else {
+  try {
+    view = await payPageByToken(db(), token);
+  } catch {
+    serviceDown = true;
+  }
+}
+
+const officeLine = [officeEmail, officePhone].filter(Boolean).join(' · ');
+
+// Only the provider's own public parameters reach the browser, and only when
+// there is actually something to open. src/lib/payments/provider.ts guarantees
+// `checkout` carries no secret; this is the second place that is relied on, so
+// it is narrowed rather than spread.
+//
+// `collectable` is a WHITELIST computed on the server — the order is still
+// awaiting payment and the offer has not lapsed. It is not "not paid and not
+// expired": a cancelled order and a refunded one both report `paid: false`, and
+// a button drawn from that would invite a school to pay for something the
+// federation cancelled, or to pay back a refund it had just been sent.
+const canPayNow = Boolean(view && view.collectable && view.provider && view.checkout);
+const razorpay = canPayNow && view!.provider === 'razorpay' ? view!.checkout : null;
+const upi = canPayNow && view!.provider === 'manual_upi' ? view!.checkout : null;
+const upiDeepLink = typeof (upi as any)?.deepLink === 'string' ? String((upi as any).deepLink) : '';
+const upiId = typeof (upi as any)?.upiId === 'string' ? String((upi as any).upiId) : '';
+const upiInstruction = typeof (upi as any)?.instruction === 'string' ? String((upi as any).instruction) : '';
+---
+
+<Base
+  title="Pay an MMAKF invoice"
+  description="Settle an invoice issued by the Modern Martial Arts Karate-Do Federation of India against an accepted quotation."
+  showNav={false}
+>
+  <section class="pay-wrap">
+    <div class="container pay-narrow">
+      <p class="pay-eyebrow">Modern Martial Arts Karate-Do Federation of India</p>
+
+      {serviceDown && (
+        <div class="pay-card pay-card--warn">
+          <h1>This page cannot reach the federation's records</h1>
+          <p>
+            That is a fault on this side, and it is <strong>not</strong> a statement about your invoice.
+            Nothing has been charged and nothing has been changed. Please try again shortly, or contact
+            the federation office.
+          </p>
+          {officeLine && <p class="pay-office">{officeLine}</p>}
+        </div>
+      )}
+
+      {!serviceDown && !view && (
+        <div class="pay-card pay-card--warn">
+          <h1>This payment link is not recognised</h1>
+          <p>
+            The federation's records hold no invoice under this link. Links are issued individually and
+            are long — the most common cause is a link that was cut short when it was copied, or an
+            invoice that has since been reissued under a new one.
+          </p>
+          <p>Contact the federation office quoting your quotation reference and it will be re-sent.</p>
+          {officeLine && <p class="pay-office">{officeLine}</p>}
+        </div>
+      )}
+
+      {view && (
+        <div class="pay-card">
+          <h1>Invoice {view.invoiceNo ?? view.orderNo}</h1>
+
+          <dl class="pay-kv">
+            <div><dt>Order</dt><dd>{view.orderNo}</dd></div>
+            {view.invoiceNo && <div><dt>Invoice</dt><dd>{view.invoiceNo}</dd></div>}
+            {view.quoteRef && (
+              <div><dt>Quotation</dt><dd>{view.quoteRef} — version {view.quoteVersion}</dd></div>
+            )}
+            {view.buyerName && <div><dt>Billed to</dt><dd>{view.buyerName}</dd></div>}
+            <div class="pay-kv-amount"><dt>Amount</dt><dd>{view.amountLabel}</dd></div>
+          </dl>
+
+          <p class="pay-frozen">
+            This is the figure on the quotation your organisation accepted, frozen when it was issued.
+            It does not change if the federation publishes different fees afterwards.
+          </p>
+
+          {view.paid && (
+            <div class="pay-state pay-state--good">
+              <h2>Paid</h2>
+              <p>
+                This invoice has been settled. The federation marked it paid only after confirming the
+                payment against the provider's own record — not because a browser reported success.
+              </p>
+            </div>
+          )}
+
+          {!view.paid && view.expired && (
+            <div class="pay-state pay-state--warn">
+              <h2>This quotation has expired</h2>
+              <p>
+                The quotation behind this invoice was valid until {view.validUntil}. The figure above is
+                no longer one the federation is offering, so nothing can be charged against it.
+              </p>
+              <p>
+                Ask the office for a fresh quotation — your request is still on file and re-quoting it
+                takes minutes.
+              </p>
+              {officeLine && <p class="pay-office">{officeLine}</p>}
+            </div>
+          )}
+
+          {!view.paid && !view.expired && !view.collectable && (
+            <div class="pay-state pay-state--warn">
+              <h2>This invoice is no longer being collected</h2>
+              <p>
+                The federation's records show this order as <strong>{view.orderStatus}</strong>, so nothing
+                is being charged against it and nothing should be paid against it. If money was sent for
+                it, it has either been refunded or is being returned.
+              </p>
+              <p>Contact the federation office quoting order {view.orderNo} if that is not what you expected.</p>
+              {officeLine && <p class="pay-office">{officeLine}</p>}
+            </div>
+          )}
+
+          {!view.paid && !view.expired && view.collectable && view.blockedReason && (
+            <div class="pay-state pay-state--warn">
+              <h2>This invoice cannot be paid online</h2>
+              <p>{view.blockedReason}</p>
+              <p>
+                The amount above is owed and the invoice is real — what is missing is a card or UPI
+                checkout on this deployment. Please contact the federation office to settle it,
+                quoting order {view.orderNo}.
+              </p>
+              {officeLine && <p class="pay-office">{officeLine}</p>}
+            </div>
+          )}
+
+          {razorpay && (
+            <div class="pay-state">
+              <h2>Pay {view.amountLabel}</h2>
+              <p>
+                The payment window opens with the federation's payment provider. Your card details are
+                entered there and never reach MMAKF.
+              </p>
+              <button id="payBtn" class="btn btn-primary" type="button">Pay {view.amountLabel}</button>
+              <p class="pay-note" id="payNote">
+                Submitting a payment is not the same as the invoice being marked paid. The federation
+                confirms every payment against the provider's own record first.
+              </p>
+            </div>
+          )}
+
+          {upi && (
+            <div class="pay-state">
+              <h2>Pay {view.amountLabel} by UPI</h2>
+              {upiDeepLink && <p><a class="btn btn-primary" href={upiDeepLink}>Open a UPI app</a></p>}
+              {upiId && (
+                <p class="pay-note">
+                  On a computer, pay <strong>{upiId}</strong> from your own UPI app, keeping the payment
+                  note exactly as <strong>MMAKF {view.orderNo}</strong>.
+                </p>
+              )}
+              {upiInstruction && <p class="pay-verbatim">{upiInstruction}</p>}
+              <p class="pay-note">
+                This invoice is <strong>not</strong> paid yet. It is marked paid, and your receipt issued,
+                only once the federation office has confirmed the money against its bank statement.
+              </p>
+              {officeLine && <p class="pay-office">{officeLine}</p>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  </section>
+
+  {razorpay && (
+    <script type="application/json" id="payCheckout" set:html={JSON.stringify(razorpay)} />
+    <script is:inline>
+      (function () {
+        var btn = document.getElementById('payBtn');
+        var note = document.getElementById('payNote');
+        var raw = document.getElementById('payCheckout');
+        if (!btn || !raw) return;
+        var params;
+        try { params = JSON.parse(raw.textContent || '{}'); } catch (e) { return; }
+
+        function say(text) { if (note) note.textContent = text; }
+
+        btn.addEventListener('click', function () {
+          btn.setAttribute('disabled', 'disabled');
+          say('Opening the payment window…');
+
+          function open() {
+            if (!window.Razorpay) {
+              btn.removeAttribute('disabled');
+              say('The payment window could not be loaded in this browser. Nothing has been charged — contact the federation office quoting the order number above.');
+              return;
+            }
+            var rzp = new window.Razorpay(Object.assign({}, params, {
+              handler: function () {
+                say('The payment has been submitted. The federation confirms it against the payment provider’s own record before this invoice is marked paid — a message on this page is not proof of payment.');
+              },
+              modal: {
+                ondismiss: function () {
+                  btn.removeAttribute('disabled');
+                  say('The payment window was closed before payment completed. Nothing has been charged.');
+                },
+              },
+            }));
+            rzp.open();
+          }
+
+          if (window.Razorpay) return open();
+          var el = document.createElement('script');
+          el.src = 'https://checkout.razorpay.com/v1/checkout.js';
+          el.onload = open;
+          el.onerror = function () {
+            btn.removeAttribute('disabled');
+            say('The payment window could not be loaded in this browser. Nothing has been charged — contact the federation office quoting the order number above.');
+          };
+          document.head.appendChild(el);
+        });
+      })();
+    </script>
+  )}
+</Base>
+
+<style>
+  .pay-wrap { padding: 4rem 0 6rem; }
+  .pay-narrow { max-width: 44rem; }
+  .pay-eyebrow {
+    font-size: 0.8rem; letter-spacing: 0.08em; text-transform: uppercase;
+    opacity: 0.7; margin-bottom: 1rem;
+  }
+  .pay-card {
+    border: 1px solid var(--line, rgba(0,0,0,0.14));
+    border-radius: 12px; padding: 2rem;
+  }
+  .pay-card--warn { border-color: #B4552B; }
+  .pay-card h1 { font-size: 1.6rem; margin: 0 0 1.25rem; }
+  .pay-kv { margin: 0 0 1.25rem; }
+  .pay-kv > div {
+    display: flex; justify-content: space-between; gap: 1rem;
+    padding: 0.55rem 0; border-bottom: 1px solid var(--line, rgba(0,0,0,0.08));
+  }
+  .pay-kv dt { opacity: 0.72; }
+  .pay-kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .pay-kv-amount dd { font-size: 1.35rem; font-weight: 700; }
+  .pay-frozen { font-size: 0.9rem; opacity: 0.78; }
+  .pay-state { margin-top: 1.75rem; padding-top: 1.5rem; border-top: 2px solid var(--line, rgba(0,0,0,0.14)); }
+  .pay-state h2 { font-size: 1.15rem; margin: 0 0 0.6rem; }
+  .pay-state--good h2 { color: #2F6B3A; }
+  .pay-state--warn h2 { color: #B4552B; }
+  .pay-note { font-size: 0.9rem; opacity: 0.8; }
+  .pay-verbatim {
+    font-size: 0.9rem; padding: 0.9rem 1rem; border-left: 3px solid var(--line, rgba(0,0,0,0.2));
+  }
+  .pay-office { font-size: 0.9rem; font-weight: 600; }
+  @media (max-width: 620px) {
+    .pay-card { padding: 1.25rem; }
+    .pay-kv > div { flex-direction: column; gap: 0.15rem; }
+    .pay-kv dd { text-align: left; }
+  }
+</style>

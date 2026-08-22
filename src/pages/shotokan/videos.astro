@@ -25,6 +25,7 @@
  */
 import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
+import TechnicalPlayer from '@/components/TechnicalPlayer.astro';
 import {
   SOURCES, BARREN_SOURCES, VIDEOS, CHECK_METHOD, REGISTER_CHECKED_ON,
   researchMatrix, libraryStats, sourceByKey,
@@ -147,21 +148,40 @@ const jsonLd = {
       {FEDERATION_KATA_FOOTAGE.length === 0 ? (
         <div class="panel fade"><p class="panel-p">No federation footage has been checked and published yet.</p></div>
       ) : (
-        <div class="grid grid-2">
-          {FEDERATION_KATA_FOOTAGE.map((f) => (
-            <div class="card fade">
-              <div class="card-eyebrow">MMAKF &mdash; training footage, not a named kata</div>
-              <div class="card-title" style="font-size:1rem">{f.title}</div>
-              <div class="card-body">
-                <a href={f.channelUrl} rel="noopener">{f.channel}</a> &middot;
-                {' '}{Math.round(f.durationSeconds / 60)} min &middot; published {f.publishedOn}
-              </div>
-              <div class="card-body">
-                <a href={`https://www.youtube.com/watch?v=${f.youtubeId}`} rel="noopener">Watch on YouTube &rarr;</a>
-              </div>
-            </div>
-          ))}
-        </div>
+        <>
+          <div class="panel fade" style="max-width:72ch;margin-bottom:28px">
+            <div class="eyebrow">Why these play and the rest do not</div>
+            <p class="panel-p">
+              These are the federation&rsquo;s own recordings, on the federation&rsquo;s own channels, so
+              MMAKF has the standing to show them. Everything else in the register is cited and linked
+              instead. That distinction is enforced in one place &mdash; the player refuses to embed a
+              recording whose rights are not cleared, whichever page asks it to.
+            </p>
+            <p class="panel-p">
+              <strong>No chapters have been entered for any of them.</strong> Chapters come from a reviewer
+              who has watched the recording; none is generated from a title or a duration, because §30 of
+              the federation&rsquo;s directive forbids inventing a timestamp and a wrong one sends a
+              student to the wrong part of a form.
+            </p>
+          </div>
+
+          <div class="grid grid-2">
+            {FEDERATION_KATA_FOOTAGE.map((f) => (
+              <TechnicalPlayer
+                videoId={f.youtubeId}
+                title={f.title}
+                channel={f.channel}
+                channelUrl={f.channelUrl}
+                rights="federation_owned"
+                durationSeconds={f.durationSeconds}
+                publishedOn={f.publishedOn}
+                cameraAngle="unknown"
+                chapters={[]}
+                caption="Training footage from a federation channel. Deliberately not attributed to a named kata — the channels describe it as practice, and naming a form it might not be would be exactly the guess this register exists to avoid."
+              />
+            ))}
+          </div>
+        </>
       )}
     </div>
   </section>

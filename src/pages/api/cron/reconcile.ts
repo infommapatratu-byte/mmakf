@@ -6,7 +6,21 @@
 //     scheduler, abandoned checkouts held the last gi forever and the item
 //     showed as out of stock while sitting on the shelf.
 //
-//  2. RETRY FAILED FULFILMENTS. The webhook handler deliberately returns 200
+//  2. DRAIN THE DOMAIN-EVENT FEED. Seventeen event types declare a
+//     'notifications' consumer, and `publish()` had been appending them to
+//     `domain_events` for months — but NOTHING IN THE APPLICATION EVER CALLED
+//     `consume()`. The cursor never advanced, `notifyForEvent()` never ran
+//     outside its tests, and the member inbox at /my/notifications never
+//     received a row.
+//
+//     That is not an abstract gap. An administrator cancelling a class through
+//     /admin/schedules publishes CLASS_SESSION_CANCELLED inside the same
+//     transaction that releases every booking on it; the catalogue promises the
+//     people holding those places are told; and nobody was. The same severed
+//     link stranded CERTIFICATE_ISSUED, CLASS_SESSION_RESCHEDULED,
+//     SCHEDULE_PUBLISHED, PROGRAM_ACCESS_REVOKED and the expiry warnings.
+//
+//  3. RETRY FAILED FULFILMENTS. The webhook handler deliberately returns 200
 //     when fulfilment throws, because a provider retry would hit the replay
 //     guard and change nothing. That is correct — but it means a payment that
 //     was captured and failed to fulfil is money taken with nothing issued, and
@@ -22,6 +36,9 @@ import { and, eq, isNotNull, isNull, desc } from 'drizzle-orm';
 import { isConfigured, db } from '@/db';
 import { expireStaleOrders, confirmPayment, markWebhookProcessed } from '@/db/orders';
 import { runDailySweeps } from '@/db/automations';
+import { consume } from '@/lib/domain-events';
+import { notifyForEvent, deliverQueued } from '@/lib/notifications';
+import { deliverQueuedPush } from '@/lib/push';
 import { legacyAdminPrincipal } from '@/lib/rbac';
 import { providerById } from '@/lib/payments';
 import * as s from '@/db/schema';
@@ -122,7 +139,76 @@ export const GET: APIRoute = async ({ request }) => {
     /* diagnostic only */
   }
 
-  // ── 4. The operations sweeps ─────────────────────────────────────────────
+  // ── 4. Drain the domain-event feed into notifications ────────────────────
+  //
+  // CAPPED AT 'member'. A consumer that writes to a member's inbox must never
+  // be handed an event above the level a member may see; `consume()` steps over
+  // anything higher, advances past it, and RETURNS THE IDS it stepped over so an
+  // operator asking "why did nobody hear about X" can reconstruct the answer.
+  //
+  // IDEMPOTENT. `notifyForEvent()` dedupes on the domain event id, so a run that
+  // fails half way and is retried tomorrow cannot notify anybody twice. The
+  // cursor stops immediately BEFORE the event whose handler threw, so nothing is
+  // skipped silently on the way past a failure — and `failedAtEventId` names it.
+  //
+  // `more: true` means the batch filled and there is still a backlog. It is
+  // reported rather than looped, because one cron run must not run long; the
+  // next run continues from the cursor.
+  try {
+    const ctx = {
+      principal: legacyAdminPrincipal(),
+      reason: 'Scheduled domain-event feed drain.',
+      authority: 'MMAKF cron',
+    };
+    const drained = await consume(
+      db(),
+      'notifications',
+      async (event) => { await notifyForEvent(db(), ctx, event); },
+      { maxClassification: 'member' },
+    );
+    report.notifications = {
+      from: drained.from,
+      to: drained.to,
+      delivered: drained.delivered,
+      skipped: drained.skipped,
+      skippedEventIds: drained.skippedEventIds,
+      failedAtEventId: drained.failedAtEventId,
+      failureMessage: drained.failureMessage,
+      backlog: drained.more,
+    };
+  } catch (err: any) {
+    report.notificationsError = String(err?.message ?? err).slice(0, 300);
+  }
+
+  // ── 5. Send what the drain queued ────────────────────────────────────────
+  //
+  // An in-app row IS the notification, so it is marked sent here and appears in
+  // the member's inbox. A row whose channel has no transport configured stays
+  // queued and is counted, rather than being marked sent on the strength of a
+  // credential nobody supplied.
+  try {
+    report.notificationsDelivery = await deliverQueued(db());
+  } catch (err: any) {
+    report.notificationsDeliveryError = String(err?.message ?? err).slice(0, 300);
+  }
+
+  // ── 6. Retry the push backlog ────────────────────────────────────────────
+  //
+  // Push rows queue rather than fail when VAPID keys are absent, which is the
+  // right call — a member's device subscription is not invalidated by the
+  // operator not having configured a key yet. But a backlog that is never
+  // retried is a backlog that was dropped slowly, and nothing was retrying it.
+  //
+  // No guard here: `deliverQueuedPush()` checks `pushStatus()` itself and, when
+  // push is unconfigured, retries nothing, marks nothing failed, and reports how
+  // deep the backlog is. That is the honest answer and it belongs in the report.
+  try {
+    report.pushBacklog = await deliverQueuedPush(db());
+  } catch (err: any) {
+    report.pushBacklogError = String(err?.message ?? err).slice(0, 300);
+  }
+
+  // ── 7. The operations sweeps ─────────────────────────────────────────────
   //
   // Workflow retries, task escalation and support escalation. All three are
   // idempotent and each is independently guarded inside runDailySweeps(), so a

@@ -53,6 +53,10 @@ export const NOTIFIABLE = {
   CERTIFICATE_ISSUED:  { audience: 'subject', essential: true,  title: 'Your certificate has been issued' },
   CERTIFICATE_REVOKED: { audience: 'subject', essential: true,  title: 'A certificate has been withdrawn' },
   MEMBERSHIP_EXPIRING: { audience: 'subject', essential: true,  title: 'Your membership is due for renewal' },
+  // ESSENTIAL, like its membership sibling. Something the member PAID FOR is
+  // about to stop working; a preference switch that let the federation stop
+  // saying so would turn a lapse into a surprise at the door.
+  ENTITLEMENT_EXPIRING:{ audience: 'subject', essential: true,  title: 'Something on your MMAKF record is due for renewal' },
   ENTRY_CONFIRMED:     { audience: 'subject', essential: true,  title: 'Your competition entry is confirmed' },
   RESULT_FINALIZED:    { audience: 'subject', essential: false, title: 'Competition results published' },
   DRAW_PUBLISHED:      { audience: 'entrants', essential: false, title: 'The draw has been published' },
@@ -71,6 +75,32 @@ export const NOTIFIABLE = {
   // resolveRecipients(): a national or state publication resolves to nobody
   // rather than to every member in the country.
   SCHEDULE_PUBLISHED: { audience: 'unit_members', essential: true, title: 'Your club’s timings have changed' },
+  // ESSENTIAL, and not a preference anybody may switch off. A refunded
+  // programme closes the technical library, the live classes and the course
+  // material its members were using, and a learner who is not told reads that
+  // as the site being broken. The audience is the programme's ROLL — an exact
+  // query against program_participants, not an estimate — and it excludes
+  // anybody who has already left it.
+  PROGRAM_ACCESS_REVOKED: { audience: 'programme_roll', essential: true, title: 'Your programme access has ended' },
+
+  // ── What a STUDENT buys (migration 0042) ─────────────────────────────────
+  //
+  // All four ESSENTIAL, and all four addressed to 'subject' — the named person
+  // whose right to train it is, carried as `personId` on every one of these
+  // payloads so `resolveRecipients()` never has to fall back to the entity id.
+  //
+  // Essential because every one of them is a consequence of the federation's own
+  // decision about something that person PAID FOR. A preference switch that let
+  // MMAKF stop saying "your training starts on the 3rd", "it has been extended",
+  // "it has been withdrawn" or "you have been moved to another club" would turn
+  // each of those into a child standing outside a hall.
+  //
+  // There is no entry here for a student MEMBERSHIP, and there never will be:
+  // students do not hold one, so there is nothing to tell them about.
+  TRAINING_ENTITLEMENT_GRANTED: { audience: 'subject', essential: true, title: 'Your training is confirmed' },
+  TRAINING_RENEWED:             { audience: 'subject', essential: true, title: 'Your training has been renewed' },
+  TRAINING_ACCESS_ENDED:        { audience: 'subject', essential: true, title: 'Your training entitlement has ended' },
+  TRAINING_ENROLMENT_TRANSFERRED: { audience: 'subject', essential: true, title: 'You have been transferred to another club' },
 } as const;
 
 export type NotifiableEvent = keyof typeof NOTIFIABLE;
@@ -492,6 +522,28 @@ async function resolveRecipients(db: DB, event: any, audience: string): Promise<
       // on unknown[] and the function promises number[].
       return [...new Set<number>(rows.map((r: any) => r.personId).filter(Boolean))];
     }
+    case 'programme_roll': {
+      // THE PEOPLE ON THAT PROGRAMME, and only that programme. Read from
+      // program_participants, which is the same table the access check in
+      // src/db/activation.ts reads, so the people told are exactly the people
+      // whose access changed.
+      //
+      // Participants held only as a display name — a school cohort the
+      // federation keeps no person record for — have no person id and no inbox,
+      // and resolve to nobody. That is honest: they hear through the desk that
+      // handled the refund, not through a person record this system invented in
+      // order to have somewhere to send a message.
+      const programId = Number(event.payload?.programId ?? event.entityId);
+      if (!Number.isFinite(programId)) return [];
+      const rows = await db
+        .select({ personId: s.programParticipants.personId })
+        .from(s.programParticipants)
+        .where(and(
+          eq(s.programParticipants.programId, programId),
+          isNull(s.programParticipants.leftOn)
+        ));
+      return [...new Set<number>(rows.map((r: any) => r.personId).filter(Boolean))];
+    }
     case 'unit_members': {
       // THE PEOPLE WHO TRAIN THERE. `persons.dojoId` is where a member is
       // placed, so this is a query and not an estimate.
@@ -556,7 +608,15 @@ function describe(event: { eventType: string; payload: any }): string {
     case 'CERTIFICATE_REVOKED':
       return 'A certificate issued to you has been withdrawn. Open your passport for the details, or contact the federation office.';
     case 'MEMBERSHIP_EXPIRING':
-      return 'Your MMAKF membership is due for renewal.';
+      return `Your MMAKF membership is due for renewal${event.payload?.expiresOn ? ` on ${event.payload.expiresOn}` : ''}.`;
+    case 'PROGRAM_ACCESS_REVOKED':
+      return 'Your MMAKF training programme has ended, and the material that came with it — the technical library, live classes and course material — is no longer available. Contact your institution or the federation office if that is unexpected.';
+    case 'ENTITLEMENT_EXPIRING':
+      // Names WHAT is running out and WHEN, because "something is expiring"
+      // sends the reader to the app to find out which of several things it is —
+      // and the subject word is a category, never the thing's own details.
+      return `Your MMAKF ${String(event.payload?.subject ?? 'record').replace(/_/g, ' ')} is due for renewal` +
+        `${event.payload?.expiresOn ? ` on ${event.payload.expiresOn}` : ''}. Renew it before it lapses.`;
     case 'ENTRY_CONFIRMED':
       return 'Your competition entry has been confirmed.';
     case 'RESULT_FINALIZED':
@@ -595,6 +655,8 @@ function linkFor(event: { eventType: string; payload: any }): string {
     case 'GRADING_APPROVED':
     case 'CERTIFICATE_ISSUED':
     case 'CERTIFICATE_REVOKED':
+    case 'MEMBERSHIP_EXPIRING':
+    case 'ENTITLEMENT_EXPIRING':
       return '/my/passport';
     case 'ENTRY_CONFIRMED':
     case 'RESULT_FINALIZED':
@@ -610,6 +672,8 @@ function linkFor(event: { eventType: string; payload: any }): string {
     case 'CLASS_SESSION_RESCHEDULED':
     case 'SCHEDULE_PUBLISHED':
       return '/my/schedule';
+    case 'PROGRAM_ACCESS_REVOKED':
+      return '/my';
     default:
       return '/my';
   }

@@ -242,12 +242,12 @@ describe('memberships', () => {
   it('issues within scope and refuses outside it', async () => {
     const p = await createPerson(db, { principal: national }, { fullName: 'Member A', stateUnitId: JH, dojoId: DOJO });
     const m = await issueMembership(db, { principal: jhAdmin() }, {
-      personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: '2026-12-31',
+      personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: '2026-12-31',
     });
     expect(m.id).toBeGreaterThan(0);
 
     await expect(
-      issueMembership(db, { principal: brAdmin() }, { personId: p.id, category: 'athlete', validFrom: '2026-01-01', validTo: null })
+      issueMembership(db, { principal: brAdmin() }, { personId: p.id, category: 'instructor', validFrom: '2026-01-01', validTo: null })
     ).rejects.toThrow(/Forbidden/);
   });
 });

@@ -169,6 +169,47 @@ export const PORTAL_SECTIONS: readonly PortalSection[] = [
         anyOf: [],
         dataGate: 'approved_seller',
       },
+      // ── THE FIVE SCREENS THAT NOTHING LINKED TO ─────────────────────────────
+      //
+      // /portal/seller and its four tabs — Overview, Products, Orders, Shipping,
+      // Money — were built, gated, tested and UNREACHABLE. SELLER_TABS in
+      // ./seller/_gate.ts links them to each other, so once a seller arrived
+      // they could move between them; nothing in the portal, the navigation or
+      // this file ever got them there in the first place. A seller could see
+      // their listings and had no route to the orders those listings produced.
+      //
+      // Four entries rather than one, because they answer four different
+      // questions and a seller looking for "where is my payout" should not have
+      // to learn that it lives behind a screen called Overview. All four carry
+      // the approved_seller gate: before approval there is nothing behind them.
+      {
+        href: '/portal/seller',
+        label: 'Shop dashboard',
+        what: 'Your shop at a glance — standing, badges, what needs attention.',
+        anyOf: [],
+        dataGate: 'approved_seller',
+      },
+      {
+        href: '/portal/seller/orders',
+        label: 'Orders to fulfil',
+        what: 'Accept, pack, ship and mark delivered the orders buyers have placed with you.',
+        anyOf: [],
+        dataGate: 'approved_seller',
+      },
+      {
+        href: '/portal/seller/products',
+        label: 'Catalogue and stock',
+        what: 'Your variants, their stock across locations, and what is running low.',
+        anyOf: [],
+        dataGate: 'approved_seller',
+      },
+      {
+        href: '/portal/seller/money',
+        label: 'Money and settlements',
+        what: 'Commission charged, settlements due and paid, and refunds against your sales.',
+        anyOf: [],
+        dataGate: 'approved_seller',
+      },
     ],
   },
 

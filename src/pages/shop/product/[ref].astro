@@ -1,0 +1,322 @@
+---
+// /shop/product/[ref] — one item, its variants, and how to buy it.
+//
+// ─── THE PAGE RESOLVES THE ITEM THROUGH THE PUBLIC PREDICATE ────────────────
+//
+// Not by ref alone. An item that is unapproved, quarantined, edited since
+// approval, or whose seller is suspended or whose shop is closed, 404s here
+// exactly as it is absent from the shop — because the same SQL decides both. A
+// page that fetched by ref and then checked would be one refactor away from
+// publishing an item nobody approved.
+//
+// ─── AND WHAT THE BUY FORM SENDS ────────────────────────────────────────────
+//
+// A variant id and a quantity. That is all `CartLine` has room for. The price
+// shown here is the server's own figure re-read at checkout; nothing on this
+// page can influence what is charged, because there is no field in which to say
+// it.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db } from '@/db';
+import { and, asc, eq, ne, sql } from 'drizzle-orm';
+import * as s from '@/db/schema';
+import { publicListingPredicate } from '@/db/onboarding.schema';
+import { badgesFor } from '@/db/seller-registry';
+import { effectiveReturnPolicy } from '@/db/returns';
+
+export const prerender = false;
+
+const ref = String(Astro.params.ref ?? '').trim();
+const configured = isConfigured();
+
+let row: any = null;
+let variants: any[] = [];
+let media: any[] = [];
+let badges: any[] = [];
+let returnPolicy: any = null;
+let reviews: any[] = [];
+let loadError = false;
+
+if (configured && ref) {
+  try {
+    const found = await db().select({ listing: s.listings, seller: s.sellers, brand: s.brands })
+      .from(s.listings)
+      .innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
+      .leftJoin(s.brands, eq(s.listings.brandId, s.brands.id))
+      // THE PUBLIC PREDICATE. Five conditions, in the query.
+      .where(and(eq(s.listings.ref, ref), publicListingPredicate()))
+      .limit(1);
+
+    row = found[0] ?? null;
+
+    if (row) {
+      variants = await db().select().from(s.listingVariants)
+        .where(and(
+          eq(s.listingVariants.listingId, row.listing.id),
+          ne(s.listingVariants.status, 'discontinued'),
+        ))
+        .orderBy(asc(s.listingVariants.sortOrder), asc(s.listingVariants.id));
+
+      media = await db().select().from(s.listingMedia)
+        .where(eq(s.listingMedia.listingId, row.listing.id))
+        .orderBy(asc(s.listingMedia.sortOrder));
+
+      badges = await badgesFor(db(), row.seller.id, row.listing.id);
+      returnPolicy = await effectiveReturnPolicy(db(), row.seller.id, row.listing.categoryId);
+
+      // Published reviews only, and every one is anchored to a purchase by a
+      // unique NOT NULL order_line_id — there is no row shape for an
+      // unverified review.
+      reviews = await db().select({
+        rating: s.productReviews.rating,
+        title: s.productReviews.title,
+        body: s.productReviews.body,
+        createdAt: s.productReviews.createdAt,
+        sellerReply: s.productReviews.sellerReply,
+      }).from(s.productReviews)
+        .where(and(
+          eq(s.productReviews.listingId, row.listing.id),
+          eq(s.productReviews.status, 'published'),
+        ))
+        .orderBy(sql`${s.productReviews.createdAt} desc`)
+        .limit(20);
+    }
+  } catch (err: any) {
+    console.error('[shop/product]', err);
+    loadError = true;
+  }
+}
+
+if (!loadError && configured && !row) Astro.response.status = 404;
+
+const money = (m: number, currency = 'INR') =>
+  `${currency === 'INR' ? '₹' : `${currency} `}${Math.floor(m / 100).toLocaleString('en-IN')}.${String(m % 100).padStart(2, '0')}`;
+const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+/**
+ * The "3 left" note on a variant.
+ *
+ * A named function in the frontmatter rather than a nested ternary in the
+ * markup: esbuild parses a template literal inside a chained ternary inside JSX
+ * as a type annotation and fails the build. It also reads better here, where
+ * the threshold can be argued with.
+ *
+ * FIVE IS A DISPLAY THRESHOLD, NOT A STOCK RULE. It changes nothing about what
+ * can be bought — `insufficient_stock` is decided by the reservation, in SQL —
+ * and it is not the low-stock alert, which is per-seller configuration with no
+ * default at all.
+ */
+function stockNote(v: { availableQty: number }): string {
+  if (v.availableQty <= 0) return ' (out of stock)';
+  if (v.availableQty < 5) return ` (${v.availableQty} left)`;
+  return '';
+}
+
+const listing = row?.listing ?? null;
+const seller = row?.seller ?? null;
+const inStock = variants.filter((v: any) => v.availableQty > 0);
+const avgRating = reviews.length
+  ? Math.round((reviews.reduce((n: number, r: any) => n + r.rating, 0) / reviews.length) * 10) / 10
+  : null;
+---
+
+<Base
+  title={listing ? `${listing.title} — MMAKF marketplace` : 'Item not found — MMAKF'}
+  description={listing ? (listing.description ?? `${listing.title}, sold through the MMAKF marketplace.`) : 'This item is not available.'}
+  breadcrumbs={listing ? [
+    { name: 'Shop', url: '/shop' },
+    { name: seller.tradingName, url: `/shop/seller/${seller.storeSlug}` },
+    { name: listing.title, url: `/shop/product/${listing.ref}` },
+  ] : undefined}
+>
+  <section>
+    <div class="container">
+
+      {configured && !loadError && !row && (
+        <div class="card">
+          <h1 class="display-2">This item is not on sale.</h1>
+          <p>
+            It may have been withdrawn, changed and sent back for review, or its shop may be closed.
+            <a href="/shop"> Browse the marketplace</a>.
+          </p>
+        </div>
+      )}
+
+      {loadError && <div class="card" role="alert"><h1 class="display-2">This item could not be loaded.</h1></div>}
+
+      {listing && (
+        <>
+          <div class="product">
+            <div class="gallery">
+              {media.length > 0
+                ? media.map((m: any) => <img src={m.url} alt={m.alt ?? ''} width="600" height="600" loading="lazy" />)
+                : <div class="noimage">No photograph</div>}
+            </div>
+
+            <div class="detail">
+              <div class="eyebrow">
+                <a href={`/shop/seller/${seller.storeSlug}`}>{seller.tradingName}</a>
+                {row.brand ? ` · ${row.brand.name}` : ''}
+              </div>
+              <h1 class="display-2" style="margin-top:8px">{listing.title}</h1>
+
+              {avgRating != null && (
+                <p class="muted">{avgRating} out of 5, from {reviews.length} verified purchase{reviews.length === 1 ? '' : 's'}</p>
+              )}
+
+              {badges.length > 0 && (
+                <ul class="badges">
+                  {badges.map((b: any) => <li title={b.basis}>{b.label}</li>)}
+                </ul>
+              )}
+
+              {listing.description && <p>{listing.description}</p>}
+
+              {inStock.length === 0 ? (
+                <p class="warn">Out of stock.</p>
+              ) : (
+                <form id="buy" class="card">
+                  <label for="variant">Choose</label>
+                  <select id="variant" name="variantId" required>
+                    {variants.map((v: any) => (
+                      <option value={v.id} disabled={v.availableQty <= 0}>
+                        {v.label} — {money(v.priceMinor, v.currency)}{stockNote(v)}
+                      </option>
+                    ))}
+                  </select>
+
+                  <label for="qty">Quantity</label>
+                  <input id="qty" name="quantity" type="number" min="1" max="99" value="1" required />
+
+                  <p id="buy-error" class="error" role="alert" hidden></p>
+                  <button class="btn btn-primary" type="submit">Add to basket</button>
+                  <p class="hint">
+                    The price is read from the catalogue on the server when you check out. Nothing on this
+                    page decides what you are charged.
+                  </p>
+                </form>
+              )}
+
+              <dl class="spec">
+                {listing.materials && <><dt>Materials</dt><dd>{listing.materials}</dd></>}
+                {listing.countryOfOrigin && <><dt>Country of origin</dt><dd>{listing.countryOfOrigin}</dd></>}
+                {listing.warranty && <><dt>Warranty</dt><dd>{listing.warranty}</dd></>}
+                {listing.certification && <><dt>Certification</dt><dd>{listing.certification}</dd></>}
+                {listing.ageMinYears != null && <><dt>Suitable from</dt><dd>{listing.ageMinYears} years</dd></>}
+                {listing.discipline && <><dt>Discipline</dt><dd>{listing.discipline}</dd></>}
+              </dl>
+
+              {listing.warning && (
+                <div class="card warning">
+                  <h2 class="h4">Warning</h2>
+                  <p>{listing.warning}</p>
+                </div>
+              )}
+
+              {listing.usageInstructions && (
+                <details class="card">
+                  <summary>How to use this safely</summary>
+                  <p>{listing.usageInstructions}</p>
+                </details>
+              )}
+
+              <div class="card">
+                <h2 class="h4">Returns</h2>
+                {returnPolicy.nonReturnable ? (
+                  <p><strong>Not returnable.</strong> {returnPolicy.nonReturnableReason}</p>
+                ) : returnPolicy.windowDays != null ? (
+                  <p>
+                    {returnPolicy.windowDays} days
+                    {returnPolicy.source === 'marketplace_floor' ? ' — the minimum MMAKF requires.' : ' — set by this seller.'}
+                  </p>
+                ) : (
+                  <p class="muted">No return window is published for this shop.</p>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {reviews.length > 0 && (
+            <section>
+              <h2 class="h3">What buyers said</h2>
+              <p class="muted">
+                Every review here is attached to a purchase of this item. There is no way to leave one
+                without having bought it, and no purchase can be reviewed twice.
+              </p>
+              {reviews.map((r: any) => (
+                <article class="card">
+                  <p><strong>{r.rating} out of 5</strong>{r.title ? ` — ${r.title}` : ''}</p>
+                  {r.body && <p>{r.body}</p>}
+                  {r.sellerReply && <p class="muted"><strong>Seller replied:</strong> {r.sellerReply}</p>}
+                </article>
+              ))}
+            </section>
+          )}
+        </>
+      )}
+    </div>
+  </section>
+</Base>
+
+<script>
+  // The basket is held in this browser only. Nothing about it is trusted: at
+  // checkout the server re-reads every price, every seller and every stock level
+  // from the catalogue, and splits the order per seller itself.
+  const form = document.getElementById('buy') as HTMLFormElement | null;
+  if (form) {
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const f = new FormData(form);
+      const variantId = Number(f.get('variantId'));
+      const quantity = Number(f.get('quantity'));
+      const err = document.getElementById('buy-error')!;
+      if (!Number.isInteger(variantId) || !Number.isInteger(quantity) || quantity < 1) {
+        err.textContent = 'Choose an option and a whole number of items.'; err.hidden = false; return;
+      }
+      // ── THE MARKETPLACE BASKET, WHICH IS NOT THE FEDERATION SHOP'S ──────
+      //
+      // This wrote key `mmakf.basket` with `{variantId, quantity}` and then sent
+      // the buyer to /checkout, which reads key `mmakf.basket.v1` with `{v, q}`.
+      // Different key and different shape, so the item was SILENTLY LOST: the
+      // page said "added", the buyer arrived at an empty basket, and nothing
+      // reported a fault.
+      //
+      // Matching the key would have been worse than the bug. /checkout resolves
+      // ids against `product_variants` — the federation's own shop — and this
+      // page sells `listing_variants`. Handing one id space's integer to the
+      // other either drops the line or finds a DIFFERENT product carrying the
+      // same number and charges for that.
+      //
+      // So the key is namespaced and the destination is the marketplace's own
+      // checkout, which prices through cartPreview() and orders through
+      // /api/marketplace/checkout.
+      const KEY = 'mmakf.market.basket.v1';
+      let basket: Array<{ v: number; q: number }> = [];
+      try { basket = JSON.parse(window.localStorage.getItem(KEY) || '[]'); } catch { basket = []; }
+      if (!Array.isArray(basket)) basket = [];
+      const existing = basket.find((l) => l && l.v === variantId);
+      if (existing) existing.q = Math.min(99, existing.q + quantity);
+      else basket.push({ v: variantId, q: quantity });
+      window.localStorage.setItem(KEY, JSON.stringify(basket));
+      window.location.href = '/shop/checkout';
+    });
+  }
+</script>
+
+<style>
+  .product { display: grid; gap: 24px; grid-template-columns: 1fr; }
+  @media (min-width: 900px) { .product { grid-template-columns: 1fr 1fr; } }
+  .gallery { display: grid; gap: 10px; }
+  .gallery img { width: 100%; height: auto; border-radius: 10px; object-fit: cover; }
+  .noimage { aspect-ratio: 1; display: grid; place-items: center; border: 1px dashed currentColor; border-radius: 10px; opacity: 0.6; }
+  .badges { list-style: none; padding: 0; display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  .badges li { border: 1px solid currentColor; border-radius: 999px; padding: 2px 10px; font-size: 0.85em; }
+  .spec { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 16px 0; }
+  .spec dt { font-weight: 600; }
+  .spec dd { margin: 0; }
+  .warning { border-width: 2px; }
+  .muted { opacity: 0.75; }
+  .warn { font-weight: 700; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
+  .error { color: #b00020; font-weight: 600; }
+</style>

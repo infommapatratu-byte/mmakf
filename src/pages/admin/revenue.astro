@@ -1,0 +1,691 @@
+---
+// /admin/revenue — revenue by what was sold.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// THE ONE MISREADING THIS SCREEN MUST MAKE IMPOSSIBLE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The federation withdrew student membership on 17 August 2026. A student pays
+// for TRAINING; there is no fee for being a student. src/data/proposed-fees.ts
+// deleted the rules that priced one, so the commercial engine cannot generate
+// one at all.
+//
+// A finance page is where that correction quietly comes undone. Put a student's
+// training payment under "membership revenue" and the withdrawn category is
+// alive again in the only numbers anybody reads — a committee sees membership
+// income, asks how to grow it, and next year's framework is drafted against a
+// line the federation abolished. Nothing in the source tree would look wrong.
+//
+// So on this page:
+//
+//   · TRAINING carries the students, and its own description says so.
+//   · MEMBERSHIP carries coaches, officials, examiners and clubs, and its
+//     description says who is NOT on it.
+//   · There is no student membership line, because src/db/revenue.ts has no
+//     such category to render. It is not filtered out here; it does not exist.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// AND THE LINE THAT IS DELIBERATELY NOT HIDDEN
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// If a HISTORICAL ledger entry genuinely carries a student membership charge,
+// it appears — under a heading that says the RULE CHANGED rather than naming a
+// category that still exists, and with every entry openable one by one. The
+// ledger is not rewritten to make a new rule look tidy. Suppressing the figure
+// would be the same falsification as deleting the row, done with CSS.
+//
+// It is zero today, and it is still rendered, because a reader has to be able
+// to see that the question was asked and answered.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// EVERY FIGURE IS A QUERY, AND EVERY ZERO WAS COUNTED
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// There is no rupee literal in this file — not in the markup, not in a default.
+// Each figure is a sum over ledger entries joined to the order line that says
+// what was sold, and the join is shown: each row can be opened to read WHICH
+// RECORD decided its category.
+//
+// A dashboard of noughts and a dashboard that failed to measure look identical,
+// so the two are drawn differently. Measured nought: printed, with the counts
+// that explain it. Could not measure: no figure at all, and a refusal saying so.
+// The counts behind "why is this empty" come from financeState() — published
+// frameworks, active fees, captured payments, ledger rows — so the sentence
+// changes when the world does instead of being written down here.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTHORITY
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 'finance:read', which src/db/revenue.ts asserts on every read as well. The
+// page check is a courtesy that avoids a refusal mid-render; the module check is
+// the control. Turnover by category is the federation's commercial position —
+// which programmes carry the organisation, and what a rival would have to beat —
+// and no institution role holds this action.
+//
+// This page WRITES NOTHING. It has no form and no action, so there is no state
+// change to protect and no CSRF surface to reason about.
+
+import AdminShell from '@/components/AdminShell.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import {
+  revenueReport, historicalWithdrawnCharges, financialYear, todayInIndia,
+  REVENUE_CATEGORIES, NON_CATEGORY_LINES, HISTORICAL_WITHDRAWN, UNATTRIBUTED,
+  isRevenueError,
+  type RevenueReport, type HistoricalCharge, type RevenueKey,
+} from '@/db/revenue';
+import { formatINR } from '@/db/orders';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const configured = isConfigured();
+const mayRead = Boolean(principal) && canAnywhere(principal, 'finance:read');
+
+// ── The period ──────────────────────────────────────────────────────────────
+//
+// Defaults to the financial year containing today, in Asia/Kolkata. A report
+// dated by UTC is a day wrong every evening in India, which is exactly the kind
+// of error that makes a treasurer distrust every other figure on the page.
+
+const TODAY = todayInIndia();
+const FY = financialYear(TODAY);
+
+const asDate = (v: string | null): string | null =>
+  v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+
+const from = asDate(Astro.url.searchParams.get('from')) ?? FY.from;
+const to = asDate(Astro.url.searchParams.get('to')) ?? FY.to;
+const isDefaultPeriod = from === FY.from && to === FY.to;
+
+// ── The read ────────────────────────────────────────────────────────────────
+
+let report: RevenueReport | null = null;
+let historical: HistoricalCharge[] = [];
+let readError: string | null = null;
+let refusal: string | null = null;
+
+if (mayRead && configured) {
+  try {
+    report = await revenueReport(db(), principal, { from, to });
+    historical = await historicalWithdrawnCharges(db(), principal, { from, to });
+  } catch (err: any) {
+    if (err instanceof ForbiddenError) {
+      refusal = `Reading revenue requires ${err.action}, which this account does not hold in any scope.`;
+    } else if (isRevenueError(err)) {
+      // The module's refusals are already written for a person.
+      readError = err.message;
+    } else {
+      console.error('[admin/revenue] revenue read failed', err);
+      readError =
+        'The ledger could not be read. No figure is shown, because a nought here would be ' +
+        'indistinguishable from a measurement. The fault is in the server log with the detail ' +
+        'this page deliberately does not print.';
+    }
+  }
+}
+
+// ── Derived, all of it from the report ──────────────────────────────────────
+
+const META = new Map(
+  [...REVENUE_CATEGORIES, ...NON_CATEGORY_LINES].map((c) => [c.key as RevenueKey, c])
+);
+
+/** Rows with money on them, in the published order. */
+const earning = report ? report.lines.filter((l) => l.grossPaise !== 0 || l.refundedPaise !== 0) : [];
+const silent = report ? report.lines.filter((l) => l.grossPaise === 0 && l.refundedPaise === 0) : [];
+
+const historicalLine = report?.lines.find((l) => l.key === HISTORICAL_WITHDRAWN) ?? null;
+const unattributedLine = report?.lines.find((l) => l.key === UNATTRIBUTED) ?? null;
+
+/**
+ * The share of net revenue a line represents.
+ *
+ * Computed from the two figures already on the page, so a reader can check it,
+ * and only where the denominator is positive — a percentage of nothing is not
+ * nought, it is undefined, and printing "0%" against every line of an empty
+ * report would be twelve fabricated statistics.
+ */
+const shareOf = (netPaise: number): string | null => {
+  const total = report?.totals.netPaise ?? 0;
+  if (total <= 0) return null;
+  return `${((netPaise / total) * 100).toFixed(1)}%`;
+};
+
+const day = (v: string | null | undefined): string => {
+  if (!v) return '—';
+  const d = new Date(`${v}T00:00:00Z`);
+  return Number.isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+};
+
+const headerDescription = report && report.empty
+  ? 'Revenue separated by what was sold. Every figure is nought, and every nought was counted — ' +
+    'no payment has been taken through this system yet.'
+  : 'Revenue separated by what was sold, each figure derived from a ledger entry joined to the order line behind it.';
+---
+
+<AdminShell
+  title="Revenue"
+  requires="finance:read"
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin/dashboard') },
+      { name: 'Finance', url: h('/admin/finance') },
+      { name: 'Revenue', url: h('/admin/revenue') },
+    ],
+    title: 'Revenue — by what was sold',
+    description: headerDescription,
+    secondary: [
+      { label: 'Money dashboard', href: h('/admin/finance') },
+      { label: 'Reconciliation', href: h('/admin/reconciliation') },
+      { label: 'Fee framework', href: h('/admin/fees') },
+    ],
+  }}
+>
+  <Fragment slot="meta">
+    <span class="meta-chip meta-rule">A student pays for training, never membership</span>
+    <span class="meta-chip">
+      {isDefaultPeriod ? `Financial year ${FY.label}` : `${day(from)} — ${day(to)}`}
+    </span>
+    {report && (
+      <span class="meta-chip">
+        {report.totals.entries} ledger {report.totals.entries === 1 ? 'entry' : 'entries'}
+      </span>
+    )}
+  </Fragment>
+
+  {/* ── Whose money is whose, before any figure ──────────────────────────── */}
+  <aside class="rule" aria-labelledby="rule-h">
+    <h2 id="rule-h" class="rule-h">Training is not membership, and this page keeps them apart.</h2>
+    <p>
+      <strong>A student does not pay a membership fee for being a student.</strong> What a student
+      buys is training, so a student&rsquo;s payments appear under <em>Training</em> — never under
+      <em>Membership</em>. The federation withdrew student membership on 17 August 2026 and the
+      pricing rules that produced it were deleted, not disabled: nothing in this system can create
+      another one.
+    </p>
+    <p>
+      <strong>Membership</strong> below is coaches, instructors, officials, examiners and clubs —
+      people and bodies that act on the federation&rsquo;s behalf rather than receive training from
+      it. That is the whole of what that line means.
+    </p>
+    <p class="rule-note">
+      There is no &ldquo;student membership revenue&rdquo; figure on this page and no way to ask for
+      one. The category does not exist in <code>src/db/revenue.ts</code>; it is not hidden here.
+      A charge taken <em>before</em> the rule changed is a different matter and is shown further
+      down, because the ledger is never rewritten.
+    </p>
+  </aside>
+
+  {!configured ? (
+    <p class="note">
+      The federation database is not configured on this deployment, so there is no ledger to read.
+      Until <code>DATABASE_URL</code> is set every figure here is <em>unmeasurable</em>, which is a
+      different fact from nought — and is why none is printed.
+    </p>
+  ) : refusal ? (
+    <p class="note">{refusal}</p>
+  ) : readError ? (
+    <ErrorState
+      title="The revenue report could not be produced."
+      safe="Nothing has been changed. This page writes nothing at all — it has no form and no action — so no order, payment, refund or ledger entry has been touched."
+      body={readError}
+    />
+  ) : report ? (
+    <>
+      {/* ── Period ──────────────────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="period-h">
+        <h2 id="period-h" class="band-h">The period</h2>
+        <p class="band-p">
+          {day(report.from)} to {day(report.to)}, inclusive, by the date each entry was posted to the
+          ledger. {isDefaultPeriod && (
+            <>This is the financial year containing today in India — 1 April to 31 March.</>
+          )}
+        </p>
+        <form class="period" method="get" action={h('/admin/revenue')}>
+          <label>From <input type="date" name="from" value={report.from} /></label>
+          <label>To <input type="date" name="to" value={report.to} /></label>
+          <button type="submit">Show</button>
+        </form>
+      </section>
+
+      {/* ── The totals ──────────────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="totals-h">
+        <h2 id="totals-h" class="band-h">The period in three figures</h2>
+        <div class="figs">
+          <div class={`fig${report.totals.grossPaise === 0 ? ' fig-void' : ''}`}>
+            <p class="fig-label">Gross</p>
+            <p class="fig-value">{formatINR(report.totals.grossPaise)}</p>
+            <p class="fig-meaning">
+              Every income credit in the ledger for this period, before refunds. The gateway&rsquo;s
+              own fee is an expense and is not deducted here — it is a cost of collecting, not a
+              reduction in what was sold.
+            </p>
+          </div>
+          <div class={`fig${report.totals.refundedPaise === 0 ? ' fig-void' : ''}`}>
+            <p class="fig-label">Refunded</p>
+            <p class="fig-value">{formatINR(report.totals.refundedPaise)}</p>
+            <p class="fig-meaning">
+              Refunds completed in this period, whenever the sale itself happened. Each is charged
+              back to the category it was taken from.
+            </p>
+          </div>
+          <div class={`fig${report.totals.netPaise === 0 ? ' fig-void' : ''}`}>
+            <p class="fig-label">Net</p>
+            <p class="fig-value">{formatINR(report.totals.netPaise)}</p>
+            <p class="fig-meaning">
+              Gross less refunds, across {report.totals.orders}
+              {report.totals.orders === 1 ? ' order' : ' orders'}. The category rows below add up
+              to exactly this.
+            </p>
+          </div>
+        </div>
+
+        {report.empty && (
+          <div class="why">
+            <p class="why-h">Every figure above is nought, and every nought was counted.</p>
+            <ul>
+              {report.whyEmpty.map((line) => <li>{line}</li>)}
+            </ul>
+            <dl class="counts">
+              <dt>Published fee frameworks</dt><dd>{report.state.publishedFrameworks}</dd>
+              <dt>Active rows in the fee schedule</dt><dd>{report.state.publishedFees}</dd>
+              <dt>Captured payments</dt><dd>{report.state.capturedPayments}</dd>
+              <dt>Orders that reached <em>paid</em></dt><dd>{report.state.paidOrders}</dd>
+              <dt>Ledger entries, all accounts</dt><dd>{report.state.ledgerEntries}</dd>
+            </dl>
+            <p class="why-p">
+              Those five counts are the chain. It starts at the fee framework: until MMAKF publishes
+              one, every pricing path ends at <em>the federation has not published a fee for this</em>,
+              so nothing can be quoted, so nothing can be charged, so the ledger stays empty and this
+              page stays at nought. <a href={h('/admin/fees')}>The fee framework is where that changes.</a>
+            </p>
+          </div>
+        )}
+      </section>
+
+      {/* ── By what was sold ────────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="cats-h">
+        <h2 id="cats-h" class="band-h">By what was sold</h2>
+        <p class="band-p">
+          Twelve categories. Each figure is a sum over ledger entries joined to the order line behind
+          them — never a category typed onto an invoice, which drifts the moment somebody re-labels
+          a product. Open a row to read what it means and what it excludes.
+        </p>
+
+        <div class="tablewrap">
+          <table class="grid">
+            <caption class="visually-hidden">Revenue by category for the selected period</caption>
+            <thead>
+              <tr>
+                <th scope="col">What was sold</th>
+                <th scope="col" class="num">Gross</th>
+                <th scope="col" class="num">Refunded</th>
+                <th scope="col" class="num">Net</th>
+                <th scope="col" class="num">Share</th>
+                <th scope="col" class="num">Orders</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(earning.length ? earning : report.lines.filter((l) => META.has(l.key) && l.key !== HISTORICAL_WITHDRAWN && l.key !== UNATTRIBUTED)).map((line) => (
+                <tr class={line.key === HISTORICAL_WITHDRAWN ? 'row-historical' : line.key === UNATTRIBUTED ? 'row-unattributed' : ''}>
+                  <th scope="row">
+                    <details>
+                      <summary>{line.label}</summary>
+                      <p class="what">{META.get(line.key)?.sells}</p>
+                    </details>
+                  </th>
+                  <td class="num">{formatINR(line.grossPaise)}</td>
+                  <td class="num">{line.refundedPaise === 0 ? <span class="nil">—</span> : formatINR(line.refundedPaise)}</td>
+                  <td class="num strong">{formatINR(line.netPaise)}</td>
+                  <td class="num">{shareOf(line.netPaise) ?? <span class="nil">—</span>}</td>
+                  <td class="num">{line.orders === 0 ? <span class="nil">—</span> : line.orders}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {earning.length > 0 && silent.length > 0 && (
+          <details class="silent">
+            <summary>{silent.length} categories took nothing in this period</summary>
+            <ul>
+              {silent.map((line) => (
+                <li><strong>{line.label}</strong> — {META.get(line.key)?.sells}</li>
+              ))}
+            </ul>
+          </details>
+        )}
+
+        {report.totals.netPaise <= 0 && (
+          <p class="band-p subtle">
+            No share is shown against any row. A percentage of nothing is not nought, it is undefined,
+            and twelve zeroes in a Share column would be twelve statistics nobody measured.
+          </p>
+        )}
+      </section>
+
+      {/* ── The withdrawn charge, kept because the ledger is not rewritten ─ */}
+      <section class="band" aria-labelledby="historical-h">
+        <h2 id="historical-h" class="band-h">Student membership — a charge the federation withdrew</h2>
+        <p class="band-p">
+          On 17 August 2026 MMAKF removed student membership. It is not a category any more and
+          nothing in this system can produce another charge under it. But <strong>a payment that was
+          taken before that is money the federation received</strong>, and correcting a business rule
+          is not a licence to edit the accounts — so if the ledger holds such a charge it is counted
+          here, on its own line, rather than folded into membership or quietly dropped.
+        </p>
+
+        {historicalLine && historicalLine.grossPaise === 0 ? (
+          <p class="clean">
+            <strong>{formatINR(historicalLine.grossPaise)}</strong> — the ledger holds no student
+            membership charge in this period. That is a measurement, not an assumption: the query ran
+            over every membership income entry in the window and joined each to the fee record behind
+            it. This section stays on the page at nought so a reader can see the question was asked.
+          </p>
+        ) : (
+          <>
+            <p class="alarm">
+              <strong>{formatINR(historicalLine?.grossPaise ?? 0)} of withdrawn student membership charges are in the accounts.</strong>
+              They are reported and they stay. Correct future pricing, not the ledger.
+            </p>
+            <div class="tablewrap">
+              <table class="grid">
+                <caption class="visually-hidden">Individual withdrawn student membership charges</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Posted</th>
+                    <th scope="col">Description</th>
+                    <th scope="col">Fee code</th>
+                    <th scope="col" class="num">Amount</th>
+                    <th scope="col">Why it is on this line</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {historical.map((c) => (
+                    <tr>
+                      <td>{day(c.occurredOn)}</td>
+                      <td>{c.description}</td>
+                      <td><code>{c.feeCode ?? '—'}</code></td>
+                      <td class="num">{formatINR(c.amountPaise)}</td>
+                      <td class="basis">{c.basis}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* ── What could not be attributed ────────────────────────────────── */}
+      <section class="band" aria-labelledby="unattributed-h">
+        <h2 id="unattributed-h" class="band-h">Money the records could not explain</h2>
+        <p class="band-p">
+          This is a defect report, not a category. A figure here means a ledger entry could not be
+          joined to any record saying what it was for — so it is <strong>not counted as revenue from
+          anything</strong> until somebody fixes the record. Folding it into an
+          &ldquo;other&rdquo; bucket would make the gap invisible, and a figure nobody can defend is
+          worse than a figure that is missing.
+        </p>
+
+        {unattributedLine && unattributedLine.grossPaise === 0 && report.unallocatedRefundsPaise === 0 ? (
+          <p class="clean">
+            <strong>{formatINR(unattributedLine.grossPaise)}</strong> — every income entry in this
+            period was joined to a record that says what was sold.
+          </p>
+        ) : (
+          <>
+            <p class="alarm">
+              <strong>{formatINR(unattributedLine?.grossPaise ?? 0)} could not be attributed.</strong>
+              Each reason below names the record that needs a decision.
+            </p>
+            <ul class="reasons">
+              {report.unattributedReasons.map((r) => (
+                <li>
+                  <span class="reason-amount">{formatINR(r.amountPaise)}</span>
+                  <span class="reason-count">{r.count} {r.count === 1 ? 'entry' : 'entries'}</span>
+                  <span class="reason-text">{r.reason}</span>
+                </li>
+              ))}
+            </ul>
+            {report.unallocatedRefundsPaise !== 0 && (
+              <p class="alarm">
+                <strong>{formatINR(report.unallocatedRefundsPaise)} was refunded against an order that
+                posted no income.</strong>
+                Money went back out against a sale the ledger does not record. That is a hole in the
+                accounts rather than a rounding question, and it needs a human.
+                <a href={h('/admin/reconciliation')}>Reconciliation</a>
+              </p>
+            )}
+          </>
+        )}
+      </section>
+
+      {/* ── How a figure is arrived at ──────────────────────────────────── */}
+      <section class="band" aria-labelledby="method-h">
+        <h2 id="method-h" class="band-h">Where each figure comes from</h2>
+        <p class="band-p">
+          Nothing here reads a category off an invoice. Every figure starts at a double-entry ledger
+          row and follows the join to the thing that was bought:
+        </p>
+        <ol class="method">
+          <li>
+            <strong>The ledger entry.</strong> A credit to an <code>income.*</code> account, posted
+            when a payment was confirmed captured against the provider&rsquo;s own record.
+          </li>
+          <li>
+            <strong>The order line.</strong> The entry names the line it was posted for, so an order
+            carrying a gi, a grading fee and a competition entry splits three ways.
+          </li>
+          <li>
+            <strong>The record that says what it was.</strong> A seller order, a product variant, a
+            quotation&rsquo;s priced services, a booking, an event&rsquo;s kind, or the fee
+            catalogue&rsquo;s own category and audience — each written by the federation, none of them
+            a string match on a fee code.
+          </li>
+          <li>
+            <strong>Where the join runs out, it stops.</strong> The money is reported as not
+            attributable, with the reason, rather than assigned to the nearest plausible category.
+          </li>
+        </ol>
+        <p class="band-p subtle">
+          Refunds are charged back to the categories of the order they reverse, split by the amounts
+          those entries carry, in whole paise, so the parts add up to the whole exactly. A refund is
+          never shown as revenue, and never as a negative sale.
+        </p>
+      </section>
+    </>
+  ) : (
+    <p class="note">
+      Reading revenue requires <code>finance:read</code>, which this account does not hold in any
+      scope. Turnover by category is the federation&rsquo;s commercial position, and it is not shown
+      to accounts that do not hold that action.
+    </p>
+  )}
+</AdminShell>
+
+<style>
+  .band { margin: 0 0 40px; }
+  .band + .band { padding-top: 34px; border-top: 1px solid var(--border); }
+  .band-h {
+    font-family: var(--font-display); font-size: 1.15rem;
+    margin: 0 0 12px; letter-spacing: .01em;
+  }
+  .band-p { color: var(--muted); line-height: 1.75; max-width: 72ch; margin: 0 0 18px; }
+  .band-p.subtle { font-size: .86rem; }
+  code { font-family: var(--font-accent, monospace); font-size: .88em; }
+
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.7; max-width: 72ch;
+  }
+
+  /* The rule, before any number. Gold rather than red: it is the federation's
+     own decision being restated, not an alarm. */
+  .rule {
+    padding: 22px 24px; margin: 0 0 34px;
+    border: 1px solid var(--border); border-left: 3px solid var(--gold);
+    background: var(--card); max-width: 78ch;
+  }
+  .rule-h {
+    font-family: var(--font-display); font-size: 1rem;
+    margin: 0 0 12px; color: var(--white); letter-spacing: .01em;
+  }
+  .rule p { color: var(--muted); line-height: 1.75; margin: 0 0 12px; }
+  .rule p:last-child { margin-bottom: 0; }
+  .rule strong { color: var(--off-white); }
+  .rule-note { font-size: .88rem; }
+
+  .meta-rule { border-color: var(--gold); }
+
+  .period { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  .period label {
+    display: flex; flex-direction: column; gap: 4px;
+    font-family: var(--font-display); font-size: .62rem;
+    letter-spacing: .18em; text-transform: uppercase; color: var(--muted);
+  }
+  .period input {
+    min-height: 44px; padding: 0 12px;
+    background: var(--bg-2); color: var(--off-white);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    font: inherit;
+  }
+  .period button {
+    min-height: 44px; padding: 0 20px;
+    background: var(--gold); color: var(--bg); border: 0; border-radius: var(--radius);
+    font-family: var(--font-display); font-size: .72rem;
+    letter-spacing: .14em; text-transform: uppercase; cursor: pointer;
+  }
+
+  /* Money figures, not StatCards: StatCard renders an integer count and would
+     print paise as a count, a hundred times the figure the reader wanted. */
+  .figs {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .fig {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px 18px 14px;
+    display: flex; flex-direction: column; min-width: 0;
+  }
+  .fig-void { background: var(--bg-2); }
+  .fig-label {
+    font-family: var(--font-display); font-size: .62rem;
+    letter-spacing: .2em; text-transform: uppercase;
+    color: var(--muted); line-height: 1.5; margin: 0;
+  }
+  .fig-value {
+    font-family: var(--font-display); font-size: 1.9rem; font-weight: 600;
+    line-height: 1.15; margin: 8px 0 0; color: var(--white);
+    overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+  }
+  /* A measured nought is printed, and is dimmed rather than hidden. */
+  .fig-void .fig-value { color: var(--muted); font-size: 1.5rem; }
+  .fig-meaning { margin: 10px 0 0; font-size: .78rem; line-height: 1.65; color: var(--muted); }
+
+  .why {
+    margin: 22px 0 0; padding: 18px 20px; max-width: 78ch;
+    border: 1px solid var(--border); border-left: 3px solid var(--gold);
+    background: var(--bg-2);
+  }
+  .why-h { font-family: var(--font-display); margin: 0 0 10px; color: var(--off-white); font-size: .95rem; }
+  .why ul { margin: 0 0 14px; padding-left: 20px; color: var(--muted); line-height: 1.7; }
+  .why-p { color: var(--muted); line-height: 1.7; margin: 12px 0 0; font-size: .9rem; }
+  .counts {
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 18px;
+    margin: 0; padding: 12px 0 0; border-top: 1px solid var(--border);
+    font-size: .82rem; line-height: 1.6;
+  }
+  .counts dt { color: var(--muted); }
+  .counts dd { margin: 0; color: var(--off-white); font-variant-numeric: tabular-nums; text-align: right; }
+
+  .tablewrap { overflow-x: auto; }
+  table.grid { width: 100%; border-collapse: collapse; min-width: 720px; }
+  table.grid th, table.grid td {
+    text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border);
+    vertical-align: top; line-height: 1.6;
+  }
+  table.grid thead th {
+    font-family: var(--font-display); font-size: .6rem;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+    border-bottom-color: var(--gold);
+  }
+  table.grid tbody th { font-weight: 500; color: var(--off-white); }
+  table.grid td { color: var(--muted); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .strong { color: var(--white); }
+  .nil { color: var(--muted); opacity: .6; }
+  .basis { font-size: .82rem; max-width: 44ch; }
+
+  /* The withdrawn line is drawn apart from the categories above it: it is not
+     one of them, and a row that looked like one would read as a live product. */
+  .row-historical th, .row-historical td { border-top: 2px solid var(--gold); }
+  .row-unattributed th, .row-unattributed td { border-top: 2px solid var(--red); }
+
+  table.grid details summary {
+    display: flex; align-items: center; min-height: 44px; cursor: pointer;
+  }
+  table.grid details summary:hover { color: var(--gold-2); }
+  .what { margin: 4px 0 8px; font-size: .8rem; line-height: 1.65; color: var(--muted); max-width: 46ch; }
+
+  .silent { margin: 20px 0 0; max-width: 78ch; }
+  .silent summary {
+    display: flex; align-items: center; min-height: 44px; cursor: pointer;
+    font-family: var(--font-display); font-size: .68rem;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  }
+  .silent ul { margin: 8px 0 0; padding-left: 20px; color: var(--muted); line-height: 1.75; font-size: .88rem; }
+  .silent strong { color: var(--off-white); }
+
+  .clean {
+    padding: 18px 20px; max-width: 78ch;
+    border: 1px solid var(--border); background: var(--bg-2);
+    color: var(--muted); line-height: 1.75;
+  }
+  .clean strong {
+    display: block; margin-bottom: 6px;
+    font-family: var(--font-display); font-size: 1.4rem; color: var(--off-white);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .alarm {
+    padding: 16px 20px; margin: 0 0 18px; max-width: 78ch;
+    border: 1px solid var(--red); border-left-width: 3px;
+    background: var(--card); color: var(--muted); line-height: 1.75;
+  }
+  .alarm strong { color: var(--red-2); display: block; margin-bottom: 6px; }
+  .alarm a { display: inline-block; margin-top: 8px; }
+
+  .reasons { list-style: none; margin: 0; padding: 0; max-width: 78ch; }
+  .reasons li {
+    display: grid; grid-template-columns: auto auto 1fr; gap: 4px 16px;
+    padding: 12px 0; border-bottom: 1px solid var(--border);
+    color: var(--muted); line-height: 1.65;
+  }
+  .reason-amount { font-variant-numeric: tabular-nums; color: var(--off-white); white-space: nowrap; }
+  .reason-count {
+    font-family: var(--font-display); font-size: .62rem;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--muted); white-space: nowrap;
+  }
+  .reason-text { font-size: .88rem; }
+
+  .method { margin: 0 0 18px; padding-left: 22px; color: var(--muted); line-height: 1.8; max-width: 76ch; }
+  .method strong { color: var(--off-white); }
+
+  @media (max-width: 640px) {
+    .reasons li { grid-template-columns: 1fr; }
+    .rule, .why, .clean, .alarm { padding-left: 16px; padding-right: 16px; }
+  }
+</style>

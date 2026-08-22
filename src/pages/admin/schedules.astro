@@ -61,11 +61,17 @@ import {
   addException, createSchedule, defineSeason, draftVersion, moveSeason,
   publishVersion, removeException, timetable, todayIso, addDays,
   versionInForce, isSchedulingError, DAY_NAMES,
+  generateSessions, cancelSession, rescheduleSession,
   type ScheduleOwner, type RuleInput, type PublishedWeek,
 } from '@/db/scheduling';
 import { planMigration, applyMigration } from '@/db/schedule-bootstrap';
+import {
+  draftAnnouncement, requestAnnouncementApproval, sendAnnouncement,
+  cancelAnnouncement, listAnnouncements, isAnnounceError,
+  TWO_PERSON_THRESHOLD, type AnnouncementRecord,
+} from '@/db/schedule-announce';
 import { get as editorial } from '@/lib/storage';
-import { and, asc, desc, eq, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, lte } from 'drizzle-orm';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 
 export const prerender = false;
@@ -240,6 +246,65 @@ if (Astro.request.method === 'POST') {
         return Astro.redirect(`${back}&done=exception-removed`, 303);
       }
 
+      if (action === 'generate-sessions') {
+        // TURNING A PATTERN INTO OCCURRENCES. The horizon is typed, never
+        // defaulted: how far ahead MMAKF opens its timetable is federation
+        // policy nobody has set, and a default of "the next eight weeks" would
+        // read afterwards as though somebody had decided it.
+        const result = await generateSessions(
+          database, ctx, Number(field('classId')), field('from'), field('to')
+        );
+        const refused = result.refused.length
+          ? `&refused=${encodeURIComponent(result.refused.map((r) => `${r.date} ${r.window}: ${r.reason}`).join(' | '))}`
+          : '';
+        return Astro.redirect(`${back}&done=generated&created=${result.created}&skipped=${result.skippedExisting}${refused}`, 303);
+      }
+
+      if (action === 'cancel-session') {
+        await cancelSession(database, ctx, Number(field('sessionId')), field('reason'));
+        return Astro.redirect(`${back}&done=session-cancelled`, 303);
+      }
+
+      if (action === 'reschedule-session') {
+        await rescheduleSession(
+          database, ctx, Number(field('sessionId')),
+          { localDate: field('localDate'), localStart: field('localStart'), localEnd: field('localEnd') },
+          field('reason'),
+          { force: field('force') === 'yes' }
+        );
+        return Astro.redirect(`${back}&done=session-moved`, 303);
+      }
+
+      if (action === 'draft-announcement') {
+        const draft = await draftAnnouncement(database, ctx, {
+          scheduleId: Number(field('scheduleId')),
+          versionId: field('versionId') ? Number(field('versionId')) : null,
+          reason: field('reason'),
+        });
+        return Astro.redirect(`${back}&done=announce-drafted&count=${draft.audienceCount}`, 303);
+      }
+
+      if (action === 'request-announcement-approval') {
+        await requestAnnouncementApproval(database, ctx, Number(field('announcementId')));
+        return Astro.redirect(`${back}&done=announce-requested`, 303);
+      }
+
+      if (action === 'send-announcement') {
+        // THE CONFIRMED COUNT IS TYPED, not clicked. An administrator who cannot
+        // reproduce the number they were shown is looking at a stale page, and
+        // the module refuses rather than sending to whatever the figure has
+        // become.
+        const result = await sendAnnouncement(
+          database, ctx, Number(field('announcementId')), Number(field('confirmCount'))
+        );
+        return Astro.redirect(`${back}&done=announce-sent&sent=${result.queued}&short=${result.shortfall}`, 303);
+      }
+
+      if (action === 'cancel-announcement') {
+        await cancelAnnouncement(database, ctx, Number(field('announcementId')), field('reason'));
+        return Astro.redirect(`${back}&done=announce-cancelled`, 303);
+      }
+
       if (action === 'migrate-hq') {
         if (!mayPublish) {
           Astro.response.status = 403;
@@ -257,7 +322,7 @@ if (Astro.request.method === 'POST') {
       if (err instanceof ForbiddenError) {
         Astro.response.status = 403;
         error = `The schedule engine refused this: it requires ${err.action}, which this account does not hold for that unit. Nothing was changed.`;
-      } else if (isSchedulingError(err)) {
+      } else if (isSchedulingError(err) || isAnnounceError(err)) {
         // The engine's refusals are already written for a person to read — the
         // overlap and reason-required messages in particular say what to do
         // instead — so they are shown as they are rather than translated.
@@ -281,8 +346,33 @@ const DONE_MESSAGES: Record<string, string> = {
   exception: 'The date is recorded. It overrides the weekly pattern.',
   'exception-removed': 'The exception is removed. That date follows the weekly pattern again.',
   migrated: 'The published headquarters hours are now rows in the engine. The editorial strings were left exactly as they were.',
+  generated: 'Occurrences generated. Anything refused is listed below, with the reason — nothing was created silently.',
+  'session-cancelled': 'The session is cancelled and every place held on it was released, with the reason attached to each.',
+  'session-moved': 'The session moved. Everyone who held a place moved with it and has been told.',
+  'announce-drafted': 'Prepared, and NOT sent. The audience was counted and frozen — confirm the figure below to send it.',
+  'announce-requested': 'A second person has been asked to agree. Nothing goes out until they do.',
+  'announce-sent': 'Sent.',
+  'announce-cancelled': 'Withdrawn. It stays on the record as something that was proposed.',
 };
 done = DONE_MESSAGES[url.searchParams.get('done') ?? ''] ?? null;
+if (done && url.searchParams.get('count')) {
+  done += ` ${url.searchParams.get('count')} recipients.`;
+}
+if (done && url.searchParams.get('sent')) {
+  const short = Number(url.searchParams.get('short') ?? 0);
+  done += ` ${url.searchParams.get('sent')} notifications queued.`;
+  if (short > 0) {
+    done += ` ${short} fewer than the frozen count — that many people are no longer active in this unit, which is reported rather than hidden.`;
+  }
+}
+if (done && url.searchParams.get('created')) {
+  done += ` ${url.searchParams.get('created')} created, ${url.searchParams.get('skipped') ?? 0} already existed.`;
+}
+/** What generation would not create, carried back on the redirect so it is READ. */
+const refusedNotes = (url.searchParams.get('refused') ?? '')
+  .split(' | ')
+  .map((x) => x.trim())
+  .filter(Boolean);
 
 // ─── What to show ───────────────────────────────────────────────────────────
 
@@ -296,6 +386,9 @@ let exceptions: any[] = [];
 let week: any[] = [];
 let inForce: any = null;
 let hqPlan: any = null;
+let announcements: AnnouncementRecord[] = [];
+let classes: any[] = [];
+let sessions: any[] = [];
 let loadError: string | null = null;
 
 if (configured && mayRead) {
@@ -340,6 +433,31 @@ if (configured && mayRead) {
         from, addDays(from, 6),
         { principal }
       );
+
+      announcements = await listAnnouncements(database, principal!, current.id);
+    }
+
+    // The classes this unit runs, and the occurrences they have produced.
+    // Sessions are the thing a member books, so this is where an administrator
+    // calls one off or moves it — the two acts a club performs most often and
+    // the two the federation is asked about afterwards.
+    classes = await database.select().from(sch.dojoClasses).where(and(
+      eq(sch.dojoClasses.ownerScope, owner.scope as any),
+      owner.id == null ? isNull(sch.dojoClasses.ownerId) : eq(sch.dojoClasses.ownerId, owner.id)
+    )).orderBy(asc(sch.dojoClasses.name));
+
+    if (classes.length) {
+      const horizonFrom = todayIso();
+      const horizonTo = addDays(horizonFrom, 27);
+      sessions = await database.select({ session: sch.classSessions, klass: sch.dojoClasses })
+        .from(sch.classSessions)
+        .innerJoin(sch.dojoClasses, eq(sch.dojoClasses.id, sch.classSessions.classId))
+        .where(and(
+          inArray(sch.classSessions.classId, classes.map((c: any) => c.id)),
+          gte(sch.classSessions.localDate, horizonFrom),
+          lte(sch.classSessions.localDate, horizonTo)
+        ))
+        .orderBy(asc(sch.classSessions.startsAt));
     }
 
     // The migration panel, shown only where it can actually be used.
@@ -732,6 +850,231 @@ const SLOTS = [0, 1, 2, 3];
         </section>
       )}
 
+      {/* ═══════ TELLING MEMBERS ═══════ */}
+      {currentSchedule && mayPublish && (
+        <section class="panel">
+          <h2 class="panel-h">Tell members it changed</h2>
+          <p class="hint">
+            Publishing a <strong>club</strong> timetable already notifies that club&rsquo;s own members
+            automatically. A <strong>district, state or national</strong> one notifies NOBODY on its own — writing
+            to every member of the federation is not something this system does because one administrator saved
+            a form. This is the deliberate act instead: the audience is counted and frozen first, you confirm the
+            figure you were shown, and above {TWO_PERSON_THRESHOLD} recipients a second person has to agree.
+          </p>
+
+          {announcements.length > 0 && (
+            <div class="tbl-scroll">
+              <table class="tbl">
+                <thead>
+                  <tr>
+                    <th scope="col">Prepared</th><th scope="col">Status</th><th scope="col">Audience</th>
+                    <th scope="col">Reason</th><th scope="col">Next step</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {announcements.map((a) => (
+                    <tr>
+                      <td>{a.createdAt.slice(0, 10)}</td>
+                      <td>
+                        <span class="pill">{String(a.status).replace(/_/g, ' ')}</span>
+                        {a.status === 'sent' && (
+                          <><br /><span class="text-muted">{a.sentCount} of {a.audienceCount} sent</span></>
+                        )}
+                      </td>
+                      <td>
+                        <strong>{a.audienceCount}</strong>
+                        {a.requiresTwoPeople && <><br /><span class="text-muted">needs a second person</span></>}
+                      </td>
+                      <td class="text-muted">{a.reason}</td>
+                      <td>
+                        {a.status === 'draft' && a.requiresTwoPeople && (
+                          <form method="post" class="inline-form">
+                            <input type="hidden" name="action" value="request-announcement-approval" />
+                            <input type="hidden" name="announcementId" value={a.id} />
+                            <button class="btn btn-ghost btn-sm" type="submit">Ask a second person</button>
+                          </form>
+                        )}
+                        {(a.status === 'draft' || a.status === 'awaiting_approval') && (
+                          <>
+                            <form method="post" class="inline-form">
+                              <input type="hidden" name="action" value="send-announcement" />
+                              <input type="hidden" name="announcementId" value={a.id} />
+                              {/* TYPED, NOT CLICKED. An administrator who cannot
+                                  reproduce the number is on a stale page. */}
+                              <input class="input input-sm" name="confirmCount" inputmode="numeric"
+                                placeholder={`Type ${a.audienceCount}`} required
+                                aria-label={`Confirm ${a.audienceCount} recipients`} />
+                              <button class="btn btn-primary btn-sm" type="submit">Send</button>
+                            </form>
+                            <form method="post" class="inline-form">
+                              <input type="hidden" name="action" value="cancel-announcement" />
+                              <input type="hidden" name="announcementId" value={a.id} />
+                              <input class="input input-sm" name="reason" placeholder="Why" required aria-label="Reason for withdrawing" />
+                              <button class="btn btn-ghost btn-sm" type="submit">Withdraw</button>
+                            </form>
+                          </>
+                        )}
+                        {a.status === 'sent' && <span class="text-muted">Cannot be unsent</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <details class="drawer">
+            <summary>Prepare an announcement</summary>
+            <form method="post" class="grid-form">
+              <input type="hidden" name="action" value="draft-announcement" />
+              <input type="hidden" name="scheduleId" value={currentSchedule.id} />
+              <label class="fld">
+                <span class="input-label">About which version</span>
+                <select class="input" name="versionId">
+                  <option value="">Not tied to a version</option>
+                  {versions.filter((v: any) => v.status !== 'draft').map((v: any) => (
+                    <option value={v.id}>v{v.versionNo} — from {v.effectiveFrom}</option>
+                  ))}
+                </select>
+              </label>
+              <label class="fld grow">
+                <span class="input-label">Reason — read afterwards by whoever justifies writing to this many people</span>
+                <input class="input" name="reason" required />
+              </label>
+              <button class="btn btn-primary" type="submit">Count the audience</button>
+            </form>
+            <p class="hint">
+              This sends nothing. It counts who would receive it and freezes that number, so what you authorise
+              next is a figure rather than a promise. A draft nobody sends stays on the record as something that
+              was proposed.
+            </p>
+          </details>
+        </section>
+      )}
+
+      {/* ═══════ CLASSES AND THEIR OCCURRENCES ═══════ */}
+      {classes.length > 0 && (
+        <section class="panel">
+          <h2 class="panel-h">Classes and sessions</h2>
+          <p class="hint">
+            A class is a weekly pattern; a SESSION is one occurrence somebody can book, attend or be
+            marked absent from. Generating turns the pattern into occurrences over a window you choose —
+            the horizon is typed rather than defaulted, because how far ahead the federation opens its
+            timetable is a decision nobody has recorded. Generation is safe to repeat: an occurrence
+            that already exists is skipped, not duplicated.
+          </p>
+
+          <table class="tbl">
+            <thead><tr><th scope="col">Class</th><th scope="col">Mode</th><th scope="col">Capacity</th><th scope="col">Status</th><th scope="col">Generate occurrences</th></tr></thead>
+            <tbody>
+              {classes.map((k: any) => (
+                <tr>
+                  <td><strong>{k.name}</strong><br /><span class="text-muted">{k.code}</span></td>
+                  <td>{String(k.mode).replace(/_/g, ' ')}</td>
+                  <td>{k.capacity ?? 'no limit recorded'}</td>
+                  <td><span class="pill">{k.status}</span></td>
+                  <td>
+                    {mayWrite && k.status === 'active' && (
+                      <form method="post" class="inline-form">
+                        <input type="hidden" name="action" value="generate-sessions" />
+                        <input type="hidden" name="classId" value={k.id} />
+                        <input class="input input-sm" type="date" name="from" required aria-label={`${k.name} from`} />
+                        <input class="input input-sm" type="date" name="to" required aria-label={`${k.name} to`} />
+                        <input class="input input-sm" name="reason" placeholder="Why" required aria-label={`${k.name} reason`} />
+                        <button class="btn btn-ghost btn-sm" type="submit">Generate</button>
+                      </form>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {refusedNotes.length > 0 && (
+            <>
+              <h3 class="panel-sub">Not generated, and why</h3>
+              <p class="hint">
+                Reported rather than logged. A generator that quietly produced eleven sessions when
+                thirteen were expected is worse than one that produced none, because nobody counts.
+              </p>
+              <ul class="blocked">
+                {refusedNotes.map((line) => <li>{line}</li>)}
+              </ul>
+            </>
+          )}
+
+          <h3 class="panel-sub">The next four weeks</h3>
+          {sessions.length === 0 ? (
+            <p class="text-muted">
+              No occurrences exist in the next four weeks. Until they do, nobody can book a place —
+              a published weekly pattern is not by itself something a member can hold.
+            </p>
+          ) : (
+            <div class="tbl-scroll">
+              <table class="tbl">
+                <thead>
+                  <tr>
+                    <th scope="col">When</th><th scope="col">Class</th><th scope="col">Booked</th>
+                    <th scope="col">Status</th><th scope="col">Call it off</th><th scope="col">Move it</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sessions.map((row: any) => (
+                    <tr class={row.session.status === 'cancelled' ? 'sess-off' : ''}>
+                      <td>
+                        <strong>{row.session.localDate}</strong><br />
+                        <span class="text-muted">{row.session.localStart}–{row.session.localEnd}</span>
+                      </td>
+                      <td>{row.klass.name}<br /><span class="text-muted">{row.session.ref}</span></td>
+                      <td>
+                        {row.session.bookedCount}{row.session.capacity != null ? ` / ${row.session.capacity}` : ''}
+                      </td>
+                      <td>
+                        <span class="pill">{String(row.session.status).replace(/_/g, ' ')}</span>
+                        {row.session.cancelledReason && (
+                          <><br /><span class="text-muted">{row.session.cancelledReason}</span></>
+                        )}
+                      </td>
+                      <td>
+                        {mayWrite && row.session.status === 'scheduled' && (
+                          <form method="post" class="inline-form">
+                            <input type="hidden" name="action" value="cancel-session" />
+                            <input type="hidden" name="sessionId" value={row.session.id} />
+                            <input class="input input-sm" name="reason" placeholder="Members are told this" required aria-label="Cancellation reason" />
+                            <button class="btn btn-ghost btn-sm" type="submit">Cancel</button>
+                          </form>
+                        )}
+                      </td>
+                      <td>
+                        {mayWrite && row.session.status === 'scheduled' && (
+                          <form method="post" class="inline-form">
+                            <input type="hidden" name="action" value="reschedule-session" />
+                            <input type="hidden" name="sessionId" value={row.session.id} />
+                            <input class="input input-sm" type="date" name="localDate" required aria-label="New date" />
+                            <input class="input input-sm" type="time" name="localStart" required aria-label="New start" />
+                            <input class="input input-sm" type="time" name="localEnd" required aria-label="New finish" />
+                            <input class="input input-sm" name="reason" placeholder="Why" required aria-label="Reason for the move" />
+                            <label class="chk-sm"><input type="checkbox" name="force" value="yes" /> <span>override</span></label>
+                            <button class="btn btn-ghost btn-sm" type="submit">Move</button>
+                          </form>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p class="hint">
+            Cancelling releases every place held on the session, attaches the reason to each, and tells
+            the people who held them. Moving carries them onto the new time instead — a member whose
+            Tuesday moved still has a place, and the difference is what they are told.
+            <strong> Override</strong> forces a move past a conflict; what was overridden is written to
+            the audit trail with the name of whoever did it.
+          </p>
+        </section>
+      )}
+
       {/* ═══════ MIGRATION ═══════ */}
       {hqPlan && (
         <section class="panel">
@@ -830,4 +1173,6 @@ const SLOTS = [0, 1, 2, 3];
   .src { font-size: .8rem; margin: 4px 0; }
   .blocked { font-size: .84rem; line-height: 1.65; padding-left: 18px; }
   .blocked li { margin-bottom: 8px; }
+  .chk-sm { display: inline-flex; gap: 5px; align-items: center; font-size: .74rem; }
+  .sess-off td { opacity: .7; }
 </style>

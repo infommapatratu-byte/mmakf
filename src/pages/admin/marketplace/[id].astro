@@ -101,7 +101,12 @@ const refunded = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.re
             <div class="row between">
               <div>
                 <div class="eyebrow">{seller.ref}</div>
-                <h1 class="display-2" style="margin-top:8px">{seller.tradingName}</h1>
+                {/* NOT an h1. <AdminShell title={seller.tradingName}> already
+                    renders the page heading, and this said the same words a
+                    second time — a screen-reader user landed on two competing
+                    titles reading identically. Kept as a paragraph so the card
+                    looks the same and the document has one title. */}
+                <p class="display-2" style="margin-top:8px">{seller.tradingName}</p>
                 <p class="muted">
                   {titleCase(seller.sellerType) || 'Kind not recorded'} ·
                   {' '}{titleCase(seller.businessType) || 'Legal form not recorded'} ·

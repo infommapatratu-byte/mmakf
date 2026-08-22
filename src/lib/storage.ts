@@ -126,6 +126,43 @@ export async function getAll(): Promise<Record<string, any>> {
  * legacy JSON blob at `mmakf:{key}` (records written before this change), so no
  * existing data is stranded.
  */
+export class StorageWriteError extends Error {
+  readonly key: string;
+  constructor(key: string, cause: unknown) {
+    super(
+      `The record could not be written to "${key}". It has NOT been stored, and ` +
+      `no caller may report it as received.`
+    );
+    this.name = 'StorageWriteError';
+    this.key = key;
+    (this as any).cause = cause;
+  }
+}
+
+export const isStorageWriteError = (e: unknown): e is StorageWriteError =>
+  Boolean(e) && (e as any).name === 'StorageWriteError';
+
+/**
+ * ─── AND WHY A FAILED WRITE NOW THROWS ──────────────────────────────────────
+ *
+ * This used to catch a Redis failure, log `console.warn`, and fall through to
+ * the in-memory path below. On a serverless function that path is per-instance
+ * and evaporates with the invocation — so the record was GONE, and the caller,
+ * having been told nothing, returned an application number and the sentence
+ * "Application received" to a family who had just filled in a twenty-field
+ * form.
+ *
+ * That is the worst failure mode this file can have. A submission that fails
+ * loudly is a submission somebody re-sends or telephones about. A submission
+ * that fails silently, with a reference number printed on the screen, is one
+ * nobody ever chases — and the federation cannot even know it happened, because
+ * the only trace is a warning in a log nobody reads.
+ *
+ * The in-memory fallback survives for the case it was actually written for:
+ * `!HAS_REDIS`, meaning nobody configured a store, which is local development.
+ * A configured store that REFUSES a write is a different fact and is raised as
+ * one.
+ */
 export async function pushToList(key: string, record: any, cap: number): Promise<void> {
   const redis = await getRedis();
   if (redis) {
@@ -148,11 +185,14 @@ export async function pushToList(key: string, record: any, cap: number): Promise
       }
       return;
     } catch (e) {
-      console.warn('Redis list push failed for', key, e);
+      // A CONFIGURED store that refused the write. Not survivable by falling
+      // back to memory — see the note above.
+      console.error('[storage] list push failed for', key, e);
+      throw new StorageWriteError(key, e);
     }
   }
 
-  // Local dev / degraded: same guarantee, same archive.
+  // NO STORE CONFIGURED — local development. Same guarantee, same archive.
   const list = (localGet<any[]>(`mmakf:${key}`, []) as any[]) || [];
   list.unshift(record);
   if (list.length > cap) {

@@ -184,6 +184,56 @@ sitting exactly where nobody would look for it.
 
 ---
 
+### 11. What happens to a seller who has published no shipping zone
+
+**Undecided.** Today they are quoted no carriage and absorb it themselves.
+
+**Effect today:** `quoteCarriage()` returns zero with `absorbed: true`, and
+`/portal/seller/shipping` tells the seller how many orders that has applied to.
+It reports **no rupee figure** for what it cost them — what a parcel costs to
+send is a fact about their carrier that MMAKF does not hold, and inventing one
+would be the same fabrication this whole register exists to prevent.
+
+The alternative — refusing the sale — would take every seller who has not yet
+configured a zone off the marketplace. Neither is chosen in code;
+`UNZONED_SELLER_POLICY_NOT_SET` in `src/db/shipping.ts` reports it.
+
+---
+
+### 12. Which documents a seller must supply
+
+**Undecided.** `missingDocuments()` reports what is absent so a reviewer can
+ask; nothing refuses an applicant for a document the federation has not
+required. `DOCUMENT_REQUIREMENTS_NOT_SET` in `src/db/seller-documents.ts`.
+
+**Blocked on infrastructure, not policy:** `UPLOAD_STORAGE_URL` is unset, so no
+document can be attached anywhere on the platform. `/portal/seller/documents`
+shows **no upload control** rather than one that would accept the bytes and drop
+them — a seller who uploaded a PAN card, saw "uploaded", and was then refused
+for a missing PAN card is the worst outcome that page could produce.
+
+This one is an operator action, not a federation decision: set
+`UPLOAD_STORAGE_URL` (and ideally `MALWARE_SCAN_URL`) and the control appears.
+
+---
+
+### 13. Which policies sellers must accept
+
+**Undecided, and every document is empty.** The eight policy records exist as
+names; `mandatoryForSellers` is false on all of them, and none has a published
+version.
+
+**Where the answer goes:** `policy/draft` with the federation's own text, then
+`policy/publish`, then `policy/mandatory`. Making a document mandatory before
+publishing it is **refused** — there would be nothing for a seller to accept.
+
+Acceptance is recorded against a **version**, and the version's body hash is
+stored a second time on the acceptance itself. A published body edited in place
+is therefore detectable: `acceptanceStillValid` goes false rather than the
+discrepancy passing unnoticed.
+
+---
+
 ## Prohibited and restricted products
 
 The policy engine exists and is enforced; the *contents* are MMAKF's.

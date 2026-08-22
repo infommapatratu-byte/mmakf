@@ -541,8 +541,24 @@ const GRANTS: Record<Role, Action[]> = {
     // and publishes them, without the federation and without a developer. The
     // binding is dojo-scoped, so it reaches exactly one club's rows.
     'schedule:read', 'schedule:write', 'schedule:publish',
-    // A club takes bookings for its own classes.
+    // A club takes bookings for its own classes, and takes the register at them.
+    // Attendance was previously reachable only from national administration and
+    // the three sector managers, which meant the club actually running the class
+    // could not record who was at it — and src/db/grading.ts counts attendance
+    // when deciding whether a candidate may be examined.
     'booking:read', 'booking:write',
+    'attendance:read', 'attendance:write',
+    // A club must be able to TELL ITS OWN MEMBERS that its timings changed. The
+    // scope binding is what makes this safe: it reaches the people placed at that
+    // one dojo and nobody else, and src/db/schedule-announce.ts still refuses to
+    // send above TWO_PERSON_THRESHOLD without a second person agreeing — so a
+    // club large enough that a mistake could not be followed up in person does
+    // not get to make one alone.
+    //
+    // Withholding it was the worse option and not the safer one: a club that
+    // cannot tell its families the Sunday moved telephones them, or does not
+    // bother, and somebody arrives at a locked dojo.
+    'notification:read', 'notification:send',
   ],
 
   INSTRUCTOR: [
@@ -553,6 +569,13 @@ const GRANTS: Record<Role, Action[]> = {
     // 'schedule:write': who teaches when is the club's decision, not the
     // individual instructor's.
     'schedule:read',
+    // READS a register. NOT 'attendance:write' — and the absence is deliberate
+    // rather than an oversight. src/db/attendance.ts lets an instructor mark THE
+    // SESSION THEY ARE TEACHING through a check against
+    // `class_sessions.coach_person_id`, which is a narrower authority than the
+    // action would confer: the action would let any instructor mark any class at
+    // the club, and the row lets them mark their own.
+    'attendance:read',
   ],
 
   // An examiner scores; only the approving authority finalises (§30).

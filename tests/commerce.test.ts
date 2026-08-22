@@ -62,8 +62,14 @@ beforeAll(async () => {
   }).returning({ id: s.productVariants.id });
   VARIANT = v.id;
 
+  // A COACH membership, and the choice of category is load-bearing. This suite
+  // needs a fee_schedule row it can raise orders against; it used to be an
+  // ATHLETE membership, which createOrder() now refuses to price at all — a
+  // student does not pay a membership fee for being a student. A coach acts for
+  // the federation, so a coach membership is a charge MMAKF genuinely makes and
+  // this suite goes on testing payment, refund and ledger behaviour on one.
   await db.insert(s.feeSchedule).values({
-    code: 'membership.athlete.annual', label: 'Athlete membership (annual)',
+    code: 'membership.coach.annual', label: 'Coach membership (annual)',
     kind: 'membership', amountPaise: 50000, effectiveFrom: '2026-01-01', active: true,
   });
 });
@@ -100,10 +106,10 @@ describe('order creation prices on the SERVER', () => {
   it('ignores a client-supplied price on a fee line too', async () => {
     const order = await createOrder(db, null, {
       email: 'buyer@example.in',
-      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual', unitPricePaise: 1 }],
+      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.coach.annual', unitPricePaise: 1 }],
     });
     expect(order.lines[0].unitPricePaise).toBe(50000);
-    expect(order.lines[0].description).toBe('Athlete membership (annual)');
+    expect(order.lines[0].description).toBe('Coach membership (annual)');
   });
 
   it('refuses a fee the federation has not published rather than inventing one', async () => {
@@ -181,7 +187,7 @@ describe('an order becomes PAID only on a verified capture', () => {
   async function pending() {
     const order = await createOrder(db, null, {
       email: 'payer@example.in',
-      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.coach.annual' }],
     });
     const payment = await beginPayment(db, order.id, {
       provider: 'razorpay', providerOrderId: `order_${crypto.randomBytes(5).toString('hex')}`,
@@ -255,7 +261,7 @@ describe('an order becomes PAID only on a verified capture', () => {
 
   it('ATTACK: beginning a payment for the wrong amount is refused', async () => {
     const order = await createOrder(db, null, {
-      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.coach.annual' }],
     });
     await expect(beginPayment(db, order.id, {
       provider: 'razorpay', providerOrderId: 'order_x', amountPaise: 1,
@@ -280,7 +286,7 @@ describe('an order becomes PAID only on a verified capture', () => {
 
   it('every payment attempt is kept — a failed try is evidence, not noise', async () => {
     const order = await createOrder(db, null, {
-      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.coach.annual' }],
     });
     const a = await beginPayment(db, order.id, { provider: 'razorpay', providerOrderId: 'ord_a', amountPaise: order.totalPaise, idempotencyKey: crypto.randomUUID() });
     await confirmPayment(db, null, captured({ providerOrderId: 'ord_a', amountPaise: order.totalPaise, status: 'failed', failureReason: 'Card declined' }));
@@ -356,7 +362,7 @@ describe('receipts', () => {
   it('carry an unguessable public verification token', async () => {
     // Its own line item: shared catalogue stock is consumed by earlier tests.
     const order = await createOrder(db, null, {
-      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.coach.annual' }],
     });
     const invoice = await issueInvoice(db, order.id);
     expect(invoice.verifyToken.length).toBeGreaterThanOrEqual(20);
@@ -373,7 +379,7 @@ describe('receipts', () => {
 describe('refunds', () => {
   async function paidOrder() {
     const order = await createOrder(db, null, {
-      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.coach.annual' }],
     });
     const oid = `ord_${crypto.randomBytes(5).toString('hex')}`;
     const payment = await beginPayment(db, order.id, {
@@ -413,7 +419,7 @@ describe('refunds', () => {
   });
 
   it('cannot refund a payment that was never captured', async () => {
-    const order = await createOrder(db, null, { lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }] });
+    const order = await createOrder(db, null, { lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.coach.annual' }] });
     const p = await beginPayment(db, order.id, { provider: 'razorpay', providerOrderId: 'ord_never', amountPaise: order.totalPaise, idempotencyKey: crypto.randomUUID() });
     await expect(requestRefund(db, { principal: finance }, {
       paymentId: p.id, amountPaise: 100, reason: 'Nope',
@@ -667,7 +673,7 @@ describe('confirming a payment is all-or-nothing', () => {
 
   it('refuses to call a half-finished confirmation a replay', async () => {
     const order = await createOrder(db, null, {
-      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.athlete.annual' }],
+      lines: [{ kind: 'membership', description: 'x', feeCode: 'membership.coach.annual' }],
     });
     const payment = await beginPayment(db, order.id, {
       provider: 'razorpay', providerOrderId: `order_${crypto.randomBytes(5).toString('hex')}`,

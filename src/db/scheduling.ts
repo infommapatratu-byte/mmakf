@@ -128,6 +128,24 @@ export type Wall = string;      // HH:MM, 24 hour, wall clock in some timezone
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
+/**
+ * Midnight at the END of a day, which is not a time of day.
+ *
+ * `24:00` is storable ONLY as a closing time (migration 0049 relaxed the CHECK
+ * on `closes_at` and left `opens_at` alone), and it exists for exactly one
+ * purpose: the first half of a window that crosses midnight. A Friday session
+ * running 22:00–02:00 is stored as Friday 22:00–24:00 and Saturday 00:00–02:00,
+ * because one row meaning two days is what migration 0032 refused and still
+ * refuses.
+ *
+ * 23:59 would lose a minute of a real class. 00:00 would make `closes_at >
+ * opens_at` false and the row unstorable. So it is 24:00, and everything that
+ * turns a wall clock into an instant has to know that 24:00 on the 3rd is
+ * 00:00 on the 4th — which is why `zonedInstant()` handles it rather than each
+ * caller remembering to.
+ */
+export const END_OF_DAY: Wall = '24:00';
+
 export const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as const;
 export const DAY_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
 
@@ -141,11 +159,23 @@ export function assertIsoDate(value: unknown, label = 'date'): IsoDate {
   return value;
 }
 
-export function assertWall(value: unknown, label = 'time'): Wall {
-  if (typeof value !== 'string' || !HHMM.test(value)) {
-    throw new SchedulingError('bad_time', `Expected ${label} as a 24-hour time (HH:MM); received ${JSON.stringify(value)}.`);
+/**
+ * A wall-clock time, or a refusal.
+ *
+ * `endOfDay` permits the single extra value `24:00`, and is passed only where a
+ * CLOSING time is being read. An opening time of 24:00 stays unstorable in the
+ * database and unacceptable here: a window cannot begin at the end of the day,
+ * and allowing it "for symmetry" would make the split in setRules() ambiguous.
+ */
+export function assertWall(value: unknown, label = 'time', opts: { endOfDay?: boolean } = {}): Wall {
+  const ok = typeof value === 'string' && (HHMM.test(value) || (opts.endOfDay === true && value === END_OF_DAY));
+  if (!ok) {
+    throw new SchedulingError(
+      'bad_time',
+      `Expected ${label} as a 24-hour time (HH:MM${opts.endOfDay ? ', or 24:00 for midnight at the end of the day' : ''}); received ${JSON.stringify(value)}.`
+    );
   }
-  return value;
+  return value as Wall;
 }
 
 /**
@@ -197,11 +227,21 @@ function offsetMsAt(instant: Date, timeZone: string): number {
  * Two passes: guess the offset using the naive instant, then re-read it at the
  * corrected instant. One pass is wrong for the hour either side of a daylight
  * transition. India has none; a zone MMAKF adds later might.
+ *
+ * `24:00` IS ACCEPTED AND MEANS THE FOLLOWING MIDNIGHT. It is handled here, once,
+ * rather than at each call site — a caller that formatted it itself would build
+ * `2026-01-03T24:00`, which `Date.UTC` happily accepts as the 4th at 00:00 in
+ * SOME paths and as NaN in others depending on how it was assembled. Converting
+ * it to the next day's 00:00 explicitly is what makes an overnight session's end
+ * instant exactly equal to the next day's start instant, which is what the
+ * interval algebra needs to see the two halves as touching rather than
+ * overlapping.
  */
 export function zonedInstant(dayIso: IsoDate, timeHHMM: Wall, timeZone: string): Date {
   assertIsoDate(dayIso);
-  assertWall(timeHHMM);
+  assertWall(timeHHMM, 'time', { endOfDay: true });
   assertTimezone(timeZone);
+  if (timeHHMM === END_OF_DAY) return zonedInstant(addDays(dayIso, 1), '00:00', timeZone);
   const [y, m, d] = dayIso.split('-').map(Number);
   const [hh, mm] = timeHHMM.split(':').map(Number);
   const naive = Date.UTC(y, m - 1, d, hh, mm, 0);
@@ -267,8 +307,16 @@ export function daysBetween(fromIso: IsoDate, toIso: IsoDate): IsoDate[] {
 // and converting each one to an instant before comparing it to another would
 // make the arithmetic depend on a timezone that cannot change the answer.
 
+/**
+ * Minutes past local midnight. 24:00 is 1440, which is the whole point.
+ *
+ * `endOfDay` is permitted here and not gated on a caller's opinion, because this
+ * is where the arithmetic happens: 1440 is an ordinary number in minutes-of-day,
+ * `toWall(1440)` returns '24:00', and a round trip through the two must not throw
+ * on a value the database is now willing to store.
+ */
 const toMin = (w: Wall): number => {
-  const [h, m] = assertWall(w).split(':').map(Number);
+  const [h, m] = assertWall(w, 'time', { endOfDay: true }).split(':').map(Number);
   return h * 60 + m;
 };
 const toWall = (min: number): Wall =>
@@ -854,7 +902,33 @@ export async function setRules(db: DB, ctx: AuditContext, versionId: number, rul
     );
   }
 
-  const values = rules.map((r, i) => {
+  /** The day after an ISO weekday, wrapping 7 → 1. */
+  const nextDay = (d: number) => (d === 7 ? 1 : d + 1);
+
+  /**
+   * The row shape both branches below produce.
+   *
+   * Stated explicitly because inference cannot do it here: the closed branch
+   * returns opensAt/closesAt as null and the open branch returns them as
+   * strings, so flatMap infers `Closed[] | Open[]` — two array types, not one
+   * array of a union — and that is not assignable to its own callback
+   * signature. Annotating the RETURN gives both branches one target to widen
+   * into. The alternative, casting the result, would silence the same message
+   * by discarding the check that a row is well-formed at all.
+   */
+  type RuleRow = {
+    versionId: number;
+    seasonId: number | null;
+    dayOfWeek: number;
+    kind: 'open' | 'closed';
+    opensAt: string | null;
+    closesAt: string | null;
+    label: string | null;
+    displayOrder: number;
+    notes: string | null;
+  };
+
+  const values: RuleRow[] = rules.flatMap((r, i): RuleRow[] => {
     const kind = r.kind ?? 'open';
     if (!Number.isInteger(r.dayOfWeek) || r.dayOfWeek < 1 || r.dayOfWeek > 7) {
       throw new SchedulingError('bad_day', `dayOfWeek must be 1 (Monday) to 7 (Sunday); received ${JSON.stringify(r.dayOfWeek)}.`);
@@ -863,25 +937,44 @@ export async function setRules(db: DB, ctx: AuditContext, versionId: number, rul
       if (r.opensAt || r.closesAt) {
         throw new SchedulingError('bad_rule', 'A closed day carries no times. Use kind "open" to state hours.');
       }
-      return {
+      return [{
         versionId, seasonId: r.seasonId ?? null, dayOfWeek: r.dayOfWeek, kind: 'closed' as const,
         opensAt: null, closesAt: null, label: r.label ?? null,
         displayOrder: r.displayOrder ?? i, notes: r.notes ?? null,
-      };
+      }];
     }
     const opensAt = assertWall(r.opensAt, 'opensAt');
-    const closesAt = assertWall(r.closesAt, 'closesAt');
-    if (closesAt <= opensAt) {
+    const closesAt = assertWall(r.closesAt, 'closesAt', { endOfDay: true });
+    const base = {
+      versionId, seasonId: r.seasonId ?? null, kind: 'open' as const,
+      label: r.label ?? null, displayOrder: r.displayOrder ?? i, notes: r.notes ?? null,
+    };
+
+    if (closesAt === opensAt) {
       throw new SchedulingError(
         'bad_rule',
-        `${DAY_NAMES[r.dayOfWeek - 1]} ${opensAt}–${closesAt} ends before it starts. A window crossing midnight is two windows on two days.`
+        `${DAY_NAMES[r.dayOfWeek - 1]} ${opensAt}–${closesAt} is not a window; it has no duration.`
       );
     }
-    return {
-      versionId, seasonId: r.seasonId ?? null, dayOfWeek: r.dayOfWeek, kind: 'open' as const,
-      opensAt, closesAt, label: r.label ?? null,
-      displayOrder: r.displayOrder ?? i, notes: r.notes ?? null,
-    };
+
+    // ── A WINDOW THAT CROSSES MIDNIGHT IS SPLIT HERE, INTO TWO ROWS ────────
+    //
+    // 22:00–02:00 becomes Friday 22:00–24:00 and Saturday 00:00–02:00. The rule
+    // migration 0032 laid down is unchanged — ONE ROW STILL NEVER MEANS TWO DAYS
+    // — and what changes is who does the arithmetic. An administrator entering
+    // an overnight camp writes what they mean, and the engine writes what the
+    // resolver can read. Asking them to enter two rows is how a timetable ends
+    // up with one half of a window moved and the other half left behind.
+    //
+    // The wrap is deliberate: a Sunday-night session's second half is Monday.
+    if (closesAt < opensAt) {
+      return [
+        { ...base, dayOfWeek: r.dayOfWeek, opensAt, closesAt: END_OF_DAY },
+        { ...base, dayOfWeek: nextDay(r.dayOfWeek), opensAt: '00:00', closesAt },
+      ];
+    }
+
+    return [{ ...base, dayOfWeek: r.dayOfWeek, opensAt, closesAt }];
   });
 
   // Two open windows on the same day and season that overlap are a mistake the
@@ -1000,10 +1093,24 @@ export async function publishVersion(
     });
 
     // On the feed, INSIDE the transaction that put it in force — so a published
-    // timetable and the record that it was published cannot come apart. No
-    // consumer acts on it yet and the catalogue entry says why: "everyone who
-    // trains at this club" is not a query this system can answer honestly, and
-    // fanning out to a list somebody guessed at is worse than not fanning out.
+    // timetable and the record that it was published cannot come apart.
+    //
+    // WHO HEARS ABOUT IT. The 'notifications' consumer drains the feed from
+    // src/pages/api/cron/reconcile.ts and turns this into inbox rows for the
+    // audience NOTIFIABLE declares — 'unit_members', resolved in
+    // src/lib/notifications.ts against `persons.dojoId`. The people who train
+    // at the club are a QUERY, not an estimate, so they are told.
+    //
+    // AND ONLY A CLUB'S. `ownerScope` and `ownerId` below are what make that
+    // limit enforceable: the resolver returns nobody unless the scope is 'dojo'.
+    // A schedule published at national, state or district level reaches no
+    // inbox — not because those changes do not matter, but because "every
+    // member of the federation" is a fan-out this system must never perform on
+    // the strength of one administrator saving a form. A national announcement
+    // is a circular, which is a different act with a different approval path.
+    //
+    // Both keys are therefore load-bearing rather than informational: drop
+    // either and this becomes a silent no-op that still looks like it works.
     await publish(tx, {
       eventType: 'SCHEDULE_PUBLISHED',
       entityType: 'schedule_version',
@@ -1138,7 +1245,7 @@ export async function addException(db: DB, ctx: AuditContext, input: ExceptionIn
       );
     }
     assertWall(input.opensAt, 'opensAt');
-    assertWall(input.closesAt, 'closesAt');
+    assertWall(input.closesAt, 'closesAt', { endOfDay: true });
     if ((input.closesAt as Wall) <= (input.opensAt as Wall)) {
       throw new SchedulingError('bad_exception', `${input.opensAt}–${input.closesAt} ends before it starts.`);
     }
@@ -1581,6 +1688,91 @@ export async function publicTimetable(
   db: DB, target: ScheduleTarget, fromIso: IsoDate, toIso: IsoDate
 ): Promise<ResolvedDay[]> {
   return await timetable(db, target, fromIso, toIso, { principal: null });
+}
+
+/**
+ * Just the closures and altered days over a window — reasons redacted.
+ *
+ * ─── WHY THIS IS NOT publicTimetable() ──────────────────────────────────────
+ *
+ * The club calendar feed (/clubs/[slug]/schedule.ics) publishes 134 days and
+ * needed nothing from a resolved day except `exceptions`. It was calling
+ * publicTimetable() for the whole window, and timetable() resolves DAY BY DAY:
+ * for each of the 134 days it re-walked the inheritance chain, re-read the
+ * seasons, re-read the rules and then read the exceptions. Somewhere between
+ * nine hundred and two thousand sequential queries, on a public endpoint a
+ * calendar client re-fetches on its own schedule, to emit a handful of all-day
+ * events.
+ *
+ * ─── AND WHY IT IS NOT SIMPLY ONE QUERY ─────────────────────────────────────
+ *
+ * The obvious version resolves the schedule once and selects its exceptions
+ * across the range. That is right almost always and WRONG in a way that would
+ * be very hard to find: resolution walks club → district → state → national and
+ * takes the nearest schedule effective ON THAT DATE, so a club that starts
+ * publishing its own timetable in the middle of the window resolves to the
+ * inherited schedule before that date and to its own after it. One resolution
+ * at the start of the range would then publish the wrong body's closures for
+ * half the window.
+ *
+ * So: resolve at BOTH ENDS, query the exceptions of whichever schedules those
+ * name, and — only when the two ends disagree, which is the rare case — confirm
+ * each exception against the schedule in force on ITS OWN date. That last step
+ * costs one resolution per DATE THAT HAS AN EXCEPTION, which is a handful,
+ * rather than one per day in the window.
+ *
+ * Cost: two resolutions and one select in the ordinary case.
+ */
+export interface DatedException {
+  date: IsoDate;
+  exception: ExceptionRecord;
+}
+
+export async function publicExceptionsBetween(
+  db: DB, target: ScheduleTarget, fromIso: IsoDate, toIso: IsoDate
+): Promise<DatedException[]> {
+  assertIsoDate(fromIso);
+  assertIsoDate(toIso);
+  if (toIso < fromIso) return [];
+
+  const atStart = await resolveSchedule(db, target, { asOf: fromIso });
+  const atEnd = await resolveSchedule(db, target, { asOf: toIso });
+
+  const ids = [...new Set(
+    [atStart?.schedule.id, atEnd?.schedule.id].filter((v): v is number => typeof v === 'number')
+  )];
+  // Nothing published at either end. An empty list, not an invented open week —
+  // see the note on publishedWeek() about what `configured: false` must mean.
+  if (!ids.length) return [];
+
+  const rows = await db.select().from(sch.scheduleExceptions).where(and(
+    inArray(sch.scheduleExceptions.scheduleId, ids),
+    gte(sch.scheduleExceptions.onDate, fromIso),
+    lte(sch.scheduleExceptions.onDate, toIso),
+  )).orderBy(asc(sch.scheduleExceptions.onDate), asc(sch.scheduleExceptions.id));
+
+  // The ordinary case: one schedule governs the whole window, so every row it
+  // returned is a row that applies.
+  if (ids.length === 1) {
+    // `false` is the redaction publicTimetable() applies — a public feed never
+    // carries the reason a club is shut.
+    return rows.map((r: any) => ({ date: r.onDate as IsoDate, exception: toException(r, false) }));
+  }
+
+  // The window straddles a change of governing schedule. Confirm each
+  // exception against the schedule actually in force on its own date.
+  const governing = new Map<string, number | null>();
+  const out: DatedException[] = [];
+  for (const r of rows) {
+    const day = r.onDate as IsoDate;
+    if (!governing.has(day)) {
+      const onDay = await resolveSchedule(db, target, { asOf: day });
+      governing.set(day, onDay?.schedule.id ?? null);
+    }
+    if (governing.get(day) !== r.scheduleId) continue;
+    out.push({ date: day, exception: toException(r, false) });
+  }
+  return out;
 }
 
 export interface PublishedWeek {
@@ -2425,7 +2617,9 @@ export async function rescheduleSession(
   }
   const localDate = assertIsoDate(to.localDate, 'localDate');
   const localStart = assertWall(to.localStart, 'localStart');
-  const localEnd = assertWall(to.localEnd, 'localEnd');
+  // 24:00 permitted: the first half of an overnight session genuinely ends at
+  // midnight on its own date, and a reschedule must be able to say so.
+  const localEnd = assertWall(to.localEnd, 'localEnd', { endOfDay: true });
   if (localEnd <= localStart) {
     throw new SchedulingError('bad_range', `${localStart}-${localEnd} ends before it starts.`);
   }

@@ -43,7 +43,7 @@
 // an amount nobody can defend is worse than a conversation about which rate to
 // use.
 
-import { and, asc, desc, eq, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, lte, sql } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { applyFactor, PPM, formatINR } from '@/db/fees';
 import { writeAudit, type AuditContext } from '@/db/federation';
@@ -471,14 +471,16 @@ export async function prepareStamp(
 export async function stampInvoice(db: DB, invoiceId: number, stamp: RateStamp) {
   const [invoice] = await db.select().from(s.invoices).where(eq(s.invoices.id, invoiceId)).limit(1);
   if (!invoice) throw new CurrencyError('unknown_invoice', 'No such invoice.');
-  if (invoice.fxRatePpm != null) {
-    throw new CurrencyError(
-      'already_frozen',
-      `Invoice ${invoice.invoiceNo} was issued at a rate of ${invoice.fxRatePpm} ppm and keeps it. ` +
-      'An issued invoice never re-rates — raise a credit note and a new invoice instead.'
-    );
-  }
-  await db.update(s.invoices).set({
+
+  // THE REFUSAL IS THE WHERE CLAUSE, NOT AN `IF` ABOVE IT.
+  //
+  // Read-then-write leaves a window: two stamps arriving together — a retry
+  // beside the original, a job that ran twice, the reconcile sweep beside an
+  // operator — both read a null rate, both pass, and the second one re-rates an
+  // invoice that has already told a customer what they owe. Written this way
+  // the database decides. `fx_rate_ppm is null` is part of the statement, so the
+  // second writer matches no row and `stamped` comes back empty.
+  const [stamped] = await db.update(s.invoices).set({
     presentmentCurrency: stamp.presentmentCurrency,
     presentmentMinorUnit: stamp.presentmentMinorUnit,
     presentmentTotalMinor: stamp.presentmentTotalMinor,
@@ -487,7 +489,21 @@ export async function stampInvoice(db: DB, invoiceId: number, stamp: RateStamp) 
     fxSource: stamp.rate.source,
     fxRetrievedAt: new Date(stamp.rate.retrievedAt),
     fxEffectiveOn: stamp.rate.effectiveOn,
-  }).where(eq(s.invoices.id, invoiceId));
+  })
+    .where(and(eq(s.invoices.id, invoiceId), isNull(s.invoices.fxRatePpm)))
+    .returning({ id: s.invoices.id });
+
+  if (!stamped) {
+    // Re-read rather than quoting the row from before the race: the rate that
+    // stands is whichever writer won, and naming a different one would be this
+    // function reporting a figure that is not on the invoice.
+    const [now] = await db.select().from(s.invoices).where(eq(s.invoices.id, invoiceId)).limit(1);
+    throw new CurrencyError(
+      'already_frozen',
+      `Invoice ${invoice.invoiceNo} was issued at a rate of ${now?.fxRatePpm ?? invoice.fxRatePpm} ppm and keeps it. ` +
+      'An issued invoice never re-rates — raise a credit note and a new invoice instead.'
+    );
+  }
   return (await db.select().from(s.invoices).where(eq(s.invoices.id, invoiceId)).limit(1))[0];
 }
 

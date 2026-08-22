@@ -34,6 +34,9 @@
 // client sees is not proof the server did not commit — lose the reply to a
 // COMMIT and the account exists carrying a password nobody ever read. Printing
 // it on the failure path costs nothing and is the only copy there will be.
+// The exception is a fault that struck BEFORE the connection was authenticated:
+// there the outcome is not in doubt, no account exists, and the password is
+// withheld rather than left on screen belonging to nobody.
 //
 // NO CONNECTION IS EVER ABANDONED. Every exit path closes the pool first.
 // Calling process.exit() with a socket still open leaves the server to discover
@@ -165,8 +168,25 @@ holder over a channel you trust — not the same channel as the email address.
 They must change it on first sign-in.
 `);
 } catch (err: any) {
+  const tls = tlsHint(err);
+
   if (err instanceof Refused) {
     console.error(`\n${err.message}\n`);
+  } else if (tls) {
+    // The one fault here whose outcome is NOT in doubt. TLS is settled before the
+    // startup packet is sent, so there was never a session for a statement to run
+    // in. Telling the operator the write "may have landed" would send them hunting
+    // for a row that cannot exist, and the way they would check is to run the
+    // command again — which fails identically until the CA is supplied. The
+    // credential is withheld for the reason a Refused withholds it: it belongs to
+    // no account, and a password on screen is one somebody eventually hands on.
+    console.error(`\nFailed: ${err.message}`);
+    console.error(tls);
+    console.error(`
+Nothing was written. The connection failed before authentication, so no statement
+was ever sent and no account exists for a password to belong to. Fix the trust
+problem above and run the command again — each run mints a fresh credential.
+`);
   } else {
     // The credential goes out here too. If the transaction rolled back it is
     // worthless and the operator simply re-runs the command; if the COMMIT

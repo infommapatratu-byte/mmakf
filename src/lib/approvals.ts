@@ -88,6 +88,17 @@ export const APPROVAL_ACTIONS = {
   disciplinary_outcome: { requires: 'membership:revoke' as Action, label: 'Disciplinary outcome' },
   policy_publication: { requires: 'content:write' as Action, label: 'Policy publication' },
   result_correction: { requires: 'result:finalize' as Action, label: 'Official result correction' },
+  /**
+   * Writing to more members than one person can follow up in person.
+   *
+   * Added for src/db/schedule-announce.ts. A schedule change at state or national
+   * scope legitimately has to reach members — src/lib/notifications.ts refuses to
+   * fan out automatically and says a circular "is a different act with a
+   * different approval path" — and this is that path. The damage it guards
+   * against is not financial: it is a message to several thousand people that
+   * cannot be recalled, sent because somebody mistyped a form.
+   */
+  mass_notification: { requires: 'notification:send' as Action, label: 'Mass notification' },
 } as const;
 
 export type ApprovalActionName = keyof typeof APPROVAL_ACTIONS;

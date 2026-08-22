@@ -403,6 +403,68 @@ describe('robots.txt opens the site and closes the private areas', () => {
   });
 });
 
+// ── the shadowing guard ─────────────────────────────────────────────────────
+
+describe('no static file in public/ shadows a route', () => {
+  // ───────────────────────────────────────────────────────────────────────────
+  // WHY THIS EXISTS
+  // ───────────────────────────────────────────────────────────────────────────
+  //
+  // Every assertion in the block above passed for as long as it had existed,
+  // and none of it was ever served. `public/robots.txt` sat beside
+  // `src/pages/robots.txt.ts`, the static layer answers first, and what
+  // production actually returned was:
+  //
+  //     User-agent: *
+  //     Allow: /
+  //     Disallow: /admin
+  //     Disallow: /api/
+  //
+  // — advertising `/my` (every member's own area) and `/portal` (every client
+  // portal) to crawlers as fair game. The endpoint's own header comment
+  // described that exact defect as the thing it had been written to fix.
+  //
+  // The tests could not catch it because they tested renderRobots(), which is
+  // the right unit and the wrong artefact: it is not what a crawler receives.
+  // Nothing in the build warns that a static file outranks a route of the same
+  // name, and the next collision — a /sitemap.xml or a /manifest.webmanifest
+  // dropped into public/ — would be exactly as quiet.
+  //
+  // So the assertion is about the COLLISION, not about robots.
+
+  /** Everything servable from public/, as the path it answers on. */
+  function publicPaths(dir = 'public', prefix = '', out: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) publicPaths(full, `${prefix}/${entry.name}`, out);
+      else out.push(`${prefix}/${entry.name}`);
+    }
+    return out;
+  }
+
+  it('leaves every SSR endpoint reachable', () => {
+    const routes = new Set(
+      FILES.map(routeFromPageFile).filter((r): r is string => !!r)
+    );
+    const shadowed = publicPaths().filter((p) => routes.has(p));
+
+    expect(
+      shadowed,
+      'These files in public/ are served BEFORE the route of the same name, so ' +
+      'the endpoint that shares their path never runs and its tests measure ' +
+      'something nobody receives. Delete the static file or rename the route:\n  ' +
+      shadowed.join('\n  ')
+    ).toEqual([]);
+  });
+
+  it('specifically, robots.txt is served by the endpoint', () => {
+    // Named separately because this is the one that actually happened, and a
+    // regression here re-publishes /my and /portal to every crawler.
+    expect(publicPaths()).not.toContain('/robots.txt');
+    expect(FILES.map(routeFromPageFile)).toContain('/robots.txt');
+  });
+});
+
 // ── source guards ───────────────────────────────────────────────────────────
 
 /** Prose in a comment is not behaviour. These guards assert on CODE. */

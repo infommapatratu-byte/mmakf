@@ -46,7 +46,7 @@ import { persons, users, stateUnits, districtUnits, dojos } from './schema';
 import { adminAreas } from './geography.schema';
 import {
   institutions, leads, trainingRequests, trainingPrograms, bookings,
-  proposals, quoteVersions, services, programParticipants,
+  proposals, quotes, quoteVersions, feeFrameworks, services, programParticipants,
   audienceKind, deliveryMode,
 } from './engagement.schema';
 import { supportTickets } from './governance.schema';
@@ -141,6 +141,18 @@ export const applicationStatus = pgEnum('institution_application_status', [
   'under_review',
   'information_requested',
   'program_design',
+  /**
+   * A quotation is being prepared and a PERSON has to act before there is one.
+   *
+   * Added with migration 0040, and it covers two situations the school reads
+   * identically: no published fee rule covered the request, or a rule that did
+   * fire demands approval. Which of the two it was is on
+   * `application_quotations.outcome`, where the training office reads it.
+   *
+   * Without this state an application the engine could not price sat in
+   * 'acknowledged', indistinguishable from one nobody had reached yet.
+   */
+  'awaiting_quotation',
   'quoted',
   'proposed',
   'approved',
@@ -297,6 +309,80 @@ export const applicationEvents = pgTable('application_events', {
   visibleToApplicant: boolean('visible_to_applicant').notNull().default(false),
 }, (t) => ({
   appIdx: index('application_events_app_idx').on(t.applicationId, t.at),
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE AUTOMATIC FIRST QUOTATION (migration 0040)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * What the engine decided when an application's requirements were complete.
+ *
+ * Three values and no fourth, in particular no 'pending': see the write-order
+ * note in migration 0040. A row exists only once the decision is final.
+ */
+export const applicationQuoteOutcome = pgEnum('application_quote_outcome', [
+  /** Priced from a published framework and issued. There is a figure. */
+  'quoted',
+  /** Priced, but a rule that fired demands a person. Issued as awaiting_approval. */
+  'awaiting_approval',
+  /** Nothing priced it. THERE IS NO FIGURE — not zero, none. */
+  'manual_quote_required',
+]);
+
+/**
+ * One row per application: what the automation decided about its price.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THIS TABLE'S JOB IS TO MAKE "NO PRICE" A RECORDED FACT
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * MMAKF has published no fee framework, so today every row written here says
+ * `manual_quote_required` and carries `totalMinor: null`. That is not a gap
+ * waiting to be filled in with a zero — it is the answer, and the check
+ * constraint `application_quotations_figure_needs_quote_ck` makes it the only
+ * storable one: a figure may exist only alongside the quotation and the
+ * framework that produced it, and the manual outcome may carry neither.
+ *
+ * THE UNIQUE INDEX ON `applicationId` IS THE IDEMPOTENCY OF THE FIRST HOP. A
+ * retried workflow, a re-fired trigger and a double-clicked button all attempt
+ * this insert and Postgres refuses all but one. src/db/auto-quote.ts issues the
+ * quotation and inserts this row in ONE transaction, so the loser's quotation,
+ * its version, its lines and even its spent QUO reference roll back with it.
+ */
+export const applicationQuotations = pgTable('application_quotations', {
+  id: serial('id').primaryKey(),
+  applicationId: integer('application_id').notNull().references(() => institutionApplications.id),
+  outcome: applicationQuoteOutcome('outcome').notNull(),
+  /**
+   * The sentence a human reads.
+   *
+   * On the manual path this is the fee engine's OWN explanation, verbatim —
+   * "Fee framework X has no rules", "no published fee rule covers this
+   * combination" — because "why is there no price?" is answered from this
+   * column and a summary of the engine's reasoning is not the reasoning.
+   */
+  reason: text('reason').notNull(),
+  /** The FeeInputs the engine was given, frozen. See migration 0040. */
+  inputs: jsonb('inputs').notNull(),
+  frameworkId: integer('framework_id').references(() => feeFrameworks.id),
+  frameworkCode: text('framework_code'),
+  quoteId: integer('quote_id').references(() => quotes.id),
+  quoteVersionId: integer('quote_version_id').references(() => quoteVersions.id),
+  quoteVersion: integer('quote_version'),
+  currency: text('currency'),
+  /**
+   * Integer paise, and NULL when the federation has not priced this.
+   *
+   * Nullable is load-bearing. A `notNull().default(0)` here would be the
+   * fabricated amount this whole subsystem exists to refuse, and zero reads as
+   * FREE to the school that receives it.
+   */
+  totalMinor: integer('total_minor'),
+  decidedAt: timestamp('decided_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  applicationUk: uniqueIndex('application_quotations_application_uk').on(t.applicationId),
+  outcomeIdx: index('application_quotations_outcome_idx').on(t.outcome, t.decidedAt),
 }));
 
 // ═══════════════════════════════════════════════════════════════════════════

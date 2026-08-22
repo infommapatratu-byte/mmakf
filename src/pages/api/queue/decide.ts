@@ -43,13 +43,26 @@ export const POST: APIRoute = async ({ request }) => {
   if (!isQueue(queue)) return json({ error: 'Unknown queue' }, 400);
 
   try {
-    const result = await decide(identity.principal, {
+    const decided = await decide(identity.principal, {
       queue,
       recordId: String(body.recordId ?? ''),
       toStatus: String(body.toStatus ?? ''),
       reason: typeof body.reason === 'string' ? body.reason : undefined,
       applicantNote: typeof body.applicantNote === 'string' ? body.applicantNote : undefined,
     });
+
+    // ── THE RECORD NEVER REACHES A RESPONSE BODY ────────────────────────────
+    //
+    // decide() returns the decided row so this endpoint can provision from it,
+    // and that row is the applicant's name, date of birth, email, telephone and
+    // address. Three places below build a response by spreading `result`, so if
+    // the record travelled on it, an approval would answer the browser with the
+    // applicant's entire submission.
+    //
+    // Split at the point of arrival rather than remembered later: `result` is
+    // what may be serialised, `sourceRecord` is what may not, and there is no
+    // single object that is both.
+    const { record: sourceRecord, ...result } = decided;
 
     // Audited when a database is available. The decision itself is already
     // durable in the record's own append-only history either way, so a missing
@@ -122,6 +135,7 @@ export const POST: APIRoute = async ({ request }) => {
 
       try {
         const { issueMembership } = await import('@/db/federation');
+        const { provisionFromRegistration } = await import('@/db/provisioning');
         const ctx = {
           principal: identity.principal,
           ip: clientIp(request),
@@ -133,22 +147,109 @@ export const POST: APIRoute = async ({ request }) => {
         // category are resolved from the RECORD, never from the request body —
         // a client that could name the person and the category of a membership
         // it is approving could admit anybody as anything.
-        const record = (result as any).record ?? null;
-        const personId = Number(record?.personId ?? NaN);
-        const category = String(record?.category ?? 'athlete');
+        //
+        // `result.record` IS NOW A REAL FIELD. It was read here from the first
+        // version of this block and `DecisionResult` never declared one, so it
+        // was `undefined` on every request and this whole path always fell into
+        // its "carries no linked person record" branch — an instruction nobody
+        // could follow, because nothing in the system linked an application to a
+        // person. src/lib/queue.ts now returns the decided row.
+        const record = sourceRecord ?? null;
+        const category = String(record?.category ?? '').trim().toLowerCase();
+
+        // ── THE APPROVAL CREATES THE PERSON ─────────────────────────────────
+        //
+        // This is the join that did not exist. Idempotent through
+        // createPersonForSource(), so a retried approval finds the person it
+        // already made rather than making a second one.
+        //
+        // It runs BEFORE the membership block and hands it the id, so the
+        // register entry and the membership are one act from the office's point
+        // of view rather than two, the second of which was impossible.
+        let personId = Number(record?.personId ?? NaN);
+        if (record) {
+          try {
+            const provisioned = await provisionFromRegistration(db(), ctx, record);
+            personId = provisioned.personId;
+            // The notes are the honest half. A provisioning run that placed the
+            // person but could not record an address, or raised a duplicate, has
+            // to say so — the office is about to tell somebody they are
+            // registered.
+            if (provisioned.notes.length) {
+              registerWarning = 'Registered as '
+                + `${provisioned.federationId}. ${provisioned.notes.join(' ')}`;
+            }
+          } catch (err: any) {
+            // FAIL VISIBLY. The queue row has already moved.
+            console.error('[queue] provisioning failed', err);
+            return json(
+              {
+                ...result,
+                registered: false,
+                error: 'decision_recorded_but_not_registered',
+                message:
+                  'The decision was recorded in the queue and the applicant was NOT entered in the '
+                  + 'register: ' + String(err?.message ?? err)
+                  + ' This needs an administrator — the queue now shows Approved.',
+              },
+              500
+            );
+          }
+        }
+
+        // ── A STUDENT DOES NOT PAY A MEMBERSHIP FEE FOR BEING A STUDENT ──
+        //
+        // AND DOES NOT HOLD ONE FOR FREE EITHER. This line used to read
+        //
+        //     const category = String(record?.category ?? 'athlete');
+        //
+        // with 'athlete' repeated again as the fallback for anything it did not
+        // recognise — so approving a registration that named no category at all
+        // minted an ATHLETE membership, the exact credential the federation
+        // withdrew, through a live HTTP route, silently, as the DEFAULT. No
+        // money changed hands, which is why no fee guard was ever going to see
+        // it: registering is free, and registering is not the same as joining.
+        //
+        // The categories below are the three the register still admits: people
+        // and bodies that act FOR the federation. A student is not among them
+        // and is not missing from them — a student's access to training is
+        // decided by a valid TRAINING ENTITLEMENT, which a membership row would
+        // not grant and its absence does not withhold.
+        //
+        // NOTHING IS GUESSED. An application that does not say which register it
+        // belongs in gets no membership and a warning that says so, for the same
+        // reason src/db/student-rule.ts refuses a standing charge that never
+        // names its payer: a category the federation cannot name is one this
+        // system must not choose on its behalf.
+        const ISSUABLE = ['instructor', 'dojo', 'official'] as const;
+        const issuable = (ISSUABLE as readonly string[]).includes(category);
 
         if (!Number.isInteger(personId) || personId <= 0) {
           registerWarning =
             'The decision was recorded. No membership was issued because this application ' +
             'carries no linked person record — link it to a person and re-run the approval.';
+        } else if (!issuable) {
+          // The applicant IS registered: the person record stands, the approval
+          // stands, and they can be enrolled and taught. What they do not get is
+          // a membership, and that is the rule rather than a failure.
+          registerWarning =
+            'The decision was recorded and the person is registered. No membership was issued: ' +
+            (category === 'athlete' || category === 'junior' || category === 'student'
+              ? `this application is recorded as '${category}', and a student does not pay a membership fee ` +
+                'for being a student. What a student buys is TRAINING, and access to it is decided by a ' +
+                'valid training entitlement rather than by membership.'
+              : category
+                ? `this application is recorded as '${category}', which is not a register MMAKF admits to.`
+                : 'this application names no membership category, and this system will not choose one ' +
+                  'for the federation.') +
+            ' The membership register admits an instructor, an official or a dojo — record that category ' +
+            'and re-run the approval if this applicant is one.';
         } else {
-          // renew() underneath is idempotent on (person, category, period), so a
-          // replayed approval supersedes rather than duplicating.
+          // renew() underneath supersedes rather than duplicating, so a replayed
+          // approval does not stack two memberships on one person.
           await issueMembership(db(), ctx, {
             personId,
-            category: (['athlete', 'instructor', 'dojo', 'official'] as const).includes(category as any)
-              ? (category as any)
-              : 'athlete',
+            category: category as 'instructor' | 'dojo' | 'official',
             validFrom: new Date().toISOString().slice(0, 10),
             // NULL, not a guessed expiry. MMAKF has published no membership
             // term, and inventing one would put a date on a member's standing

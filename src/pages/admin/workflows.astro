@@ -39,7 +39,8 @@ import type { Column } from '@/components/DataTable/types';
 import { isConfigured, db } from '@/db';
 import { identify } from '@/lib/session';
 import { canAnywhere, visibleScopes } from '@/lib/rbac';
-import { ACTIONS, STANDARD_WORKFLOWS } from '@/db/automations';
+import { ACTIONS, STANDARD_WORKFLOWS, installStandardAutomations } from '@/db/automations';
+import { rateLimit } from '@/lib/ratelimit';
 import * as o from '@/db/operations.schema';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
@@ -53,6 +54,66 @@ const identity = await identify(Astro.request.headers.get('cookie'));
 const principal = identity?.principal ?? null;
 
 /** The most recent runs, newest first — the usual question is "what just happened". */
+// ─── Installing the standard automations ────────────────────────────────────
+//
+// WHAT WAS MISSING, AND WHY IT WAS EASY TO MISS. installStandardAutomations()
+// exists in src/db/automations.ts, is idempotent, and was called by the tests
+// and by a bootstrap script — and by NOTHING A HUMAN COULD REACH. So on any
+// database that had not been through that script, every automation the site
+// advertises was inert: a school applied and no acknowledgement was created, no
+// task was raised, no notification went out. dispatch() treats a trigger with
+// no definition as a legitimate absence, so nothing errored and nothing logged.
+// This page even named the function in its own empty state, as prose, next to a
+// list of what was missing — which told an administrator exactly what they
+// could not do.
+//
+// Gated on workflow:WRITE, not the workflow:read this page renders under.
+// Reading what the machinery does and installing machinery are different
+// authorities, and the page below only offers the control to a caller who holds
+// the second.
+const mayInstall = Boolean(principal) && canAnywhere(principal, 'workflow:write');
+
+let installError: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const act = String(form.get('action') ?? '');
+  const rl = await rateLimit(Astro.request, 'workflow-install', 5, 300);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    installError = `Too many attempts. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    installError = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!isConfigured()) {
+    Astro.response.status = 503;
+    installError = 'The federation database is not configured on this deployment, so nothing can be installed.';
+  } else if (!mayInstall) {
+    // Re-checked against the session on every act. A rendered page is not
+    // evidence of authority.
+    Astro.response.status = 403;
+    installError = 'Installing an automation requires workflow:write at national scope, which this account does not hold.';
+  } else if (act !== 'install-standard') {
+    Astro.response.status = 400;
+    installError = 'That is not something this page does.';
+  } else {
+    try {
+      // Idempotent by construction: installWorkflow() VERSIONS rather than
+      // edits, so a second run leaves the earlier version on record for any run
+      // that failed under it. Re-pressing the button is therefore safe.
+      const results = await installStandardAutomations(db());
+      return Astro.redirect(`${h('/admin/workflows')}?installed=${results.length}`, 303);
+    } catch (err: any) {
+      console.error('[admin/workflows] install failed', err);
+      Astro.response.status = 500;
+      installError = 'The automations could not be installed. The fault is in the server log; nothing partial is left behind, because installWorkflow() versions rather than edits.';
+    }
+  }
+}
+
+const installedCount = Number(Astro.url.searchParams.get('installed') ?? '');
+
 const RUN_LIMIT = 60;
 
 /**
@@ -407,8 +468,14 @@ const runColumns: Column[] = [
     /* No tabs: this page has one view, and a strip offering "Definitions" and
        "Runs" would be navigation invented to fill a slot — both are on screen
        already, and the reader needs them together to answer why a run did what
-       it did. No action bar either: nothing here installs, re-runs or switches
-       off an automation, and a header is not the place to imply otherwise. */
+       it did.
+
+       No action bar either, and that is now a narrower claim than it was: this
+       page DOES install the standard automations, because nothing else a human
+       could reach ever did and every advertised automation was inert without
+       it. The control sits beside the list of what is missing, where the reader
+       is already looking, rather than in a header that would imply this screen
+       also re-runs and switches things off. It does neither. */
   }}
 >
   {notConfigured ? (
@@ -437,6 +504,14 @@ const runColumns: Column[] = [
   ) : (
     <>
       {/* ── The definitions ───────────────────────────────────────────────── */}
+      {installError && <p class="note thin" role="alert" style="border-color:var(--red)">{installError}</p>}
+      {Number.isFinite(installedCount) && installedCount > 0 && (
+        <p class="note thin" role="status">
+          {installedCount} standard automation{installedCount === 1 ? '' : 's'} installed. Each is a
+          stored definition now, so the triggers below reach something.
+        </p>
+      )}
+
       <section class="block" aria-labelledby="defs-h">
         <h2 class="sec-h" id="defs-h">Installed automations</h2>
 
@@ -449,9 +524,26 @@ const runColumns: Column[] = [
             {notInstalled.length > 0 && (
               <p class="empty-more">
                 The code defines {notInstalled.length} standard automation
-                {notInstalled.length === 1 ? '' : 's'} that no row here matches —
-                {' '}{notInstalled.map((w) => w.code).join(', ')} — and
-                installStandardAutomations() is what puts them in place.
+                {notInstalled.length === 1 ? '' : 's'} that no row here matches:
+                {' '}{notInstalled.map((w) => w.code).join(', ')}.
+              </p>
+            )}
+            {notInstalled.length > 0 && mayInstall && (
+              <form method="post" class="install-form">
+                <input type="hidden" name="action" value="install-standard" />
+                <button class="btn btn-gold" type="submit">
+                  Install the {notInstalled.length} standard automation{notInstalled.length === 1 ? '' : 's'}
+                </button>
+                <span class="install-note">
+                  Safe to press more than once — a re-run adds a new version and leaves the old one on
+                  record for any run that failed under it.
+                </span>
+              </form>
+            )}
+            {notInstalled.length > 0 && !mayInstall && (
+              <p class="empty-more">
+                Installing them requires workflow:write at national scope, which this account does not
+                hold.
               </p>
             )}
           </EmptyState>
@@ -463,6 +555,12 @@ const runColumns: Column[] = [
                 {' '}{notInstalled.map((w) => w.code).join(', ')}. Their triggers
                 fire and nothing happens, which is not an error — dispatch()
                 treats a trigger with no definition as a legitimate absence.
+                {mayInstall && (
+                  <form method="post" class="install-form">
+                    <input type="hidden" name="action" value="install-standard" />
+                    <button class="btn btn-ghost" type="submit">Install the missing {notInstalled.length}</button>
+                  </form>
+                )}
               </p>
             )}
 
@@ -763,6 +861,11 @@ const runColumns: Column[] = [
     </>
   )}
 </AdminShell>
+
+<style>
+  .install-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px; }
+  .install-note { font-size: 0.85em; opacity: 0.75; max-width: 46ch; }
+</style>
 
 <style>
   /* global.css gives every <section> 108px of padding and a top rule, which is

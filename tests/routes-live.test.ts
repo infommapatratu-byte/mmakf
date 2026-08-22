@@ -140,6 +140,10 @@ const OK_ROUTES = [
   // click target, so it is reachable by two routes that are not a menu.
   '/my',
   '/my/notifications',
+  // Renders the signed-out state during a test run, which is still worth
+  // fetching: it queries the register in its frontmatter, and a null
+  // dereference there is a 500 at request time and a perfectly clean build.
+  '/my/practice',
 
   // ── The client portal ──
   '/learn/portal',
@@ -272,15 +276,52 @@ describe('the Shotokan technical library, over HTTP', () => {
     }
   }, 60_000);
 
-  it('embeds no third-party video player anywhere in the library', async () => {
-    // §23 and §49. The register attributes and links; it does not embed a
-    // recording whose rights nobody has cleared, and an <iframe> to YouTube is
-    // exactly what "embedding it anyway" would look like in the markup.
-    for (const path of ['/shotokan/videos', '/shotokan/techniques/gyaku-zuki', '/shotokan/kihon']) {
+  it('embeds only material whose rights are cleared', async () => {
+    // §23 and §49, stated as the RULE rather than as the absence.
+    //
+    // This assertion used to be "no page emits a YouTube iframe anywhere". That
+    // was true, and it was the wrong claim: it described the state of the
+    // register — nothing external is cleared — rather than the rule, and a
+    // codebase whose only guarantee is "we never embed" can never show MMAKF's
+    // own footage either.
+    //
+    // The rule is now enforced in one place, TechnicalPlayer.astro, which
+    // refuses to embed anything outside the cleared set. So the register page,
+    // which shows the federation's own recordings, DOES carry a player — and
+    // the pages that carry only third-party references still must not.
+    for (const path of ['/shotokan/techniques/gyaku-zuki', '/shotokan/kihon', '/shotokan/kata']) {
       const { body } = await load(path);
-      expect(body, `${path} embedded a video player`).not.toMatch(/<iframe[^>]+youtube/i);
+      expect(body, `${path} embedded a recording nobody cleared`).not.toMatch(/youtube\.com\/(embed|iframe_api)/i);
     }
-  }, 90_000);
+
+    // And the third-party half of the register is still refused ON the page that
+    // does embed — the player is asked for all of them and says no to those.
+    const { body } = await load('/shotokan/videos');
+    expect(body, 'the register did not render the player at all').toMatch(/iframe_api|tp-stage/);
+
+    // The held recordings are listed on this page as a table rather than as 121
+    // blocked player cards, so the guarantee to assert is not the blocked
+    // branch's wording — it is that NONE of them reaches an embed.
+    //
+    // Checked by id, against the two collections that matter most: SKIF NZ's is
+    // the only complete twenty-six-kata set found, and Colchester's Enoeda and
+    // Ohta demonstrations are the best technical material in the register. They
+    // are also the least MMAKF's to publish, which is exactly why they are the
+    // ones worth naming in a test rather than trusting to a template.
+    for (const heldId of ['9D2yOzDsW8k', 'tXPZFarJMh0', 'bpUAkkrwNVs', 'JrWz-5rfziU']) {
+      expect(body, `a third-party recording (${heldId}) was embedded`)
+        .not.toMatch(new RegExp(`youtube\\.com/embed/${heldId}`));
+      expect(body, `${heldId} vanished from the register instead of being listed`).toContain(heldId);
+    }
+    expect(body, 'the register stopped stating the third-party standing').toMatch(/Third-party upload/i);
+  }, 120_000);
+
+  it('never invents a chapter timestamp', async () => {
+    // §30. MMAKF's own footage has no reviewed chapters, so the player must say
+    // so rather than deriving plausible ones from the duration.
+    const { body } = await load('/shotokan/videos');
+    expect(body).toMatch(/No chapters have been recorded/i);
+  }, 60_000);
 
   it('shows the rights position on the source register', async () => {
     const { body } = await load('/shotokan/videos');

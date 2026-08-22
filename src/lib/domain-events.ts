@@ -214,17 +214,40 @@ export const EVENT_TYPES = {
    *
    * On the catalogue because `NOTIFIABLE` has always named it and a name the
    * allow-list expects but the catalogue refuses is an event that can never be
-   * published — `publish()` rejects an unknown type outright. It has NO
-   * producer yet: the reminder is a scheduled sweep over
-   * `membership.lapsingSoon()`, and how many days before expiry MMAKF writes to
-   * a member is federation policy nobody has set. The vocabulary is fixed here
-   * so that adding the sweep is one function, not another rename.
+   * published — `publish()` rejects an unknown type outright.
+   *
+   * IT NOW HAS A PRODUCER: `raiseRenewalNotices()` in
+   * src/db/programme-lifecycle.ts, a scheduled sweep over the ENTITLEMENT that
+   * paid for the membership, joined to `memberships.valid_to` for the
+   * authoritative end date. Two things about it are worth knowing here.
+   *
+   * How many days of notice MMAKF gives is still federation policy nobody has
+   * set, so the sweep takes the window as an argument and REFUSES to run without
+   * one rather than defaulting to a number this system chose. And the sweep
+   * publishes nothing for an entitlement it cannot resolve a person for —
+   * `resolveRecipients('subject')` falls back to the entity id, so an event
+   * without `personId` would address the notice to whoever shares an id with the
+   * membership.
    */
   MEMBERSHIP_EXPIRING: {
     floor: 'member', publicFields: [],
     payload: ['personId', 'membershipId', 'expiresOn'],
     consumers: ['notifications'],
     means: 'A membership is within its renewal window and has not been renewed.',
+  },
+  /**
+   * The same fact about everything a payment buys that is NOT a membership — a
+   * course enrolment running out, a credential with an end date on it.
+   *
+   * Its own type rather than a widened MEMBERSHIP_EXPIRING, because a consumer
+   * counting lapsing memberships must not be handed expiring course access, and
+   * because the member-facing wording for the two is not the same sentence.
+   */
+  ENTITLEMENT_EXPIRING: {
+    floor: 'member', publicFields: [],
+    payload: ['personId', 'entitlementId', 'subject', 'expiresOn'],
+    consumers: ['notifications'],
+    means: 'An entitlement is within its renewal window and has not been renewed.',
   },
 
   // Grading, ranks and certificates
@@ -437,6 +460,41 @@ export const EVENT_TYPES = {
   },
 
   // Money. Confidential throughout: an order names a person and an amount.
+  /**
+   * An institution agreed to a quoted figure.
+   *
+   * Its own type rather than a reuse of ORDER_PAID, because it is the moment
+   * the federation acquires a RECEIVABLE and nothing has been paid yet. A
+   * consumer counting income must not find agreements in the total, and a
+   * consumer chasing unpaid invoices needs precisely this event and cannot get
+   * it from ORDER_PAID, which by definition never fires for the ones that go
+   * unpaid.
+   *
+   * Confidential, and not because the amount is embarrassing. The payload names
+   * an institution, a person at that institution and a sum together, which is a
+   * sharper disclosure about a third party than any of the three alone.
+   */
+  QUOTE_ACCEPTED: {
+    floor: 'confidential', publicFields: [],
+    payload: ['quoteId', 'quoteVersionId', 'institutionId', 'totalMinor', 'currency'],
+    means: 'An institution accepted a quotation at a specific figure, which the federation recorded with its evidence.',
+  },
+  /**
+   * An accepted quotation became payable: an order, an invoice and — where a
+   * gateway is configured — a payment link.
+   *
+   * NOT a claim that money can actually move. The payload's `blockedReason`
+   * says so when it cannot, which today it always does: MMAKF has no configured
+   * payment provider, so the order and the invoice exist and the link is a page
+   * that reports how to pay instead of a checkout. An event type that could only
+   * be published on success would have made the federation's real state
+   * invisible to every consumer.
+   */
+  QUOTE_PAYMENT_LINK_ISSUED: {
+    floor: 'confidential', publicFields: [],
+    payload: ['quoteVersionId', 'orderId', 'orderNo', 'amountMinor', 'currency', 'provider', 'blockedReason'],
+    means: 'An accepted quotation was turned into an order and an invoice, with a payment link where a provider is configured.',
+  },
   ORDER_PAID: {
     floor: 'confidential', publicFields: [],
     means: 'An order was marked paid against a verified capture.',
@@ -522,18 +580,181 @@ export const EVENT_TYPES = {
     floor: 'official', publicFields: [],
     means: 'A quotation was approved internally and may be sent.',
   },
+  /**
+   * The engine could not price a completed application, and said so.
+   *
+   * ITS OWN TYPE, not a QUOTE_ISSUED with a null total, because they are not the
+   * same fact and a consumer counting quotations must never be handed the ones
+   * that do not exist. It is also the only honest way for the feed to record
+   * what happens today: MMAKF has published no fee framework, so every
+   * application currently produces this event and none produces QUOTE_ISSUED.
+   *
+   * The payload names the application and the reason. IT CARRIES NO AMOUNT, and
+   * cannot: there is no amount. A zero here would travel to every consumer as a
+   * price the federation quoted.
+   *
+   * 'official' matches its siblings — the reason quotes the fee engine on where
+   * the federation's own rulebook does not reach, which is not public material.
+   */
+  QUOTE_MANUAL_QUOTATION_REQUIRED: {
+    floor: 'official', publicFields: [],
+    means: 'A completed application could not be priced from a published rule, so a person prepares the quotation.',
+  },
+  /**
+   * A quotation was computed and DELIBERATELY NOT ISSUED.
+   *
+   * Distinct from QUOTE_ISSUED because the institution has not been sent
+   * anything, and distinct from QUOTE_APPROVED because nobody has agreed to it
+   * yet. A rule the framework marks `requiresApproval` fired — a large
+   * discount, an unusual multiplier — and `issueQuote()` parked the version in
+   * 'awaiting_approval'.
+   *
+   * NOT reused from the two-person-control vocabulary above. APPROVAL_REQUESTED
+   * carries a `requestId` into `approval_requests` and its notification
+   * consumer resolves approvers from that row; publishing it for a quotation
+   * with no such row would address a message to nobody and say it had been sent.
+   */
+  QUOTE_HELD_FOR_APPROVAL: {
+    floor: 'official', publicFields: [],
+    means: 'A quotation was computed but a rule requires a person to approve it before it is issued.',
+  },
   CONTRACT_SIGNED: {
     floor: 'official', publicFields: [],
     means: 'An institution signed an agreement for a programme.',
   },
   PROGRAM_SCHEDULED: {
     floor: 'official', publicFields: [],
+    payload: ['programId', 'sessionId', 'seq', 'startsAt', 'endsAt'],
     means: 'A training programme was scheduled into sessions.',
+  },
+  /**
+   * A verified payment activated a programme for a stated period.
+   *
+   * NO CONSUMER, and that is a decision rather than an omission. The event
+   * carries the period and the resources so the feed, the audit trail and any
+   * future reporting can answer "what did that school actually buy" — but there
+   * is nobody to notify at the moment it fires. The roll is EMPTY when a
+   * programme is activated: participants are registered against it afterwards,
+   * and each of them learns what they can reach when they are put on the roll.
+   * A fan-out here would reach nobody and would look, in a year, like a
+   * notification path that had broken.
+   */
+  PROGRAM_ACTIVATED: {
+    floor: 'official', publicFields: [],
+    payload: ['programId', 'institutionId', 'validFrom', 'validTo', 'entitlementId', 'resources'],
+    means: 'A server-verified payment activated a training programme for an explicit period, with the resources it includes.',
+  },
+  /**
+   * A completed refund closed a programme's doors.
+   *
+   * NOTIFIABLE, and essential. This is the one message in this group somebody
+   * genuinely needs: the technical library and the live classes stop working,
+   * and a learner who is not told will read that as the site being broken. The
+   * audience is the roll — an exact query, not an estimate — and by the time a
+   * refund completes the roll is populated, which is the difference between
+   * this event and its sibling above.
+   */
+  PROGRAM_ACCESS_REVOKED: {
+    floor: 'official', publicFields: [],
+    payload: ['programId', 'entitlementId', 'grantsRevoked', 'reason'],
+    consumers: ['notifications'],
+    means: 'A refund revoked a programme entitlement; the grants it carried are closed, with the record kept.',
   },
   PROGRAM_SESSION_DELIVERED: {
     floor: 'official', publicFields: [],
     means: 'A programme session was delivered and attendance recorded.',
   },
+  /**
+   * The programme reached its end date with its sessions delivered and its
+   * register written, and its participants were assessed for certification.
+   *
+   * ASSESSED, NOT CERTIFIED. Nothing was issued when this was published: the
+   * event records that eligibility now exists and that a task is waiting for the
+   * authority who may act on it. A consumer that treated this as "certificates
+   * went out" would be describing an act no person has yet taken.
+   *
+   * No `consumers`, deliberately. Whether an institution is written to when its
+   * programme closes is a decision MMAKF has not made, and a notification wired
+   * up here would make it by default.
+   */
+  PROGRAM_COMPLETED: {
+    floor: 'official', publicFields: [],
+    means: 'A training programme completed; its participants were assessed for certification.',
+  },
+
+  // ── What a STUDENT buys (migration 0042) ─────────────────────────────────
+  //
+  // These four are about an individual and their right to train, and they are
+  // deliberately NOT the PROGRAM_* family above, which is about an institution's
+  // contracted programme. A consumer counting school programmes must not be
+  // handed a child's monthly training, and the member-facing wording for the two
+  // is not the same sentence.
+  //
+  // NOTE WHAT IS ABSENT: there is no TRAINING_MEMBERSHIP_* anything. A student
+  // does not pay a membership fee for being a student, so no event on this feed
+  // can report that they did.
+  /**
+   * A server-verified payment bought a person the right to train, for an
+   * explicit period, under a named price version.
+   *
+   * NOTIFIABLE and essential. The person paid for something and needs to know it
+   * worked, when it starts and when it ends — a student who is not told their
+   * dates finds out by being turned away, which is the failure this whole module
+   * exists to prevent.
+   *
+   * `floor: 'member'` rather than 'official': the subject of this event is the
+   * one being notified, and clamping it above their own clearance would mean the
+   * notification consumer could see it and the person it is about could not.
+   */
+  TRAINING_ENTITLEMENT_GRANTED: {
+    floor: 'member', publicFields: [],
+    payload: ['personId', 'entitlementId', 'productId', 'validFrom', 'validUntil'],
+    consumers: ['notifications'],
+    means: 'A verified payment granted a person the right to train for an explicit period, at a recorded price version.',
+  },
+  /**
+   * A recurring training plan produced its next term.
+   *
+   * Its own type rather than a second GRANTED, because "your training is
+   * confirmed" and "your training has been extended to March" are different
+   * sentences to the same person, and because a renewal-rate report that had to
+   * separate the two by reading a sequence number would eventually stop doing so.
+   */
+  TRAINING_RENEWED: {
+    floor: 'member', publicFields: [],
+    payload: ['personId', 'entitlementId', 'renewedFromEntitlementId', 'validFrom', 'validUntil'],
+    consumers: ['notifications'],
+    means: 'A training entitlement was renewed into a new term; the previous term keeps its own record.',
+  },
+  /**
+   * A revocation ended somebody's right to train before its period did.
+   *
+   * ESSENTIAL, and the most important message in this group: the person is going
+   * to arrive at a dojo and be turned away otherwise. It is NOT published when an
+   * entitlement simply expires — expiry needs no event, because nothing changed
+   * except the date, and ENTITLEMENT_EXPIRING already carries the warning.
+   */
+  TRAINING_ACCESS_ENDED: {
+    floor: 'member', publicFields: [],
+    payload: ['personId', 'entitlementId', 'productId', 'reason'],
+    consumers: ['notifications'],
+    means: 'A training entitlement was revoked before its period ended; the record is kept, not deleted.',
+  },
+  /**
+   * A student moved club, and their live training moved with them.
+   *
+   * THE PERSON IS NOT DUPLICATED and the event says so by carrying ONE personId
+   * across two enrolment ids. A consumer that saw a transfer as a departure and
+   * an arrival would double-count the federation's students every time one moved
+   * town.
+   */
+  TRAINING_ENROLMENT_TRANSFERRED: {
+    floor: 'member', publicFields: [],
+    payload: ['personId', 'fromClubId', 'toClubId', 'fromEnrolmentId', 'toEnrolmentId', 'effectiveOn'],
+    consumers: ['notifications'],
+    means: 'A student transferred between clubs; the enrolment moved, the history stayed, and the person is the same record.',
+  },
+
   COACH_APPLICATION_SUBMITTED: {
     floor: 'official', publicFields: [],
     means: 'Somebody applied to teach for MMAKF.',
@@ -550,10 +771,25 @@ export const EVENT_TYPES = {
     floor: 'official', publicFields: [],
     means: 'A named administrator confirmed a coach onto a programme.',
   },
-  SCHEDULE_CHANGED: {
-    floor: 'official', publicFields: [],
-    means: 'A session was moved or cancelled; the institution, coach and participants are affected.',
-  },
+  // SCHEDULE_CHANGED WAS HERE, AND IS RETIRED ON PURPOSE.
+  //
+  // It meant "a session was moved or cancelled; the institution, coach and
+  // participants are affected" — which is exactly what CLASS_SESSION_CANCELLED
+  // and CLASS_SESSION_RESCHEDULED below mean, and those two have producers
+  // (src/db/scheduling.ts), a consumer ('notifications') and audiences
+  // NOTIFIABLE can actually resolve. SCHEDULE_CHANGED had none of the three: no
+  // `publish()` call anywhere in the repository named it, nothing consumed it,
+  // and it carried no payload contract.
+  //
+  // A type in this catalogue is a PROMISE that the federation publishes that
+  // fact. One nobody publishes is a promise the system does not keep, and it
+  // reads to the next engineer as a fact they can subscribe to. Retired rather
+  // than given an invented producer, because the fact it describes is already
+  // on the feed under two names that work.
+  //
+  // If a genuinely distinct official-floor event is ever needed — "this club's
+  // WEEK changed", as opposed to one session moving — add it with a producer
+  // and a consumer in the same change.
   TASK_ESCALATED: {
     floor: 'official', publicFields: [],
     means: 'A task passed its escalation deadline and was raised to a higher role.',
@@ -629,8 +865,11 @@ export const EVENT_TYPES = {
    * with a KNOWN audience: the people holding a place on that session are rows
    * in `bookings`. A schedule change at club level affects everyone who trains
    * there, and "everyone who trains there" is not a query this system can
-   * answer honestly yet — so SCHEDULE_PUBLISHED above carries no consumer
-   * rather than fanning out to a list somebody guessed at.
+   * answer honestly yet — so SCHEDULE_PUBLISHED above reaches only the
+   * audience NOTIFIABLE can name, rather than fanning out to a list somebody
+   * guessed at. The feed itself is drained by the 'notifications' consumer in
+   * src/pages/api/cron/reconcile.ts; before that runner existed, every type
+   * here declared an audience and none of them was ever told.
    */
   CLASS_SESSION_CANCELLED: {
     floor: 'member', publicFields: [],
@@ -652,6 +891,27 @@ export const EVENT_TYPES = {
     payload: ['sessionId', 'previousSessionId', 'classId', 'className', 'startsAt', 'previousStartsAt'],
     consumers: ['notifications'],
     means: 'A class occurrence was moved to a new time, and every place held on it moved with it.',
+  },
+
+  /**
+   * A deliberate announcement that a timetable changed.
+   *
+   * NO CONSUMER, and that is the difference between this and every other
+   * notifiable event. The consumer pattern resolves an audience AT CONSUME TIME,
+   * which is exactly wrong here: src/db/schedule-announce.ts froze the audience
+   * when the announcement was drafted, an administrator authorised THAT NUMBER,
+   * and above a threshold a second person agreed to it. Re-resolving later would
+   * send to a set nobody approved.
+   *
+   * So this event is the RECORD, and the notification rows are written by the
+   * module inside the same transaction — with this event's id on each of them,
+   * which is what makes queue()'s deduplication work and a retried send
+   * incapable of writing to anybody twice.
+   */
+  SCHEDULE_ANNOUNCED: {
+    floor: 'member', publicFields: [],
+    payload: ['announcementId', 'scheduleId', 'versionId', 'ownerScope', 'ownerId', 'audienceCount'],
+    means: 'A schedule change was announced to the members of a unit, with the audience frozen and authorised.',
   },
 
   // ── Two-person control (src/lib/approvals.ts) ──

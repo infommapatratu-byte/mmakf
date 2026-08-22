@@ -54,6 +54,8 @@ import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { allocateFederationId, writeAudit, type AuditContext } from '@/db/federation';
 import { assertCan, canAnywhere, type Principal } from '@/lib/rbac';
+import { classifyFeeRule, findStudentCharges, type RuleCandidate } from '@/db/student-rule';
+import { isUniqueViolation } from '@/db/pgerror';
 
 type DB = any;
 
@@ -98,6 +100,53 @@ export function applyFactor(amountMinor: number, factorPpm: number): number {
   const half = BigInt(PPM) / 2n;
   const scaled = (a * f + half) / BigInt(PPM);
   const out = Number(scaled);
+  return negative ? -out : out;
+}
+
+/** Basis points. 1800 bps = 18%. */
+export const BPS = 10_000;
+
+/**
+ * Tax on an amount, at a rate in basis points. Integer-exact, half up.
+ *
+ * WHY THIS EXISTS RATHER THAN `Math.round((amount * bps) / 10_000)`.
+ *
+ * That expression lived inline in createOrder() and was allow-listed in
+ * tests/money-safety.test.ts as "FINDING 4 — a SECOND rounding implementation,
+ * outside applyFactor()". The allow-list entry carried its own justification:
+ * exact over the reachable domain, and proved so by a test. Both halves of that
+ * were true and neither is a reason to keep it.
+ *
+ * BE PRECISE ABOUT WHY IT WENT. It was NOT producing wrong money. The worst
+ * order createOrder() can build is an int32 unit price times the 99-item
+ * quantity cap times the highest GST rate, and that product is comfortably
+ * inside safe-integer range — tests/money-safety.test.ts pins exactly that, and
+ * overstating the danger here would be the same kind of untruth this codebase
+ * refuses everywhere else.
+ *
+ * The reason is DRIFT. Two implementations of one rounding rule is one edit
+ * away from an invoice that disagrees with the quotation it came from, with
+ * nothing failing in between: change half-up to half-even in applyFactor() and
+ * the inline expression keeps the old behaviour, silently, on the tax line
+ * only. One implementation cannot drift from itself.
+ *
+ * BigInt because this is a general money primitive and a later caller is not
+ * bound by createOrder()'s caps — past 2^53 the float product stops being an
+ * exact integer and Math.round() then rounds the wrong value. Half UP and away
+ * from zero, to agree with applyFactor() above: two identical line items must
+ * produce two identical amounts.
+ */
+export function taxOnMinor(amountMinor: number, rateBps: number): number {
+  if (!Number.isInteger(amountMinor)) throw new FeeError('bad_amount', 'Amounts must be integer paise.');
+  if (!Number.isInteger(rateBps)) throw new FeeError('bad_rate', 'Tax rates must be integer basis points.');
+  // A negative rate is a refund dressed as a tax. Refused rather than netted
+  // off, because a rate is a published figure and a credit is a decision.
+  if (rateBps < 0) throw new FeeError('bad_rate', 'A tax rate cannot be negative.');
+  const negative = amountMinor < 0;
+  const a = BigInt(Math.abs(amountMinor));
+  const r = BigInt(rateBps);
+  const half = BigInt(BPS) / 2n;
+  const out = Number((a * r + half) / BigInt(BPS));
   return negative ? -out : out;
 }
 
@@ -351,6 +400,83 @@ export interface Computation {
 }
 
 /**
+ * WHAT ONE RESOLVED REDUCTION IS WORTH AGAINST A RUNNING TOTAL.
+ *
+ * Lifted out of computeFee()'s inner `applyReduction` and exported, because
+ * src/db/checkout.ts applies reductions across a BASKET of separately-priced
+ * services and had nowhere to get this arithmetic from. The alternative was a
+ * second implementation, and the day the two drifted a school would be shown
+ * one figure on a quotation and a different one at checkout for the same code.
+ *
+ * PURE. A running total in, a magnitude out — no database, no clock, no line
+ * records. Every clamp it applies is reported in `notes` so the reason survives
+ * onto the line the buyer reads.
+ *
+ * THE STAMP IS RE-CHECKED HERE. computeFee() already refuses an unstamped
+ * reduction as a group before any rule runs; this function is exported, so it
+ * checks for itself rather than trusting that every future caller remembered.
+ */
+export type ReductionOutcome =
+  | { applied: false; because: string }
+  | { applied: true; reductionMinor: number; notes: string[] };
+
+export function computeReduction(runningMinor: number, r: Reduction): ReductionOutcome {
+  if (r?.[RESOLVED_BY_SERVER] !== true) {
+    throw new FeeError(
+      'unresolved_reduction',
+      `Reduction ${r?.sourceCode ?? '(unnamed)'} did not come from the server's own resolver. ` +
+      'A discount CODE may be supplied by a client; a discount AMOUNT never may. ' +
+      'Resolve it through src/db/discounts.ts.'
+    );
+  }
+
+  if (r.minSubtotalMinor != null && runningMinor < r.minSubtotalMinor) {
+    // Not silently dropped. The customer typed a code and is owed a reason.
+    return {
+      applied: false,
+      because: `the amount is ${formatINR(runningMinor)}, below the ${formatINR(r.minSubtotalMinor)} this reduction requires`,
+    };
+  }
+
+  let reduction: number;
+  if (r.basis === 'fixed_amount') {
+    // Zero is permitted here and forbidden by the CHECK on discount_rules.
+    // The difference is deliberate: a RULE worth nothing is a configuration
+    // mistake, while a reduction of zero is a real outcome — it is what a
+    // reduction clamped to the amount outstanding looks like when replayed by
+    // reproduce(), and refusing it would make a frozen quotation
+    // unreproducible for having been fully clamped.
+    if (r.amountMinor == null || !Number.isInteger(r.amountMinor) || r.amountMinor < 0) {
+      throw new FeeError('reduction_incomplete', `Reduction ${r.sourceCode} is a fixed amount with no whole, non-negative amount in paise.`);
+    }
+    reduction = r.amountMinor;
+  } else {
+    if (r.percentPpm == null || !Number.isInteger(r.percentPpm) || r.percentPpm <= 0 || r.percentPpm > PPM) {
+      throw new FeeError(
+        'reduction_incomplete',
+        `Reduction ${r.sourceCode} is a percentage and its rate is not between 1 and ${PPM} parts-per-million.`
+      );
+    }
+    // applyFactor(), not a re-implementation. It is the only multiplier in
+    // this codebase and it is where the BigInt and the half-up rounding live.
+    reduction = applyFactor(runningMinor, r.percentPpm);
+  }
+
+  const notes: string[] = [r.because].filter(Boolean);
+  if (r.maxReductionMinor != null && reduction > r.maxReductionMinor) {
+    reduction = r.maxReductionMinor;
+    notes.push(`capped at ${formatINR(r.maxReductionMinor)} by the policy`);
+  }
+  const outstanding = Math.max(runningMinor, 0);
+  if (reduction > outstanding) {
+    reduction = outstanding;
+    notes.push('limited to the amount outstanding, so the total cannot fall below zero');
+  }
+
+  return { applied: true, reductionMinor: reduction, notes };
+}
+
+/**
  * Price a request against a framework, WITHOUT writing anything.
  *
  * Pure with respect to the database: it reads the framework's rules and
@@ -416,51 +542,15 @@ export async function computeFee(
    *     and it would flow straight into an invoice.
    */
   const applyReduction = (r: Reduction) => {
-    if (r.minSubtotalMinor != null && running < r.minSubtotalMinor) {
-      // Not silently dropped. The customer typed a code and is owed a reason.
-      skipped.push({
-        ruleCode: r.sourceCode,
-        because: `the amount is ${formatINR(running)}, below the ${formatINR(r.minSubtotalMinor)} this reduction requires`,
-      });
+    // The arithmetic, and every clamp it applies, lives in computeReduction()
+    // above — one implementation, shared with src/db/checkout.ts.
+    const outcome = computeReduction(running, r);
+    if (!outcome.applied) {
+      skipped.push({ ruleCode: r.sourceCode, because: outcome.because });
       return;
     }
-
-    let reduction: number;
-    if (r.basis === 'fixed_amount') {
-      // Zero is permitted here and forbidden by the CHECK on discount_rules.
-      // The difference is deliberate: a RULE worth nothing is a configuration
-      // mistake, while a reduction of zero is a real outcome — it is what a
-      // reduction clamped to the amount outstanding looks like when replayed by
-      // reproduce(), and refusing it would make a frozen quotation
-      // unreproducible for having been fully clamped.
-      if (r.amountMinor == null || !Number.isInteger(r.amountMinor) || r.amountMinor < 0) {
-        throw new FeeError('reduction_incomplete', `Reduction ${r.sourceCode} is a fixed amount with no whole, non-negative amount in paise.`);
-      }
-      reduction = r.amountMinor;
-    } else {
-      if (r.percentPpm == null || !Number.isInteger(r.percentPpm) || r.percentPpm <= 0 || r.percentPpm > PPM) {
-        throw new FeeError(
-          'reduction_incomplete',
-          `Reduction ${r.sourceCode} is a percentage and its rate is not between 1 and ${PPM} parts-per-million.`
-        );
-      }
-      // applyFactor(), not a re-implementation. It is the only multiplier in
-      // this codebase and it is where the BigInt and the half-up rounding live.
-      reduction = applyFactor(running, r.percentPpm);
-    }
-
-    const notes: string[] = [r.because].filter(Boolean);
-    if (r.maxReductionMinor != null && reduction > r.maxReductionMinor) {
-      reduction = r.maxReductionMinor;
-      notes.push(`capped at ${formatINR(r.maxReductionMinor)} by the policy`);
-    }
-    const outstanding = Math.max(running, 0);
-    if (reduction > outstanding) {
-      reduction = outstanding;
-      notes.push('limited to the amount outstanding, so the total cannot fall below zero');
-    }
-
-    const amount = -reduction;
+    const notes = outcome.notes;
+    const amount = -outcome.reductionMinor;
     running += amount;
     adjustment += amount;
     if (r.source === 'discount') discountTotal += amount;
@@ -718,6 +808,33 @@ export async function createFramework(
   return row;
 }
 
+/**
+ * Attach the service's own words to a candidate rule before it is judged.
+ *
+ * A rule may be called RULE-17 and point at the 'MMAKF-FEE-MEM-ATHLETE' service,
+ * and judging it on its own code alone would let the most obvious student
+ * membership in the catalogue through under a neutral name. One small read, on
+ * a path that runs when somebody authors or publishes a framework — never in
+ * computeFee(), which prices thousands of times more often.
+ */
+async function withServiceNames(
+  db: DB,
+  candidate: RuleCandidate,
+  serviceId: number | null
+): Promise<RuleCandidate> {
+  if (serviceId == null) return candidate;
+  const [svc] = await db.select({
+    code: s.services.code, title: s.services.title, category: s.services.category,
+  }).from(s.services).where(eq(s.services.id, serviceId)).limit(1);
+  if (!svc) return candidate;
+  return {
+    ...candidate,
+    serviceCode: svc.code ?? null,
+    serviceTitle: svc.title ?? null,
+    serviceCategory: (svc.category as string | null) ?? null,
+  };
+}
+
 export async function addRule(
   db: DB, ctx: AuditContext, frameworkId: number,
   rule: {
@@ -752,6 +869,30 @@ export async function addRule(
     throw new FeeError('bad_factor', 'Factors are integer parts-per-million. ×1.25 is 1250000.');
   }
 
+  // ── A STUDENT DOES NOT PAY A MEMBERSHIP FEE FOR BEING A STUDENT ──
+  //
+  // Enforced HERE, at the domain layer, and not in the admin form. A rule that
+  // cannot be created cannot be displayed, exported, cloned, quoted, invoiced or
+  // seeded — every one of those reads rows this refusal prevents from existing.
+  // /admin/fees clones a framework by copying its rules back through THIS
+  // function, so a clone cannot smuggle one across either.
+  //
+  // The service is resolved first because a rule may carry a bland code and
+  // point at 'MMAKF-FEE-MEM-ATHLETE'. See src/db/student-rule.ts for why the
+  // predicate turns on who pays rather than on the word "membership" — a coach
+  // membership is legitimate and must stay creatable.
+  const verdict = classifyFeeRule(await withServiceNames(db, {
+    code: rule.code,
+    label: rule.label,
+    kind: rule.kind,
+    audience: rule.audience ?? null,
+    conditions: rule.conditions ?? {},
+    amountMinor: rule.amountMinor ?? null,
+  }, rule.serviceId ?? null));
+  if (verdict.studentCharge) {
+    throw new FeeError('student_charge_refused', verdict.refusal as string);
+  }
+
   const [row] = await db.insert(s.feeRules).values({
     frameworkId,
     code: rule.code,
@@ -784,7 +925,9 @@ export async function publishFramework(db: DB, ctx: AuditContext, frameworkId: n
     throw new FeeError('already_published', `Framework ${framework.code} is already ${framework.status}.`);
   }
 
-  const rules = await db.select({ id: s.feeRules.id }).from(s.feeRules)
+  // The WHOLE rule, not just its id. Publishing is the moment a framework
+  // starts pricing real requests, and the scan below needs something to read.
+  const rules = await db.select().from(s.feeRules)
     .where(eq(s.feeRules.frameworkId, frameworkId));
   if (!rules.length) {
     // An empty published framework prices nothing and would silently send every
@@ -795,14 +938,61 @@ export async function publishFramework(db: DB, ctx: AuditContext, frameworkId: n
     );
   }
 
-  await db.update(s.feeFrameworks)
+  // ── THE SECOND GATE, AND THE MORE IMPORTANT ONE ──
+  //
+  // addRule() catches an author. THIS catches a seed script, a migration, a
+  // restored backup or a hand-written INSERT — anything that put a row in
+  // `fee_rules` without passing through this module at all. Publishing is the
+  // only moment at which every rule in a framework is necessarily read, and it
+  // is the moment a framework acquires the power to charge somebody, so it is
+  // the right place to insist.
+  //
+  // EVERY offender is named, not just the first. An author who fixes one rule,
+  // re-publishes, and is told about the next one learns to distrust the tool.
+  const candidates: RuleCandidate[] = [];
+  for (const r of rules) {
+    candidates.push(await withServiceNames(db, {
+      code: r.code, label: r.label, kind: r.kind,
+      audience: r.audience ?? null, conditions: r.conditions ?? {},
+      amountMinor: r.amountMinor ?? null,
+    }, r.serviceId ?? null));
+  }
+  const refused = findStudentCharges(candidates);
+  if (refused.length) {
+    throw new FeeError(
+      'student_charge_refused',
+      `Framework ${framework.code} cannot be published: ${refused.length} of its ${rules.length} rules ` +
+      'would charge somebody for being a student, and publishing is what would give them the power to do it. ' +
+      'A student does not pay a membership fee for being a student.\n\n' +
+      refused.map((x, i) => `${i + 1}. ${x.verdict.refusal}`).join('\n\n')
+    );
+  }
+
+  // THE DRAFT CONDITION IS PART OF THE STATEMENT, not just of the read above.
+  //
+  // The check at the top of this function is a SELECT, and two concurrent
+  // publishes both pass a SELECT. Publishing twice would move publishedAt and
+  // publishedByUserId to the second caller — rewriting who froze the
+  // federation's prices and when — and would write two audit rows for one
+  // event. Correlating the condition into the UPDATE closes the window: exactly
+  // one caller changes a row, and the other is told so.
+  const [published] = await db.update(s.feeFrameworks)
     .set({
       status: 'published',
       publishedAt: new Date(),
       publishedByUserId: ctx.principal.userId ?? null,
       updatedAt: new Date(),
     })
-    .where(eq(s.feeFrameworks.id, frameworkId));
+    .where(and(eq(s.feeFrameworks.id, frameworkId), eq(s.feeFrameworks.status, 'draft')))
+    .returning({ id: s.feeFrameworks.id });
+
+  if (!published) {
+    throw new FeeError(
+      'already_published',
+      `Framework ${framework.code} is no longer a draft — somebody else published it. ` +
+      'It is published once, by one person, and that record stands.'
+    );
+  }
 
   await writeAudit(db, ctx, {
     entityType: 'fee_framework', entityId: frameworkId, action: 'approve',
@@ -857,24 +1047,71 @@ export async function issueQuote(
     reductions: input.reductions,
   });
 
-  // Re-version an existing quote for the same request rather than creating a
-  // second quote, so a request has one quotation with a history.
-  let quote: any = null;
-  if (input.requestId != null) {
+  // ── ONE QUOTATION PER REQUEST ────────────────────────────────────────────
+  //
+  // Re-version an existing quotation for the same request rather than opening a
+  // second one, so a request has ONE quotation with a history.
+  //
+  // The read below is a courtesy, not the guarantee. It used to be the whole of
+  // it — a SELECT, and an INSERT when it found nothing — and two concurrent
+  // callers both pass a SELECT. Two administrators pressing "issue" on the same
+  // request, or a retried workflow step, therefore opened two quotations, each
+  // numbering its versions from 1, and the supersede below (scoped to one
+  // quote_id) left BOTH carrying a live `issued` version. The federation would
+  // have been quoting two prices at once with nothing in the schema saying which
+  // one the school was given.
+  //
+  // `quotes_request_uk` (migration 0048) is the guarantee. The loser of the race
+  // is refused by Postgres, reads the winner's row and re-versions THAT — so two
+  // concurrent callers produce one quotation with two versions, which is the
+  // true history of what happened.
+  const findQuoteByRequest = async () => {
+    if (input.requestId == null) return null;
     const rows = await db.select().from(s.quotes)
       .where(eq(s.quotes.requestId, input.requestId)).limit(1);
-    quote = rows[0] ?? null;
-  }
+    return rows[0] ?? null;
+  };
+
+  let quote: any = await findQuoteByRequest();
   if (!quote) {
     const ref = await allocateFederationId(db, 'QUO', new Date().getUTCFullYear());
-    const [created] = await db.insert(s.quotes).values({
-      ref,
-      requestId: input.requestId ?? null,
-      institutionId: input.institutionId ?? null,
-      personId: input.personId ?? null,
-      createdByUserId: ctx.principal.userId ?? null,
-    }).returning();
-    quote = created;
+    let created: any = null;
+    try {
+      // ON CONFLICT DO NOTHING rather than catching the violation, because
+      // issueQuote() is called INSIDE A TRANSACTION by autoQuoteApplication().
+      // A raised unique violation aborts the whole transaction in Postgres, and
+      // the recovery read below would then fail too — the conflict has to be
+      // absorbed by the statement, not by the caller.
+      const rows = await db.insert(s.quotes).values({
+        ref,
+        requestId: input.requestId ?? null,
+        institutionId: input.institutionId ?? null,
+        personId: input.personId ?? null,
+        createdByUserId: ctx.principal.userId ?? null,
+      }).onConflictDoNothing().returning();
+      created = rows[0] ?? null;
+    } catch (err) {
+      // A driver that raises anyway. Outside a transaction the read below still
+      // recovers; inside one this rethrows, which is the safe direction.
+      if (!isUniqueViolation(err)) throw err;
+    }
+
+    // Somebody else opened the quotation for this request between the read and
+    // the write. Join theirs. Re-reading rather than keeping the loser's own
+    // view is the point: the winner's reference is the one the school sees.
+    quote = created ?? await findQuoteByRequest();
+
+    if (!quote) {
+      // Not the request index, then — the conflict was on the reference, which
+      // means the federation id allocator handed the same number out twice.
+      // That is not a race to absorb; it is a fault to stop on, and stopping
+      // here means nothing was issued.
+      throw new FeeError(
+        'quote_not_opened',
+        'A quotation could not be opened for this request and no existing one could be read. ' +
+        'Nothing has been issued and nothing has been charged. This needs a person.'
+      );
+    }
   }
 
   const existing = await db.select({ v: s.quoteVersions.version }).from(s.quoteVersions)
@@ -1251,8 +1488,12 @@ export async function explainQuote(db: DB, principal: Principal, quoteVersionId:
       if (l.kind === 'multiplier' || l.kind === 'tax') {
         return `${l.label}: ×${(l.factorPpm / PPM).toFixed(4)} → ${formatINR(l.runningTotalMinor)}`;
       }
-      if (l.quantity != null) {
-        return `${l.label}: ${l.quantity} × ${formatINR(l.unitAmountMinor ?? 0)} = ${formatINR(l.amountMinor)}`;
+      // BOTH figures, or neither. `formatINR(l.unitAmountMinor ?? 0)` printed
+      // '3 × ₹0.00 = ₹1,200.00' for a stored line that carries a quantity but no
+      // unit amount — arithmetic that does not hold, with a fabricated zero in the
+      // middle of it. A narrative nobody can check is worse than a shorter one.
+      if (l.quantity != null && l.unitAmountMinor != null) {
+        return `${l.label}: ${l.quantity} × ${formatINR(l.unitAmountMinor)} = ${formatINR(l.amountMinor)}`;
       }
       return `${l.label}: ${formatINR(l.amountMinor)}`;
     }),

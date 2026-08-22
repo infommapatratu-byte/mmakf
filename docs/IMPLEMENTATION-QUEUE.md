@@ -38,51 +38,114 @@ missing.**
 
 ---
 
-## 0a — A registration step that collects a structured address
+## 0a, 0b, 0c — SHIPPED 17 August 2026
 
-**Added 17 August 2026, and placed above the coach form because it is the same
-defect one layer down.**
+All three identity surfaces are built. Recorded here rather than deleted,
+because a queue that quietly loses its history cannot be checked against what it
+promised.
 
-`src/db/geography.ts` and `src/db/identity.ts` exist, are gated, audited and
-covered by 99 tests, and **nothing in `src/pages` calls either.** Registration
-still collects a free-text city. Every member entered between now and this item
-shipping is a member whose address has to be re-resolved later.
+| Was | Now |
+|---|---|
+| 0a — a registration step collecting a structured address | **Built.** `LOCATION_FIELDS` in `lib/registration.ts`, rendered through `isOffered()` so an empty register produces no empty select, and `/api/geography/resolve` behind the cascade. Ambiguity is returned to the form as a CHOICE (`locality_ambiguous`), never resolved silently. |
+| 0b — screens for the identity queues | **Built.** `/admin/duplicates` and `/admin/profile-changes`, both scope-filtered in SQL, both demanding a reason, both surfacing the module's refusals as sentences rather than 500s. |
+| 0c — guardian and parent surfaces | **Built.** `/my/family`, which takes no identifier and puts every field behind its own `guardianCan()` call. |
 
-- `resolveArea()` behind a step in the membership form — country → state →
-  district, each narrowing the next through `within`
-- the ambiguity case rendered as a CHOICE, not silently resolved
-- `setPersonAddress()` on submission, and `addContact()` for email and phone
-
-**Unblocks:** coach matching by travel radius, geographic dashboards, the India
-map, state and district reporting — all of which currently have no civil
-geography to read.
+Plus, unqueued but in the same wave: twelve domain event types and their
+producers, closing the EVENT link `SYSTEM-WIRING-MATRIX.md` §2.22 recorded as
+absent.
 
 ---
 
-## 0b — The identity queues need screens
+## 0d, 0e — SHIPPED 17 August 2026
 
-`duplicateQueue()` and `profileChangeQueue()` are written, scope-filtered in SQL
-and tested. Neither has a page, so a duplicate raised at registration is raised
-into a table nobody opens.
+| Was | Now |
+|---|---|
+| 0d — registration must actually create a person | **Built.** `src/db/provisioning.ts` → `provisionFromRegistration()`, called from the approval path in `api/queue/decide.ts`. Person, address, contacts, consent, guardian claim and duplicate detection, all idempotent. 26 tests. |
+| 0e — granting a guardian capability has no screen | **Built.** `/admin/guardianships`, gated on `guardian:verify`, with the double gate on the medical and safeguarding capabilities both enforced and *stated*. 21 tests. |
 
-- `/admin/duplicates` — the pair, the signals that fired, and the three
-  decisions. It must show WHICH signals, not just the score.
-- `/admin/profile-changes` — the request, the evidence, and the refusal when the
-  record moved underneath it
-- both gated on `duplicate:review` / `profilechange:decide`
+### Two things 0d turned up that were worse than the gap itself
+
+- **`DecisionResult` never had a `record` field.** `api/queue/decide.ts` had been
+  reading `(result as any).record` to find the person a membership should be
+  issued to since the day it was written. It was `undefined` on every request, so
+  the approval path always took its *"this application carries no linked person
+  record — link it to a person and re-run"* branch. **No membership had ever been
+  issued by that route**, and the message told the office to perform an action
+  nothing in the system could perform. `src/lib/queue.ts` now returns the decided
+  row, and `decide.ts` destructures it out of the response — it is the
+  applicant's name, date of birth, email and address, and three response bodies
+  were built by spreading that object.
+- **Consent needed a version and MMAKF has published no policy.**
+  `consent_records.policy_version` is NOT NULL. Writing `'1.0'` would have minted
+  a federation instrument in a migration. It records
+  `wording:<digest of the sentence the applicant saw>` instead, prefixed so
+  nobody mistakes it for a published policy reference, and derived from the
+  `CONSENTS` array so the wording and the version cannot drift.
+
+Also: a minor's guardian consent is recorded with capacity **`staff`**, not
+`guardian`. `recordConsent()` checks `guardianCan('give_consent')` and would
+refuse — correctly, since the relationship is only asserted. What actually
+happened is that the office recorded a ticked box in which somebody *claimed* to
+be the guardian, and that is what the row says, with the claim kept as evidence.
 
 ---
 
-## 0c — Guardian and parent surfaces
+## 0f — What 0d exposed next: nothing consumes the events, and no fee is charged
 
-`guardianCan()` is the single question every parent-facing screen must ask, and
-there is no parent-facing screen. The `PARENT` role has existed in `rbac.ts`
-since before this wave and has never had anywhere to go.
+Registration now reaches the register. Two joints downstream are still open, and
+neither is a defect in this wave so much as the next link in the chain:
 
-- a guardian's dependants list, built from `dependantsOf()`
-- the capability grants visible to the guardian, so they can see what they hold
-- **every read gated on `guardianCan()`**, never on the `PARENT` role alone —
-  that is the whole point of the capability table
+- **No consumer reacts to the twelve identity events.** They are published and
+  nothing walks the feed. Same gap as queue item 2, now with more producers.
+- **An approved registration issues a membership only for the three issuable
+  categories** (`instructor`, `dojo`, `official`) and takes no money at any
+  point. Whether registration should cost anything is a federation decision, and
+  the fee framework ships empty — so this is correct today and will need revisiting
+  the day MMAKF publishes a fee.
+- **`verifyContact()` has no caller.** Contacts are created unverified, as they
+  should be, and there is no email or SMS transport to verify them through. Until
+  there is, every contact in the register stays honestly unproven.
+
+---
+
+## ~~0d — Registration must actually create a person~~ (shipped — kept for the record)
+
+**The gap the wave above exposed rather than closed, and the reason 0a is only
+half of what it looks like.**
+
+`src/pages/api/register.ts` queues an application to a Redis list.
+`createPersonForSource()` in `src/db/federation.ts` is written, tested, and has
+**no caller anywhere in `src/`**. So no membership application has ever become a
+`persons` row by any automatic path.
+
+The consequence for the identity foundation specifically: the structured address
+and the verified contacts are captured onto the application record and stop
+there, because there is no person to hang a `person_addresses` or
+`person_contacts` row from. The same is true of `detectPersonDuplicates()`,
+which takes a `personId`.
+
+- an approval path on the membership queue that calls `createPersonForSource()`
+- then `setPersonAddress()` and `addContact()` from what the application carried
+- then `detectPersonDuplicates()`, which RAISES and must never block
+- the consent given at registration written through `recordConsent()` with the
+  policy version it was given against
+
+**Unblocks:** everything the identity foundation was built for. Until this
+exists, `person_contacts`, `person_addresses` and `duplicate_candidates` can
+only be populated by hand.
+
+---
+
+## 0e — Granting a guardian capability has no screen
+
+`/my/family` reads `guardianCan()` correctly and will show a verified
+guardianship holding **nothing**, because `grantGuardianCapability()` is gated on
+`guardian:verify` and no admin surface calls it.
+
+- an admin screen to verify a claimed relationship and grant capabilities one at
+  a time
+- it must respect the double gate: `view_medical` and `view_safeguarding` need
+  `medical:read` / `safeguarding:write` ON TOP of `guardian:verify`
 
 ---
 
@@ -326,92 +389,146 @@ Queued here so it does not sit as an unowned data state forever. See
 
 # Addendum — the marketplace queue
 
-Added 17 August 2026, after migration 0029. Read the addendum in
-[IMPLEMENTATION-STATUS.md](IMPLEMENTATION-STATUS.md) first: the marketplace
-engine is built and tested, and **no surface was added**. That is the shape of
-everything below.
+Updated 17 August 2026, after the surfaces were built. The previous version of
+this addendum listed nine items; six have shipped and are recorded below rather
+than deleted, because a queue that quietly loses its history cannot be checked
+against what was promised.
 
-Order matters. Each item unblocks the next.
+| Was | Now |
+|---|---|
+| 1 — `/seller/apply` and the seller portal | **Built.** `/seller/apply`, and `/portal/seller` × 4 pages. |
+| 2 — The admin marketplace console | **Built.** `/admin/marketplace` with six queues, `/[id]` Seller 360, commissions, settlements. |
+| 4 — Public storefront | **Partly.** `/shop/seller/[slug]` and `/shop/product/[ref]` built. Category landing pages are not — see item 2 below. |
+| 6 — Trust computation | **Built.** `src/db/marketplace-trust.ts` — reviews, moderation, rating roll-ups, performance snapshots, fraud review. |
+| 9 — Returns test coverage | **Built.** `tests/marketplace-returns.test.ts`, 27 tests. |
+| 3 — Commission configuration | **Reachable.** The screens exist; the DECISIONS remain MMAKF's. See [MARKETPLACE-POLICY.md](marketplace/MARKETPLACE-POLICY.md). |
 
-## 1 — `/seller/apply` and the seller portal
+---
 
-**Why first.** `registerAsSeller()` is built, tested and unreachable. Until
-there is a form, the marketplace has no sellers, and every item below has
-nothing to operate on.
+## 1 — Shipping zone configuration
 
-Needs: `/seller/apply`, then `/portal/seller/` — dashboard, products (with
-variants), inventory, orders, returns, settlements, store profile, documents.
-Every function is named in `docs/marketplace/`.
+**The highest-priority gap, and it is costing money now.**
 
-**Unblocks:** everything.
+`shipping_zones` and `shipping_methods` exist and `checkout()` reads them. There
+is no seller surface to create one, so `resolveShipping()` finds no zone and
+returns **zero**. Every seller on the marketplace is currently absorbing
+carriage silently.
 
-## 2 — The admin marketplace console
+Needs: a section on `/portal/seller` — zone by states and postcode prefixes,
+methods with a kind and a price. `return-policy/set` is already wired; this is
+the same shape.
 
-`sellerDossier()` returns the whole Seller 360 and nothing renders it.
+## 2 — Category landing pages and marketplace search
 
-Needs: `/admin/marketplace` (hub), `/marketplace/sellers`, `/sellers/[id]`
-(the 360), `/commissions`, `/settlements`, `/disputes`, `/brands`,
-`/moderation`.
+`/shop/category/[...path]` does not exist, so an adopted taxonomy has nowhere to
+be browsed. `marketplace_categories.path` is a materialised ancestry, so a
+subtree is one prefix match.
 
-**Unblocks:** approval, verification and every federation control. Without this
-the federation cannot govern the marketplace at all, whatever the engine does.
+Also: the filters the brief names — Shotokan, kata, kumite, beginner,
+competition, children, adults — map onto `listings.discipline`,
+`shotokanRelevant` and `ageMinYears`, all of which are populated and none of
+which is searchable yet.
 
-## 3 — Commission configuration, then the first settlement
+## 3 — Bulk product import pipeline
 
-Once (2) exists: adopt the taxonomy, publish a commission schedule, set the SLA
-windows, publish the seller agreement. Until then **every sale accrues a
-`commission_gaps` row and no settlement can close** — which is correct, and
-which is also a growing backlog.
+Staging tables exist. Needs validate → preview → dedupe → category-map →
+moderate → publish. Deliberately after (1) and (2): importing five hundred
+products into a marketplace whose categories cannot be browsed is five hundred
+items nobody will find.
 
-See [MARKETPLACE-POLICY.md](marketplace/MARKETPLACE-POLICY.md) — ten decisions,
-each with the exact function that records it.
-
-## 4 — Public storefront and category routes
-
-`publicStorefront()` and `publicListings()` are built. Needs
-`/shop/seller/[slug]`, `/shop/category/[...path]`, `/shop/brand/[slug]`,
-`/shop/product/[ref]`, with structured data and canonical URLs. Draft, rejected
-and quarantined items must not be indexed — the predicate already excludes them
-from the query, so this is a routing and metadata task, not a filtering one.
-
-## 5 — Shipping configuration
-
-Zones and methods exist and `checkout()` reads them. With no surface, every
-seller resolves to **zero carriage** — they are absorbing it silently. This is
-the highest-priority item that is quietly costing sellers money.
-
-## 6 — Trust computation
-
-`marketplace-trust.schema.ts` has the tables. Needs: review moderation queue,
-`computeSellerPerformance()` writing snapshots, and the seller/product rating
-roll-ups onto `sellers.ratingAvgBps`.
-
-Note the constraint already in the schema: a score is **null** below a minimum
-order count. A seller with two orders and one return does not have a 50% return
-rate in any sense a human would defend.
-
-## 7 — Payout provider adapter
+## 4 — Payout provider adapter
 
 `createPayout()` writes the instruction with a database-enforced idempotency
-key; `markPayoutPaid()` is currently operated by hand. A provider adapter goes
-behind the same abstraction as `src/lib/payments/`.
+key; `markPayoutPaid()` is operated by hand from `/admin/marketplace/settlements`.
+An adapter goes behind the same abstraction as `src/lib/payments/`.
 
-## 8 — Bulk product import pipeline
+## 5 — Policy document authoring
 
-Staging tables exist. Needs the validate → preview → dedupe → category-map →
-moderate → publish pipeline. Deliberately after (1) and (2): importing five
-hundred products into a marketplace with no moderation console is how five
-hundred unreviewed listings go live.
+`marketplace_policies` and `policy_versions` ship empty **by design** — see
+MARKETPLACE-POLICY.md. What is missing is the surface to publish a version and
+record seller acceptance against it.
 
-## 9 — Returns test coverage
+## 6 — Notifications for marketplace events
 
-`src/db/returns.ts` is the one module in 0029 with no test file. The inspection
-arithmetic, the frozen eligibility and the refund ceiling are all enforced in
-code and none is asserted. Should arrive with (1), since the flows become
-reachable then.
+The brief lists them per audience — seller, buyer, admin. `domain_events` and
+`notification_deliveries` exist; nothing publishes a marketplace event yet.
+
+## 7 — Verification document upload
+
+`seller_documents` exists and `sellerDossier()` reads it. There is no upload
+control on `/seller/apply` or the seller portal, so verification currently rests
+on evidence supplied out of band. `src/lib/uploads.ts` and `src/lib/storage.ts`
+are the existing path.
 
 ## Deferred deliberately
 
-**Seller API and webhooks.** The brief says "eventually support". Building a
-catalogue/inventory/order API before any seller has used the portal would be
-designing an integration surface against no usage at all.
+**Seller API and webhooks.** The brief says "eventually support". Designing an
+integration surface before any seller has used the portal would be designing
+against no usage at all.
+
+---
+
+## Scheduling queue — CLOSED items, 17 August 2026 (evening)
+
+Items 1, 2, 4 and 8 above are done. Recorded here rather than deleted, because
+the reason each existed is the reason it must not come back.
+
+- **1. No API route** — CLOSED. `src/pages/api/schedules/[...action].ts`, 15
+  actions, 22 tests. GET public and draft-proof; POST authenticated with the
+  module's own scope check and no second authorisation model.
+- **2. `SCHEDULE_CHANGED` orphan** — CLOSED by retirement. It duplicated
+  `CLASS_SESSION_CANCELLED` / `CLASS_SESSION_RESCHEDULED`, which have producers,
+  a consumer and resolvable audiences. Tombstone comment left in the catalogue.
+- **4. Batch resolution limited to one day** — CLOSED. `directoryRange()` and the
+  `directory-range` read, capped at 14 days, with a stated per-club standing so
+  "closed all weekend" and "has published nothing" cannot be conflated.
+- **8. `deliverQueuedPush()` uncalled** — CLOSED. Step 6 of the reconcile cron.
+
+## Still open
+
+- **5. No published-week materialisation.** Twelve queries per register render,
+  uncached. Correct and bounded. The lever if the register grows past a few
+  hundred clubs; invalidated on `SCHEDULE_PUBLISHED`, which now has a live
+  consumer path to hang it on.
+- **6. Only the headquarters has schedule rows.** Federation data entry through
+  `/admin/schedules`. The self-service onboarding wizard (location → operating
+  days → hours → seasons → classes → coaches → exceptions → preview → publish)
+  does not exist.
+- **3. Club-level schedule change notifies no wider audience.** BLOCKED, not
+  skipped: "everyone who trains at this club" is not a query this system can
+  answer honestly. Needs queryable club membership first. Do not invent the
+  audience.
+- **Venue-scoped and class-scoped batch resolution.** `directoryDay()` and
+  `directoryRange()` cover dojo scope. A room-level or class-level directory
+  would need the same treatment; nothing asks for it yet.
+
+---
+
+## Scheduling queue — 17 August 2026 (late)
+
+### CLOSED
+
+- **Club-level notification.** Recorded here twice as "blocked on queryable club
+  membership". **That was wrong and the correction matters:** `persons.dojoId`
+  makes "everyone who trains at this club" a QUERY, `NOTIFIABLE.SCHEDULE_PUBLISHED`
+  is addressed to `unit_members`, and `resolveRecipients()` implements it. Proven
+  end to end by `tests/club-notification.test.ts` (8 tests): two members of a club
+  get inbox rows, a member of another club gets none, a person who has left gets
+  none, repeat drains do not duplicate, and a state or national publication
+  reaches **nobody** — that last one being a deliberate refusal, now asserted
+  rather than assumed.
+- **Onboarding wizard.** `/admin/schedules/start` + `src/lib/week-form.ts`.
+  See [docs/scheduling/README.md](scheduling/README.md#onboarding-the-first-week-a-club-publishes).
+
+### Still open
+
+- **No published-week materialisation.** Twelve queries per register render,
+  uncached — correct and bounded. **Deliberately not built:** it needs a new
+  table, which needs a migration plus the companion `*_data_api_lockdown.sql`
+  every table-adding migration requires, in a directory a parallel workstream is
+  actively numbering. The trigger to build it is a register in the hundreds of
+  clubs, and `SCHEDULE_PUBLISHED` now has a live consumer path to hang the
+  invalidation on.
+- **Only the headquarters has schedule rows in production.** No longer an
+  engineering gap — the wizard is the answer, and it is data entry now.
+- **Venue-scoped and class-scoped batch resolution.** Nothing asks for it yet.

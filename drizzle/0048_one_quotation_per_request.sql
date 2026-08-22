@@ -1,0 +1,61 @@
+-- ONE QUOTATION PER TRAINING REQUEST, enforced by the database.
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- WHAT WAS WRONG
+-- ─────────────────────────────────────────────────────────────────────────────
+--
+-- src/db/fees.ts issueQuote() re-versions an existing quotation rather than
+-- opening a second one, and it decided which by doing this:
+--
+--     select * from quotes where request_id = $1 limit 1;   -- nothing found
+--     insert into quotes ...                                -- so open one
+--
+-- That is a SELECT followed by an INSERT with no constraint underneath it, and
+-- two concurrent callers both pass the SELECT. Two administrators pressing
+-- "issue" on the same request, a retried workflow step, or a double-submitted
+-- form therefore produced TWO quotations for one request — the first thing the
+-- federation's own idempotency rule forbids.
+--
+-- It is worse than a duplicate row, because issueQuote() supersedes previously
+-- issued versions WITHIN A QUOTE:
+--
+--     update quote_versions set status = 'superseded'
+--      where quote_id = $1 and status = 'issued';
+--
+-- With two quotations against one request, neither supersedes the other. The
+-- request then has TWO live `issued` versions, each numbered from 1, each with
+-- its own reference and its own total, and nothing in the schema says which one
+-- the school was actually given. Every surface downstream picks one:
+-- /learn/applications/{ref} showed the reference off one and the figure off the
+-- other, and /admin/pipeline counted the request as quoted at whichever total
+-- sorted last. A school reading a reference beside somebody else's amount is
+-- not a display fault, it is the federation quoting two prices at once.
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- WHAT THIS DOES
+-- ─────────────────────────────────────────────────────────────────────────────
+--
+-- A PARTIAL unique index. Partial, because `quotes.request_id` is nullable on
+-- purpose: a quotation raised for a person or an institution directly — the
+-- individual and marketplace paths — has no training request, and two of those
+-- are two different quotations, not a conflict. NULLs are distinct in a plain
+-- unique index anyway; the WHERE clause says so out loud and keeps the index off
+-- the rows it has no opinion about.
+--
+-- With this in place issueQuote() can stop hoping. Its INSERT either wins or is
+-- refused, and on a refusal it reads the winner's row and re-versions THAT — so
+-- two concurrent callers produce one quotation with two versions, which is the
+-- correct history of what happened.
+--
+-- APPLIED TO TODAY'S DATABASE THIS CHANGES NOTHING AND IS MEANT TO. MMAKF has
+-- published no fee framework, so no quotation has ever been issued and `quotes`
+-- is empty. The index is the guarantee that is in place BEFORE the first one is,
+-- which is the only time it can be added without a data clean-up first.
+--
+-- If it ever fails to build, that is the correct outcome and the message is the
+-- finding: duplicates already exist and a person has to decide which quotation
+-- the school was given. Silently keeping one would be this system choosing.
+
+CREATE UNIQUE INDEX IF NOT EXISTS "quotes_request_uk"
+  ON "quotes" ("request_id")
+  WHERE "request_id" IS NOT NULL;

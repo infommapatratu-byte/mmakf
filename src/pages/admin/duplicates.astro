@@ -87,7 +87,11 @@ Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
 
 const DONE_MESSAGES: Record<string, string> = {
   same: 'Recorded as the same person. No records were merged — see the notice above.',
-  distinct: 'Recorded as two different people. The pair will not be raised again.',
+  // NOT "the pair will not be raised again". It will: the partial unique index
+  // covers status = 'open' only, and detectPersonDuplicates() checks nothing
+  // else, so the next detection run raises the same pair afresh. A reviewer told
+  // otherwise stops expecting it and works the same candidate twice.
+  distinct: 'Recorded as two different people. The pair may be raised again if the detector runs and the matching signals still hold — a decision of "distinct" does not currently suppress it.',
   merged: 'A merge decision was RECORDED. No records were merged — see the notice above.',
 };
 
@@ -145,7 +149,14 @@ if (Astro.request.method === 'POST') {
         candidateId,
         decision,
         reason: postedReason,
-        mergedIntoId: survivorRaw ? Number(survivorRaw) : null,
+        // CLEARED on a 'distinct' decision. The survivor select sits in the same
+        // form as all three buttons, so a reviewer who picks a record, changes
+        // their mind and presses "Two different people" would otherwise file a
+        // row — and publish an event — reading "these are two different people,
+        // and the surviving record is #2". decideDuplicate() also refuses that
+        // combination now, so this is the courteous half of a guard that holds
+        // either way.
+        mergedIntoId: decision === 'distinct' ? null : (survivorRaw ? Number(survivorRaw) : null),
       });
       return Astro.redirect(`${SELF}?done=${decision}`, 303);
     } catch (err: any) {
@@ -258,7 +269,11 @@ const fmtDate = (v: Date | string | null) => {
 <AdminShell
   title="Duplicate records"
   requires="duplicate:review"
-  intro="Two records that may describe one person. Raised automatically; decided only by a person."
+  {/* NOT "raised automatically". detectPersonDuplicates() is written and tested
+      and is called from nowhere in src/, so nothing raises a candidate outside
+      the test suite — an administrator told otherwise reads an empty queue as
+      "no duplicates exist" rather than "detection has never run". */}
+  intro="Two records that may describe one person. Decided only by a person — and note that no surface runs the detector yet, so this queue is not yet fed by anything."
 >
   {doneMessage && (
     <p class="notice notice--done" role="status">{doneMessage}</p>
@@ -289,7 +304,8 @@ const fmtDate = (v: Date | string | null) => {
   {readFailed && (
     <ErrorState
       title="The duplicate queue could not be read"
-      description="The register is configured but did not answer."
+      safe="Nothing was decided and no candidate changed. Reading this queue writes nothing."
+      body="The register is configured but did not answer."
       detail={failureDetail}
       retryHref={SELF}
     />
@@ -298,7 +314,8 @@ const fmtDate = (v: Date | string | null) => {
   {!notConfigured && !readFailed && candidates.length === 0 && (
     <EmptyState
       title="No suspected duplicates are waiting"
-      description="Nothing has scored high enough to be worth a person's time. This is the ordinary state, not a sign that detection is off — candidates are raised as contacts are added and people are registered."
+      body="Nothing is on the queue. Note that no surface calls the detector yet — detectPersonDuplicates() exists and is tested, and until a registration path runs it this queue stays empty whether or not the register holds duplicates."
+      action={{ label: 'Back to the member register', href: h('/admin/membership') }}
     />
   )}
 
@@ -345,8 +362,20 @@ const fmtDate = (v: Date | string | null) => {
             ) : (
               /* The queue named a person the register no longer returns. Said
                  plainly rather than rendered as an empty card, because the two
-                 are different facts. */
-              <p>This record could not be read. It may be outside your scope.</p>
+                 are different facts.
+
+                 IT DOES NOT BLAME SCOPE. This used to read "It may be outside
+                 your scope", which cannot be the cause: the lookup above is
+                 deliberately unscoped, so a pair straddling two states shows
+                 both people to both administrators. The only way this branch is
+                 reached is a dangling reference — and attributing a data-
+                 integrity problem to a permission boundary hides it from the one
+                 person looking straight at it. */
+              <p>
+                The register no longer holds a person with this id. That is a
+                data-integrity problem rather than a permission boundary, and it
+                is worth reporting.
+              </p>
             )}
           </section>
         ))}
@@ -365,8 +394,13 @@ const fmtDate = (v: Date | string | null) => {
           placeholder="What did you check, and what did it show?"
         ></textarea>
 
+        {/* RECORDS AN OPINION, and does not promise an effect. The label used to
+            ask which record "the federation should treat as authoritative",
+            which the system does not do — nothing anywhere reads mergedIntoId —
+            and which contradicted the standing notice a few lines above. */}
         <label for={`survivor-${c.id}`}>
-          If recording these as the same person, which record should the federation treat as authoritative?
+          If these are one person, which record do you consider authoritative?
+          (Recorded with your decision. Nothing on either record is changed.)
         </label>
         <select id={`survivor-${c.id}`} name="mergedIntoId">
           <option value="">Not stated</option>

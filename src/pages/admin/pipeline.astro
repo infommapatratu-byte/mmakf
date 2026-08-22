@@ -1,0 +1,1391 @@
+---
+// /admin/pipeline — the whole chain from a submitted application to a delivered
+// programme, seen from the office, with what is STUCK named rather than implied.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS SCREEN EXISTS WHEN /admin/applications AND /admin/quotes ALREADY DO
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Those two are REGISTERS. Each answers "what is in this table?" and neither
+// can answer "where does a request stop?", because the answer spans five
+// tables: institution_applications → training_requests → quotes/quote_versions
+// → contracts → training_programs. An administrator holding both registers open
+// still has to join them in their head, one school at a time, and the join they
+// most need is the NEGATIVE one — the applications that reached no quotation at
+// all. A row that does not exist appears in no register.
+//
+// So this page is the chain, and the chain's blockages. It writes nothing. Every
+// action it points at is taken on the screen that owns it: quotations are issued
+// and approved at /admin/quotes, fee rules are published at /admin/fees,
+// applications are decided at /admin/applications/{id}.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE THING THIS PAGE EXISTS TO SAY TODAY
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// MMAKF HAS PUBLISHED NO FEE FRAMEWORK. activeFramework() returns null, so
+// computeFee() can price nothing, so EVERY application in the federation is
+// waiting for a quotation that cannot be computed. That is not an error, it is
+// not an empty list, and it is not a display fault: it is the true operational
+// state of the federation, and the page says it in those words with the reason
+// and the fix attached — publish a framework at /admin/fees.
+//
+// The distinction matters because all three of the wrong renderings are
+// actively harmful. An error screen sends somebody to look for a bug that is
+// not there. An empty list reads as "nothing is waiting", which is the exact
+// opposite of the truth. And a figure — any figure, including zero — would be
+// invented, and zero reads as FREE.
+//
+// NOTHING ON THIS PAGE IS A NUMBER THIS PAGE MADE UP. Every count comes from a
+// query over rows; every amount is formatINR() over an integer-paise column
+// that a fee framework produced. Where there is no figure there is no figure,
+// and the reason is printed in its place.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTHORITY — FOUR ACTIONS, AND THE PAGE IS NOT DRAWN FROM ONE OF THEM
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The page is gated on 'engagement:read' because the chain starts at an
+// application. But the chain crosses three other authorities on its way, and
+// they are held by different people on purpose:
+//
+//   quote:read      the quotation bands
+//   finance:read    the money bands — invoices, entitlements
+//   membership:read the lapsing register
+//
+// A band whose action the account does not hold is NOT silently omitted: the
+// reader is told which band exists, and which action would open it. A screen
+// that quietly shrinks teaches its reader that they have seen everything.
+//
+// Rows are restricted by WHERE clauses built from visibleScopes(), never by
+// filtering an array afterwards. The institutional-application predicate is not
+// written twice any more: applicationsAwaitingQuotation() in
+// src/db/applications.ts owns the negative join AND its scope clauses, so the
+// federation's idea of who may see which application has one definition. An
+// account with no scope for an action gets 'none' and is told so, which is not
+// the same statement as "there is nothing".
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE GAP IN THE CHAIN IS REAL, AND IT IS NAMED RATHER THAN JOINED AROUND
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// There is NO foreign key from an order, a payment or an invoice to a contract,
+// a quotation or an institutional application. `orders` carries `personId` and
+// nothing else that could reach an institution; `contracts` carries no invoice.
+// Grep the schema: `contract_id` appears nowhere outside contracts' own
+// self-reference, and `application_id` on the commerce side does not exist.
+//
+// So the money leg of an institutional agreement is not connected to the leg
+// above it, and this page will not fabricate the join. The money bands read the
+// commerce register as its own queue and say plainly that they are not filtered
+// to the institutions above. Inventing a match on buyer name or email would
+// produce a number that looked like an answer and was not one.
+
+import AdminShell from '@/components/AdminShell.astro';
+import PageHeader from '@/components/PageHeader.astro';
+import Status from '@/components/Status.astro';
+import Table from '@/components/DataTable/Table.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import type { Column, Filter } from '@/components/DataTable/types';
+import { readTableQuery } from '@/components/DataTable/query';
+
+import { and, asc, desc, eq, inArray, ne, notInArray, or, sql } from 'drizzle-orm';
+import { isConfigured, db } from '@/db';
+import * as s from '@/db/schema';
+import * as ops from '@/db/operations.schema';
+import { identify } from '@/lib/session';
+import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import { activeFramework, formatINR } from '@/db/fees';
+import { blockedEntitlements, activationBacklog } from '@/db/entitlements';
+import { lapsingSoon } from '@/db/membership';
+import { applicationsAwaitingQuotation } from '@/db/applications';
+import { LIFECYCLES, statusOf } from '@/lib/status';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const configured = isConfigured();
+
+const mayReadEngagement = Boolean(principal) && canAnywhere(principal, 'engagement:read');
+const mayReadQuotes = Boolean(principal) && canAnywhere(principal, 'quote:read');
+const mayReadFinance = Boolean(principal) && canAnywhere(principal, 'finance:read');
+const mayReadMembership = Boolean(principal) && canAnywhere(principal, 'membership:read');
+const mayReadFramework = Boolean(principal) && canAnywhere(principal, 'feeframework:read');
+
+const engagementScopes = visibleScopes(principal, 'engagement:read');
+const quoteScopes = visibleScopes(principal, 'quote:read');
+// finance:read has no unit dimension to restrict on — see the money bands.
+const financeScopes = visibleScopes(principal, 'finance:read');
+
+/** How many applications the chain is computed over. Stated wherever it bites. */
+const CHAIN_LIMIT = 300;
+/** How many rows any one stuck queue lists. */
+const QUEUE_LIMIT = 100;
+
+const today = new Date().toISOString().slice(0, 10);
+
+/**
+ * The scope predicate for institution_applications.
+ *
+ * The same one applicationQueue() builds in src/db/applications.ts, written
+ * again here because this page needs it in a query that function does not
+ * offer — the LEFT JOIN that finds applications with NO quotation. Copying a
+ * predicate is a real cost; the alternative was reading every application into
+ * this process and filtering in JavaScript, which would put rows an account may
+ * not see into the memory of a page that renders them.
+ *
+ * `null` means national reach — no restriction. `'none'` means the account has
+ * no basis for seeing any application, which is NOT the same as there being
+ * none, and the page says which one it is looking at.
+ */
+function applicationScope(scopes: ReturnType<typeof visibleScopes>): any | null | 'none' {
+  if (scopes.kind === 'all') return null;
+  if (scopes.kind === 'none') return 'none';
+  const clauses: any[] = [];
+  if (scopes.states.length) clauses.push(inArray(ops.institutionApplications.stateUnitId, scopes.states));
+  if (scopes.districts.length) clauses.push(inArray(ops.institutionApplications.districtUnitId, scopes.districts));
+  if (scopes.institutions.length) clauses.push(inArray(ops.institutionApplications.institutionId, scopes.institutions));
+  // A dojo binding lands here with nothing to contribute: an institutional
+  // application has no dojo. Refusing is the fail-closed reading; an empty
+  // or() would be no WHERE at all, which widens to every row.
+  if (!clauses.length) return 'none';
+  return clauses.length === 1 ? clauses[0] : or(...clauses);
+}
+
+/** The same restriction expressed against `quotes`, which reaches through the institution. */
+function quoteScope(scopes: ReturnType<typeof visibleScopes>): any | null | 'none' {
+  if (scopes.kind === 'all') return null;
+  if (scopes.kind === 'none') return 'none';
+  const clauses: any[] = [];
+  if (scopes.institutions.length) clauses.push(inArray(s.quotes.institutionId, scopes.institutions));
+  if (scopes.states.length) {
+    clauses.push(inArray(
+      s.quotes.institutionId,
+      db().select({ id: s.institutions.id }).from(s.institutions)
+        .where(inArray(s.institutions.stateUnitId, scopes.states)) as any
+    ));
+  }
+  if (scopes.districts.length) {
+    clauses.push(inArray(
+      s.quotes.institutionId,
+      db().select({ id: s.institutions.id }).from(s.institutions)
+        .where(inArray(s.institutions.districtUnitId, scopes.districts)) as any
+    ));
+  }
+  if (!clauses.length) return 'none';
+  return clauses.length === 1 ? clauses[0] : or(...clauses);
+}
+
+/**
+ * Money, or nothing at all.
+ *
+ * null rather than a zero when there is no figure. A quotation carrying
+ * requiresManualQuote has NO number, and ₹0.00 in its place would read as free.
+ * The same helper the client portal uses, for the same reason.
+ */
+const money = (minor: unknown, currency: unknown = 'INR'): string | null => {
+  if (minor == null || typeof minor !== 'number' || !Number.isFinite(minor)) return null;
+  const cur = String(currency || 'INR');
+  return cur === 'INR' ? formatINR(minor) : `${cur} ${(minor / 100).toFixed(2)}`;
+};
+
+const day = (v: unknown): string | null => {
+  if (!v) return null;
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime())
+    ? null
+    : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+};
+
+/** Whole days between now and an instant, negative when it has passed. */
+const daysFromNow = (v: unknown): number | null => {
+  if (!v) return null;
+  const d = new Date(v as string);
+  if (Number.isNaN(d.getTime())) return null;
+  return Math.floor((d.getTime() - Date.now()) / 86_400_000);
+};
+
+// ── An application that stopped is not an application that is stuck ─────────
+//
+// A declined, withdrawn or expired application has REACHED ITS END. Counting it
+// among the requests waiting for a quotation would inflate the only number on
+// this page anybody acts on, and would hand somebody a list of schools to chase
+// that the federation has already answered.
+const CLOSED_STATUSES = ['declined', 'withdrawn', 'expired'] as const;
+
+// ── State ───────────────────────────────────────────────────────────────────
+
+let readError = false;
+let scopeRefusal: string | null = null;
+
+// The basis.
+let inForce: any = null;
+let publishedFrameworks = 0;
+let frameworkProblem: string | null = null;
+
+// The chain.
+type ChainRow = {
+  id: number;
+  ref: string;
+  institutionName: string;
+  status: string;
+  submittedAt: any;
+  requestId: number | null;
+  city: string | null;
+  stateName: string | null;
+  participantCount: number | null;
+  ownerRole: string | null;
+  // filled in below, from their own queries
+  quoteRef?: string | null;
+  quoteVersionId?: number | null;
+  quoteVersion?: number | null;
+  quoteStatus?: string | null;
+  quoteTotalMinor?: number | null;
+  quoteCurrency?: string | null;
+  quoteManual?: boolean;
+  quoteManualReason?: string | null;
+  contractRef?: string | null;
+  contractStatus?: string | null;
+  programCode?: string | null;
+  programStatus?: string | null;
+};
+
+let chain: ChainRow[] = [];
+let chainTruncated = false;
+
+// The stuck queues.
+let awaitingQuotation: any[] = [];
+let awaitingQuotationTotal = 0;
+let heldForApproval: any[] = [];
+let carryingNoFigure: any[] = [];
+let quoteProblem: string | null = null;
+
+let unpaidInvoices: any[] = [];
+let blocked: any[] = [];
+let backlog: any[] = [];
+let financeProblem: string | null = null;
+let financeScopeRefusal: string | null = null;
+
+let lapsing: any = null;
+let membershipProblem: string | null = null;
+
+if (configured && mayReadEngagement) {
+  const appFilter = applicationScope(engagementScopes);
+
+  if (appFilter === 'none') {
+    scopeRefusal =
+      'This account holds engagement:read, but at a scope that contains no institutional ' +
+      'application — a dojo binding, for instance, which an application does not sit inside. ' +
+      'That is a statement about this account’s reach and not about the federation: ' +
+      'applications may well exist.';
+  } else {
+    try {
+      // ── The basis ───────────────────────────────────────────────────────
+      //
+      // Read unconditionally, because it is the reason the rest of the page
+      // looks the way it does. activeFramework() takes no principal: a
+      // framework is not scoped, and "what would price a quotation issued
+      // today" is the same question for everybody.
+      try {
+        inForce = await activeFramework(db(), today);
+        const [pub] = await db()
+          .select({ n: sql<number>`count(*)::int` })
+          .from(s.feeFrameworks)
+          .where(eq(s.feeFrameworks.status, 'published'));
+        publishedFrameworks = Number(pub?.n ?? 0);
+      } catch {
+        // A framework that could not be read must not take the queues down —
+        // the queues are the reason most people open this page. But the page
+        // then cannot say WHY nothing is priced, so it says that instead of
+        // implying a framework exists or does not.
+        frameworkProblem =
+          'The fee framework register could not be read, so this page cannot say what a ' +
+          'quotation issued today would compute against. The queues below are unaffected.';
+      }
+
+      // ── The chain ───────────────────────────────────────────────────────
+      //
+      // Three queries rather than one five-way join, so the cap applies to
+      // APPLICATIONS and not to the joined row count. A five-way join with two
+      // one-to-many legs returns a row per quote version, and a LIMIT over that
+      // silently drops whole applications.
+      const chainWhere: any[] = [ne(ops.institutionApplications.status, 'draft')];
+      if (appFilter) chainWhere.push(appFilter);
+
+      const apps = await db()
+        .select({
+          id: ops.institutionApplications.id,
+          ref: ops.institutionApplications.ref,
+          institutionName: ops.institutionApplications.institutionName,
+          status: ops.institutionApplications.status,
+          submittedAt: ops.institutionApplications.submittedAt,
+          requestId: ops.institutionApplications.requestId,
+          city: ops.institutionApplications.city,
+          stateName: ops.institutionApplications.stateName,
+          participantCount: ops.institutionApplications.participantCount,
+          ownerRole: ops.institutionApplications.ownerRole,
+        })
+        .from(ops.institutionApplications)
+        .where(and(...chainWhere))
+        .orderBy(desc(ops.institutionApplications.submittedAt), desc(ops.institutionApplications.id))
+        .limit(CHAIN_LIMIT + 1);
+
+      chainTruncated = apps.length > CHAIN_LIMIT;
+      chain = apps.slice(0, CHAIN_LIMIT) as ChainRow[];
+
+      const requestIds = chain.map((r) => r.requestId).filter((v): v is number => v != null);
+      const appIds = chain.map((r) => r.id);
+
+      // Quotations, by the request the application produced. Every version is
+      // read and the highest is kept — a quote is never edited, it is
+      // re-versioned, and the version that describes the case now is the last
+      // one. Grouping, not filtering: each row already passed the scope
+      // predicate through the application that owns the request.
+      if (requestIds.length && mayReadQuotes) {
+        const versions = await db()
+          .select({
+            requestId: s.quotes.requestId,
+            quoteRef: s.quotes.ref,
+            versionId: s.quoteVersions.id,
+            version: s.quoteVersions.version,
+            status: s.quoteVersions.status,
+            totalMinor: s.quoteVersions.totalMinor,
+            currency: s.quoteVersions.currency,
+            requiresManualQuote: s.quoteVersions.requiresManualQuote,
+            manualReason: s.quoteVersions.manualReason,
+          })
+          .from(s.quoteVersions)
+          .innerJoin(s.quotes, eq(s.quoteVersions.quoteId, s.quotes.id))
+          .where(inArray(s.quotes.requestId, requestIds))
+          .orderBy(asc(s.quotes.requestId), asc(s.quoteVersions.version));
+
+        const latest = new Map<number, any>();
+        for (const v of versions) {
+          if (v.requestId == null) continue;
+          latest.set(Number(v.requestId), v); // ordered ascending, so the last wins
+        }
+        for (const row of chain) {
+          const v = row.requestId != null ? latest.get(row.requestId) : null;
+          if (!v) continue;
+          row.quoteRef = v.quoteRef;
+          row.quoteVersionId = v.versionId;
+          row.quoteVersion = v.version;
+          row.quoteStatus = v.status;
+          row.quoteTotalMinor = v.totalMinor;
+          row.quoteCurrency = v.currency;
+          row.quoteManual = Boolean(v.requiresManualQuote);
+          row.quoteManualReason = v.manualReason;
+        }
+      }
+
+      // Agreement and delivery. contracts.applicationId is the only column in
+      // the schema that ties the commercial record back to the intake, and
+      // contracts.programId is the only one that ties it forward to delivery.
+      if (appIds.length) {
+        const agreements = await db()
+          .select({
+            applicationId: ops.contracts.applicationId,
+            contractRef: ops.contracts.ref,
+            contractStatus: ops.contracts.status,
+            programCode: s.trainingPrograms.code,
+            programStatus: s.trainingPrograms.status,
+          })
+          .from(ops.contracts)
+          .leftJoin(s.trainingPrograms, eq(s.trainingPrograms.id, ops.contracts.programId))
+          .where(inArray(ops.contracts.applicationId, appIds))
+          .orderBy(asc(ops.contracts.id));
+
+        const byApp = new Map<number, any>();
+        for (const c of agreements) {
+          if (c.applicationId == null) continue;
+          byApp.set(Number(c.applicationId), c);
+        }
+        for (const row of chain) {
+          const c = byApp.get(row.id);
+          if (!c) continue;
+          row.contractRef = c.contractRef;
+          row.contractStatus = c.contractStatus;
+          row.programCode = c.programCode;
+          row.programStatus = c.programStatus;
+        }
+      }
+
+      // ── STUCK 1: applications that reached no quotation ─────────────────
+      //
+      // THE NEGATIVE JOIN, and the reason this page exists. A row that does not
+      // exist appears in no register, so an application with no quotation is
+      // invisible on /admin/quotes and indistinguishable on /admin/applications
+      // from one that has been quoted.
+      //
+      // The predicate is `quotes.id IS NULL` after a LEFT JOIN on the request,
+      // which also catches an application that produced no training request at
+      // all — that one has no quotation either, and for a worse reason.
+      //
+      // Closed applications are excluded. See CLOSED_STATUSES.
+      // THE PREDICATE IS NOT WRITTEN HERE ANY MORE.
+      //
+      // It used to be, and the copy was the cost: the scope filter for
+      // institutional applications lived in this file AND in
+      // src/db/applications.ts, so a change to the federation's idea of who may
+      // see which application would have reached one and silently not the other.
+      // applicationsAwaitingQuotation() now owns the whole query -- the LEFT
+      // JOIN, the closed-status exclusion, the scope clauses and the separate
+      // COUNT -- and this page renders what it returns.
+      //
+      // It also made the claim testable. tests/loop-visible.test.ts calls that
+      // function with no framework published, publishes one, and calls it again:
+      // the queue empties with no code change, which is the property this page
+      // asserts in words below.
+      const waiting = await applicationsAwaitingQuotation(db(), principal!, { limit: QUEUE_LIMIT });
+      awaitingQuotation = waiting.rows;
+      awaitingQuotationTotal = waiting.total;
+
+      // ── STUCK 2 and 3: the quotation queues ─────────────────────────────
+      if (mayReadQuotes) {
+        const qFilter = quoteScope(quoteScopes);
+        if (qFilter === 'none') {
+          quoteProblem =
+            'This account holds quote:read at a scope that contains no quotation, so the ' +
+            'quotation queues below are not listed. That is this account’s reach, not the register.';
+        } else {
+          const qBase = () => db()
+            .select({
+              versionId: s.quoteVersions.id,
+              quoteRef: s.quotes.ref,
+              version: s.quoteVersions.version,
+              status: s.quoteVersions.status,
+              totalMinor: s.quoteVersions.totalMinor,
+              currency: s.quoteVersions.currency,
+              requiresManualQuote: s.quoteVersions.requiresManualQuote,
+              manualReason: s.quoteVersions.manualReason,
+              createdAt: s.quoteVersions.createdAt,
+              institutionName: s.institutions.name,
+              requestRef: s.trainingRequests.ref,
+            })
+            .from(s.quoteVersions)
+            .innerJoin(s.quotes, eq(s.quoteVersions.quoteId, s.quotes.id))
+            .leftJoin(s.institutions, eq(s.quotes.institutionId, s.institutions.id))
+            .leftJoin(s.trainingRequests, eq(s.quotes.requestId, s.trainingRequests.id));
+
+          const approvalWhere: any[] = [eq(s.quoteVersions.status, 'awaiting_approval')];
+          if (qFilter) approvalWhere.push(qFilter);
+          heldForApproval = await qBase()
+            .where(and(...approvalWhere))
+            .orderBy(asc(s.quoteVersions.createdAt))
+            .limit(QUEUE_LIMIT);
+
+          // A version that carries NO FIGURE because no rule priced it. It is
+          // not the same queue as the one above and it does not clear the same
+          // way: an approver cannot approve a number that was never computed,
+          // so these end at a fee rule being published or at somebody quoting
+          // by hand. Superseded and closed versions are excluded — a version
+          // that has been replaced is not outstanding work.
+          const manualWhere: any[] = [
+            eq(s.quoteVersions.requiresManualQuote, true),
+            inArray(s.quoteVersions.status, ['draft', 'awaiting_approval', 'issued']),
+          ];
+          if (qFilter) manualWhere.push(qFilter);
+          carryingNoFigure = await qBase()
+            .where(and(...manualWhere))
+            .orderBy(desc(s.quoteVersions.createdAt))
+            .limit(QUEUE_LIMIT);
+        }
+      }
+    } catch {
+      // The detail is deliberately not printed. See ErrorState below.
+      readError = true;
+    }
+  }
+}
+
+// ── STUCK 4, 5: the money ───────────────────────────────────────────────────
+//
+// Read on their own authority and restricted on their own terms — which is the
+// awkward part, and it is said rather than hidden. An order has a person and a
+// contact address and NO federation unit, so there is no column a state or
+// district binding could restrict it by. Rather than let a scoped account read
+// the whole federation's money because the query had nothing to filter on, the
+// money bands render only for an account whose finance:read is NATIONAL.
+if (configured && mayReadEngagement && mayReadFinance) {
+  if (financeScopes.kind !== 'all') {
+    financeScopeRefusal =
+      'This account holds finance:read at a unit scope. An order carries no federation unit — ' +
+      'there is no column to restrict it by — so restricting it is impossible rather than merely ' +
+      'unimplemented, and showing it unrestricted would hand a state account the whole ' +
+      'federation’s money. The money queues are therefore not listed here.';
+  } else {
+    try {
+      // Issued and not paid. The invoice is the demand; orders.paidAt is set
+      // only when a payment was CAPTURED, never on returning from a payment
+      // page, so an unpaid invoice here is genuinely unpaid money.
+      unpaidInvoices = await db()
+        .select({
+          invoiceNo: s.invoices.invoiceNo,
+          issuedAt: s.invoices.issuedAt,
+          orderNo: s.orders.orderNo,
+          orderStatus: s.orders.status,
+          totalPaise: s.orders.totalPaise,
+          currency: s.orders.currency,
+          buyerName: s.orders.buyerName,
+          email: s.orders.email,
+          expiresAt: s.orders.expiresAt,
+        })
+        .from(s.invoices)
+        .innerJoin(s.orders, eq(s.orders.id, s.invoices.orderId))
+        .where(notInArray(s.orders.status, ['paid', 'fulfilled', 'refunded', 'partially_refunded']))
+        .orderBy(asc(s.invoices.issuedAt))
+        .limit(QUEUE_LIMIT);
+
+      // Money taken and nothing issued — the two halves of it. blocked
+      // announces itself with a reason; the backlog is silence, and silence is
+      // what activationBacklog() converts into a list.
+      blocked = await blockedEntitlements(db(), principal!, QUEUE_LIMIT);
+      backlog = await activationBacklog(db(), principal!, QUEUE_LIMIT);
+    } catch {
+      financeProblem =
+        'The money queues could not be read. Nothing has been charged, refunded or changed — ' +
+        'this was a read that failed.';
+    }
+  }
+}
+
+// ── STUCK 6: what is about to expire ────────────────────────────────────────
+//
+// An entitlement row carries no expiry of its own: entitlement_terms holds the
+// term length and the SUBJECT holds the date it runs to. For a membership that
+// subject is `memberships.validTo`, and lapsingSoon() is the query that reads
+// it — already scoped, already capped, and already able to say how many active
+// memberships have NO expiry recorded, which is a different problem and is
+// counted rather than listed.
+if (configured && mayReadEngagement && mayReadMembership) {
+  try {
+    lapsing = await lapsingSoon(db(), principal!, { withinDays: 30, limit: 25 });
+  } catch {
+    membershipProblem =
+      'The lapsing register could not be read. Nothing has been changed — this was a read that failed.';
+  }
+}
+
+// ── Deriving the chain, from rows and nothing else ──────────────────────────
+//
+// A stage is REACHED when a row proves it was. There is no rule here that
+// infers one stage from another and no stage that is assumed because a later
+// one happened: each count is a predicate over the rows read above.
+//
+// The order is the order of the federation's own process. It is NOT a promise
+// that any one application travels all of it — a declined application stops
+// where it stops, which is why the closed count is carried separately rather
+// than folded into a funnel that would then not add up.
+const isClosed = (r: ChainRow) => (CLOSED_STATUSES as readonly string[]).includes(r.status);
+const hasQuote = (r: ChainRow) => r.quoteVersionId != null;
+const quoteIssued = (r: ChainRow) =>
+  hasQuote(r) && ['issued', 'accepted', 'rejected', 'expired', 'superseded'].includes(String(r.quoteStatus));
+const quoteAwaitingClient = (r: ChainRow) => String(r.quoteStatus) === 'issued';
+const quoteAccepted = (r: ChainRow) => String(r.quoteStatus) === 'accepted';
+const contracted = (r: ChainRow) => r.contractRef != null;
+const inDelivery = (r: ChainRow) => String(r.programStatus) === 'running';
+const complete = (r: ChainRow) =>
+  String(r.programStatus) === 'completed' || String(r.contractStatus) === 'completed';
+
+interface Stage {
+  key: string;
+  label: string;
+  /** What in the database makes this stage true. Printed, not implied. */
+  evidence: string;
+  count: number;
+  /** Where this stage is worked, when it is workable somewhere. */
+  href?: string;
+}
+
+const openChain = chain.filter((r) => !isClosed(r));
+
+const stages: Stage[] = [
+  {
+    key: 'received',
+    label: 'Received',
+    evidence: 'institution_applications, status other than draft or closed',
+    count: openChain.length,
+    href: h('/admin/applications'),
+  },
+  {
+    key: 'quoted',
+    label: 'Quotation issued',
+    evidence: 'a quote_versions row at status issued, accepted, rejected, expired or superseded',
+    count: openChain.filter(quoteIssued).length,
+    href: h('/admin/quotes'),
+  },
+  {
+    key: 'awaiting-acceptance',
+    label: 'Awaiting the applicant',
+    evidence: 'the current quote version is still at issued — nobody has accepted or refused it',
+    count: openChain.filter(quoteAwaitingClient).length,
+  },
+  {
+    key: 'accepted',
+    label: 'Accepted',
+    evidence: 'the current quote version is at accepted',
+    count: openChain.filter(quoteAccepted).length,
+  },
+  {
+    key: 'contracted',
+    label: 'Agreement in place',
+    evidence: 'a contracts row naming this application',
+    count: openChain.filter(contracted).length,
+  },
+  {
+    key: 'delivery',
+    label: 'In delivery',
+    evidence: 'the contract’s training_programs row is running',
+    count: openChain.filter(inDelivery).length,
+    href: h('/admin/programs'),
+  },
+  {
+    key: 'complete',
+    label: 'Complete',
+    evidence: 'the programme or the contract is at completed',
+    count: openChain.filter(complete).length,
+  },
+];
+
+const closedCount = chain.filter(isClosed).length;
+
+// The single sentence the whole page is built around, computed rather than
+// asserted: is every open application waiting for a quotation?
+//
+// WITHHELD WHEN THE CHAIN WAS TRUNCATED, and that guard is the whole reason
+// this is three conditions rather than one comparison. `openChain` is capped at
+// CHAIN_LIMIT and `awaitingQuotationTotal` is not, so with 500 open
+// applications and 400 waiting the comparison reads 400 >= 300 and the page
+// would print "every open application in scope" about a set it never counted.
+// A claim assembled from two figures of different scope is not a claim.
+const everyOpenApplicationIsWaiting =
+  !chainTruncated
+  && awaitingQuotationTotal > 0
+  && openChain.length > 0
+  && awaitingQuotationTotal >= openChain.length;
+
+// ── The waiting-for-a-quotation register ────────────────────────────────────
+
+const waitQuery = readTableQuery(Astro.url, {
+  prefix: 'w',
+  sortable: ['ref', 'institutionName', 'submittedAt', 'participantCount'],
+  filters: ['status'],
+  defaultSort: { key: 'submittedAt', dir: 'asc' },
+});
+
+const waitColumns: Column[] = [
+  { key: 'ref', header: 'Reference', primary: true, href: (r: any) => h(`/admin/applications/${r.id}`) },
+  { key: 'institutionName', header: 'Institution', sortable: true },
+  { key: 'where', header: 'Where', render: (r: any) => r.city ?? r.stateName ?? null },
+  { key: 'participantCount', header: 'People', numeric: true, sortable: true },
+  { key: 'status', header: 'Status', status: { domain: 'application' } },
+  {
+    key: 'ownerRole',
+    header: 'Owner',
+    render: (r: any) => (r.ownerRole ? String(r.ownerRole).replace(/_/g, ' ').toLowerCase() : 'Unassigned'),
+  },
+  {
+    key: 'submittedAt',
+    header: 'Waiting since',
+    sortable: true,
+    initialDir: 'asc',
+    render: (r: any) => day(r.submittedAt) ?? 'Not recorded',
+  },
+  {
+    key: 'hasRequest',
+    header: 'Enquiry record',
+    // Two different reasons to have no quotation, and they clear differently.
+    // No training request means there is nothing for issueQuote() to attach a
+    // quotation to at all, which is a defect in the intake and not a pricing
+    // gap — so it is shown rather than averaged into one queue.
+    hint: 'A quotation attaches to the training request the application produced',
+    render: (r: any) => (r.hasRequest ? 'Yes' : 'None — nothing to quote against'),
+  },
+];
+
+const waitFilters: Filter[] = [
+  {
+    key: 'status',
+    label: 'Status',
+    type: 'select',
+    anyLabel: 'Any status',
+    // Labels from the status dictionary and from nowhere else, so the option
+    // reads the same word as the chip it selects. A hand-formatted
+    // `under_review` → `under review` would drift from `Under review` the first
+    // time the dictionary is edited.
+    options: LIFECYCLES.application
+      .filter((v) => awaitingQuotation.some((r: any) => String(r.status) === v))
+      .map((v) => ({ value: v, label: statusOf(v, 'application').label })),
+  },
+];
+---
+
+<AdminShell
+  title="Pipeline"
+  requires="engagement:read"
+  intro="Every request from the day it arrived to the day it is delivered, and — the part no register can show — where requests stop. This screen writes nothing; each blockage names the screen that clears it."
+>
+  {!configured ? (
+    <p class="note">
+      The federation database is not configured on this deployment, so there is
+      no pipeline to read. Nothing has been lost and nothing has failed — there
+      is nothing to read until <code>DATABASE_URL</code> is set.
+    </p>
+  ) : scopeRefusal ? (
+    <p class="note">{scopeRefusal}</p>
+  ) : readError ? (
+    <ErrorState
+      title="The pipeline could not be read."
+      safe="Nothing has been quoted, approved, invoiced or changed. This page only reads; every application, quotation and contract is exactly where it was."
+      body="The fault has been logged for the federation office with the detail this page deliberately does not print."
+    />
+  ) : (
+    <>
+      {/* ── THE BASIS ─────────────────────────────────────────────────────
+          First, because it is the reason everything below looks the way it
+          does. */}
+      <section class="band" aria-labelledby="basis-h">
+        <h2 id="basis-h" class="band-h">What prices a quotation today</h2>
+
+        {frameworkProblem ? (
+          <p class="note">{frameworkProblem}</p>
+        ) : inForce ? (
+          <p class="band-p">
+            A quotation issued today computes against <strong>{inForce.code}</strong> — {inForce.title} —
+            and keeps computing against it for as long as that quotation exists.
+            An application below with no quotation is therefore waiting on a
+            person, not on a rule.
+          </p>
+        ) : (
+          <div class="headline" role="note">
+            <p class="headline-lede">
+              <strong>MMAKF has published no fee framework, so nothing can be priced.</strong>
+            </p>
+            <p class="headline-p">
+              {publishedFrameworks === 0
+                ? 'No fee framework has ever been published.'
+                : `${publishedFrameworks} ${publishedFrameworks === 1 ? 'framework has' : 'frameworks have'} been published, and none is in force today — every published version’s effective window is either closed or has not opened yet.`}
+              {' '}<code>activeFramework()</code> returns nothing, so <code>computeFee()</code> can
+              price nothing, so every application that arrives ends at
+              &ldquo;a quotation will be prepared&rdquo;.
+            </p>
+            <p class="headline-p">
+              <strong>This is the true operational state of the federation, not a fault in this screen.</strong>
+              {' '}The queue below is real work waiting on a real decision, and it
+              will keep growing at the rate applications arrive until a framework
+              is authored and published. No figure is shown anywhere on this page
+              for an unpriced request — not a placeholder and not a zero, because
+              zero reads as free.
+            </p>
+            <p class="headline-act">
+              {mayReadFramework ? (
+                <a class="btn btn-primary" href={h('/admin/fees')}>Publish a fee framework</a>
+              ) : (
+                <span class="muted">
+                  Publishing a framework is done at <code>/admin/fees</code> and needs
+                  {' '}<code>feeframework:read</code> to open and <code>feeframework:publish</code> to
+                  do, neither of which this account holds.
+                </span>
+              )}
+            </p>
+          </div>
+        )}
+      </section>
+
+      {/* ── THE CHAIN ─────────────────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="chain-h">
+        <PageHeader
+          title="The chain"
+          headingLevel="h2"
+          sticky={false}
+          id="chain-h"
+          description="Each stage counts the applications a row proves reached it. A stage with no rows is not a stage nobody wants — it is a stage nothing has reached, and the two are the same sentence here only because the count is the same."
+          secondary={[
+            { label: 'Applications', href: h('/admin/applications') },
+            { label: 'Quotations', href: h('/admin/quotes') },
+            { label: 'Programmes', href: h('/admin/programs') },
+          ]}
+        >
+          <Fragment slot="meta">
+            <span class="meta-chip">{openChain.length}{chainTruncated ? '+' : ''} open</span>
+            {closedCount > 0 && <span class="meta-chip">{closedCount} closed</span>}
+          </Fragment>
+        </PageHeader>
+
+        {chainTruncated && (
+          <p class="band-p">
+            The {CHAIN_LIMIT} most recently submitted applications in scope were
+            read, so these stage counts describe those and not the whole
+            register. The queues below are counted over the whole register in
+            scope and are unaffected.
+          </p>
+        )}
+
+        {!mayReadQuotes && (
+          <p class="note">
+            The quotation stages are counted from <code>quote_versions</code>, which
+            needs <code>quote:read</code> — an action this account does not hold in
+            any scope. Those stages are shown as zero because nothing was read,
+            not because nothing exists, and this sentence is here so the zero is
+            not mistaken for a fact about the federation.
+          </p>
+        )}
+
+        {openChain.length === 0 ? (
+          <p class="note">
+            {engagementScopes.kind === 'all'
+              ? 'No application is open. This account reads applications nationally, so that is a fact about the register and not something being withheld.'
+              : 'No open application falls within this account’s scope. The restriction is in the query, so this does not mean the federation has none.'}
+          </p>
+        ) : (
+          <ol class="chain">
+            {stages.map((st) => (
+              <li class:list={['chain-step', st.count === 0 && 'is-empty']}>
+                <div class="chain-n">{st.count}</div>
+                <div class="chain-body">
+                  <p class="chain-label">
+                    {st.href ? <a href={st.href}>{st.label}</a> : st.label}
+                  </p>
+                  {/* What makes this true, in the schema's own terms. A stage
+                      count nobody can trace is a number to be argued with. */}
+                  <p class="chain-ev">{st.evidence}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+
+        {closedCount > 0 && (
+          <p class="band-p foot">
+            {closedCount} of the applications read {closedCount === 1 ? 'has' : 'have'} been
+            declined, withdrawn or allowed to expire. They are counted here and
+            excluded from every stage above and every queue below: an application
+            that has been answered is finished, not stuck, and chasing one is
+            work the federation has already done.
+          </p>
+        )}
+      </section>
+
+      {/* ── STUCK: WAITING FOR A QUOTATION ────────────────────────────────
+          The most important section on the page. */}
+      <section class="band" id="waiting" aria-labelledby="waiting-h">
+        <PageHeader
+          title="Waiting for a quotation"
+          headingLevel="h2"
+          sticky={false}
+          id="waiting-h"
+          description="Applications the federation has accepted and has not priced. This is the negative join no register can show: an application with no quotation has no row on the quotations screen and looks identical to a quoted one on the applications screen."
+        >
+          <Fragment slot="meta">
+            <span class="meta-chip">{awaitingQuotationTotal} waiting</span>
+            {awaitingQuotationTotal > awaitingQuotation.length && (
+              <span class="meta-chip">{awaitingQuotation.length} listed</span>
+            )}
+          </Fragment>
+        </PageHeader>
+
+        {awaitingQuotationTotal === 0 ? (
+          <p class="note">
+            Every open application in scope has a quotation against it. That is
+            counted from the same predicate that fills the table — a LEFT JOIN
+            from the application to its training request's quotation — so it is
+            a fact about the register rather than a table that happened to
+            render empty.
+          </p>
+        ) : (
+          <>
+            {/* The operational fact, in one sentence, with the reason and the
+                fix. Written from the numbers actually read. */}
+            <p class:list={['claim', !inForce && 'claim-loud']}>
+              <strong>
+                {awaitingQuotationTotal} {awaitingQuotationTotal === 1 ? 'application is' : 'applications are'} waiting
+                for a quotation{everyOpenApplicationIsWaiting ? ' — every open application in scope' : ''}.
+              </strong>
+              {' '}
+              {/* THREE OUTCOMES, NOT TWO. "No framework in force" and "no
+                  framework published" call for different work — one is an
+                  effective-date to correct, the other is a set of rules nobody
+                  has written — and a single sentence covering both would send
+                  half its readers to the wrong task. */}
+              {inForce
+                ? <>A framework is in force ({inForce.code}), so each of these is waiting on somebody to issue a quotation at <a href={h('/admin/quotes')}>/admin/quotes</a>, not on a rule being written.</>
+                : publishedFrameworks === 0
+                  ? <>None of them can be computed, because MMAKF has never published a fee framework. The fix is one thing and it is not on this screen: author and publish one at <a href={h('/admin/fees')}>/admin/fees</a>. Until then this queue grows at the rate applications arrive, and no amount may be quoted to any of these institutions by this system.</>
+                  : <>None of them can be computed today. {publishedFrameworks} {publishedFrameworks === 1 ? 'framework has' : 'frameworks have'} been published and none is inside its effective window, so <code>activeFramework()</code> finds nothing for today's date. That is an effective date to correct at <a href={h('/admin/fees')}>/admin/fees</a>, not a set of rules to write — and a published framework may still be named explicitly when issuing a quotation, because the engine checks that a framework is published and not that it is in force.</>}
+            </p>
+
+            {awaitingQuotationTotal > awaitingQuotation.length && (
+              <p class="band-p">
+                The {awaitingQuotation.length} longest-waiting are listed. The
+                count above is the whole queue in scope, from the same predicate.
+              </p>
+            )}
+
+            <Table
+              id="pipeline-waiting"
+              caption="Applications with no quotation, oldest first"
+              columns={waitColumns}
+              filters={waitFilters}
+              rows={awaitingQuotation}
+              query={waitQuery}
+              paramPrefix="w"
+              note={awaitingQuotationTotal > awaitingQuotation.length
+                ? `The ${awaitingQuotation.length} longest-waiting of ${awaitingQuotationTotal} in scope.`
+                : null}
+              emptyTitle="No application is waiting for a quotation."
+              emptyBody="Every open application in scope has a quotation against it."
+              emptyAction={{ label: 'Applications', href: h('/admin/applications') }}
+            />
+          </>
+        )}
+      </section>
+
+      {/* ── STUCK: THE QUOTATION QUEUES ───────────────────────────────────── */}
+      <section class="band" aria-labelledby="quotes-h">
+        <h2 id="quotes-h" class="band-h">Quotations that cannot move on their own</h2>
+
+        {!mayReadQuotes ? (
+          <p class="note">
+            Two queues live here — quotations a rule held for a second pair of
+            eyes, and quotations carrying no figure because no rule priced them.
+            Both are read from <code>quote_versions</code> and need
+            <code>quote:read</code>, which this account does not hold in any
+            scope. They are named rather than omitted: a screen that quietly
+            shrinks teaches its reader that they have seen everything.
+          </p>
+        ) : quoteProblem ? (
+          <p class="note">{quoteProblem}</p>
+        ) : (
+          <>
+            <h3 class="sub-h">Held for approval — {heldForApproval.length}</h3>
+            {heldForApproval.length === 0 ? (
+              <p class="band-p">
+                No quotation is waiting on an approver. A version arrives here
+                only when a rule that priced it required a second pair of eyes,
+                and none has.
+              </p>
+            ) : (
+              <>
+                <p class="band-p">
+                  Each of these has a computed figure that nobody has agreed to
+                  yet. <strong>The approver must not be the issuer</strong> — the
+                  fee module refuses a self-approval outright — so a version here
+                  is waiting on a specific other person, not on time passing.
+                  The decision is taken at <a href={h('/admin/quotes')}>/admin/quotes</a>;
+                  nothing on this page writes to a quotation.
+                </p>
+                <ul class="queue">
+                  {heldForApproval.map((q: any) => {
+                    const total = q.requiresManualQuote ? null : money(q.totalMinor, q.currency);
+                    return (
+                      <li class="q-item">
+                        <div class="q-top">
+                          <strong>{q.quoteRef}</strong>
+                          <span class="q-v">version {q.version}</span>
+                          <Status value={q.status} domain="quote" withMeaning={false} size="sm" />
+                        </div>
+                        <dl class="q-facts">
+                          <div>
+                            <dt>Institution</dt>
+                            <dd>{q.institutionName ?? 'Not recorded on the quotation'}</dd>
+                          </div>
+                          <div>
+                            <dt>Enquiry</dt>
+                            <dd>{q.requestRef ?? '—'}</dd>
+                          </div>
+                          <div>
+                            <dt>Amount</dt>
+                            {/* No figure means NO FIGURE. */}
+                            <dd>{total ?? (q.manualReason || 'No rule priced this — there is no amount')}</dd>
+                          </div>
+                          <div>
+                            <dt>Held since</dt>
+                            <dd>{day(q.createdAt) ?? 'Not recorded'}</dd>
+                          </div>
+                        </dl>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+
+            <h3 class="sub-h">Carrying no figure — {carryingNoFigure.length}</h3>
+            {carryingNoFigure.length === 0 ? (
+              <p class="band-p">
+                No live quotation version carries <code>requiresManualQuote</code>.
+                Every version that is still current was priced by a rule.
+              </p>
+            ) : (
+              <>
+                <p class="band-p">
+                  A version here exists and has <strong>no amount at all</strong>,
+                  because no rule in the framework it was computed against could
+                  price the request. It is a different queue from the one above
+                  and it clears differently: an approver cannot approve a number
+                  that was never computed. These end either at a fee rule being
+                  written that covers the case, or at somebody quoting it by hand.
+                </p>
+                <ul class="queue">
+                  {carryingNoFigure.map((q: any) => (
+                    <li class="q-item">
+                      <div class="q-top">
+                        <strong>{q.quoteRef}</strong>
+                        <span class="q-v">version {q.version}</span>
+                        <Status value={q.status} domain="quote" withMeaning={false} size="sm" />
+                      </div>
+                      <dl class="q-facts">
+                        <div>
+                          <dt>Institution</dt>
+                          <dd>{q.institutionName ?? 'Not recorded on the quotation'}</dd>
+                        </div>
+                        <div>
+                          <dt>Raised</dt>
+                          <dd>{day(q.createdAt) ?? 'Not recorded'}</dd>
+                        </div>
+                      </dl>
+                      <p class="q-why">{q.manualReason || 'No reason was recorded against this version.'}</p>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </>
+        )}
+      </section>
+
+      {/* ── STUCK: THE MONEY ──────────────────────────────────────────────── */}
+      <section class="band" aria-labelledby="money-h">
+        <h2 id="money-h" class="band-h">Money that has stopped</h2>
+
+        {/* THE GAP, SAID FIRST. A reader who takes these queues for the money
+            side of the applications above would be wrong, and the mistake is
+            invisible unless it is spelled out. */}
+        <p class="band-p">
+          <strong>These queues are not filtered to the applications above, and cannot be.</strong>
+          {' '}No column in this schema ties an order, a payment or an invoice to a
+          contract, a quotation or an institutional application —
+          <code>orders</code> carries a person and a contact address and no
+          institution, and <code>contracts</code> carries no invoice. So the money
+          leg of an institutional agreement is not joined to the leg above it, and
+          this page will not invent the join by matching on a buyer's name. What
+          follows is the commerce register's own outstanding work.
+        </p>
+
+        {!mayReadFinance ? (
+          <p class="note">
+            Three queues live here — invoices issued and unpaid, payments taken
+            for something that was never issued, and payments taken where
+            activation never ran at all. All three need <code>finance:read</code>,
+            which this account does not hold in any scope.
+          </p>
+        ) : financeScopeRefusal ? (
+          <p class="note">{financeScopeRefusal}</p>
+        ) : financeProblem ? (
+          <p class="note">{financeProblem}</p>
+        ) : (
+          <>
+            <h3 class="sub-h">Invoices issued and not paid — {unpaidInvoices.length}</h3>
+            {unpaidInvoices.length === 0 ? (
+              <p class="band-p">
+                Every issued invoice has a paid order behind it.
+                {' '}<code>orders.paidAt</code> is set only when a payment was
+                actually captured — never on returning from a payment page — so
+                this is money received and not money reported.
+              </p>
+            ) : (
+              <ul class="queue">
+                {unpaidInvoices.map((iv: any) => {
+                  const overdueBy = daysFromNow(iv.expiresAt);
+                  return (
+                    <li class="q-item">
+                      <div class="q-top">
+                        <strong>{iv.invoiceNo}</strong>
+                        <span class="q-v">order {iv.orderNo}</span>
+                        <Status value={iv.orderStatus} withMeaning={false} size="sm" />
+                      </div>
+                      <dl class="q-facts">
+                        <div>
+                          <dt>Amount</dt>
+                          <dd>{money(iv.totalPaise, iv.currency) ?? 'No amount recorded'}</dd>
+                        </div>
+                        <div>
+                          <dt>Issued</dt>
+                          <dd>{day(iv.issuedAt) ?? 'Not recorded'}</dd>
+                        </div>
+                        <div>
+                          <dt>Buyer</dt>
+                          <dd>{iv.buyerName ?? iv.email ?? 'Not recorded'}</dd>
+                        </div>
+                        <div>
+                          {/* The ONLY deadline anywhere on this page, and it is a
+                              real stored one: expiresAt is when an unpaid order
+                              releases its stock reservation. MMAKF has published
+                              no payment terms, so nothing here is "overdue"
+                              against a term — it is only past its own reservation. */}
+                          <dt>Reservation</dt>
+                          <dd>
+                            {iv.expiresAt == null
+                              ? 'No expiry set on the order'
+                              : overdueBy != null && overdueBy < 0
+                                ? `Released ${Math.abs(overdueBy)} ${Math.abs(overdueBy) === 1 ? 'day' : 'days'} ago`
+                                : `Holds for ${overdueBy} more ${overdueBy === 1 ? 'day' : 'days'}`}
+                          </dd>
+                        </div>
+                      </dl>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            <h3 class="sub-h">Paid, and nothing issued — {blocked.length + backlog.length}</h3>
+            {blocked.length + backlog.length === 0 ? (
+              <p class="band-p">
+                Every captured payment produced the entitlement it bought.
+              </p>
+            ) : (
+              <>
+                <p class="band-p">
+                  Every row here is a payer who has been charged and has received
+                  nothing. The two halves are different failures:
+                  <strong> blocked</strong> announces itself with a reason,
+                  and <strong>never activated</strong> is silence — a process that
+                  died between the capture and the activation, which no error log
+                  records. Each ends either in an activation once the obstacle is
+                  cleared, or in a refund.
+                </p>
+                <ul class="queue">
+                  {blocked.map((e: any) => (
+                    <li class="q-item">
+                      <div class="q-top">
+                        <strong>{e.orderNo}</strong>
+                        <span class="q-v">{String(e.subject).replace(/_/g, ' ')}</span>
+                        <span class="tag tag-bad">Blocked</span>
+                      </div>
+                      <dl class="q-facts">
+                        <div>
+                          <dt>Charged</dt>
+                          <dd>{money(e.totalPaise) ?? 'No amount recorded'}</dd>
+                        </div>
+                        <div>
+                          <dt>Payer</dt>
+                          <dd>{e.email ?? 'Not recorded'}</dd>
+                        </div>
+                      </dl>
+                      <p class="q-why">{e.reason || 'No reason was recorded against this entitlement.'}</p>
+                    </li>
+                  ))}
+                  {backlog.map((b: any) => (
+                    <li class="q-item">
+                      <div class="q-top">
+                        <strong>{b.orderNo}</strong>
+                        <span class="q-v">{String(b.kind).replace(/_/g, ' ')}</span>
+                        <span class="tag tag-bad">Never activated</span>
+                      </div>
+                      <dl class="q-facts">
+                        <div>
+                          <dt>Paid for</dt>
+                          <dd>{b.description}</dd>
+                        </div>
+                        <div>
+                          <dt>Paid</dt>
+                          <dd>{day(b.paidAt) ?? 'Not recorded'}</dd>
+                        </div>
+                      </dl>
+                      <p class="q-why">
+                        The payment was captured and no entitlement row exists for
+                        this line at all. Nothing refused it — activation never ran.
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </>
+        )}
+      </section>
+
+      {/* ── STUCK: WHAT IS ABOUT TO RUN OUT ───────────────────────────────── */}
+      <section class="band" aria-labelledby="lapse-h">
+        <h2 id="lapse-h" class="band-h">Entitlements about to expire</h2>
+
+        {!mayReadMembership ? (
+          <p class="note">
+            What a payment bought and how long it lasts is read from the
+            membership register, which needs <code>membership:read</code> — an
+            action this account does not hold in any scope.
+          </p>
+        ) : membershipProblem ? (
+          <p class="note">{membershipProblem}</p>
+        ) : !lapsing ? (
+          <p class="band-p">The lapsing register produced no answer.</p>
+        ) : (
+          <>
+            <p class="band-p">
+              An entitlement row carries no expiry of its own — the term length
+              lives on <code>entitlement_terms</code> and the date it runs to
+              lives on the thing that was issued. For a membership that is
+              <code>memberships.valid_to</code>, which is what is read here, at
+              this account's own scope, for the next {lapsing.withinDays} days.
+            </p>
+
+            {lapsing.rows.length === 0 ? (
+              <p class="band-p">
+                No active membership in scope lapses within {lapsing.withinDays} days.
+              </p>
+            ) : (
+              <ul class="lapse">
+                {lapsing.rows.map((r: any) => (
+                  <li class="lapse-row">
+                    <span class="lapse-name">{r.fullName}</span>
+                    <span class="lapse-fed">{r.federationId}</span>
+                    <span class="lapse-cat">{r.category}</span>
+                    <span class="lapse-when">
+                      {r.daysRemaining === 0
+                        ? 'Lapses today'
+                        : `${r.daysRemaining} ${r.daysRemaining === 1 ? 'day' : 'days'} — ${day(r.validTo)}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {lapsing.truncated && (
+              <p class="band-p foot">
+                The cap was reached, so this list is not the whole set.
+              </p>
+            )}
+
+            {lapsing.withNoExpiryRecorded > 0 && (
+              <p class="band-p foot">
+                {lapsing.withNoExpiryRecorded} active
+                {lapsing.withNoExpiryRecorded === 1 ? ' membership has' : ' memberships have'} no
+                expiry date recorded. They cannot lapse and so cannot appear
+                above — which makes them a data quality problem rather than a
+                silence, and counting them is the only way anyone finds out.
+                <strong> No expiry recorded is not the same as valid for ever.</strong>
+              </p>
+            )}
+
+            <p class="band-p foot">
+              Renewal is priced by the same engine as everything else on this
+              page, so with no fee framework published there is no renewal fee to
+              charge and no figure to show beside any of these.
+            </p>
+          </>
+        )}
+      </section>
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .note {
+    padding: 20px 22px; border-left: 3px solid var(--gold);
+    background: var(--card); color: var(--muted); line-height: 1.75; max-width: 70ch;
+  }
+  .note code { color: var(--gold-2); }
+
+  .band { margin: 0 0 40px; }
+  .band + .band { padding-top: 34px; border-top: 1px solid var(--border); }
+  .band-h { font-family: var(--font-display); font-size: 1.15rem; margin: 0 0 12px; }
+  .band-p { color: var(--muted); line-height: 1.75; max-width: 74ch; margin: 0 0 18px; }
+  .band-p.foot { margin-top: 18px; font-size: .88rem; }
+  .sub-h { font-family: var(--font-display); font-size: .95rem; margin: 30px 0 12px; }
+
+  .meta-chip {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    font-size: var(--text-xs); color: var(--muted);
+    border: 1px solid var(--border); border-radius: var(--radius-pill);
+    padding: 3px 10px; line-height: 1.5;
+  }
+
+  .muted { color: var(--muted); }
+  code { font-family: var(--font-accent, monospace); font-size: .88em; }
+
+  /* ── The headline ────────────────────────────────────────────────────────
+     Weighted like a statement of fact, NOT like an error. No red, no warning
+     triangle: the federation not having published its fees is a decision it has
+     not yet taken, and dressing it as a fault sends somebody hunting for a bug
+     that does not exist. */
+  .headline {
+    border: 1px solid var(--border); border-left: 3px solid var(--gold);
+    background: var(--card); padding: 24px 26px; max-width: 78ch;
+  }
+  .headline-lede { margin: 0 0 12px; line-height: 1.7; font-size: 1.02rem; }
+  .headline-p { margin: 0 0 12px; color: var(--muted); line-height: 1.8; }
+  .headline-act { margin: 18px 0 0; }
+
+  .claim {
+    padding: 16px 20px; margin: 0 0 20px; line-height: 1.8; max-width: 78ch;
+    border-left: 3px solid var(--border); background: var(--bg-2); color: var(--muted);
+  }
+  .claim strong { color: var(--white); }
+  .claim-loud { border-left-color: var(--gold); background: var(--card); }
+
+  /* ── The chain ───────────────────────────────────────────────────────────
+     A list of stages REACHED, drawn as a ladder rather than a funnel. A funnel
+     implies each stage drains into the next and that the numbers must decline;
+     these are seven independent predicates over one set of rows, and a
+     re-quoted application legitimately sits in two of them. */
+  .chain { list-style: none; margin: 0; padding: 0; max-width: 780px; }
+  .chain-step {
+    display: grid; grid-template-columns: 4.5rem minmax(0, 1fr);
+    gap: 0 20px; align-items: baseline;
+    padding: 14px 0; border-bottom: 1px solid var(--border);
+  }
+  .chain-step:first-child { border-top: 1px solid var(--border); }
+  .chain-n {
+    font-family: var(--font-display); font-size: 1.5rem;
+    font-variant-numeric: tabular-nums; text-align: right;
+  }
+  .chain-step.is-empty .chain-n { color: var(--muted); }
+  .chain-label { margin: 0; font-size: .98rem; }
+  .chain-label a { color: inherit; }
+  .chain-ev { margin: 4px 0 0; font-size: .78rem; color: var(--muted); line-height: 1.6; }
+
+  /* ── A queue is a list of decisions, not a table of values ─────────────── */
+  .queue { list-style: none; margin: 0; padding: 0; max-width: 900px; }
+  .q-item {
+    border: 1px solid var(--border); border-left-width: 3px;
+    border-left-color: var(--gold-dim);
+    padding: 18px 20px; margin: 0 0 16px; background: var(--card);
+  }
+  .q-top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 12px; }
+  .q-v { font-size: .82rem; color: var(--muted); }
+  .q-facts { display: flex; flex-wrap: wrap; gap: 4px 36px; margin: 0; }
+  .q-facts dt { font-size: .7rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .q-facts dd { margin: 3px 0 0; font-variant-numeric: tabular-nums; }
+  .q-why {
+    margin: 14px 0 0; padding: 12px 16px; background: var(--bg-2);
+    border-left: 3px solid var(--border); color: var(--muted);
+    line-height: 1.7; font-size: .88rem;
+  }
+
+  .tag {
+    font-size: var(--text-xs); border: 1px solid var(--border);
+    border-radius: var(--radius-pill); padding: 2px 10px; color: var(--muted);
+  }
+  .tag-bad { border-color: var(--red); color: var(--red); }
+
+  .lapse { list-style: none; margin: 0; padding: 0; max-width: 820px; }
+  .lapse-row {
+    display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, .9fr) minmax(0, .7fr) minmax(0, 1fr);
+    gap: 4px 20px; padding: 11px 0; border-bottom: 1px solid var(--border);
+    font-size: .9rem; align-items: baseline;
+  }
+  .lapse-fed, .lapse-cat { color: var(--muted); font-size: .84rem; }
+  .lapse-when { font-variant-numeric: tabular-nums; }
+
+  @media (max-width: 700px) {
+    .chain-step { grid-template-columns: 3.2rem minmax(0, 1fr); gap: 0 14px; }
+    .chain-n { font-size: 1.25rem; }
+    .lapse-row { grid-template-columns: 1fr; gap: 2px; padding: 14px 0; }
+  }
+</style>

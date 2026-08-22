@@ -1,0 +1,343 @@
+---
+/**
+ * The technical learning player. §29, §30 — and §23, which decides whether it
+ * renders at all.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * THE RIGHTS GATE IS THE FIRST THING THIS COMPONENT DOES
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Embedding a recording is publishing it. So this component REFUSES to embed
+ * anything whose rights are not cleared, and renders the attribution and a link
+ * instead — which is a legitimate reference and always has been.
+ *
+ * That rule used to live as an absence: no page in the library emitted an
+ * iframe, and a test asserted the absence. The absence was correct and the
+ * expression of it was not, because it stated a fact about today rather than
+ * the rule. MMAKF's own footage IS the federation's to publish, and a codebase
+ * whose only guarantee is "we never embed" cannot ever show it.
+ *
+ * So the rule is now expressed properly and enforced in ONE place: a recording
+ * is embedded when, and only when, `rights` is a cleared value. Every surface
+ * that wants a player asks this component, and no surface writes an iframe of
+ * its own.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * AND THE CHAPTERS ARE NEVER INVENTED
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * §30 is explicit: do not fabricate timestamps; generate only from actual
+ * reviewed media. Chapters come from `media_chapters` rows a reviewer entered.
+ * A recording with none renders a stated absence — not an empty strip that
+ * looks like a loading failure, and certainly not a plausible guess derived
+ * from the duration.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WHAT "FRAME NAVIGATION" HONESTLY MEANS HERE
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * §29 asks for frame navigation "where technically possible". Through the
+ * YouTube IFrame API it is NOT possible: there is no frame-accurate seek, and
+ * the true frame rate of the recording is not exposed. The step control
+ * therefore moves by a fixed small interval and is LABELLED as an approximate
+ * step rather than a frame — because a control called "frame" that does not
+ * move a frame teaches a student to mistrust the whole tool.
+ */
+import type { cameraAngle } from '@/db/media-angles.schema';
+
+/** The enum's value union, so the prop cannot take a position that does not exist. */
+type CameraAngle = (typeof cameraAngle)['enumValues'][number];
+
+export interface PlayerChapter {
+  ordinal: number;
+  startSeconds: number;
+  endSeconds: number | null;
+  title: string;
+  /** manual | description | transcript | ai — shown, because an AI guess is not a reviewer's note. */
+  source: string;
+}
+
+export interface Props {
+  /** YouTube video id. The only provider the register holds. */
+  videoId: string;
+  title: string;
+  channel: string;
+  channelUrl: string;
+  /**
+   * The rights standing, as stored. Anything outside CLEARED renders as a
+   * reference rather than a player — see the header.
+   */
+  rights: string;
+  durationSeconds?: number | null;
+  publishedOn?: string | null;
+  /** Reviewed chapters. Empty is normal and is rendered as such. */
+  chapters?: readonly PlayerChapter[];
+  /** §28. `unknown` on everything currently on file, and shown as unrecorded. */
+  cameraAngle?: CameraAngle | null;
+  /** Why this recording is here, in the surface's own words. */
+  caption?: string | null;
+}
+
+const {
+  videoId, title, channel, channelUrl, rights,
+  durationSeconds = null, publishedOn = null,
+  chapters = [], cameraAngle = null, caption = null,
+} = Astro.props;
+
+/**
+ * The cleared set, restated from src/db/library.ts's `mediaUse()` vocabulary.
+ *
+ * Deliberately a LIST OF THE PERMITTED VALUES rather than a list of forbidden
+ * ones. A new rights state added to the enum tomorrow is not-cleared by default
+ * under this form, and would be publishable by default under the other — and
+ * the direction a default fails in is the whole of the decision.
+ */
+const CLEARED = ['cleared', 'federation_owned', 'licensed'];
+const mayEmbed = CLEARED.includes(rights);
+
+const mmss = (n: number) => `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, '0')}`;
+
+/** Stable, so two players on one page do not fight over element ids. */
+const uid = `tp-${videoId.replace(/[^A-Za-z0-9_-]/g, '')}`;
+
+const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
+---
+
+{mayEmbed ? (
+  <figure class="tp" data-uid={uid} data-video={videoId}>
+    <div class="tp-stage">
+      <div id={`${uid}-frame`} class="tp-frame" data-video={videoId}></div>
+      <noscript>
+        <p class="tp-noscript">
+          The learning player needs JavaScript for its chapter, speed and loop controls.
+          <a href={`https://www.youtube.com/watch?v=${videoId}`} rel="noopener">Open the recording on YouTube</a>.
+        </p>
+      </noscript>
+    </div>
+
+    <div class="tp-bar" role="group" aria-label="Playback controls">
+      <button type="button" class="tp-btn" data-act="back">&minus;5s</button>
+      <button type="button" class="tp-btn" data-act="step-back" title="Approximate step, not a frame">&#9664;&#9664;</button>
+      <button type="button" class="tp-btn tp-play" data-act="play" aria-live="polite">Play</button>
+      <button type="button" class="tp-btn" data-act="step-fwd" title="Approximate step, not a frame">&#9654;&#9654;</button>
+      <button type="button" class="tp-btn" data-act="fwd">+5s</button>
+
+      <label class="tp-speed">
+        Speed
+        <select data-act="speed" aria-label="Playback speed">
+          {SPEEDS.map((s) => <option value={s} selected={s === 1}>{s}&times;</option>)}
+        </select>
+      </label>
+
+      <button type="button" class="tp-btn" data-act="loop" aria-pressed="false">Loop section</button>
+      <span class="tp-time" data-role="time" aria-live="off">0:00</span>
+    </div>
+
+    <p class="tp-note">
+      The step controls move by a fixed short interval. They are <strong>not</strong> frame-accurate —
+      the player interface exposes no frame boundary, and a control labelled &ldquo;frame&rdquo; that
+      does not move one frame would be worse than none.
+    </p>
+
+    {chapters.length > 0 ? (
+      <ol class="tp-chapters" aria-label="Chapters">
+        {chapters.map((c) => (
+          <li>
+            <button type="button" class="tp-chapter" data-act="seek" data-at={c.startSeconds}>
+              <span class="tp-at">{mmss(c.startSeconds)}</span>
+              <span class="tp-ch-title">{c.title}</span>
+              {c.source === 'ai' && <span class="pill">Machine-proposed</span>}
+            </button>
+          </li>
+        ))}
+      </ol>
+    ) : (
+      <p class="tp-empty">
+        <strong>No chapters have been recorded for this recording.</strong> Chapters are entered by a
+        reviewer who has watched it. None are generated from the title, the description or the
+        duration, because a timestamp nobody checked is a timestamp that sends a student to the wrong
+        part of a form.
+      </p>
+    )}
+
+    <figcaption class="tp-cap">
+      <span class="tp-title">{title}</span>
+      <span class="tp-meta">
+        <a href={channelUrl} rel="noopener">{channel}</a>
+        {durationSeconds && <> &middot; {mmss(durationSeconds)}</>}
+        {publishedOn && <> &middot; published {publishedOn}</>}
+        {cameraAngle && cameraAngle !== 'unknown' && <> &middot; {cameraAngle.replace(/_/g, ' ')} view</>}
+        {cameraAngle === 'unknown' && <> &middot; <span class="text-muted">camera position not recorded</span></>}
+      </span>
+      {caption && <span class="tp-because">{caption}</span>}
+    </figcaption>
+  </figure>
+) : (
+  <div class="tp tp-blocked">
+    <div class="tp-blocked-head">Reference — not embedded</div>
+    <p class="tp-title">{title}</p>
+    <p class="tp-meta">
+      <a href={channelUrl} rel="noopener nofollow">{channel}</a>
+      {durationSeconds && <> &middot; {mmss(durationSeconds)}</>}
+      {publishedOn && <> &middot; published {publishedOn}</>}
+    </p>
+    <p class="tp-why">
+      MMAKF has not cleared the rights to show this recording, so it is cited rather than played here.
+      Embedding it would present somebody else&rsquo;s work as the federation&rsquo;s.
+    </p>
+    <a class="btn btn-ghost" href={`https://www.youtube.com/watch?v=${videoId}`} rel="noopener nofollow">
+      Watch it at the source &rarr;
+    </a>
+  </div>
+)}
+
+{mayEmbed && (
+  <script is:inline define:vars={{ uid, videoId }}>
+    /*
+     * The IFrame API is loaded ONCE per page however many players are on it, and
+     * only on a page that actually has a cleared recording — the script is not
+     * emitted at all in the blocked branch above, so a page full of references
+     * loads no third-party script.
+     */
+    (function () {
+      const mount = () => {
+        const holder = document.getElementById(uid + '-frame');
+        if (!holder || holder.dataset.ready) return;
+        holder.dataset.ready = '1';
+
+        const player = new window.YT.Player(uid + '-frame', {
+          videoId,
+          playerVars: { rel: 0, modestbranding: 1, playsinline: 1 },
+        });
+
+        const root = document.querySelector('[data-uid="' + uid + '"]');
+        if (!root) return;
+        const timeEl = root.querySelector('[data-role="time"]');
+        const playBtn = root.querySelector('[data-act="play"]');
+        const loopBtn = root.querySelector('[data-act="loop"]');
+
+        /* Loop is a SECTION between two marks the student sets by pressing the
+           button twice: once to open the section, once to close it. Simpler
+           than two controls, and it matches how somebody drilling a sequence
+           actually thinks — start here, end there, again. */
+        let loopFrom = null;
+        let loopTo = null;
+
+        const at = () => (player.getCurrentTime ? player.getCurrentTime() : 0);
+        const seek = (t) => player.seekTo(Math.max(0, t), true);
+        const fmt = (n) => Math.floor(n / 60) + ':' + String(Math.floor(n % 60)).padStart(2, '0');
+
+        root.addEventListener('click', (ev) => {
+          const el = ev.target.closest('[data-act]');
+          if (!el) return;
+          const act = el.dataset.act;
+
+          if (act === 'play') {
+            const state = player.getPlayerState ? player.getPlayerState() : -1;
+            if (state === 1) { player.pauseVideo(); el.textContent = 'Play'; }
+            else { player.playVideo(); el.textContent = 'Pause'; }
+          } else if (act === 'back') seek(at() - 5);
+          else if (act === 'fwd') seek(at() + 5);
+          /* 0.04s ≈ one frame at 25fps. Approximate on purpose, and the caption
+             under the controls says so rather than implying accuracy. */
+          else if (act === 'step-back') { player.pauseVideo(); seek(at() - 0.04); }
+          else if (act === 'step-fwd') { player.pauseVideo(); seek(at() + 0.04); }
+          else if (act === 'seek') seek(Number(el.dataset.at || 0));
+          else if (act === 'loop') {
+            if (loopFrom === null) {
+              loopFrom = at();
+              loopBtn.textContent = 'End loop here';
+              loopBtn.setAttribute('aria-pressed', 'true');
+            } else if (loopTo === null) {
+              loopTo = at();
+              if (loopTo <= loopFrom) { loopFrom = null; loopTo = null; loopBtn.textContent = 'Loop section'; loopBtn.setAttribute('aria-pressed', 'false'); return; }
+              loopBtn.textContent = 'Looping ' + fmt(loopFrom) + '–' + fmt(loopTo) + ' — clear';
+            } else {
+              loopFrom = null; loopTo = null;
+              loopBtn.textContent = 'Loop section';
+              loopBtn.setAttribute('aria-pressed', 'false');
+            }
+          }
+        });
+
+        root.addEventListener('change', (ev) => {
+          const el = ev.target.closest('[data-act="speed"]');
+          if (!el) return;
+          player.setPlaybackRate(Number(el.value));
+        });
+
+        setInterval(() => {
+          if (!player.getCurrentTime) return;
+          const t = at();
+          if (timeEl) timeEl.textContent = fmt(t);
+          if (loopFrom !== null && loopTo !== null && t >= loopTo) seek(loopFrom);
+        }, 250);
+      };
+
+      if (window.YT && window.YT.Player) { mount(); return; }
+
+      /* Several players share one API load and one callback. */
+      window.__mmakfPlayerQueue = window.__mmakfPlayerQueue || [];
+      window.__mmakfPlayerQueue.push(mount);
+      if (!window.__mmakfPlayerLoading) {
+        window.__mmakfPlayerLoading = true;
+        const prev = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = function () {
+          if (typeof prev === 'function') prev();
+          (window.__mmakfPlayerQueue || []).forEach((fn) => fn());
+        };
+        const tag = document.createElement('script');
+        tag.src = 'https://www.youtube.com/iframe_api';
+        document.head.appendChild(tag);
+      }
+    })();
+  </script>
+)}
+
+<style>
+  .tp { margin: 0 0 28px; }
+  .tp-stage { position: relative; aspect-ratio: 16 / 9; background: #000; border-radius: 4px; overflow: hidden; }
+  .tp-frame { width: 100%; height: 100%; }
+  .tp-frame :global(iframe) { width: 100%; height: 100%; border: 0; }
+  .tp-noscript { color: #fff; padding: 16px; }
+
+  .tp-bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 10px 0; border-bottom: 1px solid var(--border, rgba(0,0,0,.12));
+  }
+  .tp-btn {
+    font: inherit; font-size: .85rem; padding: 6px 10px; cursor: pointer;
+    background: transparent; border: 1px solid var(--border, rgba(0,0,0,.2)); border-radius: 3px;
+  }
+  .tp-btn:hover { background: var(--bg2, rgba(0,0,0,.04)); }
+  .tp-play { min-width: 5.5em; }
+  .tp-speed { font-size: .8rem; display: inline-flex; align-items: center; gap: 6px; }
+  .tp-time { font-variant-numeric: tabular-nums; font-size: .85rem; margin-left: auto; }
+
+  .tp-note, .tp-empty { font-size: .85rem; color: var(--muted); margin: 10px 0; max-width: 68ch; }
+
+  .tp-chapters { list-style: none; margin: 12px 0; padding: 0; }
+  .tp-chapters li { border-top: 1px solid var(--border, rgba(0,0,0,.08)); }
+  .tp-chapter {
+    display: flex; gap: 14px; align-items: baseline; width: 100%;
+    font: inherit; text-align: left; padding: 9px 4px; cursor: pointer;
+    background: transparent; border: 0;
+  }
+  .tp-chapter:hover { background: var(--bg2, rgba(0,0,0,.04)); }
+  .tp-at { font-variant-numeric: tabular-nums; color: var(--gold-2, #8a6d1f); min-width: 4em; }
+
+  .tp-cap { margin-top: 12px; display: grid; gap: 4px; }
+  .tp-title { font-weight: 600; }
+  .tp-meta, .tp-because { font-size: .88rem; color: var(--muted); }
+
+  .tp-blocked { border: 1px solid var(--border, rgba(0,0,0,.14)); border-radius: 4px; padding: 18px; }
+  .tp-blocked-head {
+    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 8px;
+  }
+  .tp-why { font-size: .88rem; color: var(--muted); max-width: 62ch; margin: 8px 0 14px; }
+
+  @media (max-width: 560px) {
+    .tp-time { margin-left: 0; width: 100%; }
+  }
+</style>

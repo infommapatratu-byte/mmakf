@@ -135,6 +135,8 @@ export const SELLER_TABS = [
   { href: '/portal/seller', label: 'Overview' },
   { href: '/portal/seller/products', label: 'Products' },
   { href: '/portal/seller/orders', label: 'Orders' },
+  { href: '/portal/seller/shipping', label: 'Shipping' },
+  { href: '/portal/seller/documents', label: 'Documents' },
   { href: '/portal/seller/money', label: 'Money' },
 ];
 

@@ -41,11 +41,39 @@ if (authed) {
                  placeholder="you@mmakf.in" />
 
           <label class="input-label" for="login-password" style="margin-top:14px">Password</label>
-          <input class="input" type="password" id="login-password" name="password"
-                 autocomplete="current-password" required />
+          <div style="position:relative">
+            <input class="input" type="password" id="login-password" name="password"
+                   autocomplete="current-password" required style="padding-right:74px" />
+            <button type="button" id="pwToggle" aria-controls="login-password" aria-pressed="false"
+                    style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:0;padding:8px;font-family:var(--font-display);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);cursor:pointer">Show</button>
+          </div>
 
           <div id="loginErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
           <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;justify-content:center">Sign in</button>
+
+          <!--
+            Recovery, stated rather than hidden. `details` and not a modal, so it
+            works with JavaScript off like the rest of this form.
+          -->
+          <details style="margin-top:18px">
+            <summary style="cursor:pointer;font-size:.78rem;color:var(--gold);font-family:var(--font-display);letter-spacing:.04em">Forgotten your password?</summary>
+            <div style="margin-top:10px;font-size:.75rem;color:var(--muted);line-height:1.7">
+              <p style="margin:0">
+                There is no self-service reset here, for two reasons worth knowing rather than
+                guessing at. This console has no mail transport configured, so a reset link
+                would have nowhere to go. And a security question — a date of birth, a first
+                school — would be weaker than the password it replaced: this federation's own
+                register stores dates of birth, so an answer anyone could look up would become
+                the way in to an account that can read every record in it.
+              </p>
+              <p style="margin:10px 0 0">
+                A federation officer with database access reissues the credential instead:
+                <code style="font-size:.72rem">npm run user:reset-password -- --email you@mmakf.in</code>.
+                It is shown once, every existing session for that account is signed out, and
+                the holder must choose a new password on first use.
+              </p>
+            </div>
+          </details>
 
           <p style="margin-top:20px;font-size:.75rem;color:var(--muted);text-align:center;line-height:1.6">
             Authorised personnel only. Every action is recorded against your account.<br />
@@ -56,10 +84,56 @@ if (authed) {
     </section>
 
     <script>
+      // The Quick-links buttons. Delegated so the markup carries no inline
+      // JavaScript — see the note beside them for what inline cost here.
+      document.addEventListener('click', (e) => {
+        const btn = (e.target as HTMLElement | null)?.closest('[data-scroll-to]');
+        if (!btn) return;
+        const target = document.getElementById(btn.getAttribute('data-scroll-to') || '');
+        // A missing section is not an error worth throwing at the operator: the
+        // button simply does nothing, which is what it did before and is now
+        // deliberate rather than accidental.
+        if (!target) return;
+        window.scrollTo({ top: target.offsetTop - 20, behavior: 'smooth' });
+      });
+
+      // REVEAL THE PASSWORD.
+      //
+      // This form's only error is deliberately generic — "Invalid email or
+      // password" — because saying which one was wrong tells a stranger whether
+      // an account exists. The cost of that correct decision falls on the
+      // legitimate operator: a mistyped character and a wrong account produce
+      // the identical sentence, and a 27-character generated credential is
+      // exactly the kind nobody types correctly first time. Being able to LOOK
+      // is the difference between one attempt and five.
+      //
+      // type="button" so it cannot submit the form, and aria-pressed so a screen
+      // reader announces the state rather than just the word on the button.
+      const pw = document.getElementById('login-password') as HTMLInputElement | null;
+      const pwBtn = document.getElementById('pwToggle');
+      pwBtn?.addEventListener('click', () => {
+        if (!pw) return;
+        const revealed = pw.type === 'text';
+        pw.type = revealed ? 'password' : 'text';
+        pwBtn.textContent = revealed ? 'Show' : 'Hide';
+        pwBtn.setAttribute('aria-pressed', String(!revealed));
+        // Return focus to the field so the keyboard user is not left on the
+        // button having to tab back to carry on typing.
+        pw.focus();
+      });
+
       const f = document.getElementById('loginForm');
       const err = document.getElementById('loginErr');
       f.addEventListener('submit', async (e) => {
         e.preventDefault();
+        // Re-mask before anything else. A browser restoring this page from the
+        // back/forward cache restores the field as it was left, and a password
+        // left readable on a shared office screen is the one failure this
+        // control could introduce.
+        if (pw && pw.type === 'text') {
+          pw.type = 'password';
+          if (pwBtn) { pwBtn.textContent = 'Show'; pwBtn.setAttribute('aria-pressed', 'false'); }
+        }
         err.style.display = 'none';
         const btn = f.querySelector('button[type=submit]');
         const data = new FormData(f);
@@ -160,11 +234,22 @@ if (authed) {
           </div>
           <div class="card" style="margin-top:24px">
             <div class="card-eyebrow">Quick links</div>
+            {/* DELEGATED, NOT onclick. These four carried
+                `document.getElementById('news')!.offsetTop` in an onclick
+                attribute. The `!` is a TypeScript non-null assertion, and an
+                inline handler is parsed as plain JavaScript by the browser — no
+                compiler ever sees it. Every one of the four threw SyntaxError
+                on click and did nothing at all, silently, because a handler
+                that fails to parse reports nothing to the person pressing it.
+
+                A data attribute and one listener in the page's compiled script
+                cannot have that failure: there is no inline JavaScript left to
+                mis-parse. */}
             <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:14px">
-              <button class="btn btn-ghost" onclick="scrollTo({top:document.getElementById('news')!.offsetTop-20,behavior:'smooth'})">Post News</button>
-              <button class="btn btn-ghost" onclick="scrollTo({top:document.getElementById('events')!.offsetTop-20,behavior:'smooth'})">Add Event</button>
-              <button class="btn btn-ghost" onclick="scrollTo({top:document.getElementById('schedule')!.offsetTop-20,behavior:'smooth'})">Edit Schedule</button>
-              <button class="btn btn-ghost" onclick="scrollTo({top:document.getElementById('leads')!.offsetTop-20,behavior:'smooth'})">View Leads</button>
+              <button class="btn btn-ghost" type="button" data-scroll-to="news">Post News</button>
+              <button class="btn btn-ghost" type="button" data-scroll-to="events">Add Event</button>
+              <button class="btn btn-ghost" type="button" data-scroll-to="schedule">Edit Schedule</button>
+              <button class="btn btn-ghost" type="button" data-scroll-to="leads">View Leads</button>
             </div>
           </div>
         </section>

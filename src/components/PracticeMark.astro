@@ -1,0 +1,173 @@
+---
+/**
+ * The practice-marking control. §43.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * IT MAKES NO DATABASE CALL, AND THAT IS DELIBERATE
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * The pages this sits on — the technique pages, the kata pages — render entirely
+ * from static source and touch no database at all. That is a property worth
+ * protecting: production currently receives no DATABASE_URL, and the technical
+ * library must stay readable regardless.
+ *
+ * Reading "what has this member already marked?" in the frontmatter would put a
+ * database query on the critical path of every public technique page, to render
+ * four buttons. So the control renders unconditionally and the CURRENT state is
+ * fetched by the browser afterwards — or not at all, if the visitor is not
+ * signed in, in which case the buttons simply explain themselves when pressed.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * AND IT OFFERS NO WAY TO SAY "DONE"
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * §44: watching Bassai Dai does not complete Bassai Dai. The four options are
+ * the four in the vocabulary and none of them is terminal — there is nothing to
+ * press that claims attainment, because attainment is what a grading is for.
+ * The note under the control says so in the member's own reading, not only in a
+ * comment a member will never see.
+ */
+import { MARK_LABEL, MARKS } from '@/db/practice';
+
+export interface Props {
+  subjectKind: 'technique' | 'kata' | 'kumite' | 'video' | 'drill';
+  subjectSlug: string;
+  /** Named in the confirmation, so a member sees what they marked. */
+  subjectTitle: string;
+}
+
+const { subjectKind, subjectSlug, subjectTitle } = Astro.props;
+---
+
+<section class="pm" data-kind={subjectKind} data-slug={subjectSlug} aria-labelledby={`pm-h-${subjectSlug}`}>
+  <div class="pm-head">
+    <span class="eyebrow">Your own practice</span>
+    <h3 id={`pm-h-${subjectSlug}`} class="pm-h">How are you getting on with {subjectTitle}?</h3>
+  </div>
+
+  <div class="pm-btns" role="group" aria-label={`Mark your practice of ${subjectTitle}`}>
+    {MARKS.map((m) => (
+      <button type="button" class="pm-btn" data-mark={m} aria-pressed="false" title={MARK_LABEL[m].help}>
+        {MARK_LABEL[m].label}
+      </button>
+    ))}
+    <button type="button" class="pm-btn pm-clear" data-mark="" hidden>Clear</button>
+  </div>
+
+  <p class="pm-status" role="status" aria-live="polite"></p>
+
+  <p class="pm-note">
+    This is your own note and nobody else&rsquo;s. It is not seen by an examiner and it counts toward no
+    grade &mdash; there is deliberately nothing here that says &ldquo;completed&rdquo;, because whether you
+    can perform a technique is decided on the floor and, if it is to count, at a grading.
+    <a href="/my/practice">Your practice notes</a>.
+  </p>
+</section>
+
+<script is:inline>
+  /*
+   * One listener for every control on the page. Progressive: with no JavaScript
+   * the buttons are inert and the explanatory note still reads correctly, which
+   * is better than a control that appears to work and silently does not.
+   */
+  (function () {
+    if (window.__mmakfPracticeBound) return;
+    window.__mmakfPracticeBound = true;
+
+    /* Load the member's existing marks once, after paint, and light up the
+       matching buttons. A 401 is the normal signed-out case and is silent —
+       the page is public and most readers are not signed in. */
+    const hydrate = async () => {
+      const nodes = document.querySelectorAll('.pm[data-slug]');
+      if (!nodes.length) return;
+      try {
+        const res = await fetch('/api/practice/mine', { headers: { accept: 'application/json' } });
+        if (!res.ok) return;
+        const { marks } = await res.json();
+        if (!Array.isArray(marks)) return;
+        for (const node of nodes) {
+          const hit = marks.find(
+            (m) => m.subjectKind === node.dataset.kind && m.subjectSlug === node.dataset.slug
+          );
+          if (!hit) continue;
+          const btn = node.querySelector('[data-mark="' + hit.mark + '"]');
+          if (btn) btn.setAttribute('aria-pressed', 'true');
+          const clear = node.querySelector('.pm-clear');
+          if (clear) clear.hidden = false;
+        }
+      } catch { /* the control still works; only the current state is missing */ }
+    };
+
+    document.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('.pm-btn');
+      if (!btn) return;
+      const root = btn.closest('.pm');
+      const status = root.querySelector('.pm-status');
+      const mark = btn.dataset.mark;
+
+      root.querySelectorAll('.pm-btn').forEach((b) => (b.disabled = true));
+      status.textContent = 'Saving…';
+
+      try {
+        const res = await fetch('/api/practice', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: mark ? 'mark' : 'clear',
+            subjectKind: root.dataset.kind,
+            subjectSlug: root.dataset.slug,
+            mark: mark || undefined,
+          }),
+        });
+        const body = await res.json().catch(() => ({}));
+
+        if (res.ok) {
+          root.querySelectorAll('[data-mark]').forEach((b) =>
+            b.setAttribute('aria-pressed', String(Boolean(mark) && b.dataset.mark === mark))
+          );
+          const clear = root.querySelector('.pm-clear');
+          if (clear) clear.hidden = !mark;
+          status.textContent = mark ? 'Saved to your own notes.' : 'Removed.';
+        } else {
+          /* The API's refusals are written to be read by whoever hit them —
+             "sign in with your own account", "the register is not connected". */
+          status.textContent = body.error || 'That did not save.';
+        }
+      } catch {
+        status.textContent = 'That did not save.';
+      } finally {
+        root.querySelectorAll('.pm-btn').forEach((b) => (b.disabled = false));
+      }
+    });
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', hydrate);
+    } else {
+      hydrate();
+    }
+  })();
+</script>
+
+<style>
+  .pm {
+    border: 1px solid var(--border, rgba(0, 0, 0, .14));
+    border-radius: 4px;
+    padding: 20px;
+    max-width: 68ch;
+  }
+  .pm-head { margin-bottom: 14px; }
+  .pm-h { font-family: var(--font-display); font-size: 1.1rem; margin: 8px 0 0; }
+  .pm-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pm-btn {
+    font: inherit; font-size: .88rem; padding: 8px 14px; cursor: pointer;
+    background: transparent; border: 1px solid var(--border, rgba(0, 0, 0, .2)); border-radius: 3px;
+  }
+  .pm-btn:hover { background: var(--bg2, rgba(0, 0, 0, .04)); }
+  .pm-btn[aria-pressed='true'] {
+    border-color: var(--gold-2, #8a6d1f);
+    box-shadow: inset 0 0 0 1px var(--gold-2, #8a6d1f);
+  }
+  .pm-btn:disabled { opacity: .55; cursor: default; }
+  .pm-status { min-height: 1.3em; margin: 10px 0 0; font-size: .88rem; color: var(--muted); }
+  .pm-note { margin: 10px 0 0; font-size: .86rem; color: var(--muted); }
+</style>

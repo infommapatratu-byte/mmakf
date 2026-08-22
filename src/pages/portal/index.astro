@@ -231,7 +231,10 @@ const displayName = person?.fullName || principal?.label || 'Your account';
 
               <div style="margin-top:16px">
                 <a class="btn btn-gold" href="/portal/applications">Apply for a role</a>
-                <a class="btn btn-ghost" href="/portal/selling" style="margin-left:10px">Apply to sell</a>
+                {/* /portal/selling does not exist and never did — this 404'd. /seller/apply
+                    is the application itself, and it routes a member who has already
+                    applied to their own standing rather than a second blank form. */}
+                <a class="btn btn-ghost" href="/seller/apply" style="margin-left:10px">Apply to sell</a>
               </div>
             </div>
           )}

@@ -86,6 +86,22 @@ export interface DecisionResult {
   recordId: string;
   from: string;
   to: string;
+  /**
+   * The record as it now stands, for a caller that has to ACT on the decision.
+   *
+   * WHY IT IS HERE AT ALL. src/pages/api/queue/decide.ts has always read
+   * `(result as any).record` to find the person a membership should be issued
+   * to — and this interface never carried one, so that read was `undefined`
+   * every single time. The approval path therefore always took its "this
+   * application carries no linked person record" branch and no membership was
+   * ever issued by it. A field the caller invented and this type never promised.
+   *
+   * IT IS PII AND MUST NOT BE SERIALISED TO A CLIENT. It holds the applicant's
+   * name, date of birth, email, telephone and address. Every caller is
+   * responsible for stripping it before it reaches a response body; decide.ts
+   * destructures it out for exactly that reason and says so.
+   */
+  record: Record<string, any>;
 }
 
 /**
@@ -174,7 +190,15 @@ export async function decide(
   // above says it is handled.
   await storageSet(storageKeyFor(decision.queue), rows);
 
-  return { ok: true, recordId: String(decision.recordId), from, to: toStatus };
+  // `record` is the DECIDED row, not the one read at the top — a caller
+  // provisioning from it must see the status the decision just set.
+  return {
+    ok: true,
+    recordId: String(decision.recordId),
+    from,
+    to: toStatus,
+    record: rows[index],
+  };
 }
 
 /** Counts per status, for the dashboard. */

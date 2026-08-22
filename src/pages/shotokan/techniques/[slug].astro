@@ -29,6 +29,7 @@
  */
 import Base from '@/layouts/Base.astro';
 import PageHero from '@/components/PageHero.astro';
+import PracticeMark from '@/components/PracticeMark.astro';
 import { techniqueGraph, familyByKey } from '@/data/shotokan';
 import { canonicalFor, href as surfaceHref, type Surface } from '@/lib/surface';
 
@@ -416,8 +417,19 @@ const jsonLd = {
     </div>
   </section>
 
-  {/* ═══════ NAVIGATION ═══════ */}
+  {/* ═══════ YOUR OWN PRACTICE ═══════
+      Renders unconditionally and makes no database call — see the component.
+      This page must stay readable with no DATABASE_URL, which is production's
+      current state, so the control's saved state is fetched afterwards by
+      whoever is signed in rather than queried here for everybody. */}
   <section class="bg2">
+    <div class="container">
+      <PracticeMark subjectKind="technique" subjectSlug={t.slug} subjectTitle={t.name} />
+    </div>
+  </section>
+
+  {/* ═══════ NAVIGATION ═══════ */}
+  <section>
     <div class="container">
       <div class="flex flex-wrap gap-3">
         <a class="btn btn-ghost" href={h('/shotokan/kihon')}>&larr; All kihon</a>

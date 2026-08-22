@@ -48,6 +48,7 @@ import { and, asc, desc, eq, inArray, isNull, lte, gte, or, sql, type SQL } from
 import * as s from '@/db/schema';
 import { writeAudit, type AuditContext } from '@/db/federation';
 import { assertCan, canAnywhere, visibleScopes, type Principal } from '@/lib/rbac';
+import { isStudentMembershipCategory } from './student-rule';
 
 type DB = any;
 
@@ -304,6 +305,47 @@ function daysBetween(fromIso: string, toIso: string): number {
 export async function renew(db: DB, ctx: AuditContext, input: RenewInput): Promise<RenewResult> {
   if (!CATEGORIES.includes(input.category)) {
     throw new MembershipError('bad_category', `Unknown membership category: ${String(input.category)}.`);
+  }
+
+  // ── A STUDENT DOES NOT PAY A MEMBERSHIP FEE FOR BEING A STUDENT ──
+  //
+  // THE LAST PLACE ONE COULD BE CREATED. src/db/orders.ts refuses to CHARGE for
+  // a student membership from any of its three price sources; configureTerm()
+  // refuses to record that a fee BUYS one; decideMembership() refuses to ACT on
+  // a term row that says it does. All of those sit on the money path. This
+  // function does not: it is the register's own issue-and-renew action, and it
+  // would still mint an athlete membership for anybody holding
+  // 'membership:issue' — no charge, no fee code, no order, and therefore no
+  // guard in front of it.
+  //
+  // The federation's instruction names who membership is for: coaches,
+  // officials, examiners and clubs. An athlete is not on that list, and
+  // src/db/revenue.ts has reported the category as withdrawn since 17 August
+  // 2026 while nothing stopped another being issued. This is that sentence
+  // becoming true rather than remaining a caption.
+  //
+  // WHAT IS NOT REFUSED, and the distinction is the whole of it:
+  //
+  //   · READING. standing(), resolveStanding(), history(), lapsingSoon(),
+  //     /verify and the public register all still read athlete memberships
+  //     exactly as they are. An issued credential is a fact.
+  //   · CORRECTING. suspend(), reinstate() and revoke() still work on one. A
+  //     federation that cannot revoke a credential it issued is worse off than
+  //     one that never issued it.
+  //
+  // Only ISSUING ANOTHER is refused. The category stays in the enum for the
+  // same reason: removing it would orphan the rows, and the rule governs what
+  // may be created from now on, never what the record says already happened.
+  if (isStudentMembershipCategory(input.category)) {
+    throw new MembershipError(
+      'student_membership_refused',
+      `The federation does not issue a '${input.category}' membership. A student does not pay a membership ` +
+      'fee for being a student — what a student buys is TRAINING, and an account, a profile, an enrolment ' +
+      'and a place in a class are what having a student means rather than products to be sold. Access to ' +
+      'training is decided by a valid training entitlement, which this row would not grant and whose absence ' +
+      'it would not cure. The register admits an instructor, an official or a dojo. Memberships already ' +
+      'issued in this category keep their rows and stay readable, and can still be suspended or revoked.'
+    );
   }
   const validFrom = requireIsoDate(input.validFrom, 'validFrom');
 

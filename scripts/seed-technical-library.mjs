@@ -140,7 +140,7 @@ const schema = await import('../src/db/schema.ts');
 // The rules live in scripts/db-tls.mjs — ONE definition, shared by every runner
 // in this directory. They were briefly copied into each file, which is not three
 // times the safety but three places for one copy to quietly stop matching.
-const { tlsFor } = await import('./db-tls.mjs');
+const { tlsFor, tlsHint } = await import('./db-tls.mjs');
 
 // prepare:false is what keeps this working through a transaction-mode pooler,
 // which is the same reason src/db/index.ts sets it.
@@ -258,7 +258,19 @@ try {
   process.exit(0);
 } catch (err) {
   console.error(`\nSeeding failed: ${err?.message ?? err}`);
-  if (err?.stack) console.error(err.stack.split('\n').slice(1, 6).join('\n'));
+
+  // A certificate failure arrives wearing the wrong clothes. The line above it
+  // says the SEED failed, and the five frames below it land in node:internal/tls
+  // — so the reader goes hunting for a bug in this file, or re-checks a password
+  // that was never reached, when the fault is a root missing from the trust
+  // store. Those frames record where the handshake gave up, never why. So when
+  // db-tls.mjs recognises the fault, its explanation REPLACES them.
+  const hint = tlsHint(err);
+  if (hint) {
+    console.error(hint);
+  } else if (err?.stack) {
+    console.error(err.stack.split('\n').slice(1, 6).join('\n'));
+  }
   await client.end({ timeout: 5 }).catch(() => {});
   process.exit(1);
 }

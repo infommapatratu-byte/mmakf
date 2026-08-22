@@ -1,0 +1,533 @@
+---
+// /admin/timetable — the resource view, and the register.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHY A ROOM-BY-ROOM GRID AND NOT ANOTHER LIST
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// /admin/schedules answers "what are this unit's hours" and lists occurrences in
+// date order. That is the right shape for editing a timetable and the wrong shape
+// for the two questions an operations desk actually asks:
+//
+//   · IS THIS ROOM FREE ON THURSDAY EVENING? A date-ordered list of every class
+//     at the club makes somebody read forty rows and hold four of them in their
+//     head. A grid of rooms against days answers it by looking.
+//
+//   · WHO WAS AT MONDAY'S CLASS? Attendance was READ by src/db/grading.ts to
+//     decide whether a candidate may be examined, and NOTHING IN THE
+//     APPLICATION EVER WROTE IT — so the count was always zero. This screen is
+//     the writer.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// THE ONE THING THIS SCREEN REFUSES TO GUESS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A register is not pre-filled. There is no "mark all present" and no default:
+// src/db/attendance.ts treats an unmarked person as ABSENT FROM THE REGISTER
+// rather than as absent, and this page renders three states — present, absent,
+// not marked — because a system that filled in the gaps would be inventing
+// training somebody did not do, or denying training they did.
+//
+// The "not marked yet" report is the other half. Without it, a class whose
+// instructor forgot the register is indistinguishable from a class nobody
+// attended, and the grading engine treats the two the same way.
+
+import AdminShell from '@/components/AdminShell.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import * as s from '@/db/schema';
+import * as ops from '@/db/operations.schema';
+import * as sch from '@/db/scheduling.schema';
+import {
+  todayIso, addDays, daysBetween, isoDayOfWeek, DAY_SHORT, timeToMinutes,
+  isSchedulingError,
+} from '@/db/scheduling';
+import { register, takeRegister, missingRegisters, isAttendanceError, type Register } from '@/db/attendance';
+import { and, asc, eq, gte, inArray, isNull, lte } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/timetable');
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const configured = isConfigured();
+
+const mayRead = Boolean(principal) && canAnywhere(principal, 'attendance:read');
+const mayWrite = Boolean(principal) && canAnywhere(principal, 'attendance:write');
+
+const url = new URL(Astro.request.url);
+const dojoParam = url.searchParams.get('dojo');
+const dojoId = dojoParam ? Number(dojoParam) : null;
+/** Monday of the week being shown. Defaults to the current one. */
+const weekParam = url.searchParams.get('week');
+const openSessionId = url.searchParams.get('session') ? Number(url.searchParams.get('session')) : null;
+
+function mondayOf(iso: string): string {
+  return addDays(iso, -(isoDayOfWeek(iso) - 1));
+}
+const weekStart = weekParam && /^\d{4}-\d{2}-\d{2}$/.test(weekParam) ? mondayOf(weekParam) : mondayOf(todayIso());
+const weekEnd = addDays(weekStart, 6);
+const weekDays = daysBetween(weekStart, weekEnd);
+
+let error: string | null = null;
+let done: string | null = null;
+
+// ─── Taking the register ────────────────────────────────────────────────────
+//
+// Posts to this page, not to /api/. src/middleware.ts requires application/json
+// on /api/ paths and a form with JavaScript off cannot send one; CSRF is already
+// handled, because the middleware refuses a mutating request that is not
+// same-origin before any of this runs.
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const field = (k: string) => String(form.get(k) ?? '').trim();
+  const rl = await rateLimit(Astro.request, 'admin-timetable', 60, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many changes in a short time. Nothing was recorded. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was recorded.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment.';
+  } else if (field('action') !== 'take-register') {
+    Astro.response.status = 400;
+    error = 'That is not something this screen does.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: field('reason') || 'Register taken at the class',
+    };
+    const sessionId = Number(field('sessionId'));
+    // Three states in, three states out. A person whose radio is left on
+    // "not marked" is NOT sent as absent — see the header note.
+    const marks: Array<{ personId: number; present: boolean; note?: string | null }> = [];
+    for (const [key, value] of form.entries()) {
+      const m = /^mark-(\d+)$/.exec(key);
+      if (!m) continue;
+      const v = String(value);
+      if (v !== 'present' && v !== 'absent') continue;
+      marks.push({
+        personId: Number(m[1]),
+        present: v === 'present',
+        note: String(form.get(`note-${m[1]}`) ?? '').trim() || null,
+      });
+    }
+
+    try {
+      if (!marks.length) {
+        error = 'Nothing was marked, so nothing was recorded. An empty register is not the same as an empty class.';
+        Astro.response.status = 400;
+      } else {
+        const result = await takeRegister(db(), ctx, sessionId, marks, {
+          focus: field('focus') || null,
+          allowFuture: field('allowFuture') === 'yes',
+        });
+        return Astro.redirect(
+          `${SELF}?dojo=${dojoId ?? ''}&week=${weekStart}&session=${sessionId}&done=register&marked=${result.marked}&amended=${result.amended}&present=${result.presentCount}`,
+          303
+        );
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = `The register refused this: it requires ${err.action}, which this account does not hold for that club. Nothing was recorded.`;
+      } else if (isAttendanceError(err) || isSchedulingError(err)) {
+        // The module writes its refusals for the person who hit them.
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        Astro.response.status = 500;
+        error = 'The register could not be saved. Nothing was recorded.';
+        console.error('/admin/timetable', err);
+      }
+    }
+  }
+}
+
+if (url.searchParams.get('done') === 'register') {
+  const marked = url.searchParams.get('marked') ?? '0';
+  const amended = url.searchParams.get('amended') ?? '0';
+  const present = url.searchParams.get('present') ?? '0';
+  done = `Register saved: ${marked} newly marked, ${amended} amended, ${present} present. Every amendment records the value it replaced.`;
+}
+
+// ─── What to show ───────────────────────────────────────────────────────────
+
+let dojos: any[] = [];
+let venues: any[] = [];
+let grid: Map<string, any[]> = new Map();
+let onlineSessions: any[] = [];
+let missing: any[] = [];
+let sheet: Register | null = null;
+let loadError: string | null = null;
+
+if (configured && mayRead) {
+  try {
+    const database = db();
+    dojos = await database.select({ id: s.dojos.id, name: s.dojos.name })
+      .from(s.dojos).where(inArray(s.dojos.status, ['active', 'provisional']))
+      .orderBy(asc(s.dojos.name));
+
+    if (dojoId) {
+      venues = await database.select({ id: ops.venues.id, name: ops.venues.name })
+        .from(ops.venues)
+        .where(and(eq(ops.venues.dojoId, dojoId), eq(ops.venues.active, true)))
+        .orderBy(asc(ops.venues.name));
+
+      const rows = await database.select({ session: sch.classSessions, klass: sch.dojoClasses })
+        .from(sch.classSessions)
+        .innerJoin(sch.dojoClasses, eq(sch.dojoClasses.id, sch.classSessions.classId))
+        .leftJoin(s.trainingSessions, eq(s.trainingSessions.classSessionId, sch.classSessions.id))
+        .where(and(
+          eq(sch.dojoClasses.ownerScope, 'dojo'),
+          eq(sch.dojoClasses.ownerId, dojoId),
+          gte(sch.classSessions.localDate, weekStart),
+          lte(sch.classSessions.localDate, weekEnd)
+        ))
+        .orderBy(asc(sch.classSessions.startsAt));
+
+      // Keyed by room and day, which is what makes the grid a lookup rather than
+      // a scan. An online class has no room and gets its own row beneath.
+      for (const row of rows) {
+        const key = `${row.session.venueId ?? 'online'}|${row.session.localDate}`;
+        const list = grid.get(key) ?? [];
+        list.push(row);
+        grid.set(key, list);
+        if (row.session.venueId == null) onlineSessions.push(row);
+      }
+
+      missing = await missingRegisters(database, principal!, {
+        dojoId, fromIso: addDays(weekStart, -28), toIso: weekEnd,
+      }, 50);
+    }
+
+    if (openSessionId) sheet = await register(database, principal!, openSessionId);
+  } catch (err: any) {
+    if (err instanceof ForbiddenError) {
+      loadError = `Reading this needs ${err.action}, which this account does not hold for that club.`;
+    } else {
+      console.error('/admin/timetable load', err);
+      loadError = 'The timetable could not be read.';
+    }
+  }
+}
+
+const dojoName = dojos.find((d: any) => d.id === dojoId)?.name ?? null;
+/** Rooms plus a synthetic online row, only when there is something in it. */
+const rowsToRender = [
+  ...venues.map((v: any) => ({ key: String(v.id), name: v.name, online: false })),
+  ...(onlineSessions.length ? [{ key: 'online', name: 'Online (no room)', online: true }] : []),
+];
+const fmtDay = (iso: string) =>
+  `${DAY_SHORT[isoDayOfWeek(iso) - 1]} ${iso.slice(8)}/${iso.slice(5, 7)}`;
+---
+
+<AdminShell
+  title="Timetable and registers"
+  requires="attendance:read"
+  intro="Room by room for one week, and the register at each class."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: h('/admin/dashboard') },
+      { name: 'Training and engagement', url: h('/admin/schedules') },
+      { name: 'Timetable and registers', url: SELF },
+    ],
+    description:
+      'A grid of rooms against days answers "is this room free on Thursday evening" by looking, which a date-ordered list does not. ' +
+      'Attendance is recorded here — and it is counted by the grading engine when it decides whether a candidate may be examined.',
+  }}
+>
+  {error && <ErrorState title="Nothing was recorded" safe={error} />}
+  {done && <div class="ok-note">{done}</div>}
+
+  {!configured ? (
+    <EmptyState
+      title="No federation database is configured"
+      body="The timetable and its registers live in Postgres. Set DATABASE_URL for this deployment and run the migrations."
+    />
+  ) : !mayRead ? (
+    <EmptyState
+      title="You do not hold attendance:read"
+      body="Reading a register needs attendance:read in some scope. A club administrator and the club's instructors hold it for their own club."
+    />
+  ) : loadError ? (
+    <ErrorState title="Could not read the timetable" safe="Nothing was recorded." detail={loadError} />
+  ) : (
+    <>
+      {/* ═══════ WHICH CLUB, WHICH WEEK ═══════ */}
+      <section class="panel">
+        <form method="get" action={SELF} class="row-form">
+          <label class="fld">
+            <span class="input-label">Club</span>
+            <select class="input" name="dojo">
+              <option value="">Choose a club…</option>
+              {dojos.map((d: any) => <option value={d.id} selected={d.id === dojoId}>{d.name}</option>)}
+            </select>
+          </label>
+          <label class="fld">
+            <span class="input-label">Week beginning</span>
+            <input class="input" type="date" name="week" value={weekStart} />
+          </label>
+          <button class="btn btn-ghost" type="submit">Show</button>
+          {dojoId && (
+            <>
+              <a class="btn btn-ghost" href={`${SELF}?dojo=${dojoId}&week=${addDays(weekStart, -7)}`}>&larr; Previous</a>
+              <a class="btn btn-ghost" href={`${SELF}?dojo=${dojoId}&week=${addDays(weekStart, 7)}`}>Next &rarr;</a>
+            </>
+          )}
+        </form>
+      </section>
+
+      {!dojoId ? (
+        <EmptyState
+          title="Choose a club"
+          body="The grid is per club, because a room belongs to one. Pick one above."
+        />
+      ) : (
+        <>
+          {/* ═══════ THE RESOURCE GRID ═══════ */}
+          <section class="panel">
+            <h2 class="panel-h">{dojoName} — rooms, {weekStart} to {weekEnd}</h2>
+            {rowsToRender.length === 0 ? (
+              <EmptyState
+                title="No rooms are recorded for this club"
+                body="A grid of rooms needs rooms. Enter them in the venue register; a club with no venue on record cannot have a class placed in one."
+              />
+            ) : (
+              <div class="tbl-scroll">
+                <table class="tbl grid-tbl">
+                  <caption class="sr-only">Class occurrences by room and day for {dojoName}</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Room</th>
+                      {weekDays.map((d) => <th scope="col">{fmtDay(d)}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowsToRender.map((room) => (
+                      <tr>
+                        <th scope="row">{room.name}</th>
+                        {weekDays.map((day) => {
+                          const cell = grid.get(`${room.key}|${day}`) ?? [];
+                          return (
+                            <td class={cell.length ? 'busy' : 'free'}>
+                              {cell.length === 0 ? (
+                                <span class="sr-only">Nothing booked</span>
+                              ) : (
+                                cell.map((row: any) => (
+                                  <a
+                                    class={`slot ${row.session.status !== 'scheduled' && row.session.status !== 'delivered' ? 'slot-off' : ''}`}
+                                    href={`${SELF}?dojo=${dojoId}&week=${weekStart}&session=${row.session.id}`}
+                                  >
+                                    <span class="slot-time">{row.session.localStart}–{row.session.localEnd}</span>
+                                    <span class="slot-name">{row.klass.name}</span>
+                                    <span class="slot-meta">
+                                      {row.session.bookedCount}{row.session.capacity != null ? `/${row.session.capacity}` : ''}
+                                      {row.session.status !== 'scheduled' && ` · ${String(row.session.status).replace(/_/g, ' ')}`}
+                                    </span>
+                                  </a>
+                                ))
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p class="hint">
+              An empty cell means <strong>nothing is booked in that room that day</strong>. It does not mean the
+              room is open — opening hours are a schedule, and a room with no class in it may still be shut.
+              Check <a href={h('/admin/schedules')} class="text-gold">the schedule</a> for that.
+            </p>
+          </section>
+
+          {/* ═══════ THE REGISTER ═══════ */}
+          {sheet && (
+            <section class="panel">
+              <h2 class="panel-h">
+                Register — {sheet.className}, {sheet.localDate} {sheet.localStart}–{sheet.localEnd}
+              </h2>
+              <p class="hint">
+                {sheet.sessionRef}.
+                {sheet.takenAt
+                  ? ` Taken ${sheet.takenAt.slice(0, 16).replace('T', ' ')}. Saving again amends it, and every amendment records the value it replaced.`
+                  : ' Not yet taken.'}
+              </p>
+
+              {sheet.cancelled ? (
+                <EmptyState
+                  title="This class was cancelled"
+                  body="A register cannot be taken at a class that did not happen. If it did happen, the cancellation was the mistake — correct that first."
+                />
+              ) : sheet.rows.length === 0 ? (
+                <EmptyState
+                  title="Nobody is on this register"
+                  body="No place is held on this occurrence and nobody has been marked. Somebody who turned up without booking is added by marking them — enter them below."
+                />
+              ) : (
+                <form method="post">
+                  <input type="hidden" name="action" value="take-register" />
+                  <input type="hidden" name="sessionId" value={sheet.sessionId} />
+                  <div class="tbl-scroll">
+                    <table class="tbl">
+                      <caption class="sr-only">Attendance for {sheet.className}</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">Member</th>
+                          <th scope="col">Booked</th>
+                          <th scope="col">Present</th>
+                          <th scope="col">Absent</th>
+                          <th scope="col">Not marked</th>
+                          <th scope="col">Note</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sheet.rows.map((r) => (
+                          <tr>
+                            <th scope="row">{r.fullName}</th>
+                            <td>{r.booked ? 'yes' : <span class="text-muted">walked in</span>}</td>
+                            <td>
+                              <input type="radio" name={`mark-${r.personId}`} value="present"
+                                checked={r.present === true} aria-label={`${r.fullName} present`} />
+                            </td>
+                            <td>
+                              <input type="radio" name={`mark-${r.personId}`} value="absent"
+                                checked={r.present === false} aria-label={`${r.fullName} absent`} />
+                            </td>
+                            <td>
+                              {/* THE THIRD STATE, and it is the default. An unmarked
+                                  person is not an absent person: grading counts
+                                  presence, and filling in the gap would invent or
+                                  deny training. */}
+                              <input type="radio" name={`mark-${r.personId}`} value="unmarked"
+                                checked={r.present === null} aria-label={`${r.fullName} not marked`} />
+                            </td>
+                            <td>
+                              <input class="input input-sm" type="text" name={`note-${r.personId}`}
+                                value={r.note ?? ''} aria-label={`${r.fullName} note`} />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* SHOWN TO EVERY READER OF THE REGISTER, deliberately. An
+                      INSTRUCTOR holds attendance:read and NOT attendance:write —
+                      src/db/attendance.ts lets them mark THE SESSION THEY TEACH
+                      through a check against class_sessions.coach_person_id, which
+                      this page cannot evaluate without knowing who the reader is
+                      as a person. So the form is offered and the module refuses
+                      it, with a message naming the authority, rather than the
+                      page hiding a control the caller may well be entitled to
+                      use. */}
+                  <div class="row-form">
+                      <label class="fld grow">
+                        <span class="input-label">What was covered (optional)</span>
+                        <input class="input" name="focus" placeholder="Heian Nidan, kumite drills" />
+                      </label>
+                      <label class="fld grow">
+                        <span class="input-label">Reason recorded on the change</span>
+                        <input class="input" name="reason" value="Register taken at the class" required />
+                      </label>
+                      {sheet.notYet && (
+                        <label class="fld chk">
+                          <input type="checkbox" name="allowFuture" value="yes" />
+                          <span>This class has not started — record from a signed list anyway</span>
+                        </label>
+                      )}
+                      <button class="btn btn-primary" type="submit">Save register</button>
+                  </div>
+                  <p class="hint">
+                    Saving marks the occurrence <strong>delivered</strong>, because a register means it ran.
+                    {sheet.notYet && ' A class that has not started is refused unless you tick the box above — marking attendance in advance records a prediction, and afterwards nothing can tell it apart from a record.'}
+                  </p>
+                </form>
+              )}
+            </section>
+          )}
+
+          {/* ═══════ NOT MARKED YET ═══════ */}
+          <section class="panel">
+            <h2 class="panel-h">Classes that ran with no register</h2>
+            <p class="hint">
+              The report that makes attendance self-correcting. Without it, a class whose instructor forgot the
+              register is indistinguishable from a class nobody attended — and
+              <strong> src/db/grading.ts counts attendance</strong> when it decides whether a candidate may be
+              examined, so the difference decides gradings.
+            </p>
+            {missing.length === 0 ? (
+              <p class="text-muted">None in the last four weeks. Every class that ran has a register.</p>
+            ) : (
+              <table class="tbl">
+                <thead>
+                  <tr><th scope="col">Date</th><th scope="col">Class</th><th scope="col">Reference</th><th scope="col">Take it</th></tr>
+                </thead>
+                <tbody>
+                  {missing.map((m: any) => (
+                    <tr>
+                      <td>{m.localDate} <span class="text-muted">{m.localStart}</span></td>
+                      <td>{m.className}</td>
+                      <td class="text-muted">{m.ref}</td>
+                      <td>
+                        <a class="btn btn-ghost btn-sm" href={`${SELF}?dojo=${dojoId}&week=${mondayOf(m.localDate)}&session=${m.sessionId}`}>
+                          Open register
+                        </a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </section>
+        </>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .panel { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); padding: 22px; margin-bottom: 24px; }
+  .panel-h { font-family: var(--font-display); font-size: 1.02rem; margin-bottom: 12px; }
+  .hint { font-size: .82rem; line-height: 1.65; color: var(--muted, #9a9a9a); margin: 12px 0 0; max-width: 84ch; }
+  .ok-note { border: 1px solid var(--border); border-left: 3px solid var(--gold); border-radius: var(--radius); padding: 12px 16px; margin-bottom: 20px; font-size: .86rem; }
+  .row-form { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-top: 16px; }
+  .fld { display: flex; flex-direction: column; gap: 4px; }
+  .fld.grow { flex: 1 1 260px; }
+  .fld.chk { flex-direction: row; align-items: center; gap: 8px; font-size: .82rem; }
+  .input-label { font-size: .66rem; letter-spacing: .16em; text-transform: uppercase; color: var(--gold); }
+  .input-sm { padding: 5px 8px; font-size: .78rem; }
+  .btn-sm { padding: 5px 10px; font-size: .76rem; }
+  .tbl { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  .tbl th, .tbl td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: .84rem; vertical-align: top; }
+  .tbl thead th { font-family: var(--font-display); font-size: .64rem; letter-spacing: .18em; text-transform: uppercase; color: var(--gold); }
+  .tbl-scroll { overflow-x: auto; }
+  .grid-tbl { min-width: 960px; }
+  .grid-tbl td { min-width: 118px; }
+  .grid-tbl td.free { background: transparent; }
+  .grid-tbl td.busy { background: var(--bg-2); }
+  .slot { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; margin-bottom: 6px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); text-decoration: none; }
+  .slot:last-child { margin-bottom: 0; }
+  .slot-time { font-family: var(--font-display); color: var(--gold); font-size: .78rem; }
+  .slot-name { font-size: .8rem; }
+  .slot-meta { font-size: .7rem; color: var(--muted, #9a9a9a); }
+  .slot-off { opacity: .6; text-decoration: line-through; }
+</style>

@@ -59,7 +59,8 @@ const principal = identity?.principal ?? null;
 // unrecognised status is now simply no status filter.
 const STATUSES = [
   'submitted', 'acknowledged', 'under_review', 'information_requested',
-  'program_design', 'quoted', 'proposed', 'approved', 'contracted', 'declined',
+  'program_design', 'awaiting_quotation', 'quoted', 'proposed', 'approved',
+  'contracted', 'declined',
 ];
 
 const requestedStatus = Astro.url.searchParams.get('status') || '';

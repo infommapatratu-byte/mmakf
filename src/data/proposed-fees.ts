@@ -45,9 +45,9 @@
 //
 // 3. INTERNAL COHERENCE. Every ratio below is deliberate and defensible out
 //    loud, which matters more than any single number:
-//      · a junior pays less than an adult
-//      · someone who EARNS from the federation — a coach, an examiner — pays
-//        more than someone who trains in it
+//      · someone who EARNS from the federation — a coach, an examiner, an
+//        official — pays a membership. SOMEBODY WHO TRAINS DOES NOT: they pay
+//        for training, and nothing else is charged for being a student
 //      · a Dan examination costs more than a kyu examination
 //      · a club pays more than a person, and an institution more than a club
 //      · a protest fee is high enough to deter a frivolous one and is REFUNDED
@@ -88,28 +88,53 @@ export interface ProposedRule {
 const R = (rupees: number) => Math.round(rupees * 100);
 
 /**
- * MEMBERSHIP — annual.
+ * MEMBERSHIP — annual, and NOT for students.
  *
- * The anchor is the junior rate. MMAKF teaches children, and ₹300 a year is
- * about the cost of a school exercise-book set: low enough that it is not the
- * reason a family says no. Everything else is scaled from it.
+ * The anchor was the junior rate until the federation removed it. What remains
+ * is priced against the coach rate, and the test of whether a category belongs
+ * here at all is a single question: does this person RECEIVE training from the
+ * federation, or ACT on its behalf? Only the second pays a membership.
  */
 export const MEMBERSHIP: ProposedRule[] = [
-  { code: 'MEM-JUNIOR', label: 'Junior membership (under 18), annual', kind: 'base',
-    amountMinor: R(300), audience: 'individual', conditions: { category: 'junior' }, sortOrder: 10,
-    basis: 'Set so it is never the reason a family declines. IBF Great Britain charges £15 for a junior; this is the same intent at Indian levels.' },
-
-  { code: 'MEM-ATHLETE', label: 'Athlete membership, annual', kind: 'base',
-    amountMinor: R(500), audience: 'individual', conditions: { category: 'athlete' }, sortOrder: 11,
-    basis: 'Benchmarks run £25 (IBF GB) to $60 (USA Karate). ₹500 keeps the structure and sets the level for India.' },
+  // ───────────────────────────────────────────────────────────────────────────
+  // WITHDRAWN: MEM-JUNIOR (₹300/yr) AND MEM-ATHLETE (₹500/yr)
+  //
+  // I proposed both on 17 August 2026. The federation removed them the same
+  // day, and the rule it gave is the correct one:
+  //
+  //     A STUDENT DOES NOT PAY A MEMBERSHIP FEE FOR BEING A STUDENT.
+  //
+  // What a student buys is TRAINING. An account, a profile, an enrolment and a
+  // place in a class are not a product — they are what having a student means.
+  // Charging ₹500 a year for the right to then pay ₹800 a month is a second
+  // charge for the first one, and a family reads it as exactly that.
+  //
+  // They are DELETED rather than commented out or hidden. A rule that still
+  // exists can still be applied by a future edit, a seed, a migration or a
+  // careless clone of the framework — the federation's instruction was
+  // explicit that the commercial engine must lose the ABILITY to generate
+  // these, not merely stop displaying them.
+  //
+  // The benchmarks that justified them are not deleted: USA Karate and IBF
+  // Great Britain genuinely do charge an athlete membership, and those rows
+  // stay in `fee_benchmarks` as facts about those organisations. MMAKF has
+  // decided differently, which is a decision it is entitled to make and this
+  // file should record rather than argue with.
+  //
+  // What survives below is membership for people whose RELATIONSHIP TO THE
+  // FEDERATION is not "student": a coach who teaches under its authority, an
+  // official who adjudicates in its name, an examiner who grades on its behalf,
+  // a club that carries its charter. None of those is a person receiving
+  // training, and none is reachable by being a student.
+  // ───────────────────────────────────────────────────────────────────────────
 
   { code: 'MEM-COACH', label: 'Coach or instructor membership, annual', kind: 'base',
     amountMinor: R(1000), audience: 'individual', conditions: { category: 'instructor' }, sortOrder: 12,
-    basis: 'Twice the athlete rate. USA Karate and WUKF both price a coach above an athlete, and a coach earns from the federation rather than only training in it.' },
+    basis: 'A coach EARNS from the federation rather than receiving training from it, which is what makes this a membership and not a student charge. USA Karate and WUKF both price a coach above an athlete.' },
 
   { code: 'MEM-OFFICIAL', label: 'Referee, judge or technical official, annual', kind: 'base',
     amountMinor: R(1000), audience: 'individual', conditions: { category: 'official' }, sortOrder: 13,
-    basis: 'Level with a coach: the same relationship to the federation, and officials should not be priced out of officiating.' },
+    basis: 'Level with a coach: the same relationship to the federation — adjudicating in its name — and officials should not be priced out of officiating.' },
 
   { code: 'MEM-EXAMINER', label: 'Examiner, annual', kind: 'base',
     amountMinor: R(1500), audience: 'individual', conditions: { category: 'examiner' }, sortOrder: 14,

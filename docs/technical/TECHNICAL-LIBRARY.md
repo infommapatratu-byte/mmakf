@@ -177,13 +177,31 @@ Schema, migration, rights engine, review workflow, audit trail, admin queue,
 search, seed, 38 tests. Verified: all 31 migrations apply to a fresh Postgres and
 every constraint refuses what it should.
 
-### P20 — WKF sport kumite — DATA COMPLETE, NO PUBLIC PAGE
+### P20 — WKF sport kumite — COMPLETE
 
 Ruleset 2026.01 and 14 provisions seeded verbatim with citations, kept apart
-from traditional kumite. `getRuleset()` reads it. **No learner-facing page** —
-see conflict 4 in PATCH-CONFLICTS: which surface owns technical content is an
-open architecture question and guessing would create a route somebody has to
-un-pick.
+from traditional kumite, `getRuleset()` reads it, and **`/shotokan/competition`
+publishes it** — article by article, every provision a quotation with its clause
+number, the WKF attribution as the first block on the page.
+
+The surface question in conflict 4 answered itself: the nine-route
+`/shotokan/*` contract in `tests/routes-live.test.ts` settled where technical
+content lives, and `competition` was not among the nine, so the route is new
+rather than contested.
+
+**The page renders from `src/data/technical-reference.ts`, not from Postgres.**
+Production has no `DATABASE_URL` for this content, and a technical page that
+goes blank without a database is a page search engines find empty. The database
+copy exists so the rules can be reviewed, versioned and cited; the page exists
+so they can be read.
+
+### Reference curriculum — PUBLISHED
+
+`/shotokan/grading-reference` publishes the JKA kyu/dan guideline, 10th Kyu to
+3rd Dan, verbatim. Whose syllabus it is appears above the table, in the table's
+heading, and on a badge on every single grade card — because a reader arriving
+mid-page from a search result sees one grade and must still know it is not
+MMAKF's.
 
 ### P41 — Master teacher channel — SOURCE REGISTERED, LIVE PIPELINE NOT RUN
 
@@ -284,7 +302,10 @@ src/lib/surface.ts           one admin nav entry
 - **No Tier A claim** for the master teacher channel.
 - **No fabricated transcripts or chapters.** `media_chapters` is empty; the
   directive says not to fabricate a transcript when none is available.
-- **No learner route.** Pending the surface decision.
+- **No kata or kihon learner routes of mine.** Those are the Shotokan content
+  agent's `/shotokan/*` pages and duplicating them would be the waste the
+  audit-first rule exists to prevent. The two routes added here are the ones
+  nobody had.
 - **No LIVE YouTube ingestion run.** No credentials on this deployment; the
   provider interface already exists and is not faked. The offline register import
   does run.

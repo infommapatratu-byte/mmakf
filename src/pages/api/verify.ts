@@ -9,6 +9,8 @@
 // Three provenances, and the difference is the whole point:
 //
 //   examined            traced to a grading with examiner scores behind it
+//   programme           a course-completion certificate resting on an attendance
+//                       register. NOT a grade, and no examination was ever held
 //   unverified_legacy   a real grade predating digital records; the federation
 //                       holds evidence, but no examination record exists
 //   legacy_register     the old hand-typed list, used only while no database is
@@ -45,6 +47,8 @@ function hashIp(ip: string | null): string | null {
 const NOTE = {
   examined:
     'This credential is traced to a recorded examination held by the federation.',
+  programme:
+    'This is a record of ATTENDANCE at a federation training programme. It is not an examination result and it confers no rank or grade — the attendance figures it was issued on are printed on the certificate itself.',
   unverified_legacy:
     'This grade predates the federation’s digital examination records. The federation holds evidence for it, but it is not backed by an examination scorecard in this system.',
   legacy_register:
@@ -80,6 +84,10 @@ export const GET: APIRoute = async ({ url, request }) => {
             certificateNo: result.certificateNo,
             name: result.holderName,
             federationId: result.federationId,
+            // WHAT THE DOCUMENT IS. A programme certificate carries no grade,
+            // so without this the card named a holder and a number and never
+            // said what had been certified.
+            title: result.title,
             grade: result.grade,
             awardedOn: result.awardedOn,
             issuingAuthority: result.issuingAuthority,

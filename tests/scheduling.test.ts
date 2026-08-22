@@ -40,6 +40,7 @@ import {
   // classes
   createClass, generateSessions, detectConflicts,
   bookableSessions, bookClassSession, cancelSessionBooking, cancelSession,
+  rescheduleSession, deliveryOptions, personalSchedule,
   isSchedulingError,
 } from '../src/db/scheduling';
 import { notifyForEvent } from '../src/lib/notifications';
@@ -1057,6 +1058,432 @@ describe('booking a place in a class', () => {
     const after = await bookableSessions(db, { classId: klassId }, '2026-09-01', '2026-09-30', { now: new Date('2026-09-30T00:00:00Z') });
     expect(before).toHaveLength(1);
     expect(after).toHaveLength(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A WINDOW THAT CROSSES MIDNIGHT
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('overnight windows', () => {
+  it('splits 22:00–02:00 into two rows on two days', async () => {
+    // Migration 0032 refused to let ONE ROW mean two days and still refuses.
+    // What changed in 0049 is who does the arithmetic: the engine, not the
+    // administrator, because a human entering two rows will move one of them and
+    // leave the other behind.
+    const made = await publishSchedule(clubAdminA, {
+      name: 'Overnight camp', owner: { scope: 'dojo', id: CLUB_A },
+      effectiveFrom: '2026-01-01',
+      rules: [open(5, '22:00', '02:00', { label: 'Night session' })],
+    });
+    const rows = await db.select().from(sch.scheduleRules)
+      .where(eq(sch.scheduleRules.versionId, made.version.id))
+      .orderBy(sch.scheduleRules.dayOfWeek);
+    expect(rows).toHaveLength(2);
+    expect(`${rows[0].dayOfWeek} ${rows[0].opensAt}-${rows[0].closesAt}`).toBe('5 22:00-24:00');
+    expect(`${rows[1].dayOfWeek} ${rows[1].opensAt}-${rows[1].closesAt}`).toBe('6 00:00-02:00');
+    // The label travels onto both halves: they are one session to a reader.
+    expect(rows.every((r: any) => r.label === 'Night session')).toBe(true);
+  });
+
+  it('wraps a Sunday night onto Monday', async () => {
+    const made = await publishSchedule(clubAdminA, {
+      name: 'New Year', owner: { scope: 'dojo', id: CLUB_A },
+      effectiveFrom: '2026-01-01',
+      rules: [open(7, '23:00', '01:00')],
+    });
+    const rows = await db.select().from(sch.scheduleRules)
+      .where(eq(sch.scheduleRules.versionId, made.version.id))
+      .orderBy(sch.scheduleRules.dayOfWeek);
+    expect(rows.map((r: any) => r.dayOfWeek).sort()).toEqual([1, 7]);
+  });
+
+  it('renders each half on its own day', async () => {
+    await publishSchedule(clubAdminA, {
+      name: 'Overnight', owner: { scope: 'dojo', id: CLUB_A },
+      effectiveFrom: '2026-01-01',
+      rules: [open(5, '22:00', '02:00')],
+    });
+    // 2026-09-18 is a Friday; the 19th is the Saturday it runs into.
+    const friday = await openingHoursOn(db, { purpose: 'training', dojoId: CLUB_A }, '2026-09-18');
+    const saturday = await openingHoursOn(db, { purpose: 'training', dojoId: CLUB_A }, '2026-09-19');
+    expect(windowsOf(friday)).toEqual(['22:00-24:00']);
+    expect(windowsOf(saturday)).toEqual(['00:00-02:00']);
+  });
+
+  it('turns 24:00 into the following midnight, exactly', () => {
+    // The two halves must TOUCH rather than overlap or leave a gap, which is
+    // only true if the first one's end instant equals the second one's start.
+    const endOfFriday = zonedInstant('2026-09-18', '24:00', TZ);
+    const startOfSaturday = zonedInstant('2026-09-19', '00:00', TZ);
+    expect(endOfFriday.getTime()).toBe(startOfSaturday.getTime());
+  });
+
+  it('refuses 24:00 as an OPENING time — a window cannot begin at the end of a day', async () => {
+    const schedule = await createSchedule(db, ctx(clubAdminA), {
+      name: 'Bad', purpose: 'training', owner: { scope: 'dojo', id: CLUB_A },
+    });
+    const v = await draftVersion(db, ctx(clubAdminA), schedule.id, { effectiveFrom: '2026-01-01' });
+    await expect(setRules(db, ctx(clubAdminA), v.id, [
+      { dayOfWeek: 1, opensAt: '24:00', closesAt: '24:00' },
+    ])).rejects.toThrow(/opensAt/);
+  });
+
+  it('refuses a window with no duration at all', async () => {
+    const schedule = await createSchedule(db, ctx(clubAdminA), {
+      name: 'Zero', purpose: 'training', owner: { scope: 'dojo', id: CLUB_A },
+    });
+    const v = await draftVersion(db, ctx(clubAdminA), schedule.id, { effectiveFrom: '2026-01-01' });
+    await expect(setRules(db, ctx(clubAdminA), v.id, [
+      { dayOfWeek: 1, opensAt: '18:00', closesAt: '18:00' },
+    ])).rejects.toThrow(/no duration/);
+  });
+
+  it('generates an occurrence for each half, and they abut', async () => {
+    await publishSchedule(clubAdminA, {
+      name: 'Hall all hours', owner: { scope: 'dojo', id: CLUB_A }, venueId: A_VENUE,
+      effectiveFrom: '2026-01-01',
+      rules: [...[1, 2, 3, 4, 5, 6, 7].map((d) => open(d, '00:00', '24:00'))],
+    });
+    const klass = await createClass(db, ctx(clubAdminA), {
+      name: 'Night camp', slug: 'night-camp', owner: { scope: 'dojo', id: CLUB_A },
+      venueId: A_VENUE, activate: true,
+    });
+    await publishSchedule(clubAdminA, {
+      name: 'Night times', purpose: 'class', owner: { scope: 'dojo', id: CLUB_A }, classId: klass.id,
+      effectiveFrom: '2026-01-01',
+      rules: [open(5, '22:00', '02:00')],
+    });
+    // A Friday and the Saturday after it.
+    const result = await generateSessions(db, ctx(clubAdminA), klass.id, '2026-09-18', '2026-09-19');
+    expect(result.created).toBe(2);
+    expect(result.refused).toHaveLength(0);
+
+    const sessions = await db.select().from(sch.classSessions)
+      .where(eq(sch.classSessions.classId, klass.id))
+      .orderBy(sch.classSessions.startsAt);
+    expect(sessions.map((x: any) => `${x.localDate} ${x.localStart}-${x.localEnd}`))
+      .toEqual(['2026-09-18 22:00-24:00', '2026-09-19 00:00-02:00']);
+    // The first ends exactly where the second begins — no gap, no overlap.
+    expect(new Date(sessions[0].endsAt).getTime()).toBe(new Date(sessions[1].startsAt).getTime());
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MOVING A CLASS
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('rescheduling', () => {
+  let klassId: number, sessionId: number;
+
+  beforeEach(async () => {
+    await publishSchedule(clubAdminA, {
+      name: 'A hall', owner: { scope: 'dojo', id: CLUB_A }, venueId: A_VENUE,
+      effectiveFrom: '2026-01-01', rules: [...[1, 2, 3, 4, 5].map((d) => open(d, '06:00', '21:00'))],
+    });
+    const klass = await createClass(db, ctx(clubAdminA), {
+      name: 'Kihon', slug: 'kihon-reschedule', owner: { scope: 'dojo', id: CLUB_A },
+      venueId: A_VENUE, capacity: 4, defaultCoachPersonId: coach1, activate: true,
+    });
+    klassId = klass.id;
+    await publishSchedule(clubAdminA, {
+      name: 'Kihon times', purpose: 'class', owner: { scope: 'dojo', id: CLUB_A }, classId: klassId,
+      effectiveFrom: '2026-01-01', rules: [open(1, '18:00', '19:30')],
+    });
+    await generateSessions(db, ctx(clubAdminA), klassId, '2099-01-05', '2099-01-05');
+    const [session] = await db.select().from(sch.classSessions).where(eq(sch.classSessions.classId, klassId));
+    sessionId = session.id;
+  });
+
+  it('carries the people who booked onto the new time', async () => {
+    // NOT "cancel and let them rebook". A member whose Tuesday moved still has
+    // a place; it is the federation's job to say which happened.
+    const held = await bookClassSession(db, ctx(member), sessionId, student);
+    const moved = await rescheduleSession(
+      db, ctx(clubAdminA), sessionId,
+      { localDate: '2099-01-06', localStart: '19:00', localEnd: '20:30' },
+      'Hall let to the district for a grading rehearsal'
+    );
+    expect(moved.bookingsMoved).toBe(1);
+
+    const [booking] = await db.select().from(s.bookings).where(eq(s.bookings.id, held.bookingId));
+    expect(booking.classSessionId).toBe(moved.to);
+    expect(booking.status).toBe('rescheduled');
+
+    const [original] = await db.select().from(sch.classSessions).where(eq(sch.classSessions.id, sessionId));
+    expect(original.status).toBe('rescheduled');
+    expect(original.rescheduledToSessionId).toBe(moved.to);
+
+    const [successor] = await db.select().from(sch.classSessions).where(eq(sch.classSessions.id, moved.to));
+    expect(`${successor.localDate} ${successor.localStart}-${successor.localEnd}`).toBe('2099-01-06 19:00-20:30');
+    expect(successor.bookedCount).toBe(1);
+  });
+
+  it('refuses to move a class outside the building hours', async () => {
+    // Otherwise a reschedule is a hole straight through everything generation
+    // refuses — the same room, the same closed door.
+    await expect(rescheduleSession(
+      db, ctx(clubAdminA), sessionId,
+      { localDate: '2099-01-06', localStart: '22:00', localEnd: '23:00' },
+      'why'
+    )).rejects.toThrow(/venue is open/);
+  });
+
+  it('refuses to move a class onto a day the venue is shut', async () => {
+    // 2099-01-10 is a Saturday, and the hall's week runs Monday to Friday.
+    await expect(rescheduleSession(
+      db, ctx(clubAdminA), sessionId,
+      { localDate: '2099-01-10', localStart: '10:00', localEnd: '11:00' },
+      'why'
+    )).rejects.toThrow(/closed on 2099-01-10/);
+  });
+
+  it('refuses a move with no reason', async () => {
+    await expect(rescheduleSession(
+      db, ctx(clubAdminA), sessionId,
+      { localDate: '2099-01-06', localStart: '19:00', localEnd: '20:00' }, '  '
+    )).rejects.toThrow(/must record why/);
+  });
+
+  it('records what was overridden when a human forces it through', async () => {
+    await db.insert(ops.venueBlackouts).values({
+      venueId: A_VENUE,
+      startsAt: zonedInstant('2099-01-06', '18:00', TZ),
+      endsAt: zonedInstant('2099-01-06', '21:00', TZ),
+      reason: 'Hall let',
+    });
+    // The refusal cites the ROOM HOURS rather than the blackout, and that is
+    // right: openingHoursOn() has already subtracted the blackout, so by the
+    // time the reschedule asks, 18:00–21:00 genuinely is not open time. The
+    // administrator is told what the room's hours are that day, which is the
+    // fact they need, rather than the internal reason they were reduced.
+    await expect(rescheduleSession(
+      db, ctx(clubAdminA), sessionId,
+      { localDate: '2099-01-06', localStart: '19:00', localEnd: '20:00' }, 'why'
+    )).rejects.toThrow(/venue is open 06:00-18:00/);
+
+    const forced = await rescheduleSession(
+      db, ctx(clubAdminA), sessionId,
+      { localDate: '2099-01-06', localStart: '19:00', localEnd: '20:00' },
+      'Agreed with the hall keeper by telephone',
+      { force: true }
+    );
+    expect(forced.overridden.map((c: any) => c.kind)).toContain('venue_blackout');
+    const audit = await db.select().from(s.auditEvents).where(eq(s.auditEvents.entityType, 'class_session'));
+    expect(JSON.stringify(audit)).toMatch(/forcedOver/);
+  });
+
+  it('tells the people who held a place that it moved, not that it was cancelled', async () => {
+    await bookClassSession(db, ctx(member), sessionId, student);
+    await rescheduleSession(
+      db, ctx(clubAdminA), sessionId,
+      { localDate: '2099-01-06', localStart: '19:00', localEnd: '20:30' }, 'Hall let'
+    );
+    const [event] = await db.select().from(s.domainEvents)
+      .where(eq(s.domainEvents.eventType, 'CLASS_SESSION_RESCHEDULED'));
+    expect(event).toBeTruthy();
+
+    const queued = await notifyForEvent(db, ctx(clubAdminA), {
+      id: event.id, eventType: event.eventType, entityType: event.entityType,
+      entityId: event.entityId, payload: event.payload,
+    });
+    expect(queued).toBe(1);
+    const [note] = await db.select().from(s.notifications);
+    expect(note.title).toMatch(/moved/i);
+    expect(note.body).toMatch(/moved from .* to /);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FINDING A TIME FOR A SCHOOL
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('institutional delivery options', () => {
+  beforeEach(async () => {
+    await publishSchedule(clubAdminA, {
+      name: 'A hall', owner: { scope: 'dojo', id: CLUB_A }, venueId: A_VENUE,
+      effectiveFrom: '2026-01-01',
+      rules: [...[1, 2, 3, 4, 5].map((d) => open(d, '08:00', '12:00'))],
+    });
+  });
+
+  it('offers only starts that fit inside the room hours', async () => {
+    const slots = await deliveryOptions(db, {
+      venueId: A_VENUE, durationMinutes: 60,
+      fromIso: '2099-01-05', toIso: '2099-01-05',
+    });
+    expect(slots[0].opensAt).toBe('08:00');
+    expect(slots[slots.length - 1].closesAt).toBe('12:00');
+    // Nothing may start so late that it would end after the room shuts.
+    expect(slots.every((x) => x.closesAt <= '12:00')).toBe(true);
+  });
+
+  it('respects the client own window — a school day, not the dojo day', async () => {
+    const slots = await deliveryOptions(db, {
+      venueId: A_VENUE, durationMinutes: 45,
+      fromIso: '2099-01-05', toIso: '2099-01-05',
+      earliestAt: '09:00', latestAt: '10:30',
+    });
+    expect(slots.every((x) => x.opensAt >= '09:00' && x.closesAt <= '10:30')).toBe(true);
+    expect(slots.length).toBeGreaterThan(0);
+  });
+
+  it('honours preferred days and skips the days the room is shut', async () => {
+    const slots = await deliveryOptions(db, {
+      venueId: A_VENUE, durationMinutes: 60,
+      fromIso: '2099-01-05', toIso: '2099-01-11',
+      preferredDays: [2, 4],
+    });
+    expect([...new Set(slots.map((x) => x.date))].sort()).toEqual(['2099-01-06', '2099-01-08']);
+  });
+
+  it('will not invent a session length', async () => {
+    // The same refusal src/db/booking.ts makes. A default here would appear in
+    // a quotation as though the federation had decided it.
+    await expect(deliveryOptions(db, {
+      venueId: A_VENUE, durationMinutes: 0,
+      fromIso: '2099-01-05', toIso: '2099-01-05',
+    } as any)).rejects.toThrow(/no default/);
+  });
+
+  it('offers nothing where a coach is not free, and something where one is', async () => {
+    const withCoach = await deliveryOptions(db, {
+      venueId: A_VENUE, durationMinutes: 60,
+      fromIso: '2099-01-05', toIso: '2099-01-05',
+      coachPersonIds: [coach1], limit: 5,
+    });
+    expect(withCoach.length).toBeGreaterThan(0);
+    expect(withCoach.every((x) => x.coachPersonId === coach1)).toBe(true);
+
+    await db.insert(s.coachAvailability).values({
+      personId: coach1, kind: 'travel',
+      startsAt: zonedInstant('2099-01-05', '00:00', TZ),
+      endsAt: zonedInstant('2099-01-06', '00:00', TZ),
+      reason: 'National camp',
+    });
+    const away = await deliveryOptions(db, {
+      venueId: A_VENUE, durationMinutes: 60,
+      fromIso: '2099-01-05', toIso: '2099-01-05',
+      coachPersonIds: [coach1],
+    });
+    expect(away).toHaveLength(0);
+  });
+
+  it('refuses to offer anything for a venue whose hours nobody recorded', async () => {
+    await expect(deliveryOptions(db, {
+      venueId: B_VENUE, durationMinutes: 60,
+      fromIso: '2099-01-05', toIso: '2099-01-05',
+    })).rejects.toThrow(/no published hours/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A PERSON'S OWN WEEK
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('a personal schedule', () => {
+  let klassId: number, sessionId: number;
+
+  beforeEach(async () => {
+    await publishSchedule(clubAdminA, {
+      name: 'A hall', owner: { scope: 'dojo', id: CLUB_A }, venueId: A_VENUE,
+      effectiveFrom: '2026-01-01', rules: [open(1, '06:00', '21:00')],
+    });
+    const klass = await createClass(db, ctx(clubAdminA), {
+      name: 'Kihon', slug: 'kihon-personal', owner: { scope: 'dojo', id: CLUB_A },
+      venueId: A_VENUE, capacity: 4, defaultCoachPersonId: coach1, activate: true,
+    });
+    klassId = klass.id;
+    await publishSchedule(clubAdminA, {
+      name: 'Kihon times', purpose: 'class', owner: { scope: 'dojo', id: CLUB_A }, classId: klassId,
+      effectiveFrom: '2026-01-01', rules: [open(1, '18:00', '19:30')],
+    });
+    await generateSessions(db, ctx(clubAdminA), klassId, '2099-01-05', '2099-01-05');
+    const [session] = await db.select().from(sch.classSessions).where(eq(sch.classSessions.classId, klassId));
+    sessionId = session.id;
+  });
+
+  it('shows a student what they booked, and a coach what they teach', async () => {
+    await bookClassSession(db, ctx(member), sessionId, student);
+
+    const theirs = await personalSchedule(db, student, '2099-01-01', '2099-01-31');
+    expect(theirs).toHaveLength(1);
+    expect(theirs[0].role).toBe('attending');
+    expect(theirs[0].bookingId).not.toBeNull();
+    expect(theirs[0].venueName).toBe('Ramgarh hall');
+
+    const coachs = await personalSchedule(db, coach1, '2099-01-01', '2099-01-31');
+    expect(coachs).toHaveLength(1);
+    expect(coachs[0].role).toBe('teaching');
+    expect(coachs[0].bookingId).toBeNull();
+  });
+
+  it('shows a cancelled class as cancelled rather than removing it', async () => {
+    // The person most in need of this page is the one whose Tuesday moved. A
+    // gap where a class used to be reads as a fault in the timetable.
+    await bookClassSession(db, ctx(member), sessionId, student);
+    await cancelSession(db, ctx(clubAdminA), sessionId, 'Instructor at a national camp');
+
+    const theirs = await personalSchedule(db, student, '2099-01-01', '2099-01-31');
+    expect(theirs).toHaveLength(1);
+    expect(theirs[0].status).toBe('cancelled');
+    expect(theirs[0].cancelledReason).toMatch(/national camp/);
+  });
+
+  it('gives an instructor who also booked ONE row, not two contradicting each other', async () => {
+    await bookClassSession(db, ctx(nat), sessionId, coach1);
+    const theirs = await personalSchedule(db, coach1, '2099-01-01', '2099-01-31');
+    expect(theirs).toHaveLength(1);
+    expect(theirs[0].role).toBe('teaching');
+  });
+
+  it('returns nothing for somebody with nothing on', async () => {
+    expect(await personalSchedule(db, coach2, '2099-01-01', '2099-01-31')).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A CLUB'S OWN MEMBERS ARE TOLD; THE COUNTRY IS NOT
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('who is told when a timetable changes', () => {
+  it('tells the club’s own members when the CLUB publishes', async () => {
+    await db.update(s.persons).set({ dojoId: CLUB_A, status: 'active' }).where(eq(s.persons.id, student));
+    const made = await publishSchedule(clubAdminA, {
+      name: 'Ramgarh', owner: { scope: 'dojo', id: CLUB_A },
+      effectiveFrom: '2026-01-01', rules: [open(1, '18:00', '20:00')],
+    });
+    const [event] = await db.select().from(s.domainEvents)
+      .where(eq(s.domainEvents.eventType, 'SCHEDULE_PUBLISHED'));
+    expect(event.payload.ownerScope).toBe('dojo');
+
+    const queued = await notifyForEvent(db, ctx(clubAdminA), {
+      id: event.id, eventType: event.eventType, entityType: event.entityType,
+      entityId: event.entityId, payload: event.payload,
+    });
+    expect(queued).toBeGreaterThanOrEqual(1);
+    const notes = await db.select().from(s.notifications);
+    expect(notes.some((n: any) => n.personId === student)).toBe(true);
+    // The body points at the page and does not try to be half a timetable.
+    expect(notes[0].body).not.toMatch(/\d\d:\d\d/);
+  });
+
+  it('tells NOBODY when the FEDERATION publishes', async () => {
+    // Not because a national change does not matter, but because "every member
+    // in the country" is a fan-out this system must never perform on the
+    // strength of one administrator saving a form.
+    await db.update(s.persons).set({ dojoId: CLUB_A, status: 'active' }).where(eq(s.persons.id, student));
+    await publishSchedule(nat, {
+      name: 'National default', owner: { scope: 'national', id: null },
+      effectiveFrom: '2026-01-01', rules: [open(1, '06:00', '07:00')],
+    });
+    const [event] = await db.select().from(s.domainEvents)
+      .where(eq(s.domainEvents.eventType, 'SCHEDULE_PUBLISHED'));
+    expect(event.payload.ownerScope).toBe('national');
+    expect(await notifyForEvent(db, ctx(nat), {
+      id: event.id, eventType: event.eventType, entityType: event.entityType,
+      entityId: event.entityId, payload: event.payload,
+    })).toBe(0);
   });
 });
 

@@ -257,6 +257,15 @@ try {
   else await restore(fileArg);
 } catch (err) {
   console.error(`\n${err.message}`);
+
+  // Every other failure this script reports is a judgement about the FILE, so a bare
+  // certificate error gets read as one too — during --restore especially, where the
+  // operator is already braced for the dump to be bad and will go re-verify a backup
+  // that was never at fault. The register never moved either way: the handshake died
+  // before a single statement was sent. Name the layer that actually refused.
+  const hint = tlsHint(err);
+  if (hint) console.error(hint);
+
   process.exitCode = 1;
 } finally {
   await sql.end({ timeout: 5 }).catch(() => {});

@@ -51,7 +51,23 @@ export const POST: APIRoute = async ({ request }) => {
     status: 'Pending',
   };
 
-  await pushToList('submissions', record, 500);
+  // Reported as accepted only if it was actually stored — see the note in
+  // src/lib/storage.ts on why a swallowed write is the worst outcome here.
+  try {
+    await pushToList('submissions', record, 500);
+  } catch (err) {
+    console.error('[api/unit/submit] the submission could not be stored', err);
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        error: 'not_stored',
+        message:
+          'The submission could NOT be recorded and nothing was saved. Please try ' +
+          'again shortly, or contact the federation office.',
+      }),
+      { status: 503, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,

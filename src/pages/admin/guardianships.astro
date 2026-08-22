@@ -1,0 +1,511 @@
+---
+// /admin/guardianships — who may act for a child, and precisely what they may do.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DEFECT THIS CLOSES
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// /my/family asks guardianCan() correctly and would show a verified guardianship
+// holding NOTHING, for ever, because grantGuardianCapability() is gated on
+// 'guardian:verify' and no screen in this repository called it. A capability
+// table with no way to populate it is a design document, not a control — and the
+// parent-facing page built against it was permanently empty.
+//
+// Registration now creates the claim (src/db/provisioning.ts) as an ASSERTED
+// relationship that confers nothing. This is where a human decides it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// TWO ACTS, DELIBERATELY SEPARATE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// VERIFYING that an adult is a child's guardian, and GRANTING that guardian
+// sight of something, are different decisions and this screen keeps them apart.
+// Verifying confers nothing at all — that is the whole point of the
+// guardian_authorizations table — so a reviewer who verifies a relationship and
+// stops has given nobody access to anything.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DOUBLE GATE IS VISIBLE, NOT MERELY ENFORCED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// view_medical and view_safeguarding need 'medical:read' / 'safeguarding:write'
+// ON TOP of 'guardian:verify'. A reader who lacks the extra action is not
+// offered the control — and the page SAYS the control is withheld and why,
+// because a missing button with no explanation reads as a bug and gets reported
+// as one. The module refuses it as well; this is the courteous half of a gate
+// that holds either way.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// relationshipQueue() filters in SQL on the SUBJECT's placement, because
+// authority over a guardianship is authority over the child's record. Every
+// mutation re-derives the subject from the stored row and re-checks against it,
+// so a relationship id in a form body buys nothing.
+
+export const prerender = false;
+
+import AdminShell from '@/components/AdminShell.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, can, ForbiddenError, type Action } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  relationshipQueue, capabilitiesOn, extraActionFor,
+  decideRelationship, revokeRelationship,
+  grantGuardianCapability, revokeGuardianCapability,
+  GUARDIAN_CAPABILITIES, isMinor, ageOn, isIdentityError,
+  type GuardianCapability,
+} from '@/db/identity';
+import * as s from '@/db/schema';
+import { inArray } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/guardianships');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+const mayVerify = Boolean(identity) && canAnywhere(identity!.principal, 'guardian:verify');
+
+// Names and dates of birth of children. Never a shared-cache document.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+/** What each capability lets a guardian see, in a reviewer's words. */
+const CAPABILITY_WORDS: Record<GuardianCapability, string> = {
+  view_profile: 'The child’s own record — name, grade, dojo',
+  manage_enrolment: 'Enrol, withdraw, change programme',
+  pay: 'Invoices and payment on the child’s behalf',
+  give_consent: 'Give consent in the guardian capacity',
+  view_attendance: 'Attendance',
+  view_results: 'Competition results',
+  view_medical: 'MEDICAL RECORDS',
+  view_safeguarding: 'SAFEGUARDING CASEWORK',
+};
+
+// ─── The acts ───────────────────────────────────────────────────────────────
+//
+// Posts to this page rather than to /api/: the middleware requires
+// application/json on /api/ paths and a form without JavaScript cannot send
+// one, while the same-origin check that answers CSRF applies here identically.
+
+const DONE_MESSAGES: Record<string, string> = {
+  verified: 'The relationship is verified. It grants nothing yet — capabilities are granted one at a time below.',
+  rejected: 'The claim is refused, with your reason recorded against it. The record stays.',
+  revoked: 'The relationship is revoked, and every capability granted on it was revoked with it.',
+  granted: 'The capability is granted.',
+  ungranted: 'The capability is revoked. The relationship itself stands.',
+};
+
+let error: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+
+  const rl = await rateLimit(Astro.request, 'guardianship-decide', 40, 60);
+  const act = get('act');
+  const relationshipId = Number(get('relationshipId'));
+  const reason = get('reason');
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so there is nothing to decide against.';
+  } else if (!mayVerify) {
+    // Re-checked against the session on every act. The rendered page is not
+    // evidence of authority.
+    Astro.response.status = 403;
+    error = 'Deciding a guardianship requires guardian:verify, which this account does not hold in any scope.';
+  } else if (!Number.isInteger(relationshipId) || relationshipId <= 0) {
+    Astro.response.status = 400;
+    error = 'Name the relationship to act on.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: reason || null,
+    };
+    try {
+      if (act === 'verify' || act === 'reject') {
+        if (!reason) {
+          Astro.response.status = 400;
+          error = 'A decision about a guardianship requires a recorded reason — for a verification '
+            + 'as much as a refusal. Attaching an adult to a child’s record is not a fact the '
+            + 'register can hold without one.';
+        } else {
+          await decideRelationship(db(), ctx, {
+            relationshipId,
+            decision: act === 'verify' ? 'verified' : 'rejected',
+            reason,
+          });
+          return Astro.redirect(`${SELF}?done=${act === 'verify' ? 'verified' : 'rejected'}`, 303);
+        }
+      } else if (act === 'revoke') {
+        if (!reason) {
+          Astro.response.status = 400;
+          error = 'Revoking a guardianship requires a recorded reason.';
+        } else {
+          await revokeRelationship(db(), ctx, { relationshipId, reason });
+          return Astro.redirect(`${SELF}?done=revoked`, 303);
+        }
+      } else if (act === 'grant' || act === 'ungrant') {
+        const capability = get('capability') as GuardianCapability;
+        if (!(GUARDIAN_CAPABILITIES as readonly string[]).includes(capability)) {
+          Astro.response.status = 400;
+          error = 'That is not a capability a guardian can hold.';
+        } else if (act === 'grant') {
+          await grantGuardianCapability(db(), ctx, { relationshipId, capability });
+          return Astro.redirect(`${SELF}?done=granted`, 303);
+        } else {
+          const authorizationId = Number(get('authorizationId'));
+          if (!Number.isInteger(authorizationId) || authorizationId <= 0) {
+            Astro.response.status = 400;
+            error = 'Name the grant to revoke.';
+          } else if (!reason) {
+            Astro.response.status = 400;
+            error = 'Revoking a capability requires a recorded reason.';
+          } else {
+            await revokeGuardianCapability(db(), ctx, { authorizationId, reason });
+            return Astro.redirect(`${SELF}?done=ungranted`, 303);
+          }
+        }
+      } else {
+        Astro.response.status = 400;
+        error = 'Unknown action.';
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        // The double gate reaches here when somebody posts a capability the
+        // page withheld from them.
+        error = 'Your credential does not hold the authority this act requires. Granting sight of a '
+          + 'medical or safeguarding record needs medical:read or safeguarding:write on top of '
+          + 'guardian:verify.';
+      } else if (isIdentityError(err)) {
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[admin/guardianships] act failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was changed.';
+      }
+    }
+  }
+}
+
+// ─── The read ───────────────────────────────────────────────────────────────
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE_MESSAGES[done] ? DONE_MESSAGES[done] : null;
+
+interface Party { id: number; federationId: string | null; fullName: string | null; dob: string | null }
+interface Row {
+  id: number;
+  type: string;
+  status: string;
+  evidence: any;
+  createdAt: Date | string | null;
+  holder: Party | null;
+  subject: Party | null;
+  /** true | false | null — null means no date of birth is on record. */
+  subjectIsMinor: boolean | null;
+  subjectAge: number | null;
+  held: Array<{ id: number; capability: string }>;
+}
+
+let pending: Row[] = [];
+let live: Row[] = [];
+let notConfigured = false;
+let readFailed = false;
+let failureDetail: string | null = null;
+
+if (!configured) {
+  notConfigured = true;
+} else if (identity && mayVerify) {
+  try {
+    const d = db();
+    const [asserted, verified] = await Promise.all([
+      relationshipQueue(d, identity.principal, { status: ['asserted'], limit: 100 }),
+      relationshipQueue(d, identity.principal, { status: ['verified'], limit: 100 }),
+    ]);
+
+    const all = [...asserted, ...verified];
+    const ids = [...new Set(all.flatMap((r: any) => [r.holderPersonId, r.subjectPersonId]))];
+    const people: Party[] = ids.length
+      ? await d.select({
+          id: s.persons.id,
+          federationId: s.persons.federationId,
+          fullName: s.persons.fullName,
+          dob: s.persons.dob,
+        }).from(s.persons).where(inArray(s.persons.id, ids))
+      : [];
+    const byId = new Map(people.map((p) => [p.id, p]));
+
+    const build = async (r: any): Promise<Row> => {
+      const subject = byId.get(r.subjectPersonId) ?? null;
+      return {
+        id: r.id,
+        type: r.type,
+        status: r.status,
+        evidence: r.evidence,
+        createdAt: r.createdAt,
+        holder: byId.get(r.holderPersonId) ?? null,
+        subject,
+        subjectIsMinor: isMinor(subject?.dob ?? null),
+        subjectAge: ageOn(subject?.dob ?? null),
+        held: r.status === 'verified' ? await capabilitiesOn(d, r.id) : [],
+      };
+    };
+
+    pending = await Promise.all(asserted.map(build));
+    live = await Promise.all(verified.map(build));
+  } catch (err: any) {
+    readFailed = true;
+    failureDetail = String(err?.message ?? err);
+  }
+}
+
+/** May this reader grant this capability at all? Reads the module's own map. */
+function mayGrant(capability: GuardianCapability): boolean {
+  if (!identity) return false;
+  const extra = extraActionFor(capability);
+  if (!extra) return true;
+  return can(identity.principal, extra as Action, {});
+}
+
+const fmt = (v: Date | string | null) => {
+  if (!v) return '—';
+  const d = v instanceof Date ? v : new Date(v);
+  return Number.isNaN(d.getTime()) ? '—' : d.toISOString().slice(0, 10);
+};
+
+/** How the subject's age is described. Unknown is NEVER rendered as adult. */
+const ageWords = (r: Row) =>
+  r.subjectIsMinor === null
+    ? 'Date of birth not recorded — whether this is a child is unknown'
+    : r.subjectIsMinor
+      ? `A MINOR${r.subjectAge != null ? `, aged ${r.subjectAge}` : ''}`
+      : `An adult${r.subjectAge != null ? `, aged ${r.subjectAge}` : ''}`;
+---
+
+<AdminShell
+  title="Guardianships"
+  requires="guardian:verify"
+  intro="Who may act for another person, and exactly what they may do for them. Verifying confers nothing on its own."
+>
+  {doneMessage && <p class="notice notice--done" role="status">{doneMessage}</p>}
+  {error && <p class="notice notice--error" role="alert">{error}</p>}
+
+  <p class="notice notice--standing">
+    <strong>Verifying a relationship grants no access whatsoever.</strong>
+    It records that the federation accepts this adult stands in this relationship
+    to this person. Every capability is granted separately below, one at a time,
+    and a guardian holding none can see nothing. Revoking the relationship
+    revokes every capability granted on it.
+  </p>
+
+  {notConfigured && (
+    <p class="notice">
+      The federation database is not configured on this deployment, so there are
+      no relationships to decide.
+    </p>
+  )}
+
+  {readFailed && (
+    <ErrorState
+      title="The guardianship register could not be read"
+      safe="Nothing was decided and no relationship changed. Reading this page writes nothing."
+      body="The register is configured but did not answer."
+      detail={failureDetail}
+      retryHref={SELF}
+    />
+  )}
+
+  {!notConfigured && !readFailed && pending.length === 0 && live.length === 0 && (
+    <EmptyState
+      title="No guardianships are recorded"
+      body="A claim arrives here when a minor's application names a parent or guardian — src/db/provisioning.ts records it as asserted, conferring nothing, and it waits for a decision."
+      action={{ label: 'Back to the member register', href: h('/admin/membership') }}
+    />
+  )}
+
+  {pending.length > 0 && (
+    <section>
+      <h2>Claims awaiting a decision ({pending.length})</h2>
+      {pending.map((r) => (
+        <article class="rel">
+          <header class="rel__head">
+            <h3>
+              {r.holder?.fullName ?? '(unknown adult)'} claims to be the
+              {' '}{String(r.type).replace(/_/g, ' ')} of {r.subject?.fullName ?? '(unknown person)'}
+            </h3>
+            <p class="rel__meta">claimed {fmt(r.createdAt)}</p>
+          </header>
+
+          <dl class="rel__body">
+            <dt>The adult</dt>
+            <dd>{r.holder ? (r.holder.federationId ?? `#${r.holder.id}`) : 'could not be read'}</dd>
+            <dt>The person</dt>
+            <dd>
+              {r.subject ? (r.subject.federationId ?? `#${r.subject.id}`) : 'could not be read'}
+              {' — '}<strong>{ageWords(r)}</strong>
+            </dd>
+            <dt>Evidence supplied</dt>
+            <dd>
+              {r.evidence
+                ? <details><summary>As submitted</summary><pre>{JSON.stringify(r.evidence, null, 2)}</pre></details>
+                : <em>None supplied.</em>}
+            </dd>
+          </dl>
+
+          <form method="POST" action={SELF} class="rel__act">
+            <input type="hidden" name="relationshipId" value={String(r.id)} />
+            <label for={`reason-${r.id}`}>Reason (required — what did you check?)</label>
+            <textarea id={`reason-${r.id}`} name="reason" required maxlength="2000" rows="2"></textarea>
+            <div class="rel__buttons">
+              <button type="submit" name="act" value="reject">Refuse the claim</button>
+              <button type="submit" name="act" value="verify">Verify the relationship</button>
+            </div>
+          </form>
+        </article>
+      ))}
+    </section>
+  )}
+
+  {live.length > 0 && (
+    <section>
+      <h2>Verified relationships ({live.length})</h2>
+      {live.map((r) => {
+        const heldNames = new Set(r.held.map((x) => x.capability));
+        return (
+          <article class="rel">
+            <header class="rel__head">
+              <h3>
+                {r.holder?.fullName ?? '(unknown adult)'} —
+                {' '}{String(r.type).replace(/_/g, ' ')} of {r.subject?.fullName ?? '(unknown person)'}
+              </h3>
+              <p class="rel__meta">{ageWords(r)}</p>
+            </header>
+
+            <h4>What this guardian may do</h4>
+            <ul class="caps">
+              {GUARDIAN_CAPABILITIES.map((cap) => {
+                const holds = heldNames.has(cap);
+                const grantable = mayGrant(cap);
+                const extra = extraActionFor(cap);
+                const grant = r.held.find((x) => x.capability === cap);
+                return (
+                  <li class:list={['cap', { 'cap--held': holds }]}>
+                    <div class="cap__what">
+                      <strong>{holds ? 'HELD' : 'not granted'}</strong> — {CAPABILITY_WORDS[cap]}
+                    </div>
+
+                    {/* The double gate, SAID rather than silently hidden. A
+                        missing control with no explanation reads as a bug. */}
+                    {!grantable ? (
+                      <p class="cap__withheld">
+                        This control is withheld from you. Granting this one needs
+                        {' '}<code>{extra}</code> on top of <code>guardian:verify</code>, and this
+                        account does not hold it. That is deliberate: the office that attaches a
+                        parent to a child is not automatically the office that may hand over a
+                        medical or safeguarding record.
+                      </p>
+                    ) : (
+                      <form method="POST" action={SELF} class="cap__form">
+                        <input type="hidden" name="relationshipId" value={String(r.id)} />
+                        <input type="hidden" name="capability" value={cap} />
+                        {holds ? (
+                          <>
+                            <input type="hidden" name="authorizationId" value={String(grant!.id)} />
+                            <input
+                              type="text"
+                              name="reason"
+                              required
+                              maxlength="2000"
+                              placeholder="Reason for revoking"
+                              aria-label={`Reason for revoking ${cap}`}
+                            />
+                            <button type="submit" name="act" value="ungrant">Revoke</button>
+                          </>
+                        ) : (
+                          <button type="submit" name="act" value="grant">Grant</button>
+                        )}
+                      </form>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+
+            <form method="POST" action={SELF} class="rel__act">
+              <input type="hidden" name="relationshipId" value={String(r.id)} />
+              <label for={`revoke-${r.id}`}>
+                End this relationship (this also revokes every capability above)
+              </label>
+              <textarea id={`revoke-${r.id}`} name="reason" required maxlength="2000" rows="2"></textarea>
+              <div class="rel__buttons">
+                <button type="submit" name="act" value="revoke">Revoke the relationship</button>
+              </div>
+            </form>
+          </article>
+        );
+      })}
+    </section>
+  )}
+</AdminShell>
+
+<style>
+  .notice {
+    padding: var(--space-3, 0.75rem) var(--space-4, 1rem);
+    border-radius: var(--radius, 6px);
+    margin-block: var(--space-3, 0.75rem);
+    border: 1px solid var(--border, #d0d0d0);
+  }
+  .notice--error { border-color: #a11; }
+  .notice--done { border-color: #171; }
+
+  h2 { font-size: 1.05rem; margin-block: var(--space-6, 1.5rem) var(--space-3, 0.75rem); }
+  h4 { font-size: 0.95rem; margin-block: var(--space-4, 1rem) var(--space-2, 0.5rem); }
+
+  .rel {
+    border: 1px solid var(--border, #d0d0d0);
+    border-radius: var(--radius, 6px);
+    padding: var(--space-4, 1rem);
+    margin-block: var(--space-4, 1rem);
+  }
+  .rel__head h3 { margin: 0; font-size: 1rem; }
+  .rel__meta { margin: 0.25rem 0 0; color: var(--muted, #555); }
+  .rel__body { display: grid; grid-template-columns: auto 1fr; gap: 0.35rem 0.9rem; margin-block: var(--space-3, 0.75rem); }
+  .rel__body dt { color: var(--muted, #555); }
+  .rel__body dd { margin: 0; }
+  .rel__body pre { overflow-x: auto; font-size: 0.8rem; }
+
+  .rel__act { display: grid; gap: var(--space-2, 0.5rem); margin-block-start: var(--space-3, 0.75rem); }
+  .rel__act textarea { width: 100%; }
+  .rel__buttons { display: flex; flex-wrap: wrap; gap: var(--space-2, 0.5rem); }
+
+  .caps { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-2, 0.5rem); }
+  .cap {
+    border: 1px solid var(--border, #d0d0d0);
+    border-radius: var(--radius, 6px);
+    padding: var(--space-2, 0.5rem) var(--space-3, 0.75rem);
+    display: flex; flex-wrap: wrap; gap: var(--space-2, 0.5rem);
+    align-items: center; justify-content: space-between;
+  }
+  .cap--held { border-color: #171; }
+  .cap__what { flex: 1 1 20rem; }
+  .cap__withheld { flex: 1 1 100%; margin: 0; color: var(--muted, #555); font-size: 0.9rem; }
+  .cap__form { display: flex; flex-wrap: wrap; gap: var(--space-2, 0.5rem); align-items: center; }
+</style>

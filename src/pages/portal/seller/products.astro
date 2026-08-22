@@ -24,7 +24,7 @@ import { db } from '@/db';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { myListings, LISTING_CATEGORIES } from '@/db/marketplace';
-import { variantsForListing } from '@/db/catalogue';
+import { variantsForListings } from '@/db/catalogue';
 import { myLocations, stockForSeller, lowStock } from '@/db/inventory';
 import { sellerContext, readableError, money, fmtDate, titleCase, SELLER_TABS } from './_gate';
 
@@ -45,9 +45,12 @@ if (ctx.gate === 'seller' && ctx.approved && !pageError) {
     // inside its own query, so reading another seller's catalogue is not
     // refused — it cannot be asked for.
     listings = await myListings(db(), ctx.identity!.principal, { limit: 200 });
-    for (const l of listings) {
-      variantsBy.set(l.id, await variantsForListing(db(), l.id));
-    }
+    // ONE query for every listing's variants, not one per listing. This was a
+    // `for … await` over up to two hundred rows — two hundred sequential round
+    // trips to render a single page, each waiting on the one before it. The
+    // cost is invisible on a test catalogue of three items and very visible to
+    // a seller with a real one.
+    variantsBy = await variantsForListings(db(), listings.map((l: any) => l.id));
     locations = await myLocations(db(), ctx.identity!.principal);
     stock = await stockForSeller(db(), ctx.identity!.principal);
     low = await lowStock(db(), ctx.identity!.principal);

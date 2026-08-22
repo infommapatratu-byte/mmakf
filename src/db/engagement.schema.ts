@@ -456,6 +456,23 @@ export const quotes = pgTable('quotes', {
 }, (t) => ({
   refUk: uniqueIndex('quotes_ref_uk').on(t.ref),
   reqIdx: index('quotes_request_idx').on(t.requestId),
+  /**
+   * ONE QUOTATION PER REQUEST (migration 0048).
+   *
+   * issueQuote() re-versions rather than opening a second quotation, and it used
+   * to decide that with a SELECT followed by an INSERT — which two concurrent
+   * callers both pass. The result was two quotations for one request, each
+   * numbering its versions from 1, and neither superseding the other's issued
+   * version: the federation quoting two prices at once with nothing in the
+   * schema to say which one the school was given.
+   *
+   * PARTIAL, because a null request_id is not a conflict. A quotation raised
+   * directly against a person or an institution has no training request, and two
+   * of those are two different quotations.
+   */
+  requestUk: uniqueIndex('quotes_request_uk')
+    .on(t.requestId)
+    .where(sql`request_id is not null`),
 }));
 
 /**
@@ -675,6 +692,19 @@ export const programParticipants = pgTable('program_participants', {
   leftOn: date('left_on'),
 }, (t) => ({
   programIdx: index('program_participants_program_idx').on(t.programId),
+  // ── Added by migration 0039 (programme activation) ───────────────────────
+  //
+  // "Which programmes is this person on" is the other half of every access
+  // check in src/db/activation.ts, and the index above answers only "who is on
+  // this programme". Without this one the check is a sequential scan of every
+  // participant in the federation, per request.
+  personIdx: index('program_participants_person_idx').on(t.personId, t.leftOn),
+  // One roll entry per person per programme — the replay guard for
+  // registerParticipant(). Partial, because a school cohort held only as a
+  // display name has a null person_id and NULLs do not collide.
+  personUk: uniqueIndex('program_participants_person_uk')
+    .on(t.programId, t.personId)
+    .where(sql`person_id is not null`),
 }));
 
 // ─── Availability, booking and consultation ─────────────────────────────────

@@ -53,6 +53,7 @@ import {
   todayIso, addDays, isSchedulingError,
   type PersonalSession, type BookableSession,
 } from '@/db/scheduling';
+import { issueFeed, myFeeds, revokeFeed, isFeedError, type FeedToken } from '@/lib/calendar-feed';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 
 export const prerender = false;
@@ -121,11 +122,25 @@ if (Astro.request.method === 'POST') {
         await cancelSessionBooking(db(), ctx, Number(field('bookingId')), field('reason') || 'Cancelled by the member');
         return Astro.redirect(`${SELF}?done=released`, 303);
       }
+      if (action === 'subscribe') {
+        // THE SECRET IS RETURNED ONCE AND CANNOT BE RECOVERED, so it travels
+        // back on the redirect and is rendered once. Not stored anywhere by this
+        // page, and not in the audit trail either — see src/lib/calendar-feed.ts.
+        const issued = await issueFeed(db(), ctx, {
+          scope: field('scope') === 'coach_diary' ? 'coach_diary' : 'own_classes',
+          label: field('label') || null,
+        });
+        return Astro.redirect(`${SELF}?done=subscribed&secret=${encodeURIComponent(issued.secret)}`, 303);
+      }
+      if (action === 'unsubscribe') {
+        await revokeFeed(db(), ctx, Number(field('tokenId')), field('reason') || 'No longer used');
+        return Astro.redirect(`${SELF}?done=unsubscribed`, 303);
+      }
     } catch (err: any) {
       if (err instanceof ForbiddenError) {
         Astro.response.status = 403;
         error = 'The federation’s permission rules do not allow this account to do that. Nothing was changed.';
-      } else if (isSchedulingError(err)) {
+      } else if (isFeedError(err) || isSchedulingError(err)) {
         // The engine writes its refusals for the person who hit them — "that
         // session is full", "that place is already held under MMAKF-BKG-…" —
         // so they are shown as they are.
@@ -143,6 +158,8 @@ if (Astro.request.method === 'POST') {
 const DONE: Record<string, string> = {
   booked: 'Your place is booked. It appears in your week below.',
   released: 'Your place has been released and is available to somebody else.',
+  subscribed: 'Your calendar subscription is ready. The address below is shown ONCE — copy it now.',
+  unsubscribed: 'That subscription has been withdrawn. The address stops working immediately.',
 };
 done = DONE[Astro.url.searchParams.get('done') ?? ''] ?? null;
 
@@ -151,7 +168,17 @@ done = DONE[Astro.url.searchParams.get('done') ?? ''] ?? null;
 let mine: PersonalSession[] = [];
 let offered: BookableSession[] = [];
 let myDojoId: number | null = null;
+let feeds: FeedToken[] = [];
 let loadError: string | null = null;
+
+/**
+ * The one moment the secret exists in a page.
+ *
+ * It arrives on the redirect from the POST that minted it, is rendered once, and
+ * is never read from the database again because only a hash of it was stored. A
+ * member who loses it revokes the subscription and makes another.
+ */
+const freshSecret = Astro.url.searchParams.get('secret');
 
 if (gate === 'ok' && personId != null) {
   try {
@@ -166,6 +193,7 @@ if (gate === 'ok' && personId != null) {
     if (myDojoId) {
       offered = await bookableSessions(database, { dojoId: myDojoId }, from, to);
     }
+    feeds = await myFeeds(database, identity!.principal);
   } catch (err) {
     console.error('[my/schedule] read failed', err);
     loadError = 'Your training week could not be read. Nothing has been changed.';
@@ -275,6 +303,78 @@ const DAY_FMT = (iso: string) =>
             </ul>
           )}
 
+          {/* ═══════ IN YOUR OWN CALENDAR ═══════
+              A calendar client fetches with no cookies and no way to sign in, so
+              a session-scoped feed is impossible: the address itself is the
+              authorisation. src/pages/calendar.ics.ts set out that requirement
+              and src/lib/calendar-feed.ts satisfies it — a long secret, stored
+              only as a hash, revocable at once. */}
+          <h2 class="sec-h">In your own calendar</h2>
+
+          {freshSecret && (
+            <div class="secret">
+              <strong>Copy this address now. It is shown once and cannot be recovered.</strong>
+              <code class="secret-url">{Astro.url.origin}/my/calendar/{freshSecret}.ics</code>
+              <span class="text-muted">
+                Paste it into Google Calendar, Outlook or Apple Calendar as a subscription — not as an import,
+                so it keeps up to date. Anybody who has this address can read this calendar, so treat it like a
+                password; if it goes astray, withdraw it below and make another.
+              </span>
+            </div>
+          )}
+
+          {feeds.filter((f) => f.status === 'active').length === 0 ? (
+            <p class="text-muted">
+              No calendar subscription yet. One address, added to your phone or your work calendar, keeps your
+              classes up to date — including the ones that get cancelled or moved.
+            </p>
+          ) : (
+            <ul class="feeds">
+              {feeds.filter((f) => f.status === 'active').map((f) => (
+                <li class="feed">
+                  <div>
+                    <strong>{f.label || 'Unnamed subscription'}</strong>
+                    <span class="pill">{f.scope === 'coach_diary' ? 'teaching (busy only)' : 'my classes'}</span>
+                    <div class="text-muted" style="font-size:.78rem">
+                      Added {f.createdAt.slice(0, 10)}.
+                      {f.lastUsedAt
+                        ? ` Last read ${f.lastUsedAt.slice(0, 16).replace('T', ' ')}, ${f.useCount} ${f.useCount === 1 ? 'time' : 'times'}.`
+                        : ' Never read yet — if it stays that way, the subscription did not take.'}
+                      {' '}The address is not shown again; only a one-way hash of it was kept.
+                    </div>
+                  </div>
+                  <form method="post" class="inline-form">
+                    <input type="hidden" name="action" value="unsubscribe" />
+                    <input type="hidden" name="tokenId" value={f.id} />
+                    <input class="input input-sm" name="reason" placeholder="Why (optional)" />
+                    <button class="btn btn-ghost btn-sm" type="submit">Withdraw</button>
+                  </form>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <form method="post" class="row-form">
+            <input type="hidden" name="action" value="subscribe" />
+            <label class="fld">
+              <span class="input-label">Name it</span>
+              <input class="input input-sm" name="label" placeholder="iPhone" />
+            </label>
+            <label class="fld">
+              <span class="input-label">What it carries</span>
+              <select class="input input-sm" name="scope">
+                <option value="own_classes">My classes — name, time and room</option>
+                <option value="coach_diary">Teaching — busy blocks only, no details</option>
+              </select>
+            </label>
+            <button class="btn btn-ghost btn-sm" type="submit">Create a subscription</button>
+          </form>
+          <p class="text-muted" style="font-size:.78rem;margin-top:10px">
+            <strong>Teaching (busy only)</strong> publishes opaque blocks reading &ldquo;MMAKF (busy)&rdquo; with no class
+            name, venue or student. A teaching calendar is often shared with a family or an employer, and a year
+            of named classes in it is a movement pattern for an adult who works with children.
+          </p>
+
           {/* ═══════ WHAT I COULD BOOK ═══════ */}
           {myDojoId && (
             <>
@@ -348,4 +448,21 @@ const DAY_FMT = (iso: string) =>
   .inline-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .input-sm { padding: 5px 8px; font-size: .78rem; }
   .btn-sm { padding: 6px 12px; font-size: .78rem; }
+  .row-form { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-top: 14px; }
+  .fld { display: flex; flex-direction: column; gap: 4px; }
+  .input-label { font-size: .66rem; letter-spacing: .16em; text-transform: uppercase; color: var(--gold); }
+  .secret {
+    display: flex; flex-direction: column; gap: 10px;
+    border: 1px solid var(--border); border-left: 3px solid var(--gold);
+    border-radius: var(--radius); background: var(--card);
+    padding: 16px 18px; margin-bottom: 16px; font-size: .86rem; line-height: 1.6;
+  }
+  .secret-url { word-break: break-all; font-size: .8rem; padding: 8px 10px; background: var(--bg-2); border-radius: 6px; }
+  .feeds { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+  .feed {
+    display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card); padding: 14px 16px; font-size: .86rem;
+  }
+  .feed > div { flex: 1 1 340px; display: flex; flex-direction: column; gap: 4px; }
 </style>

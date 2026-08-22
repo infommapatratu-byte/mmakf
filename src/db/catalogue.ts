@@ -661,6 +661,39 @@ export async function variantsForListing(db: DB, listingId: number) {
     .orderBy(asc(s.listingVariants.sortOrder), asc(s.listingVariants.id));
 }
 
+/**
+ * The variants of MANY listings, in one query, grouped by listing id.
+ *
+ * WHY THIS EXISTS. /portal/seller/products reads up to two hundred listings and
+ * then called variantsForListing() once per listing inside a `for … await` —
+ * two hundred sequential round trips to render one page, each waiting on the
+ * last. A seller with a real catalogue watched the page take a second per
+ * fifty items, and the cost is invisible in testing because a test catalogue
+ * has three.
+ *
+ * The empty-input guard is not defensive padding: `inArray(col, [])` compiles
+ * to `in ()`, which is a syntax error in Postgres rather than an empty result.
+ *
+ * Every listing asked for gets a key, including the ones with no variants, so a
+ * caller can tell "none" from "not fetched" without a second lookup.
+ */
+export async function variantsForListings(
+  db: DB,
+  listingIds: number[]
+): Promise<Map<number, any[]>> {
+  const by = new Map<number, any[]>();
+  const ids = [...new Set(listingIds.filter((id) => Number.isInteger(id)))];
+  for (const id of ids) by.set(id, []);
+  if (!ids.length) return by;
+
+  const rows = await db.select().from(s.listingVariants)
+    .where(inArray(s.listingVariants.listingId, ids))
+    .orderBy(asc(s.listingVariants.sortOrder), asc(s.listingVariants.id));
+
+  for (const r of rows) by.get(r.listingId)?.push(r);
+  return by;
+}
+
 // ─── Quarantine ─────────────────────────────────────────────────────────────
 
 /**

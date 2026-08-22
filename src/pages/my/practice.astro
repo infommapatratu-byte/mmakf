@@ -1,0 +1,322 @@
+---
+/**
+ * /my/practice — what the member says about their own training, and what an
+ * instructor has asked them to work on. §43.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * THE THING THIS PAGE MUST NEVER BECOME
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * A progress dashboard. §44 is one sentence and it governs the whole design:
+ *
+ *     Watching Bassai Dai does NOT make Bassai Dai "completed".
+ *
+ * So there is no percentage, no completion ring, no "12 of 26 kata", and no
+ * streak. Every one of those is a claim about attainment dressed as a
+ * statistic, and attainment on this platform is established by a grading with a
+ * panel behind it — never by a member pressing a button about themselves.
+ *
+ * What the page shows instead is a WORKING LIST: what you are on, and above all
+ * what you have said you cannot yet do. `needs_work` is put first and given the
+ * most room, because it is the only entry on the list that changes what somebody
+ * does at their next session.
+ *
+ * The counts that are shown are counts of MARKS — "you have flagged six things
+ * as needing work" — never counts against the size of the library, because the
+ * library is reference material and has no end to progress toward.
+ */
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { myMarks, myAssignments, myPracticeSummary, practitionerFor, MARK_LABEL, type Mark } from '@/db/practice';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+
+let marks: any[] = [];
+let assignments: any[] = [];
+let summary: any = null;
+/**
+ * Why the page is empty, told apart properly.
+ *
+ * "No database", "not signed in", "signed in with a shared credential that
+ * identifies nobody" and "signed in, linked to no person yet" are four different
+ * sentences, and none of them is "you have marked nothing".
+ */
+let state: 'ok' | 'unconfigured' | 'anonymous' | 'no_person' | 'failed' = 'ok';
+
+if (!configured) {
+  state = 'unconfigured';
+} else if (!identity) {
+  state = 'anonymous';
+} else {
+  try {
+    const me = await practitionerFor(db(), identity.principal);
+    if (!me) {
+      state = 'no_person';
+    } else {
+      marks = await myMarks(db(), identity.principal);
+      assignments = await myAssignments(db(), identity.principal);
+      summary = await myPracticeSummary(db(), identity.principal);
+    }
+  } catch {
+    // The driver's own words are a fact about the server, not about the member.
+    state = 'failed';
+  }
+}
+
+const ORDER: Mark[] = ['needs_work', 'practising', 'bookmarked', 'watched'];
+const grouped = ORDER.map((mark) => ({
+  mark,
+  label: MARK_LABEL[mark],
+  items: marks.filter((m) => m.mark === mark),
+})).filter((g) => g.items.length > 0);
+---
+
+<Base
+  title="My practice — MMAKF"
+  description="What you are working on in the technical library, and what your instructor has asked you to practise."
+>
+  <PageHero
+    eyebrow="My practice"
+    title={`What you are <em class="r">working on</em>.`}
+    lead="Your own notes on the technical library. Not a record of attainment — that is what a grading is for."
+  />
+
+  <section>
+    <div class="container">
+      {state === 'unconfigured' && (
+        <div class="panel fade" style="max-width:66ch">
+          <h3 class="panel-h">The federation register is not connected on this deployment.</h3>
+          <p class="panel-p">
+            Practice marks are stored in the register, so this page cannot show yours. That is different
+            from saying you have none.
+          </p>
+        </div>
+      )}
+
+      {state === 'anonymous' && (
+        <div class="panel fade" style="max-width:66ch">
+          <h3 class="panel-h">Sign in to keep your own practice notes.</h3>
+          <p class="panel-p">
+            A practice record belongs to one person, so it needs an account rather than a shared code.
+          </p>
+          <a class="btn btn-ghost" href={h('/my')}>Sign in &rarr;</a>
+        </div>
+      )}
+
+      {state === 'no_person' && (
+        <div class="panel fade" style="max-width:66ch">
+          <h3 class="panel-h">This account is not linked to a member record yet.</h3>
+          <p class="panel-p">
+            Practice notes hang off your membership record. Until the account is linked to one there is
+            nowhere to put them &mdash; which is a gap in your registration, not a fault you can fix here.
+          </p>
+        </div>
+      )}
+
+      {state === 'failed' && (
+        <div class="panel fade" style="max-width:66ch">
+          <h3 class="panel-h">Your practice notes could not be read.</h3>
+          <p class="panel-p">
+            The request to the register did not complete. This page is not reporting that you have none.
+          </p>
+        </div>
+      )}
+
+      {state === 'ok' && (
+        <div class="two-col">
+          <div class="fade">
+            <div class="eyebrow">What this is</div>
+            <h2 class="display-2" style="margin-top:16px">A working list, <em class="r">not a score</em>.</h2>
+            <div class="rule"></div>
+            <p class="body-txt">
+              Nothing here counts toward a grade. There is no percentage and no total against the library,
+              because the library is reference material rather than a course with an end &mdash; and because
+              a progress bar toward a destination that does not exist is a lie told with a rectangle.
+            </p>
+            <p class="body-txt">
+              What it is for is the next session. The things you have marked <strong>needs work</strong> are
+              first and given the most room, because they are the only entries that change what you do when
+              you next stand on the floor.
+            </p>
+          </div>
+
+          <aside class="fade panel">
+            <div class="eyebrow">Your marks</div>
+            <h3 class="panel-h">{summary?.total ?? 0} recorded</h3>
+            <ul class="plain">
+              {ORDER.map((m) => (
+                <li class="panel-p">
+                  <strong>{summary?.byMark?.[m] ?? 0}</strong> {MARK_LABEL[m].label.toLowerCase()}
+                </li>
+              ))}
+            </ul>
+            <p class="panel-p text-muted" style="font-size:.86rem">
+              Counts of your own notes. Deliberately not a proportion of the library.
+            </p>
+          </aside>
+        </div>
+      )}
+    </div>
+  </section>
+
+  {state === 'ok' && assignments.length > 0 && (
+    <section class="bg2">
+      <div class="container">
+        <div class="section-head fade">
+          <div class="eyebrow">{assignments.length} open</div>
+          <h2 class="display-2">Asked of you</h2>
+          <div class="rule"></div>
+          <p class="lead">
+            What an instructor has asked you to work on. Acknowledging one records that you have seen it
+            &mdash; nothing more, because whether you can now do it is decided on the floor.
+          </p>
+        </div>
+        <div class="grid grid-2">
+          {assignments.map((a) => (
+            <div class="card fade">
+              <div class="card-eyebrow">
+                {a.state === 'acknowledged' ? 'Acknowledged' : 'New'}
+                {a.dueOn && <> &middot; by {new Date(a.dueOn).toDateString()}</>}
+              </div>
+              <div class="card-title" style="font-size:1rem">
+                {a.subject?.href ? <a href={h(a.subject.href)}>{a.subject.title}</a> : a.subject?.title ?? a.subjectSlug}
+              </div>
+              <div class="card-body">{a.instruction}</div>
+              {a.state === 'assigned' && (
+                <button type="button" class="btn btn-ghost" data-ack={a.id}>Mark as seen</button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  )}
+
+  {state === 'ok' && (
+    <section>
+      <div class="container">
+        {grouped.length === 0 ? (
+          <div class="panel fade" style="max-width:66ch">
+            <h3 class="panel-h">Nothing marked yet.</h3>
+            <p class="panel-p">
+              Open a technique or a kata and mark how you are getting on with it. The most useful thing you
+              can record is what you <em>cannot</em> do yet.
+            </p>
+            <a class="btn btn-ghost" href={h('/shotokan/kihon')}>The kihon library &rarr;</a>
+          </div>
+        ) : (
+          grouped.map((g) => (
+            <div class="fade" style="margin-bottom:44px">
+              <div class="section-head">
+                <div class="eyebrow">{g.items.length}</div>
+                <h2 class="display-2">{g.label.label}</h2>
+                <div class="rule"></div>
+                <p class="lead">{g.label.help}</p>
+              </div>
+              <ul class="mk">
+                {g.items.map((m) => (
+                  <li class="mk-row">
+                    <span class="mk-kind">{m.subjectKind}</span>
+                    <span class="mk-title">
+                      {m.subject?.href
+                        ? <a href={h(m.subject.href)}>{m.subject.title}</a>
+                        : (m.subject?.title ?? m.subjectSlug)}
+                    </span>
+                    {m.note && <span class="mk-note">{m.note}</span>}
+                    <button type="button" class="mk-clear" data-clear-kind={m.subjectKind} data-clear-slug={m.subjectSlug}>
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        )}
+      </div>
+    </section>
+  )}
+
+  <section class="bg2">
+    <div class="container">
+      <div class="panel fade" style="max-width:70ch">
+        <div class="eyebrow">What decides a grade</div>
+        <h3 class="panel-h">None of this.</h3>
+        <p class="panel-p">
+          Everything on this page is your own note about your own practice. It is not seen by an examiner,
+          it does not count toward a grading, and it cannot. Physical competence is established by the
+          federation&rsquo;s examination process &mdash; a panel, a syllabus, a certificate &mdash; and the
+          two records are kept structurally apart so that one can never be mistaken for the other.
+        </p>
+        <a class="btn btn-ghost" href={h('/belt-system')}>How grading works &rarr;</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<script is:inline>
+  /* Progressive: the page is fully readable without this, and the controls
+     simply do nothing rather than pretending to have saved something. */
+  document.addEventListener('click', async (ev) => {
+    const ack = ev.target.closest('[data-ack]');
+    const clear = ev.target.closest('[data-clear-slug]');
+    if (!ack && !clear) return;
+
+    const payload = ack
+      ? { action: 'acknowledge', assignmentId: Number(ack.dataset.ack) }
+      : { action: 'clear', subjectKind: clear.dataset.clearKind, subjectSlug: clear.dataset.clearSlug };
+
+    const btn = ack || clear;
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/practice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) { location.reload(); return; }
+      const body = await res.json().catch(() => ({}));
+      btn.disabled = false;
+      /* The module's refusals are written to be read by whoever hit them. */
+      btn.textContent = body.error || 'That did not save';
+    } catch {
+      btn.disabled = false;
+      btn.textContent = 'That did not save';
+    }
+  });
+</script>
+
+<style>
+  .plain { list-style: none; margin: 0 0 12px; padding: 0; }
+  .mk { list-style: none; margin: 0; padding: 0; }
+  .mk-row {
+    display: grid;
+    grid-template-columns: 6.5rem 1fr auto;
+    gap: 4px 16px;
+    align-items: baseline;
+    padding: 12px 2px;
+    border-top: 1px solid var(--border, rgba(0, 0, 0, .1));
+  }
+  .mk-row:last-child { border-bottom: 1px solid var(--border, rgba(0, 0, 0, .1)); }
+  .mk-kind {
+    font-size: .72rem; letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
+  }
+  .mk-title { font-weight: 500; }
+  .mk-note { grid-column: 2 / -1; color: var(--muted); font-size: .9rem; }
+  .mk-clear {
+    font: inherit; font-size: .8rem; background: transparent; cursor: pointer;
+    border: 1px solid var(--border, rgba(0, 0, 0, .2)); border-radius: 3px; padding: 4px 9px;
+  }
+  @media (max-width: 620px) {
+    .mk-row { grid-template-columns: 1fr auto; }
+    .mk-kind { grid-column: 1 / -1; }
+  }
+</style>

@@ -1,0 +1,213 @@
+---
+// /shop/seller/[slug] — a seller's public storefront.
+//
+// ─── WHAT IS PUBLISHED, AND HOW THAT IS DECIDED ─────────────────────────────
+//
+// publicStorefront() returns a DELIBERATE ALLOW-LIST, not a redacted row. That
+// distinction is the whole safety of this page: adding a column to `sellers`
+// must not publish it, and a spread-with-deletions would do exactly that the
+// next time somebody adds a field. Location is exposed at city and state
+// granularity — never the street, and never the warehouse.
+//
+// ─── THE BADGES ARE THE ONLY OFFICIAL-LOOKING THING HERE ────────────────────
+//
+// And every one is data-backed. They come from badgesFor(), which derives
+// `verified_seller` and `verified_brand` from current verification records and
+// reads the two granted badges from a table sellers cannot write. The BASIS is
+// rendered beside each one, so a reader can see what it rests on rather than
+// being asked to take a graphic on trust.
+//
+// The seller's own tagline is rendered as their words, in ordinary type, with
+// nothing that could be mistaken for a federation endorsement — because it is
+// not one, whatever it says.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db } from '@/db';
+import { and, desc, eq, sql } from 'drizzle-orm';
+import * as s from '@/db/schema';
+import { publicListingPredicate } from '@/db/onboarding.schema';
+import { publicStorefront } from '@/db/seller-registry';
+
+export const prerender = false;
+
+const slug = String(Astro.params.slug ?? '').trim().toLowerCase();
+const configured = isConfigured();
+
+let store: any = null;
+let items: any[] = [];
+let loadError = false;
+
+if (configured && slug) {
+  try {
+    store = await publicStorefront(db(), slug);
+    if (store) {
+      // The SAME predicate the shop uses. A suspended seller, a closed shop, a
+      // quarantined item or one edited since approval is absent from this list
+      // because the query excluded it — not because a filter ran afterwards on
+      // rows that were already in memory.
+      items = await db().select({
+        id: s.listings.id,
+        ref: s.listings.ref,
+        title: s.listings.title,
+        description: s.listings.description,
+        category: s.listings.category,
+        priceMinor: s.listings.priceMinor,
+        currency: s.listings.currency,
+        variantCount: s.listings.variantCount,
+        stockQty: s.listings.stockQty,
+        image: sql<string | null>`(
+          select url from listing_media
+          where listing_id = ${s.listings.id}
+          order by sort_order asc limit 1
+        )`,
+      })
+        .from(s.listings)
+        .innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
+        .where(and(eq(s.sellers.storeSlug, slug), publicListingPredicate()))
+        .orderBy(desc(s.listings.id))
+        .limit(120);
+    }
+  } catch (err: any) {
+    console.error('[shop/seller]', err);
+    loadError = true;
+  }
+}
+
+if (!loadError && configured && !store) {
+  // A shop that is closed, suspended or has never existed all 404 alike. A
+  // "this shop is suspended" page would publish a governance decision about a
+  // named trader to anybody who guessed their address.
+  Astro.response.status = 404;
+}
+
+const money = (m: number, currency = 'INR') =>
+  `${currency === 'INR' ? '₹' : `${currency} `}${Math.floor(m / 100).toLocaleString('en-IN')}.${String(m % 100).padStart(2, '0')}`;
+const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+---
+
+<Base
+  title={store ? `${store.tradingName} — MMAKF marketplace` : 'Shop not found — MMAKF'}
+  description={store
+    ? (store.storeTagline || `${store.tradingName} sells through the MMAKF marketplace.`)
+    : 'This shop is not available.'}
+  breadcrumbs={store ? [{ name: 'Shop', url: '/shop' }, { name: store.tradingName, url: `/shop/seller/${store.storeSlug}` }] : undefined}
+>
+  <section>
+    <div class="container">
+
+      {!configured && (
+        <div class="card"><h1 class="display-2">Not available on this deployment.</h1></div>
+      )}
+
+      {configured && loadError && (
+        <div class="card" role="alert"><h1 class="display-2">This shop could not be loaded.</h1>
+        <p>The fault has been logged for the federation office. Please try again shortly.</p></div>
+      )}
+
+      {configured && !loadError && !store && (
+        <div class="card">
+          <h1 class="display-2">No shop at this address.</h1>
+          <p>It may have closed, or the address may be wrong. <a href="/shop">Browse the marketplace</a>.</p>
+        </div>
+      )}
+
+      {store && (
+        <>
+          <header class="storefront">
+            {store.storeLogoUrl && <img src={store.storeLogoUrl} alt="" class="logo" width="96" height="96" />}
+            <div>
+              <div class="eyebrow">MMAKF marketplace</div>
+              <h1 class="display-1" style="margin-top:8px">{store.tradingName}</h1>
+              {store.storeTagline && <p class="tagline">{store.storeTagline}</p>}
+              <p class="muted">
+                {titleCase(store.sellerType)}
+                {store.city ? ` · ${store.city}` : ''}
+                {store.memberSince ? ` · selling through MMAKF since ${new Date(store.memberSince).getFullYear()}` : ''}
+              </p>
+            </div>
+          </header>
+
+          {store.badges.length > 0 && (
+            <div class="card">
+              <h2 class="h4">What MMAKF has verified</h2>
+              <ul class="badges">
+                {store.badges.map((b: any) => (
+                  <li>
+                    <strong>{b.label}</strong>
+                    <br /><span class="muted">{b.basis}</span>
+                  </li>
+                ))}
+              </ul>
+              <p class="hint">
+                Every badge above is a record MMAKF holds, not a description this shop wrote. If a claim
+                does not appear here, the federation has not verified it.
+              </p>
+            </div>
+          )}
+
+          {store.storeAbout && (
+            <div class="card">
+              <h2 class="h4">About this shop</h2>
+              <p>{store.storeAbout}</p>
+              <p class="hint">Written by the seller.</p>
+            </div>
+          )}
+
+          <h2 class="h3">On sale ({items.length})</h2>
+          {items.length === 0 ? (
+            <div class="card"><p class="muted">Nothing on sale here at the moment.</p></div>
+          ) : (
+            <div class="items">
+              {items.map((it: any) => (
+                <article class="card item">
+                  {it.image && <img src={it.image} alt="" width="240" height="240" loading="lazy" />}
+                  <h3 class="h4"><a href={`/shop/product/${it.ref}`}>{it.title}</a></h3>
+                  <p class="price">
+                    {it.variantCount > 1 ? 'from ' : ''}{money(it.priceMinor, it.currency)}
+                  </p>
+                  <p class="muted">
+                    {titleCase(it.category)}
+                    {it.variantCount > 1 ? ` · ${it.variantCount} options` : ''}
+                    {it.stockQty > 0 ? '' : ' · out of stock'}
+                  </p>
+                </article>
+              ))}
+            </div>
+          )}
+
+          <div class="card">
+            <h2 class="h4">Returns</h2>
+            {store.returnPolicy.windowDays != null ? (
+              <p>
+                {store.returnPolicy.windowDays} days
+                {store.returnPolicy.source === 'marketplace_floor'
+                  ? ' — the minimum MMAKF requires of every seller.'
+                  : ' — set by this seller.'}
+                {store.returnPolicy.returnShippingPaidBy
+                  ? ` Return carriage is paid by the ${store.returnPolicy.returnShippingPaidBy}.`
+                  : ''}
+              </p>
+            ) : (
+              <p class="muted">No return window is published for this shop.</p>
+            )}
+            {store.returnPolicy.notes.map((n: string) => <p class="hint">{n}</p>)}
+          </div>
+        </>
+      )}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .storefront { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 18px; }
+  .logo { border-radius: 12px; object-fit: cover; }
+  .tagline { font-size: 1.15rem; margin: 8px 0; }
+  .badges { list-style: none; padding: 0; display: grid; gap: 10px; }
+  .items { display: grid; gap: 14px; grid-template-columns: 1fr; }
+  @media (min-width: 640px) { .items { grid-template-columns: 1fr 1fr; } }
+  @media (min-width: 1000px) { .items { grid-template-columns: repeat(3, 1fr); } }
+  .item img { width: 100%; height: auto; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
+  .price { font-weight: 700; font-size: 1.1rem; margin: 6px 0; }
+  .muted { opacity: 0.75; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
+</style>

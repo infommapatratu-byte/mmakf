@@ -523,8 +523,13 @@ describe('submitApplicationWithAutomation() is what joins the intake to the offi
         eq(o.workflowRuns.subjectKind, 'institution_application'),
         eq(o.workflowRuns.subjectId, wired.applicationId)
       ));
-    expect(runs.length).toBe(1);
-    expect(runs[0].status).toBe('succeeded');
+    // TWO RUNS since migration 0040, and they are deliberately separate: the
+    // intake acknowledges the school, and the quotation automation prices it —
+    // or, today, records that MMAKF has published nothing to price it with.
+    // Folding them into one would mean a failure in either blocked the other.
+    expect(runs.map((r: any) => r.workflowCode).sort())
+      .toEqual(['APPLICATION_AUTO_QUOTE', 'INSTITUTION_APPLICATION_INTAKE']);
+    expect(runs.every((r: any) => r.status === 'succeeded')).toBe(true);
   });
 
   it('creates the review task, in the template role queue', async () => {
@@ -533,25 +538,38 @@ describe('submitApplicationWithAutomation() is what joins the intake to the offi
         eq(o.tasks.subjectKind, 'institution_application'),
         eq(o.tasks.subjectId, wired.applicationId)
       ));
-    expect(tasks.length).toBe(1);
+    const review = tasks.find((t: any) => t.templateCode === 'REVIEW_INSTITUTION_APPLICATION');
+    expect(review).toBeTruthy();
     // Routing produced no owner, so the task falls to the template default
     // rather than to nobody. That is the difference between unassigned and lost.
-    expect(tasks[0].assignedRole).toBe('TRAINING_OPERATIONS');
-    expect(tasks[0].assignedUserId).toBeNull();
+    expect(review.assignedRole).toBe('TRAINING_OPERATIONS');
+    expect(review.assignedUserId).toBeNull();
     // Still no deadline. The task is real; the promise is not invented.
-    expect(tasks[0].dueAt).toBeNull();
+    expect(review.dueAt).toBeNull();
+    // And the second: nobody may price this application from a published rule,
+    // so somebody has to. Also with no invented deadline.
+    const quote = tasks.find((t: any) => t.templateCode === 'PREPARE_MANUAL_QUOTATION');
+    expect(quote, 'nobody was asked to price this application').toBeTruthy();
+    expect(quote.dueAt).toBeNull();
   });
 
   it('QUEUES the acknowledgement — queued, not sent', async () => {
     const msgs = await db.select().from(g.notifications)
       .where(eq(g.notifications.recipientEmail, 'head@riverside.example'));
-    expect(msgs.length).toBe(1);
+    const ack = msgs.find((m: any) => m.template === 'application_received');
+    expect(ack).toBeTruthy();
     // MMAKF has no mail provider configured. 'queued' is the honest state; a
     // sendEmail() that returned success would make the record say the school was
     // written to when it was not.
-    expect(msgs[0].status).toBe('queued');
-    expect(msgs[0].template).toBe('application_received');
-    expect(msgs[0].body).not.toMatch(/\b\d+\s*(hours?|days?|working days?)\b/i);
+    expect(ack.status).toBe('queued');
+    expect(ack.body).not.toMatch(/\b\d+\s*(hours?|days?|working days?)\b/i);
+
+    // The second message the school gets: its quotation is being prepared. It
+    // carries no figure, because there is none — see tests/auto-quote.test.ts.
+    const pending = msgs.find((m: any) => m.template === 'application_quotation_pending');
+    expect(pending).toBeTruthy();
+    expect(pending.status).toBe('queued');
+    expect(pending.body).not.toMatch(/₹/);
   });
 
   it('publishes the domain event', async () => {
@@ -560,18 +578,25 @@ describe('submitApplicationWithAutomation() is what joins the intake to the offi
         eq(g.domainEvents.entityType, 'institution_application'),
         eq(g.domainEvents.entityId, String(wired.applicationId))
       ));
-    expect(events.length).toBe(1);
-    expect(events[0].eventType).toBe('INSTITUTION_APPLICATION_SUBMITTED');
+    const types = events.map((x: any) => x.eventType).sort();
+    expect(types).toEqual(['INSTITUTION_APPLICATION_SUBMITTED', 'QUOTE_MANUAL_QUOTATION_REQUIRED']);
+    // And never QUOTE_ISSUED, because no quotation was issued.
+    expect(types).not.toContain('QUOTE_ISSUED');
   });
 
   it('moves the application to acknowledged and tells the applicant so', async () => {
     const [app] = await db.select().from(o.institutionApplications)
       .where(eq(o.institutionApplications.id, wired.applicationId));
-    expect(app.status).toBe('acknowledged');
+    // Acknowledged, and then moved on the same submission: the fee engine ran
+    // and found MMAKF has published nothing to price this with, so the school
+    // is told a person is preparing its quotation rather than left in a state
+    // that reads "nobody has looked at this yet".
     expect(app.acknowledgedAt).toBeTruthy();
+    expect(app.status).toBe('awaiting_quotation');
 
     const view = await applicantStatus(db, wired.ref, wired.accessToken);
     expect(view.timeline.some((t: any) => t.kind === 'acknowledged')).toBe(true);
+    expect(view.timeline.some((t: any) => t.kind === 'awaiting_quotation')).toBe(true);
     expect(view.respondBy).toBeNull();
   });
 
@@ -582,8 +607,9 @@ describe('submitApplicationWithAutomation() is what joins the intake to the offi
     // failure, because nothing would ever be investigated.
     const holders = await db.select().from(s.roleBindings);
     expect(holders).toEqual([]);
-    expect(wired.automation.length).toBe(1);
-    expect(wired.automation[0].status).toBe('succeeded');
+    // Two outcomes, because two workflows fired: the intake and the quotation.
+    expect(wired.automation.length).toBe(2);
+    expect(wired.automation.every((r: any) => r.status === 'succeeded')).toBe(true);
   });
 
   it('re-running the automation does not double anything', async () => {
@@ -612,7 +638,10 @@ describe('submitApplicationWithAutomation() is what joins the intake to the offi
     const perRun = await db.select().from(o.tasks)
       .where(eq(o.tasks.subjectKind, 'institution_application'));
     const forThisApp = perRun.filter((t: any) => t.subjectId === wired.applicationId);
-    expect(forThisApp.length).toBe(1);
+    // TWO, and only two: the review and the hand-prepared quotation, one each.
+    // The number that matters is that it did not become four.
+    expect(forThisApp.map((t: any) => t.templateCode).sort())
+      .toEqual(['PREPARE_MANUAL_QUOTATION', 'REVIEW_INSTITUTION_APPLICATION']);
     expect(afterMsgs.length).toBeGreaterThanOrEqual(beforeMsgs.length);
     expect(before.length).toBeGreaterThan(0);
   });

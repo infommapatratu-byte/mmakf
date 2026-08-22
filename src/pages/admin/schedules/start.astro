@@ -1,0 +1,575 @@
+---
+// /admin/schedules/start — the first week a club ever publishes.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHY A SECOND SCREEN, WHEN /admin/schedules ALREADY EDITS EVERYTHING
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// /admin/schedules is complete and it is an EXPERT's screen: eleven separate
+// forms, each writing one row into one table, arranged the way the data model
+// is arranged. Somebody who already knows that a schedule is an object, that a
+// version is effective-dated, that rules hang off a version and that publishing
+// is a separate authority can do anything from there.
+//
+// A club secretary opening it for the first time cannot, and the evidence is
+// blunt: months after the engine shipped, exactly one unit in the federation had
+// schedule rows — the headquarters, entered by a migration. Every other club's
+// timings were still "not published". The engine was not the bottleneck. The
+// first five minutes were.
+//
+// So this screen asks the questions in the order a person actually knows the
+// answers — which club, which days, what times — and does the three-step
+// create/draft/publish dance on their behalf.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// IT ADDS NO POLICY, AND CANNOT
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Every write is `createSchedule()` then `draftVersion()` then
+// `publishVersion()` from src/db/scheduling.ts — the same three calls
+// /admin/schedules makes, in the same order, with the same arguments. Nothing
+// here decides whether two sessions overlap, whether a range is reversed, who
+// may publish, or what a day resolves to. When the module refuses, the refusal
+// is shown WORD FOR WORD: "Sunday has two overlapping sessions: 06:00–10:00 and
+// 08:00–11:30" tells the secretary which two rows to fix, and a friendlier
+// paraphrase would lose the times.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// AND IT PUBLISHES NOTHING BY ACCIDENT
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The week is DRAFTED first and reviewed on its own step. A draft is invisible
+// to every public read in the module, so a half-finished week cannot appear on
+// /dojos while somebody is still typing. Publication is a separate post, needs a
+// reason, and needs `schedule:publish` — which a club administrator may hold and
+// a shared password never can, because a published version records who put it in
+// force and a password shared by an office names nobody.
+//
+// The moment it IS published, `SCHEDULE_PUBLISHED` goes on the feed — INSIDE the
+// same transaction, so the timetable and the record of it cannot come apart.
+// The inbox rows are NOT written then: the 'notifications' consumer drains the
+// feed from the scheduled sweep in src/pages/api/cron/reconcile.ts, resolving
+// audience 'unit_members' against `persons.dojoId`.
+//
+// That distinction is why this screen says the notice is QUEUED rather than
+// sent. A confirmation that claims members have been told, minutes before they
+// have, is a small lie that the first person to ask "why didn't I get it?"
+// discovers — and publishing is not a private act, so it has to be described
+// accurately rather than reassuringly.
+
+import AdminShell from '@/components/AdminShell.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, visibleScopes, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import * as s from '@/db/schema';
+import * as sch from '@/db/scheduling.schema';
+import {
+  createSchedule, draftVersion, publishVersion, isSchedulingError,
+  DAY_NAMES, type RuleInput,
+} from '@/db/scheduling';
+import { parseWeekForm, assertWeekNotEmpty, WeekFormError } from '@/lib/week-form';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
+
+export const prerender = false;
+
+const SELF = '/admin/schedules/start';
+const MAX_SESSIONS_PER_DAY = 3;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const configured = isConfigured();
+const mayWrite = canAnywhere(identity?.principal, 'schedule:write');
+const mayPublish = canAnywhere(identity?.principal, 'schedule:publish');
+
+const url = new URL(Astro.request.url);
+const step = url.searchParams.get('step') || 'club';
+const doneParam = url.searchParams.get('done');
+const draftVersionId = Number(url.searchParams.get('version') || 0) || null;
+
+let error: string | null = null;
+
+/**
+ * The clubs this administrator may write a timetable for.
+ *
+ * From `visibleScopes()`, so it is the same authority model every other surface
+ * uses. A club administrator sees their own club and nothing else — which is
+ * also why the club is a SELECT and not a text field: an id typed into a box is
+ * an id somebody can change.
+ */
+type ClubRow = { id: number; name: string; code: string; city: string | null };
+let clubs: ClubRow[] = [];
+
+if (configured && mayWrite) {
+  const scope = visibleScopes(identity!.principal, 'schedule:write');
+  const database = db();
+  if (scope.kind === 'all') {
+    clubs = await database.select({ id: s.dojos.id, name: s.dojos.name, code: s.dojos.code, city: s.dojos.city })
+      .from(s.dojos).where(inArray(s.dojos.status, ['active', 'provisional'])).orderBy(s.dojos.name).limit(500);
+  } else if (scope.kind === 'scoped') {
+    const conds: any[] = [];
+    if (scope.dojos.length) conds.push(inArray(s.dojos.id, scope.dojos));
+    if (scope.states.length) conds.push(inArray(s.dojos.stateUnitId, scope.states));
+    if (scope.districts.length) conds.push(inArray(s.dojos.districtUnitId, scope.districts));
+    if (conds.length) {
+      const rows = await database.select({ id: s.dojos.id, name: s.dojos.name, code: s.dojos.code, city: s.dojos.city })
+        .from(s.dojos)
+        .where(and(inArray(s.dojos.status, ['active', 'provisional']), conds.length === 1 ? conds[0] : undefined))
+        .orderBy(s.dojos.name).limit(500);
+      // Several binding kinds at once are rare; union them in memory rather than
+      // building an or() whose shape changes with the principal.
+      const seen = new Set(rows.map((r: any) => r.id));
+      clubs = rows;
+      if (conds.length > 1) {
+        for (const cond of conds.slice(1)) {
+          const more = await database.select({ id: s.dojos.id, name: s.dojos.name, code: s.dojos.code, city: s.dojos.city })
+            .from(s.dojos).where(and(inArray(s.dojos.status, ['active', 'provisional']), cond)).limit(500);
+          for (const m of more) if (!seen.has(m.id)) { seen.add(m.id); clubs.push(m); }
+        }
+        clubs.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      }
+    }
+  }
+}
+
+// ─── The acts ───────────────────────────────────────────────────────────────
+//
+// Posts to this page, not to /api/: src/middleware.ts requires application/json
+// on /api/ paths, and a form with JavaScript off cannot send one. CSRF is
+// already handled — the middleware refuses a mutating request that is not
+// same-origin before any of this runs.
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const field = (k: string) => String(form.get(k) ?? '').trim();
+  const action = field('action');
+  const rl = await rateLimit(Astro.request, 'admin-schedule-start', 30, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so there is no timetable to write.';
+  } else if (!mayWrite) {
+    Astro.response.status = 403;
+    error = 'Entering a timetable requires schedule:write, which this account does not hold in any scope.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: field('reason') || null,
+    };
+    const database = db();
+
+    try {
+      if (action === 'draft-week') {
+        const dojoId = Number(field('dojoId'));
+        if (!Number.isInteger(dojoId) || dojoId <= 0) {
+          throw new Error('Choose the club this timetable belongs to.');
+        }
+        // THE CLUB MUST BE ONE THIS ADMINISTRATOR MAY WRITE FOR. The select is
+        // built from visibleScopes(), but a rendered page is never evidence of
+        // authority — the id is checked against the same list before use, and
+        // the module re-checks it again against the owner.
+        if (!clubs.some((c) => c.id === dojoId)) {
+          throw new ForbiddenError('That club is not one this account may write a timetable for.');
+        }
+
+        // READING THE WEEK IS src/lib/week-form.ts's JOB, not this page's. Every
+        // way that parsing goes wrong — a half-filled row dropped, a closed day
+        // that still carries sessions, slots renumbered — publishes a plausible
+        // WRONG timetable rather than raising anything, so it lives in a module
+        // tests/week-form.test.ts can hold.
+        const rules: RuleInput[] = parseWeekForm(field, { maxSlotsPerDay: MAX_SESSIONS_PER_DAY });
+        assertWeekNotEmpty(rules);
+
+        // One active schedule per owner + purpose is a unique index, so a club
+        // that already has a training schedule reuses it and drafts a successor
+        // rather than colliding. That is also what makes this screen safe to
+        // open twice.
+        const existing = (await database.select().from(sch.schedules).where(and(
+          eq(sch.schedules.ownerScope, 'dojo' as any),
+          eq(sch.schedules.ownerId, dojoId),
+          eq(sch.schedules.purpose, 'training' as any),
+          eq(sch.schedules.status, 'active' as any),
+          isNull(sch.schedules.venueId),
+          isNull(sch.schedules.classId),
+        )).limit(1))[0];
+
+        const club = clubs.find((c) => c.id === dojoId)!;
+        const schedule = existing ?? await createSchedule(database, ctx, {
+          name: `${club.name} — training hours`,
+          purpose: 'training',
+          owner: { scope: 'dojo', id: dojoId },
+          timezone: field('timezone') || undefined,
+        });
+
+        const version = await draftVersion(database, ctx, schedule.id, {
+          effectiveFrom: field('effectiveFrom') || new Date().toISOString().slice(0, 10),
+          reason: field('reason') || null,
+          rules,
+        });
+
+        return Astro.redirect(`${SELF}?step=review&version=${version.id}`, 303);
+      }
+
+      if (action === 'publish-week') {
+        if (!mayPublish) {
+          Astro.response.status = 403;
+          throw new ForbiddenError(
+            'Putting a timetable in force requires schedule:publish. The draft is saved — ' +
+            'somebody who holds it can publish it without re-entering anything.'
+          );
+        }
+        const versionId = Number(field('versionId'));
+        await publishVersion(database, ctx, versionId, field('reason'));
+        return Astro.redirect(`${SELF}?step=done&version=${versionId}&done=published`, 303);
+      }
+
+      throw new Error('Unknown action.');
+    } catch (err: any) {
+      if (err instanceof WeekFormError) {
+        // The parser's message already names the day in words and says what to
+        // do about it. Nothing to add.
+        Astro.response.status = 400;
+        error = err.message;
+      } else if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = err.message;
+      } else if (isSchedulingError(err)) {
+        // WORD FOR WORD. The module's message names the two windows that clash,
+        // or the season it collided with. A paraphrase would lose exactly the
+        // detail the person needs to fix it.
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        Astro.response.status = 400;
+        error = String(err?.message ?? err);
+      }
+    }
+  }
+}
+
+// ─── What the review step reads ─────────────────────────────────────────────
+//
+// The DRAFT's own rules, straight from the table. Not through
+// `openingHoursOn()` — a draft is invisible to every read in the module, on
+// purpose, and this screen must not be the one exception that leaks one.
+
+type DraftView = {
+  versionId: number;
+  scheduleName: string;
+  clubName: string;
+  effectiveFrom: string;
+  status: string;
+  byDay: Array<{ day: number; name: string; windows: Array<{ opensAt: string; closesAt: string; label: string | null }> }>;
+};
+let draft: DraftView | null = null;
+
+if (configured && draftVersionId && (step === 'review' || step === 'done')) {
+  const database = db();
+  const version = (await database.select().from(sch.scheduleVersions)
+    .where(eq(sch.scheduleVersions.id, draftVersionId)).limit(1))[0];
+  if (version) {
+    const schedule = (await database.select().from(sch.schedules)
+      .where(eq(sch.schedules.id, version.scheduleId)).limit(1))[0];
+    // Only a schedule this administrator may write for. A version id in a query
+    // string is not authority.
+    const permitted = schedule && schedule.ownerScope === 'dojo' && clubs.some((c) => c.id === schedule.ownerId);
+    if (permitted) {
+      const rules = await database.select().from(sch.scheduleRules)
+        .where(eq(sch.scheduleRules.versionId, version.id))
+        .orderBy(sch.scheduleRules.dayOfWeek, sch.scheduleRules.opensAt);
+      const club = clubs.find((c) => c.id === schedule.ownerId)!;
+      draft = {
+        versionId: version.id,
+        scheduleName: schedule.name,
+        clubName: club.name,
+        effectiveFrom: version.effectiveFrom,
+        status: version.status,
+        byDay: DAY_NAMES.map((name, i) => ({
+          day: i + 1,
+          name,
+          windows: rules.filter((r: any) => r.dayOfWeek === i + 1)
+            .map((r: any) => ({ opensAt: r.opensAt, closesAt: r.closesAt, label: r.label ?? null })),
+        })),
+      };
+    }
+  }
+}
+
+const today = new Date().toISOString().slice(0, 10);
+---
+
+<AdminShell
+  title="Publish a club’s week"
+  requires="schedule:read"
+  intro="Choose the club, enter the week, check it, put it in force. The full editor is one screen along."
+  header={{
+    breadcrumbs: [
+      { name: 'Operations', url: '/admin/dashboard' },
+      { name: 'Schedules and seasons', url: '/admin/schedules' },
+      { name: 'Publish a club’s week', url: SELF },
+    ],
+    description:
+      'The first week a club ever publishes. Every write here is the same createSchedule / ' +
+      'draftVersion / publishVersion the full editor makes — this screen only asks the questions ' +
+      'in the order somebody knows the answers, and drafts before it publishes.',
+  }}
+>
+  {/* NO h1 HERE. AdminShell renders the page's only top-level heading from its
+      `title`, and a second one is two documents in one to a screen reader.
+      tests/accessibility.test.ts asserts it by name (WCAG 2.4.6). */}
+  <p class="wz-lede">
+    Three steps: choose the club, enter the week, check it and put it in force. Everything here
+    writes the same rows the full <a href="/admin/schedules">schedule editor</a> writes — this
+    screen only asks the questions in the order you know the answers.
+  </p>
+
+  {error && <ErrorState title="Nothing was changed" safe={error!} />}
+
+  {!configured && (
+    <ErrorState
+      title="No federation database on this deployment"
+      safe="Nothing was changed. This is a deployment state, not an empty register — no club’s timetable can be read or written here."
+    />
+  )}
+
+  {configured && !mayWrite && (
+    <ErrorState
+      title="This account cannot enter a timetable"
+      safe="Nothing was changed. Entering a club’s hours requires schedule:write — a club administrator holds it for their own club. Ask the federation office to bind the role."
+    />
+  )}
+
+  {configured && mayWrite && clubs.length === 0 && (
+    <ErrorState
+      title="No club is in scope for this account"
+      safe="Nothing was changed. This account holds schedule:write, but no affiliated club falls inside its scope — a club must be on the affiliation register before its hours can be published."
+    />
+  )}
+
+  {/* ═══════ STEP 1 + 2 — the club, and the week ═══════ */}
+  {configured && mayWrite && clubs.length > 0 && step === 'club' && (
+    <form method="POST" class="wz-form">
+      <input type="hidden" name="action" value="draft-week" />
+
+      <section class="wz-step">
+        <h2 class="wz-step-h"><span class="wz-num">1</span> Which club</h2>
+        <p class="wz-help">
+          Only clubs this account may write for are listed. A club’s hours are its own — nothing
+          entered here reaches any other club.
+        </p>
+        <label class="wz-label" for="dojoId">Club</label>
+        <select class="wz-input" id="dojoId" name="dojoId" required>
+          {clubs.map((c) => (
+            <option value={c.id}>{c.name}{c.city ? ` — ${c.city}` : ''} ({c.code})</option>
+          ))}
+        </select>
+
+        <div class="wz-row">
+          <div>
+            <label class="wz-label" for="effectiveFrom">In force from</label>
+            <input class="wz-input" id="effectiveFrom" name="effectiveFrom" type="date" value={today} required />
+            <p class="wz-help">
+              Earlier weeks are not overwritten. Publishing closes the previous version the day
+              before this one begins, so an attendance record from last month still makes sense.
+            </p>
+          </div>
+          <div>
+            <label class="wz-label" for="timezone">Timezone</label>
+            <input class="wz-input" id="timezone" name="timezone" placeholder="Asia/Kolkata" />
+            <p class="wz-help">Leave blank for Asia/Kolkata. The room’s clock is the authority on what “six in the morning” means.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="wz-step">
+        <h2 class="wz-step-h"><span class="wz-num">2</span> The week</h2>
+        <p class="wz-help">
+          Up to {MAX_SESSIONS_PER_DAY} sessions a day — a morning batch and an evening batch is the
+          usual shape. Leave a day empty, or tick <em>closed</em>, if the club does not train then.
+          Times are 24-hour: <code>06:00</code>, <code>17:30</code>.
+        </p>
+
+        <div class="wz-grid" role="group" aria-label="Weekly sessions">
+          {DAY_NAMES.map((name, i) => {
+            const day = i + 1;
+            return (
+              <fieldset class="wz-day">
+                <legend class="wz-day-name">{name}</legend>
+                <label class="wz-closed">
+                  <input type="checkbox" name={`closed-${day}`} value="yes" />
+                  <span>Closed</span>
+                </label>
+                {Array.from({ length: MAX_SESSIONS_PER_DAY }, (_, k) => k + 1).map((slot) => (
+                  <div class="wz-slot">
+                    <label class="sr-only" for={`open-${day}-${slot}`}>{name} session {slot} opens</label>
+                    <input class="wz-time" id={`open-${day}-${slot}`} name={`open-${day}-${slot}`} type="time" />
+                    <span class="wz-dash">–</span>
+                    <label class="sr-only" for={`close-${day}-${slot}`}>{name} session {slot} closes</label>
+                    <input class="wz-time" id={`close-${day}-${slot}`} name={`close-${day}-${slot}`} type="time" />
+                    <label class="sr-only" for={`label-${day}-${slot}`}>{name} session {slot} name</label>
+                    <input class="wz-name" id={`label-${day}-${slot}`} name={`label-${day}-${slot}`} placeholder="Name (optional)" />
+                  </div>
+                ))}
+              </fieldset>
+            );
+          })}
+        </div>
+      </section>
+
+      <section class="wz-step">
+        <label class="wz-label" for="reason">Why (recorded on the change)</label>
+        <input class="wz-input" id="reason" name="reason" placeholder="First timetable for the club, agreed with the chief instructor." />
+        <p class="wz-help">
+          Read months later by somebody asking when a class moved and who decided it.
+        </p>
+      </section>
+
+      <div class="wz-actions">
+        <button type="submit" class="wz-btn wz-btn-primary">Save as a draft</button>
+        <p class="wz-help">
+          Nothing is published yet. A draft is invisible on the public site — you will see the
+          whole week on the next screen before deciding.
+        </p>
+      </div>
+    </form>
+  )}
+
+  {/* ═══════ STEP 3 — check it, then put it in force ═══════ */}
+  {step === 'review' && !draft && !error && (
+    <ErrorState
+      title="That draft is not available to this account"
+      safe="Nothing was changed. Either the draft does not exist, or it belongs to a club outside this account’s scope."
+    />
+  )}
+
+  {step === 'review' && draft && (
+    <section class="wz-step">
+      <h2 class="wz-step-h"><span class="wz-num">3</span> Check it, then put it in force</h2>
+      <p class="wz-help">
+        This is <strong>{draft.clubName}</strong>, in force from <strong>{draft.effectiveFrom}</strong>.
+        It is a <strong>{draft.status}</strong> and does not appear anywhere on the public site yet.
+      </p>
+
+      <table class="wz-review">
+        <caption class="sr-only">The drafted week</caption>
+        <thead><tr><th scope="col">Day</th><th scope="col">Sessions</th></tr></thead>
+        <tbody>
+          {draft.byDay.map((d) => (
+            <tr>
+              <th scope="row">{d.name}</th>
+              <td>
+                {d.windows.length === 0
+                  ? <span class="wz-shut">No session</span>
+                  : d.windows.map((w) => (
+                      <span class="wz-win">{w.opensAt}–{w.closesAt}{w.label ? ` · ${w.label}` : ''}</span>
+                    ))}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <div class="wz-notice">
+        <strong>Publishing queues a notice to the club’s members.</strong>
+        Everyone recorded as training at {draft.clubName} will get this in their MMAKF inbox. The
+        timetable itself goes live the moment you publish; the notice is written by the scheduled
+        sweep shortly afterwards, so it is queued rather than instant. It does not reach any other
+        club, and it is not a federation-wide announcement.
+      </div>
+
+      {!mayPublish && (
+        <div class="wz-notice wz-notice-warn">
+          This account can draft but cannot publish. The draft is saved — somebody holding
+          <code>schedule:publish</code> can put it in force without re-entering anything.
+        </div>
+      )}
+
+      <form method="POST" class="wz-form">
+        <input type="hidden" name="action" value="publish-week" />
+        <input type="hidden" name="versionId" value={draft.versionId} />
+        <label class="wz-label" for="publish-reason">Why (required)</label>
+        <input class="wz-input" id="publish-reason" name="reason" required
+          placeholder="Timetable agreed at the club meeting on 14 September." />
+        <div class="wz-actions">
+          <button type="submit" class="wz-btn wz-btn-primary" disabled={!mayPublish}>Put this week in force</button>
+          <a class="wz-btn" href={SELF}>Start again</a>
+        </div>
+      </form>
+    </section>
+  )}
+
+  {/* ═══════ DONE ═══════ */}
+  {step === 'done' && doneParam === 'published' && (
+    <section class="wz-step">
+      <h2 class="wz-step-h">Published</h2>
+      <p class="wz-help">
+        {draft ? `${draft.clubName}’s week is in force.` : 'The week is in force.'} It is on the
+        club’s public page and in the affiliation register <strong>now</strong>. The notice to its
+        members is <strong>queued</strong> — written by the scheduled sweep, not by this click, so
+        it arrives shortly rather than instantly.
+      </p>
+      <div class="wz-actions">
+        <a class="wz-btn wz-btn-primary" href="/admin/schedules">Open the full editor</a>
+        <a class="wz-btn" href={SELF}>Publish another club’s week</a>
+        <a class="wz-btn" href="/dojos">See the register</a>
+      </div>
+      <p class="wz-help">
+        Seasons, holidays and one-off closures live in the full editor. A summer and winter
+        timetable is two seasons and one more version — not a second club.
+      </p>
+    </section>
+  )}
+</AdminShell>
+
+<style>
+  .wz-lede { color: var(--muted); max-width: 68ch; line-height: 1.7; margin: 0 0 22px; }
+  .wz-form { display: block; }
+  .wz-step { border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; margin-top: 18px; background: var(--card); }
+  .wz-step-h { font-family: var(--font-display); font-size: 1.1rem; margin: 0 0 6px; display: flex; align-items: center; gap: 10px; }
+  .wz-num {
+    display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
+    background: var(--gold); color: #12100c; font-size: .82rem; font-weight: 700;
+  }
+  .wz-help { color: var(--muted); font-size: .86rem; line-height: 1.65; margin: 8px 0 0; max-width: 70ch; }
+  .wz-label { display: block; font-size: .74rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin: 16px 0 6px; }
+  .wz-input {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--bg-2); color: inherit; font: inherit;
+  }
+  .wz-row { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 720px) { .wz-row { grid-template-columns: 1fr; } }
+
+  .wz-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 16px; }
+  .wz-day { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 0; }
+  .wz-day-name { font-family: var(--font-display); font-size: .95rem; padding: 0 6px; }
+  .wz-closed { display: flex; align-items: center; gap: 8px; font-size: .82rem; color: var(--muted); margin-bottom: 8px; }
+  .wz-slot { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .wz-time { padding: 7px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-2); color: inherit; font: inherit; }
+  .wz-name { flex: 1 1 120px; min-width: 110px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-2); color: inherit; font: inherit; font-size: .82rem; }
+  .wz-dash { color: var(--muted); }
+
+  .wz-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 20px; }
+  .wz-btn {
+    display: inline-block; padding: 10px 18px; border-radius: 8px; border: 1px solid var(--border);
+    color: inherit; text-decoration: none; font: inherit; cursor: pointer; background: transparent;
+  }
+  .wz-btn-primary { background: var(--gold); color: #12100c; border-color: var(--gold); font-weight: 600; }
+  .wz-btn[disabled] { opacity: .5; cursor: not-allowed; }
+
+  .wz-review { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  .wz-review th, .wz-review td { text-align: left; padding: 10px 8px; border-top: 1px solid var(--border); vertical-align: top; }
+  .wz-win { display: inline-block; margin-right: 10px; font-variant-numeric: tabular-nums; }
+  .wz-shut { color: var(--muted); font-style: italic; }
+  .wz-notice { margin-top: 18px; padding: 14px 16px; border-left: 3px solid var(--gold); background: var(--bg-2); font-size: .88rem; line-height: 1.65; }
+  .wz-notice-warn { border-left-color: var(--red-2); }
+  .wz-notice strong { display: block; margin-bottom: 4px; }
+</style>

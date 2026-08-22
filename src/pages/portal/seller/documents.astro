@@ -1,0 +1,266 @@
+---
+// /portal/seller/documents — verification evidence.
+//
+// ─── THE POINT OF THIS PAGE ─────────────────────────────────────────────────
+//
+// A seller who has been ASKED FOR SOMETHING must be able to see what. A
+// verification sitting in `documents_required` carries the reviewer's own
+// words, and without a page that shows them the seller supplies the wrong
+// thing, or nothing, and the queue stalls with both sides believing they are
+// waiting for the other.
+//
+// ─── AND WHAT IS NOT HERE ───────────────────────────────────────────────────
+//
+// NO DOWNLOAD LINKS. `documentPositions()` returns what exists and never a
+// storage key, so there is nothing on this page that could become a URL. A
+// seller re-reading their own document goes through `document/ref`, which asks
+// for authority and writes an audit row — a link rendered into markup would
+// outlive both.
+//
+// AND NO UPLOAD CONTROL UNLESS FILES CAN ACTUALLY BE STORED (§70).
+//
+// `uploadCapability()` reports whether MMAKF has configured object storage.
+// This deployment has not, so there is no file input on this page — not a
+// disabled one, and emphatically not one that posts to an endpoint which would
+// accept the bytes and drop them.
+//
+// A seller who uploaded a PAN card, saw a success message and then had their
+// application refused for a missing PAN card would be the worst outcome this
+// page could produce. So the control is ABSENT and the page says what to do
+// instead. When UPLOAD_STORAGE_URL is set the form appears, and the gap
+// recorded in docs/marketplace/MARKETPLACE-POLICY.md closes.
+
+import Base from '@/layouts/Base.astro';
+import { db } from '@/db';
+import { uploadCapability } from '@/lib/uploads';
+import { documentPositions, missingDocuments, DOCUMENT_KINDS } from '@/db/seller-documents';
+import { sellerContext, readableError, fmtDate, titleCase, SELLER_TABS } from './_gate';
+
+export const prerender = false;
+
+const ctx = await sellerContext(Astro.request.headers.get('cookie'));
+
+// Read BEFORE anything renders, because it decides whether a control exists at
+// all rather than how one behaves.
+const uploads = uploadCapability();
+
+let positions: any[] = [];
+let missing: any = null;
+let pageError: string | null = ctx.loadError;
+
+if (ctx.gate === 'seller' && ctx.approved && !pageError) {
+  try {
+    positions = await documentPositions(db(), ctx.identity!.principal);
+    missing = await missingDocuments(db(), ctx.identity!.principal);
+  } catch (err: any) {
+    pageError = readableError(err, 'Your documents');
+  }
+}
+
+const requested = positions.filter((p: any) => p.requestedReason);
+---
+
+<Base
+  title="Your documents — MMAKF marketplace"
+  description="The evidence MMAKF holds for your seller verification, and anything a reviewer has asked you for."
+>
+  <section>
+    <div class="container">
+
+      {ctx.gate !== 'seller' && (
+        <div class="card"><div class="eyebrow">Seller area</div>
+        <h1 class="display-2" style="margin-top:14px">Your documents</h1>
+        <p>Sign in with a personal account that holds an approved seller record.</p></div>
+      )}
+
+      {ctx.gate === 'seller' && (
+        <>
+          <div class="eyebrow">MMAKF marketplace</div>
+          <h1 class="display-1" style="margin-top:14px">Documents</h1>
+
+          <nav class="tabs" aria-label="Seller area">
+            {SELLER_TABS.map((t) => (
+              <a href={t.href} aria-current={t.href === '/portal/seller/documents' ? 'page' : undefined}>{t.label}</a>
+            ))}
+          </nav>
+
+          {pageError && <div class="card" role="alert"><p>{pageError}</p></div>}
+
+          {!ctx.approved && (
+            <div class="card"><p>MMAKF has not approved this seller account yet.</p></div>
+          )}
+
+          {ctx.approved && (
+            <>
+              {requested.length > 0 && (
+                <div class="card tone-wait" role="status">
+                  <div class="eyebrow">MMAKF has asked you for something</div>
+                  <h2 class="h3">{requested.length} document{requested.length === 1 ? '' : 's'} requested</h2>
+                  <ul>
+                    {requested.map((p: any) => (
+                      <li><strong>{p.label}.</strong> {p.requestedReason}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {!uploads.storage && (
+                <div class="card tone-wait">
+                  <div class="eyebrow">Not available on this deployment</div>
+                  <h2 class="h3">Documents cannot be attached here yet.</h2>
+                  <p>
+                    MMAKF has not configured file storage, so there is nowhere for a document to go. There
+                    is deliberately no upload button on this page rather than one that appears to work:
+                    seeing “uploaded” and then being refused for a missing document is worse than being
+                    told plainly.
+                  </p>
+                  <p>
+                    Send your evidence to the federation office by the route they gave you. A reviewer
+                    records the outcome of each check directly, and the table below will show what they
+                    have decided and anything further they need.
+                  </p>
+                  <ul class="muted">{uploads.notes.map((n: string) => <li>{n}</li>)}</ul>
+                </div>
+              )}
+
+              <div class="card">
+                <p class="muted">{missing?.note}</p>
+                <p class="muted">
+                  Nothing here is published. A document attached to your record is readable by you and by
+                  the federation officer working your verification, and by nobody else — there is no
+                  address it can be reached at without that check running first, and every read of one is
+                  recorded.
+                </p>
+                {!uploads.scanner && uploads.storage && (
+                  <p class="muted">
+                    <strong>Note:</strong> files are checked by type and content but are not virus-scanned
+                    on this deployment.
+                  </p>
+                )}
+              </div>
+
+              <table class="card">
+                <caption class="sr-only">Documents by kind</caption>
+                <thead><tr>
+                  <th scope="col">Document</th><th scope="col">Supplied</th>
+                  <th scope="col">Verification</th>
+                  {uploads.storage && <th scope="col">Attach</th>}
+                </tr></thead>
+                <tbody>
+                  {positions.map((p: any) => (
+                    <tr>
+                      <th scope="row">
+                        {p.label}
+                        {p.requestedReason && <div class="warn">Requested: {p.requestedReason}</div>}
+                      </th>
+                      <td>
+                        {p.current
+                          ? <>Yes — {fmtDate(p.current.uploadedAt)}
+                              {p.supersededCount > 0 && <div class="muted">{p.supersededCount} earlier version{p.supersededCount === 1 ? '' : 's'} kept</div>}
+                            </>
+                          : <span class="muted">Not supplied</span>}
+                      </td>
+                      <td>{p.verificationStatus ? titleCase(p.verificationStatus) : '—'}</td>
+                      {uploads.storage && (
+                        <td>
+                          <form class="attach-form row" data-kind={p.kind}>
+                            <label class="sr-only" for={`file-${p.kind}`}>Attach {p.label}</label>
+                            <input id={`file-${p.kind}`} name="file" type="file"
+                              accept="application/pdf,image/jpeg,image/png" required />
+                            <button class="btn btn-small" type="submit">Attach</button>
+                          </form>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {uploads.storage && (
+                <p class="hint">
+                  PDF, JPEG or PNG, up to 10&nbsp;MB. Attaching a document again replaces it as the
+                  current one and keeps the earlier version — a verification decision was made against a
+                  specific file, and deleting it would leave that decision pointing at nothing.
+                </p>
+              )}
+
+              <p id="page-error" class="error" role="alert" hidden></p>
+              <p id="page-ok" class="ok" role="status" hidden></p>
+            </>
+          )}
+        </>
+      )}
+
+    </div>
+  </section>
+</Base>
+
+<script>
+  const err = document.getElementById('page-error');
+  const ok = document.getElementById('page-ok');
+  const say = (el: HTMLElement | null, m: string) => {
+    if (!el) { window.alert(m); return; }
+    el.textContent = m; el.hidden = false;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  document.querySelectorAll('.attach-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (err) err.hidden = true;
+      if (ok) ok.hidden = true;
+
+      const kind = (form as HTMLElement).dataset.kind!;
+      const input = (form as HTMLFormElement).querySelector('input[type=file]') as HTMLInputElement;
+      const file = input.files?.[0];
+      if (!file) { say(err, 'Choose a file first.'); return; }
+
+      // THE BYTES GO TO THE UPLOAD ENDPOINT, which validates the type by
+      // sniffing the content rather than trusting the extension, enforces the
+      // size limit and scans it. Only once it has a storage key does the
+      // marketplace record that a document exists — this page never handles a
+      // key beyond passing back the one it was given.
+      const body = new FormData();
+      body.set('file', file);
+      body.set('purpose', 'seller_verification');
+
+      let storageKey = '';
+      try {
+        const up = await fetch('/api/uploads', { method: 'POST', body });
+        const upBody = await up.json().catch(() => ({}));
+        if (!up.ok || !upBody?.storageKey) {
+          say(err, upBody?.error || 'The file could not be stored. Nothing has been recorded.');
+          return;
+        }
+        storageKey = upBody.storageKey;
+      } catch {
+        say(err, 'The file could not be sent. Check your connection and try again.');
+        return;
+      }
+
+      const r = await fetch('/api/marketplace/document/attach', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind, storageKey, mimeType: file.type || null, sizeBytes: file.size }),
+      });
+      const b = await r.json().catch(() => ({}));
+      if (r.ok && b.ok) { window.location.reload(); return; }
+      say(err, b.error || 'The document could not be recorded.');
+    });
+  });
+</script>
+
+<style>
+  .tabs { display: flex; gap: 16px; margin: 18px 0; flex-wrap: wrap; }
+  .tabs a { padding: 6px 0; border-bottom: 2px solid transparent; text-decoration: none; }
+  .tabs a[aria-current='page'] { border-bottom-color: currentColor; font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .muted { opacity: 0.75; }
+  .warn { font-weight: 600; font-size: 0.9em; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
+  .error { color: #b00020; font-weight: 600; }
+  .ok { font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); vertical-align: top; }
+  .btn-small { padding: 4px 10px; font-size: 0.9em; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style>

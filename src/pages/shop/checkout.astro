@@ -1,0 +1,416 @@
+---
+// /shop/checkout — the MARKETPLACE basket, and the order it becomes.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHY THE MARKETPLACE HAS ITS OWN BASKET AND ITS OWN CHECKOUT
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Because the two catalogues are two id spaces, and merging them would charge
+// people for the wrong thing.
+//
+//   /checkout          resolves basket ids against `product_variants` — the
+//                      federation's own shop.
+//   /shop/product/…    sells `listing_variants` — a seller's item.
+//
+// The product page used to write its variant id into `localStorage` and send
+// the buyer to /checkout. It wrote key `mmakf.basket` with `{variantId,
+// quantity}`; /checkout reads key `mmakf.basket.v1` with `{v, q}`. Different
+// key, different shape — so the item vanished and the buyer arrived at an empty
+// basket having been told it was added.
+//
+// THE OBVIOUS FIX WOULD HAVE BEEN THE DANGEROUS ONE. Making the keys and shapes
+// match would have handed a `listing_variants` id to a page that looks ids up in
+// `product_variants`: either the line silently disappears, or — far worse — it
+// finds a completely different federation product carrying the same integer and
+// charges for that instead. The id spaces are not interchangeable and this page
+// exists so they never have to be.
+//
+// The key here is therefore NAMESPACED: `mmakf.market.basket.v1`.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// NOTHING ON THIS PAGE PRICES ANYTHING
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The basket in the browser holds variant ids and quantities. There is no price
+// field in it, so a tampered price has nowhere to be written. Every figure the
+// buyer sees comes from POST /api/shop/price, which calls cartPreview() in
+// src/db/seller-orders.ts — the SAME priceCart() that checkout() prices with, so
+// the figure shown and the figure charged cannot drift apart.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// AND WHY IT SAYS "SIGN IN" RATHER THAN TAKING A GUEST ORDER
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// /api/marketplace/* requires a session for every action, deliberately: an
+// order belongs to somebody, a seller has to be able to be told who to ship to,
+// and a dispute has to have two identified parties. So the gate is stated up
+// front rather than after the buyer has typed an address.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured } from '@/db';
+import { identify } from '@/lib/session';
+import { activeProvider } from '@/lib/payments';
+
+export const prerender = false;
+
+type Gate = 'no_database' | 'no_provider' | 'signed_out' | 'ready';
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const provider = activeProvider();
+
+let gate: Gate = 'ready';
+if (!configured) gate = 'no_database';
+else if (!identity) gate = 'signed_out';
+else if (!provider) gate = 'no_provider';
+
+// A basket is one visitor's, and the page reflects a session.
+Astro.response.headers.set('Cache-Control', 'no-store, private');
+---
+
+<Base
+  title="Your marketplace basket — MMAKF"
+  description="Review the items in your MMAKF marketplace basket, see what each seller charges including carriage, and place the order."
+  breadcrumbs={[{ name: 'Shop', url: '/shop' }, { name: 'Basket', url: '/shop/checkout' }]}
+>
+  <section>
+    <div class="container">
+
+      {gate === 'no_database' && (
+        <div class="card">
+          <div class="eyebrow">Marketplace</div>
+          <h1 class="display-2" style="margin-top:14px">Not available on this deployment.</h1>
+          <p>The federation database is not configured here, so an order cannot be recorded. Nothing in your basket has been lost.</p>
+        </div>
+      )}
+
+      {gate === 'signed_out' && (
+        <div class="card">
+          <div class="eyebrow">Marketplace</div>
+          <h1 class="display-2" style="margin-top:14px">Sign in to place this order.</h1>
+          <p>
+            An order belongs to an account — so that the seller knows who to send the goods to, and so
+            that if something goes wrong there are two identified parties to a dispute.
+            <a href="/join">Create an account</a> or sign in, then come back. Your basket is kept in this
+            browser and will still be here.
+          </p>
+        </div>
+      )}
+
+      {gate === 'no_provider' && (
+        <div class="card">
+          <div class="eyebrow">Marketplace</div>
+          <h1 class="display-2" style="margin-top:14px">No payment method is configured.</h1>
+          <p>
+            MMAKF has not configured a payment provider on this deployment, so an order cannot be paid
+            for and this page will not pretend otherwise. Contact the federation office.
+          </p>
+        </div>
+      )}
+
+      {gate === 'ready' && (
+        <div id="mkRoot" data-provider={provider!.id}>
+          <div class="eyebrow">Marketplace</div>
+          <h1 class="display-2" style="margin-top:14px">Your basket.</h1>
+          <p class="lead" style="max-width:70ch">
+            Every price, tax figure and carriage charge below is read from the catalogue by the server
+            when this page loads — nothing in your browser sets an amount. Items from different sellers
+            are shipped separately and are charged carriage separately.
+          </p>
+
+          {/* Filled by the script from the server's own pricing. Never
+              pre-rendered: a basket lives in the browser, so the server has
+              nothing to render until the browser tells it what is in one. */}
+          <div id="mkBasket" class="card" style="margin-top:24px">
+            <p class="muted">Reading your basket…</p>
+          </div>
+
+          <div id="mkError" class="card" role="alert" hidden style="margin-top:16px;border-color:var(--red)"></div>
+
+          <form id="mkForm" class="card" style="margin-top:24px" hidden>
+            <h2 class="card-title">Where should it go?</h2>
+            <p class="muted" style="margin-top:4px">
+              The seller ships to this address. MMAKF passes it to them and to nobody else.
+            </p>
+
+            <div class="mk-grid">
+              <label>Full name<input name="name" required maxlength="120" autocomplete="name" /></label>
+              <label>Email<input name="email" type="email" required maxlength="254" autocomplete="email" /></label>
+              <label>Telephone<input name="phone" required maxlength="32" autocomplete="tel" /></label>
+              <label>Address<input name="line1" required maxlength="200" autocomplete="address-line1" /></label>
+              <label>Address (second line)<input name="line2" maxlength="200" autocomplete="address-line2" /></label>
+              <label>Town or city<input name="city" required maxlength="120" autocomplete="address-level2" /></label>
+              <label>State<input name="state" required maxlength="120" autocomplete="address-level1" /></label>
+              <label>PIN code<input name="pincode" required maxlength="12" inputmode="numeric" autocomplete="postal-code" /></label>
+            </div>
+            <label class="mk-wide">Delivery notes (optional)<textarea name="notes" maxlength="400" rows="2"></textarea></label>
+
+            <p class="muted" style="margin-top:12px">
+              Carriage shown above is quoted from each seller's own zones for a default destination. The
+              charge is re-quoted against this address when the order is placed, so the total you are
+              asked to pay is the one computed for where it is actually going.
+            </p>
+
+            <button class="btn btn-gold" type="submit" id="mkSubmit" style="margin-top:16px">
+              Place the order
+            </button>
+          </form>
+
+          <div id="mkResult" hidden style="margin-top:24px"></div>
+        </div>
+      )}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .mk-grid { display: grid; gap: 14px; grid-template-columns: 1fr; margin-top: 16px; }
+  @media (min-width: 720px) { .mk-grid { grid-template-columns: 1fr 1fr; } }
+  .mk-grid label, .mk-wide { display: grid; gap: 6px; font-weight: 600; font-size: 0.92em; }
+  .mk-wide { margin-top: 14px; }
+  .mk-grid input, .mk-wide textarea {
+    font: inherit; font-weight: 400; padding: 9px 11px;
+    border: 1px solid var(--border-2); border-radius: 6px; background: var(--bg);
+  }
+  .mk-seller { border-top: 1px solid var(--border-2); padding-top: 14px; margin-top: 18px; }
+  .mk-seller:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+  .mk-line { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: center; padding: 8px 0; }
+  .mk-tot { display: flex; justify-content: space-between; gap: 16px; padding: 4px 0; }
+  .mk-grand { font-weight: 700; font-size: 1.1em; border-top: 2px solid var(--border-2); margin-top: 12px; padding-top: 12px; }
+  .mk-qty { width: 4.5rem; font: inherit; padding: 4px 6px; border: 1px solid var(--border-2); border-radius: 4px; }
+  .muted { opacity: 0.75; }
+</style>
+
+<script>
+  // ── The marketplace basket ────────────────────────────────────────────────
+  //
+  // NAMESPACED KEY. `mmakf.market.basket.v1` is not `mmakf.basket.v1`: that one
+  // belongs to the federation's own shop and its ids resolve against a
+  // different table. See the note at the top of this file for what merging them
+  // would charge people for.
+  import { formatMinor as inr } from '@/lib/inr';
+
+  const KEY = 'mmakf.market.basket.v1';
+  type Line = { v: number; q: number };
+
+  const root = document.getElementById('mkRoot');
+  const basketBox = document.getElementById('mkBasket');
+  const form = document.getElementById('mkForm') as HTMLFormElement | null;
+  const errBox = document.getElementById('mkError');
+  const resultBox = document.getElementById('mkResult');
+  const submit = document.getElementById('mkSubmit') as HTMLButtonElement | null;
+
+  if (root && basketBox && form && errBox && resultBox && submit) {
+    function read(): Line[] {
+      try {
+        const raw = JSON.parse(localStorage.getItem(KEY) || '[]');
+        if (!Array.isArray(raw)) return [];
+        return raw
+          .filter((l: any) => l && Number.isInteger(l.v) && Number.isInteger(l.q) && l.q > 0 && l.q <= 99)
+          .slice(0, 40)
+          .map((l: any) => ({ v: l.v, q: l.q }));
+      } catch { return []; }
+    }
+    function write(lines: Line[]) {
+      try { localStorage.setItem(KEY, JSON.stringify(lines)); } catch { /* storage disabled */ }
+    }
+
+    const esc = (v: unknown) => String(v)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+
+    function fail(message: string) {
+      errBox.textContent = message;
+      errBox.hidden = false;
+    }
+
+    async function paint() {
+      errBox.hidden = true;
+      const lines = read();
+
+      if (!lines.length) {
+        basketBox.innerHTML =
+          '<h2 class="card-title">Your basket is empty.</h2>' +
+          '<p class="muted">Nothing has been added yet. <a href="/shop">Browse the marketplace</a>.</p>';
+        form.hidden = true;
+        return;
+      }
+
+      basketBox.innerHTML = '<p class="muted">Pricing your basket…</p>';
+
+      let data: any = null;
+      try {
+        const res = await fetch('/api/shop/price', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lines: lines.map((l) => ({ variantId: l.v, quantity: l.q })) }),
+        });
+        data = await res.json().catch(() => null);
+        if (!res.ok || !data?.ok) {
+          // The server's own sentence — "unavailable" in particular tells the
+          // buyer exactly why an item has gone, which a generic message cannot.
+          basketBox.innerHTML = '<h2 class="card-title">This basket cannot be priced.</h2>';
+          fail(data?.error || 'The basket could not be priced. Please try again.');
+          form.hidden = true;
+          return;
+        }
+      } catch {
+        basketBox.innerHTML = '<h2 class="card-title">Could not reach the marketplace.</h2>';
+        fail('The connection failed. Your basket is unchanged — try again.');
+        form.hidden = true;
+        return;
+      }
+
+      const r = data.result;
+      const sellers: any[] = Array.isArray(r.sellers) ? r.sellers : [];
+
+      let html = '<h2 class="card-title">' + sellers.length +
+        (sellers.length === 1 ? ' seller' : ' sellers') + ' in this basket</h2>';
+
+      for (const s of sellers) {
+        html += '<div class="mk-seller">';
+        html += '<h3 style="margin:0 0 4px">' + esc(s.sellerName) + '</h3>';
+        if (s.storeSlug) {
+          html += '<p class="muted" style="margin:0 0 8px"><a href="/shop/seller/' +
+            encodeURIComponent(s.storeSlug) + '">Visit this shop</a></p>';
+        }
+        for (const l of s.lines) {
+          html += '<div class="mk-line">' +
+            '<span>' + esc(l.description) + '<br><span class="muted">' + inr(l.unitPriceMinor) + ' each</span></span>' +
+            '<label class="muted" style="font-size:.85em">Qty ' +
+            '<input class="mk-qty" type="number" min="0" max="99" step="1" value="' + l.quantity +
+            '" data-variant="' + l.variantId + '" aria-label="Quantity for ' + esc(l.description) + '" /></label>' +
+            '<span>' + inr(l.totalMinor) + '</span>' +
+            '</div>';
+        }
+        html += '<div class="mk-tot"><span class="muted">Goods</span><span>' + inr(s.subtotalMinor) + '</span></div>';
+        html += '<div class="mk-tot"><span class="muted">Tax</span><span>' + inr(s.taxMinor) + '</span></div>';
+        html += '<div class="mk-tot"><span class="muted">Carriage</span><span>' + inr(s.shippingMinor) + '</span></div>';
+        html += '<div class="mk-tot"><strong>This seller</strong><strong>' + inr(s.totalMinor) + '</strong></div>';
+        html += '</div>';
+      }
+
+      html += '<div class="mk-tot mk-grand"><span>Total to pay</span><span>' + inr(r.totalMinor) + '</span></div>';
+      basketBox.innerHTML = html;
+      form.hidden = false;
+
+      // Quantity edits re-price from the server. Setting 0 removes the line —
+      // there is no separate "remove" control to keep out of step with it.
+      basketBox.querySelectorAll<HTMLInputElement>('.mk-qty').forEach((input) => {
+        input.addEventListener('change', () => {
+          const variantId = Number(input.dataset.variant);
+          const q = Math.max(0, Math.min(99, Math.floor(Number(input.value) || 0)));
+          const next = read()
+            .map((l) => (l.v === variantId ? { v: l.v, q } : l))
+            .filter((l) => l.q > 0);
+          write(next);
+          void paint();
+        });
+      });
+    }
+
+    const val = (name: string) =>
+      String((form.elements.namedItem(name) as HTMLInputElement | null)?.value ?? '').trim();
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errBox.hidden = true;
+      const lines = read();
+      if (!lines.length) { fail('Your basket is empty.'); return; }
+
+      submit.disabled = true;
+      const label = submit.textContent;
+      submit.textContent = 'Placing the order…';
+
+      try {
+        // ── 1. Create the order. Splits per seller and reserves the stock. ──
+        const placed = await fetch('/api/marketplace/checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            buyerName: val('name'),
+            email: val('email'),
+            phone: val('phone'),
+            shipTo: {
+              name: val('name'), line1: val('line1'), line2: val('line2'),
+              city: val('city'), state: val('state'), pincode: val('pincode'),
+              phone: val('phone'), notes: val('notes'),
+            },
+            // Ids and quantities. No price — there is no field for one.
+            lines: lines.map((l) => ({ variantId: l.v, quantity: l.q })),
+          }),
+        });
+        const pd = await placed.json().catch(() => null);
+        if (!placed.ok || !pd?.ok) {
+          fail(pd?.error || 'The order could not be placed. Nothing has been charged.');
+          return;
+        }
+        const order = pd.result;
+
+        // The basket is cleared HERE and not before: an order exists now, and
+        // clearing earlier would lose the basket if the call had failed.
+        write([]);
+
+        // ── 2. Begin the payment against the order that now exists. ────────
+        const paid = await fetch('/api/shop/pay', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderId: order.orderId }),
+        });
+        const payd = await paid.json().catch(() => null);
+
+        const held = (order.sellerOrders || []).filter((s: any) => s.commissionHeld).length;
+        let out = '<div class="card"><h2 class="card-title">Order ' + esc(order.orderNo) + ' placed</h2>';
+        out += '<div class="mk-tot"><span class="muted">Total</span><span>' + inr(order.totalMinor) + '</span></div>';
+        out += '<div class="mk-tot"><span class="muted">Sellers</span><span>' +
+          (order.sellerOrders || []).length + '</span></div>';
+        // The reservation is a real deadline and the buyer is told it.
+        if (order.expiresAt) {
+          out += '<p class="muted">The stock is held until ' +
+            esc(new Date(order.expiresAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })) +
+            '. After that the reservation lapses and the basket must be placed again.</p>';
+        }
+        if (held > 0) {
+          // Stated rather than hidden: MMAKF has published no commission for
+          // part of this order, and the seller will be told the same thing.
+          out += '<p class="muted">MMAKF has published no commission covering ' + held +
+            ' of these seller orders, so that part is recorded as held for the federation to settle.</p>';
+        }
+
+        if (paid.ok && payd?.ok) {
+          out += '<h3 style="margin-top:18px">Payment</h3>';
+          if (payd.checkout?.mode === 'manual_upi' && payd.checkout?.upiUri) {
+            out += '<p>Pay ' + inr(payd.amountPaise) + ' by UPI and quote <strong>' +
+              esc(payd.orderNo) + '</strong> as the reference.</p>';
+            out += '<p><a class="btn btn-gold" href="' + esc(payd.checkout.upiUri) + '">Open your UPI app</a></p>';
+          } else {
+            // A provider flow this page does not render. The order is real and
+            // the reference is real, so both are stated rather than dressed up.
+            out += '<p>A payment has been opened with ' + esc(payd.provider) +
+              ' for ' + inr(payd.amountPaise) + ', under reference <strong>' + esc(payd.orderNo) +
+              '</strong>. The federation office can confirm receipt against that reference.</p>';
+          }
+        } else {
+          out += '<h3 style="margin-top:18px">Payment could not be started</h3>';
+          out += '<p><strong>Your order exists and the stock is held.</strong> ' +
+            esc(payd?.error || 'The payment could not be opened.') +
+            ' Quote order <strong>' + esc(order.orderNo) + '</strong> to the federation office.</p>';
+        }
+        out += '</div>';
+
+        resultBox.innerHTML = out;
+        resultBox.hidden = false;
+        form.hidden = true;
+        basketBox.hidden = true;
+      } catch {
+        fail('The connection failed. If you did not see a confirmation, nothing was charged.');
+      } finally {
+        submit.disabled = false;
+        submit.textContent = label;
+      }
+    });
+
+    void paint();
+  }
+</script>

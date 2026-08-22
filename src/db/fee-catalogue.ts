@@ -125,6 +125,18 @@ export interface CatalogueSeedEntry {
   frequency: FeeFrequency;
   displayPolicy: FeeDisplayPolicy;
   description?: string;
+  /**
+   * Defaults to 'published' — the seed states the federation's chargeable
+   * services, and stating one means it is charged for.
+   *
+   * 'withdrawn' is for a service the federation has STOPPED charging for and
+   * whose code must nevertheless keep existing, because paid lines in the
+   * ledger still carry it and src/db/revenue.ts reads this table to attribute
+   * them. publicCatalogue() lists only 'published', and feeFor() refuses to
+   * price anything else — so a withdrawn entry disappears from every surface
+   * while every historical record that names it stays readable and unchanged.
+   */
+  status?: 'draft' | 'published' | 'withdrawn';
 }
 
 // ─── The sentinel ───────────────────────────────────────────────────────────
@@ -517,8 +529,23 @@ export async function feeFor(
  */
 export const FEE_CATALOGUE_SEED: readonly CatalogueSeedEntry[] = Object.freeze([
   // ── Membership ────────────────────────────────────────────────────────────
-  { code: 'MMAKF-FEE-MEM-ATHLETE', slug: 'membership-athlete', name: 'Athlete membership', category: 'membership', audience: 'athlete', unit: 'per_person', frequency: 'annual', displayPolicy: 'public' },
-  { code: 'MMAKF-FEE-MEM-JUNIOR', slug: 'membership-junior', name: 'Junior athlete membership', category: 'membership', audience: 'junior', unit: 'per_person', frequency: 'annual', displayPolicy: 'public' },
+  // ── WITHDRAWN, 17 August 2026 ────────────────────────────────────────────
+  //
+  // A STUDENT DOES NOT PAY A MEMBERSHIP FEE FOR BEING A STUDENT. These two
+  // entries are the withdrawn charge, and this seed was still publishing them:
+  // status 'published', displayPolicy 'public', which is the public fee page
+  // advertising an annual athlete membership and an annual junior membership as
+  // things the federation sells. No amount was ever attached — src/db/fees.ts
+  // refuses to create a rule that would price them — so nobody could be charged
+  // through them. They were being ADVERTISED, which is its own kind of wrong.
+  //
+  // NOT DELETED. src/db/revenue.ts reads this table by code to attribute paid
+  // lines, and a line paid in 2024 against MMAKF-FEE-MEM-ATHLETE has to keep
+  // resolving to "a student membership, withdrawn" rather than to nothing. A
+  // code deleted here would make an old receipt unattributable, which is the
+  // ledger being quietly damaged to make a new rule look tidy.
+  { code: 'MMAKF-FEE-MEM-ATHLETE', slug: 'membership-athlete', name: 'Athlete membership', category: 'membership', audience: 'athlete', unit: 'per_person', frequency: 'annual', displayPolicy: 'public', status: 'withdrawn', description: 'Withdrawn on 17 August 2026. A student does not pay a membership fee for being a student; what a student buys is training. The code is kept so that payments already recorded against it stay attributable.' },
+  { code: 'MMAKF-FEE-MEM-JUNIOR', slug: 'membership-junior', name: 'Junior athlete membership', category: 'membership', audience: 'junior', unit: 'per_person', frequency: 'annual', displayPolicy: 'public', status: 'withdrawn', description: 'Withdrawn on 17 August 2026. A junior does not pay a membership fee for being a junior. The code is kept so that payments already recorded against it stay attributable.' },
   { code: 'MMAKF-FEE-MEM-COACH', slug: 'membership-coach', name: 'Coach membership', category: 'membership', audience: 'coach', unit: 'per_person', frequency: 'annual', displayPolicy: 'public' },
   { code: 'MMAKF-FEE-MEM-INSTRUCTOR', slug: 'membership-instructor', name: 'Instructor membership', category: 'membership', audience: 'instructor', unit: 'per_person', frequency: 'annual', displayPolicy: 'public' },
   { code: 'MMAKF-FEE-MEM-REFEREE', slug: 'membership-referee', name: 'Referee membership', category: 'membership', audience: 'referee', unit: 'per_person', frequency: 'annual', displayPolicy: 'public' },
@@ -648,8 +675,9 @@ export async function seedFeeCatalogue(
         displayPolicy: e.displayPolicy,
         // Published means "the federation charges for this", NOT "the amount is
         // known". The amount is a separate publication, and every surface says
-        // so until it happens.
-        status: 'published' as const,
+        // so until it happens. An entry the federation has STOPPED charging for
+        // says so instead — see MMAKF-FEE-MEM-ATHLETE.
+        status: e.status ?? ('published' as const),
         description: e.description ?? null,
         sortOrder: (FEE_CATEGORIES.indexOf(e.category) + 1) * 100 + i,
       }))

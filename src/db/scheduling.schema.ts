@@ -524,3 +524,101 @@ export const classSessions = pgTable('class_sessions', {
   windowIdx: index('class_sessions_window_idx').on(t.startsAt, t.endsAt),
   classIdx: index('class_sessions_class_idx').on(t.classId, t.localDate),
 }));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PERSONAL CALENDAR FEEDS (migration 0049)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const calendarFeedScope = pgEnum('calendar_feed_scope', ['own_classes', 'coach_diary']);
+export const calendarFeedStatus = pgEnum('calendar_feed_status', ['active', 'revoked']);
+
+/**
+ * One revocable secret that lets ONE calendar client read ONE person's diary.
+ *
+ * src/pages/calendar.ics.ts set out the problem this solves: a calendar client
+ * fetches with no cookies and no way to sign in, so a session-scoped feed works
+ * in a browser and then quietly does nothing in the app that subscribes — except
+ * on the day somebody shares the URL. That file said a per-user feed "needs a
+ * per-user secret in the URL and its own revocation story". This is both.
+ *
+ * THE SECRET IS NOT IN THIS TABLE. `tokenHash` is a SHA-256 of it, the same
+ * treatment `users.mfaRecoveryHashes` gives recovery codes. It is shown to its
+ * owner once and cannot be recovered afterwards, so a leaked backup of this
+ * table hands over nobody's calendar. A feed URL is a bearer credential that
+ * travels through server logs, proxy logs and an address bar; storing it in the
+ * clear would be storing a password.
+ *
+ * REVOKED IS A STATUS. §78: nothing is deleted. A member who revokes a feed
+ * because they think it leaked needs the record that they did, and when.
+ */
+export const calendarFeedTokens = pgTable('calendar_feed_tokens', {
+  id: serial('id').primaryKey(),
+  personId: integer('person_id').notNull().references(() => persons.id),
+  /** SHA-256, base64url. NEVER the secret. */
+  tokenHash: text('token_hash').notNull(),
+  scope: calendarFeedScope('scope').notNull().default('own_classes'),
+  /** What the member called it — 'iPhone', 'work Outlook' — so they revoke the right one. */
+  label: text('label'),
+  status: calendarFeedStatus('status').notNull().default('active'),
+  lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  useCount: integer('use_count').notNull().default(0),
+  createdByUserId: integer('created_by_user_id').references(() => users.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  revokedReason: text('revoked_reason'),
+}, (t) => ({
+  hashUk: uniqueIndex('calendar_feed_tokens_hash_uk').on(t.tokenHash),
+  personIdx: index('calendar_feed_tokens_person_idx').on(t.personId, t.status),
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ANNOUNCEMENTS (migration 0049)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const scheduleAnnouncementStatus = pgEnum('schedule_announcement_status', [
+  'draft', 'awaiting_approval', 'approved', 'sent', 'cancelled',
+]);
+
+/**
+ * A deliberate act of telling members that a timetable changed.
+ *
+ * src/lib/notifications.ts resolves SCHEDULE_PUBLISHED to NOBODY for a national,
+ * state or district schedule, and says why: "'every member of the federation' is
+ * a fan-out this system must never perform on the strength of one administrator
+ * saving a form." That stays true. This is the act that CAN reach them, and its
+ * shape is the safety:
+ *
+ *   · `audienceCount` is COUNTED AND FROZEN when the announcement is drafted, so
+ *     an administrator authorises a NUMBER rather than a promise;
+ *   · above a threshold it needs two-person control through src/lib/approvals.ts
+ *     — the mechanism that already exists — and `approvalRequestId` records
+ *     which request authorised it;
+ *   · `sentCount` is what actually went out, which need not equal the frozen
+ *     count: somebody may have left the club in between, and reporting the
+ *     estimate as the outcome would be lying about delivery.
+ *
+ * A draft nobody approves is never sent and stays on the record as a thing
+ * somebody proposed. That is the point of it being a row rather than a click.
+ */
+export const scheduleAnnouncements = pgTable('schedule_announcements', {
+  id: serial('id').primaryKey(),
+  scheduleId: integer('schedule_id').notNull().references(() => schedules.id),
+  versionId: integer('version_id').references(() => scheduleVersions.id),
+  ownerScope: scopeType('owner_scope').notNull(),
+  ownerId: integer('owner_id'),
+  status: scheduleAnnouncementStatus('status').notNull().default('draft'),
+  audienceCount: integer('audience_count').notNull(),
+  sentCount: integer('sent_count').notNull().default(0),
+  reason: text('reason').notNull(),
+  /** The src/lib/approvals.ts request that authorised a large fan-out. */
+  approvalRequestId: text('approval_request_id'),
+  createdByUserId: integer('created_by_user_id').references(() => users.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  sentAt: timestamp('sent_at', { withTimezone: true }),
+  sentByUserId: integer('sent_by_user_id').references(() => users.id),
+  cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+  cancelledReason: text('cancelled_reason'),
+}, (t) => ({
+  scheduleIdx: index('schedule_announcements_schedule_idx').on(t.scheduleId, t.createdAt),
+  statusIdx: index('schedule_announcements_status_idx').on(t.status, t.createdAt),
+}));

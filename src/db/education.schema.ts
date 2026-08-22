@@ -18,6 +18,7 @@ import {
   pgTable, serial, text, integer, timestamp, date, boolean,
   uniqueIndex, index, jsonb, pgEnum,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { persons, dojos } from './schema';
 
 // ─── Enums ──────────────────────────────────────────────────────────────────
@@ -425,8 +426,35 @@ export const trainingSessions = pgTable('training_sessions', {
   endsAt: text('ends_at'),
   instructorPersonId: integer('instructor_person_id').references(() => persons.id),
   focus: text('focus'),
+
+  /**
+   * The scheduling-engine occurrence this register was taken at (migration 0049).
+   *
+   * ONE COLUMN, NOT A THIRD ATTENDANCE TABLE. `session_attendance` already hangs
+   * off this table and is already READ by src/db/grading.ts, which counts a
+   * candidate's sessions since their last grade, and by src/db/athletes.ts. A
+   * separate `class_session_attendance` would have meant grading silently
+   * ignoring half the federation's attendance — a defect that surfaces years
+   * later as a candidate refused a grading they had in fact trained for.
+   *
+   * Nullable: a register may still be taken for a session the engine never
+   * generated. Unique when set, so one occurrence has at most one register —
+   * two registers for one class are two answers to "who was there", and the
+   * reader cannot tell which the instructor meant.
+   *
+   * No drizzle `.references()`: `class_sessions` lives in scheduling.schema.ts,
+   * which imports THIS file's siblings, and a type-level reference back would be
+   * a cycle. The foreign key is real and is created by migration 0049.
+   */
+  classSessionId: integer('class_session_id'),
+
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => ({ dojoDateIdx: index('training_sessions_dojo_date_idx').on(t.dojoId, t.heldOn) }));
+}, (t) => ({
+  dojoDateIdx: index('training_sessions_dojo_date_idx').on(t.dojoId, t.heldOn),
+  classSessionUk: uniqueIndex('training_sessions_class_session_uk')
+    .on(t.classSessionId)
+    .where(sql`class_session_id is not null`),
+}));
 
 export const sessionAttendance = pgTable('session_attendance', {
   id: serial('id').primaryKey(),

@@ -788,11 +788,20 @@ export async function recordLegacyGrade(
 
 export interface VerificationResult {
   status: 'valid' | 'expired' | 'revoked' | 'suspended' | 'not_found';
-  /** How the credential came to exist. The public sees this. */
-  provenance?: 'examined' | 'unverified_legacy';
+  /**
+   * How the credential came to exist. The public sees this.
+   *
+   * `programme` is NOT a weaker `examined` and it is not a legacy record at all.
+   * It is a different KIND of document: a course-completion certificate rests on
+   * an attendance register, confers no rank, and has no examination behind it
+   * because none was ever held. See the note in verifyCredential().
+   */
+  provenance?: 'examined' | 'programme' | 'unverified_legacy';
   certificateNo?: string;
   holderName?: string;
   federationId?: string;
+  /** What the document says it is. A programme certificate carries no grade. */
+  title?: string;
   grade?: string;
   awardedOn?: string;
   issuingAuthority?: string;
@@ -838,7 +847,46 @@ export async function verifyCredential(
   if (!cert) return { status: 'not_found' };
 
   const snapshot = (cert.snapshot ?? {}) as Record<string, any>;
-  const provenance = snapshot.provenance === 'examined' ? 'examined' : 'unverified_legacy';
+
+  // THREE KINDS OF DOCUMENT, AND THE THIRD ONE USED TO BE SWALLOWED.
+  //
+  // This read `provenance === 'examined' ? 'examined' : 'unverified_legacy'`,
+  // which was safe while every certificate in the system came out of a grading.
+  // Two modules then began minting COURSE COMPLETION certificates —
+  // src/db/programme-lifecycle.ts for a school cohort's attendance
+  // (`provenance: 'programme'`, `confersRank: false`, no rank record, no
+  // examination) and src/db/academy.ts for an online course — and every one of
+  // them verified publicly as `unverified_legacy`, under the sentence "This
+  // GRADE predates the federation's digital examination records".
+  //
+  // That is the federation, on its own public endpoint, describing a 2026
+  // attendance certificate as an old unexamined RANK. It is wrong in both
+  // directions at once: it invents a grade the document does not claim, and it
+  // ages a document issued this year. An employer reading it is being told
+  // something MMAKF cannot defend, which is the exact failure this endpoint
+  // exists to prevent.
+  //
+  // The certificate KIND is read as well as the snapshot, deliberately. The
+  // snapshot is free-form jsonb written by whichever module issued the row; the
+  // `kind` column is an enum the database enforces. Where they agree it costs
+  // nothing, and where a future issuer forgets the snapshot key the enum still
+  // stops a completion certificate being reported as a grade.
+  const provenance: 'examined' | 'programme' | 'unverified_legacy' =
+    snapshot.provenance === 'examined'
+      ? 'examined'
+      : (snapshot.provenance === 'programme' || cert.kind === 'course_completion')
+        ? 'programme'
+        : 'unverified_legacy';
+
+  const NOTE = {
+    examined: undefined,
+    programme:
+      'This certificate records ATTENDANCE at a federation programme. It is not an examination result, ' +
+      'it confers no rank or grade, and the attendance figures it was issued on are printed on the document itself.',
+    unverified_legacy:
+      'This grade predates the federation’s digital examination records and is held as a legacy record. ' +
+      'It has not been verified against an examination scorecard.',
+  } as const;
 
   const base: VerificationResult = {
     status: 'valid',
@@ -846,13 +894,15 @@ export async function verifyCredential(
     certificateNo: cert.certificateNo,
     holderName: snapshot.holder ?? undefined,
     federationId: snapshot.federationId ?? undefined,
-    grade: snapshot.grade ?? undefined,
+    title: cert.title ?? undefined,
+    // NEVER carried for a programme certificate, whatever a snapshot says. A
+    // grade is the one field an enquirer reads as a rank claim, and this
+    // document makes none.
+    grade: provenance === 'programme' ? undefined : (snapshot.grade ?? undefined),
     awardedOn: snapshot.awardedOn ?? cert.issuedOn,
     issuingAuthority: cert.issuingAuthority,
     syllabusVersion: snapshot.syllabusVersion ?? undefined,
-    note: provenance === 'examined'
-      ? undefined
-      : 'This grade predates the federation’s digital examination records and is held as a legacy record. It has not been verified against an examination scorecard.',
+    note: NOTE[provenance],
   };
 
   if (cert.status === 'revoked') {

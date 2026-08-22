@@ -39,6 +39,7 @@ import * as s from '../src/db/schema';
 import {
   createFramework, addRule, publishFramework, issueQuote, approveQuoteVersion,
   computeFee, reproduce, activeFramework, applyFactor, PPM,
+  taxOnMinor,
 } from '../src/db/fees';
 import {
   createOrder, beginPayment, confirmPayment, recordWebhook, markWebhookProcessed,
@@ -996,10 +997,6 @@ describe('money never becomes a float', () => {
       why: 'Integer paise × an integer quantity bounded to 1..99 by createOrder().',
     },
     {
-      file: 'src/db/orders.ts', code: 'const lineTax = Math.round((lineTotal * taxRateBps) / 10_000);',
-      why: 'FINDING 4 — a SECOND rounding implementation, outside applyFactor(). Exact over the reachable domain, proved below.',
-    },
-    {
       file: 'src/lib/payments/manual-upi.ts', code: 'const rupees = (input.amountPaise / 100).toFixed(2);',
       why: 'The only place money leaves integer space, to write rupees into a UPI intent string. Round-trip proved below.',
     },
@@ -1061,23 +1058,73 @@ describe('money never becomes a float', () => {
     expect(applyFactor(-1, 1_500_000)).toBe(-2);
   });
 
-  it("orders.ts's tax rounding agrees with applyFactor over its whole reachable domain", () => {
-    // FINDING 4 is that the implementation is duplicated, not that it is wrong
-    // today. This pins WHY it is not wrong today, so a change to either one
-    // that breaks the agreement is caught here.
-    const taxOrders = (lineTotal: number, bps: number) => Math.round((lineTotal * bps) / 10_000);
+  it('taxOnMinor() agrees with applyFactor() over the whole reachable domain', () => {
+    // FINDING 4 WAS that createOrder() carried a SECOND rounding implementation
+    // inline: `Math.round((lineTotal * taxRateBps) / 10_000)`. It is now
+    // taxOnMinor() in src/db/fees.ts, in BigInt, and the exemption that used to
+    // sanction the inline version has been REMOVED from ALLOWED above rather
+    // than updated to match the new line — which is why the rule is stricter
+    // now than it was, not merely green.
+    //
+    // This still pins the agreement between the two money paths, because a tax
+    // computed one way and a fee factor computed the other must never disagree
+    // by a paisa on the same invoice.
     const taxFees = (lineTotal: number, bps: number) => applyFactor(lineTotal, PPM + bps * 100) - lineTotal;
 
     for (const bps of [0, 100, 250, 500, 1200, 1800, 2800]) {
       for (const amount of [1, 7, 99, 100, 101, 12_345, 999_999, 1_000_000, 99_999_999, 210_000_000]) {
-        expect(`${amount}@${bps}: ${taxOrders(amount, bps)}`).toBe(`${amount}@${bps}: ${taxFees(amount, bps)}`);
+        expect(`${amount}@${bps}: ${taxOnMinor(amount, bps)}`).toBe(`${amount}@${bps}: ${taxFees(amount, bps)}`);
       }
     }
+  });
 
-    // The intermediate product stays inside safe-integer range for every order
-    // createOrder() will build: an int32 unit price × 99 × 2800 bps.
+  it('the float it replaced was exact over the REACHABLE domain — which is why this was debt, not a bug', () => {
+    // Said plainly, because overstating it would be the same failure this file
+    // exists to prevent. `Math.round((lineTotal * taxRateBps) / 10_000)` was
+    // NOT producing wrong money. The worst order createOrder() can build is an
+    // int32 unit price × the 99-item quantity cap × the highest GST rate, and
+    // that product is comfortably inside safe-integer range.
     const worst = 2_147_483_647 * 99 * 2_800;
     expect(worst).toBeLessThan(Number.MAX_SAFE_INTEGER);
+
+    // So the reason for removing it is DRIFT, not overflow: two implementations
+    // of the same rounding is one edit away from an invoice that disagrees with
+    // the quotation it came from, with nothing failing in between.
+    for (const bps of [0, 1, 250, 1_800, 2_800]) {
+      for (const amount of [1, 3, 99, 12_345, 2_147_483_647]) {
+        expect(taxOnMinor(amount, bps)).toBe(Math.round((amount * bps) / 10_000));
+      }
+    }
+  });
+
+  it('taxOnMinor() stays exact past the point where the float stops being', () => {
+    // Beyond anything createOrder() can build — ₹10,000 crore on one line — but
+    // this module is a general money primitive and a later caller is not bound
+    // by createOrder()'s caps. 2^53 is 9,007,199,254,740,992.
+    const amount = 10_000_000_000_000;          // 10^13 paise
+    const bps = 2_800;
+    expect(amount * bps).toBeGreaterThan(Number.MAX_SAFE_INTEGER);
+
+    // Exact by construction: 10^13 × 2800 / 10_000.
+    expect(taxOnMinor(amount, bps)).toBe(2_800_000_000_000);
+    expect(Number.isSafeInteger(taxOnMinor(amount, bps))).toBe(true);
+  });
+
+  it('taxOnMinor() refuses a rate that is not a whole number of basis points', () => {
+    expect(() => taxOnMinor(1_000, 18.5)).toThrow();
+    // A negative rate is a credit dressed as a tax. Refused, not netted off.
+    expect(() => taxOnMinor(1_000, -100)).toThrow();
+    expect(() => taxOnMinor(10.5, 1_800)).toThrow();
+  });
+
+  it('rounds half UP and away from zero, so identical lines produce identical tax', () => {
+    // 1 paisa at 5000 bps is exactly 0.5 — the half-way case.
+    expect(taxOnMinor(1, 5_000)).toBe(1);
+    expect(taxOnMinor(3, 5_000)).toBe(2);
+    expect(taxOnMinor(0, 1_800)).toBe(0);
+    // Two identical line items, two identical amounts. Banker's rounding would
+    // make this depend on the digit before.
+    expect(taxOnMinor(5, 5_000)).toBe(taxOnMinor(5, 5_000));
   });
 
   it('the UPI deep link carries the exact rupee value of the paise it was given', () => {

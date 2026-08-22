@@ -70,3 +70,9 @@ astro.config.verify.mjs
 # gitlink that no clone can resolve, so the outer repo ends up referencing a
 # commit nobody else has.
 .claude/worktrees/
+
+# Timestamped copies of env files. `.env*.local` does not match these:
+# the name must END in .local, and `.env.local.backup-192538` does not.
+# It held live KV/Redis tokens and was one `git add -A` from being committed.
+.env*.backup*
+.env.local.backup-*

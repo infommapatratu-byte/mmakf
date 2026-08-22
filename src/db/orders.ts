@@ -6,13 +6,29 @@
 // from a payment page, not when the browser says so, not when someone reports
 // it on WhatsApp.
 
-import { and, eq, sql, desc } from 'drizzle-orm';
+import { and, eq, gte, isNull, lte, or, sql, desc } from 'drizzle-orm';
 import crypto from 'node:crypto';
 import * as s from './schema';
 import { writeAudit, type AuditContext } from './federation';
 import { isUniqueViolation } from './pgerror';
 import { assertCan, assertCanAnywhere, type Principal } from '@/lib/rbac';
 import type { VerifiedPayment } from '@/lib/payments';
+// The single sanctioned tax rounding. Inlining `Math.round((total * bps) /
+// 10_000)` here was a second implementation of the same arithmetic in float —
+// see the note on taxOnMinor() for why that is a liability even while it agrees.
+import { taxOnMinor } from './fees';
+import { classifyScheduledFee } from './student-rule';
+
+/**
+ * Order-line kinds that buy STANDING WITH THE FEDERATION rather than a thing.
+ *
+ * Stated here as well as read as text by src/db/student-rule.ts, because the
+ * merchandise branch of createOrder() needs the structural fact on its own: a
+ * product variant carries `stock_qty` and a reservation, and standing cannot be
+ * stocked. That refusal is about the SHAPE of the line and holds whatever the
+ * item happens to be called.
+ */
+const STANDING_LINE_KINDS = new Set(['membership', 'affiliation']);
 
 type DB = any;
 
@@ -24,6 +40,30 @@ type DB = any;
  */
 export function paise(rupees: number): number {
   return Math.round(rupees * 100);
+}
+
+/**
+ * Today, in the FEDERATION'S OWN timezone.
+ *
+ * `new Date().toISOString().slice(0, 10)` is the UTC date, and India runs 5½
+ * hours ahead of UTC: between midnight and 05:30 IST it names YESTERDAY. Two
+ * things in this module are dated, and both were dated that way.
+ *
+ *   · `ledger_entries.occurred_on`, which /admin/revenue sums BETWEEN TWO DATES
+ *     COMPUTED IN Asia/Kolkata. A capture at 02:00 IST on 1 April posted to
+ *     31 March — the previous FINANCIAL YEAR — and the treasurer's report for
+ *     the year it belonged to was short by exactly that payment.
+ *   · the fee window below, where "is this fee in force today" has to be asked
+ *     in the timezone the federation publishes its fees in.
+ *
+ * Exported, and src/db/revenue.ts's `todayInIndia` is now this function, so the
+ * date a ledger row is WRITTEN with and the date it is READ BETWEEN can never
+ * drift apart again.
+ */
+export function federationToday(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now);
 }
 
 export function formatINR(amountPaise: number): string {
@@ -70,13 +110,41 @@ async function nextInvoiceNo(db: DB, year = new Date().getFullYear()): Promise<s
 // ─── Order creation ─────────────────────────────────────────────────────────
 
 export interface DraftLine {
-  kind: 'product' | 'membership' | 'affiliation' | 'event_entry' | 'grading' | 'course' | 'certificate' | 'donation' | 'other';
+  // 'training' was added by migration 0045: a STUDENT'S own training, as
+  // opposed to 'membership' (which students do not buy) and 'program' (which is
+  // an institution's contracted block). Its own kind rather than 'other',
+  // because postLedger() posts income under this column and because
+  // src/db/training-products.ts filters on it to find the lines it must turn
+  // into a right to train — a training line billed as 'other' would be paid for,
+  // undelivered, and invisible in both places built to notice.
+  kind: 'product' | 'membership' | 'affiliation' | 'event_entry' | 'grading' | 'course' | 'certificate' | 'donation' | 'training' | 'program' | 'other';
   description: string;
   quantity?: number;
   /** Omit for catalogue/fee lines — the price is then read from the server. */
   unitPricePaise?: number;
   variantId?: number;
   feeCode?: string;
+  /**
+   * An ISSUED-AND-ACCEPTED quote version this line pays for.
+   *
+   * A THIRD server-priced path, alongside `variantId` (the catalogue) and
+   * `feeCode` (the published fee schedule), and it obeys the same rule as both:
+   * the caller names WHAT is being paid for and the price is read here.
+   *
+   * The price read is the FROZEN one on the quote version — `subtotal_minor +
+   * adjustment_minor` for the line and `tax_minor` for its tax, which sum back
+   * to `total_minor` by construction. Nothing is recomputed from the fee
+   * framework. That is the whole point: a school that accepted ₹4,80,000 in
+   * March is charged ₹4,80,000 in June, whatever the federation has published
+   * since, and tests/fees.test.ts already asserts the property one step
+   * upstream.
+   *
+   * See src/db/quote-to-order.ts, which is the only caller and which checks
+   * acceptance, approval and expiry before it gets here. The checks below are
+   * repeated rather than trusted to it, because this is the function that
+   * decides what somebody is charged.
+   */
+  quoteVersionId?: number;
   refType?: string;
   refId?: number;
   taxRateBps?: number;
@@ -120,9 +188,146 @@ export async function createOrder(db: DB, ctx: AuditContext | null, draft: Draft
   let subtotal = 0;
   let tax = 0;
 
+  // ── When a quotation is what is being paid for ──
+  //
+  // A quote-derived order reserves no stock, so the 45-minute reservation
+  // release below has nothing to release, and applying it would EXPIRE a
+  // school's invoice three quarters of an hour after it was raised —
+  // expireStaleOrders() cancels anything still `awaiting_payment` past its
+  // `expiresAt`. What actually governs is the quotation's own validity, so that
+  // is what the order takes. `null` when the federation set no validity: an
+  // offer with no stated end date does not acquire one here.
+  let quoteValidUntil: string | null = null;
+  let quotePriced = false;
+
   for (const line of draft.lines) {
     const qty = Number.isInteger(line.quantity) ? line.quantity! : 1;
     if (qty < 1 || qty > 99) throw new OrderError('bad_quantity', 'Quantity must be between 1 and 99');
+
+    // ── A QUOTATION LINE IS PRICED AND PUSHED HERE, AND SKIPS THE REST ──
+    //
+    // Handled before the catalogue chain and returned from with `continue`,
+    // rather than folded into the shared arithmetic below, for one reason: the
+    // shared arithmetic DERIVES a tax from a rate, and a quotation's tax is not
+    // derived — it is part of a total somebody already accepted. Threading a
+    // "unless it is frozen" exception through the common path would have put a
+    // conditional inside the one calculation in this function that every other
+    // kind of line depends on. This branch computes nothing; it copies.
+    if (line.quoteVersionId != null) {
+      // A caller that names both a quote version and a catalogue item has a bug,
+      // and the frozen figure is the one that must win — silently pricing from
+      // the catalogue instead would charge a school something it never agreed to.
+      if (line.variantId != null || line.feeCode) {
+        throw new OrderError(
+          'ambiguous_line',
+          'A line names both a quotation and a catalogue item. A quoted figure and a catalogue price are two different amounts and this function will not choose between them.'
+        );
+      }
+      // A quotation is agreed once, as a whole. Multiplying it by a quantity
+      // would be the caller inventing a price out of one the federation issued.
+      if (qty !== 1) {
+        throw new OrderError('bad_quantity', 'A quotation is paid once. It has no quantity to multiply.');
+      }
+
+      const qv = (await db.select().from(s.quoteVersions)
+        .where(eq(s.quoteVersions.id, line.quoteVersionId)).limit(1))[0];
+      if (!qv) throw new OrderError('unknown_quote_version', 'No such quotation version');
+
+      // THE HONEST STATE, and today the only reachable one. A quotation nothing
+      // could price carries no figure at all — never a zero, which would read
+      // as free — so there is nothing here to charge for.
+      if (qv.requiresManualQuote) {
+        throw new OrderError(
+          'quote_has_no_figure',
+          'That quotation carries no figure: the federation has not published a fee covering it, so the office prepares it by hand. There is nothing to charge.'
+        );
+      }
+      // Repeated from src/db/quote-to-order.ts on purpose. This is the function
+      // that decides what somebody is charged, and it does not delegate the
+      // question of whether they ever agreed to be.
+      if (qv.status !== 'accepted') {
+        throw new OrderError(
+          'quote_not_accepted',
+          `That quotation is ${qv.status}. Only an accepted quotation can be charged for.`
+        );
+      }
+      if (qv.currency !== 'INR') {
+        // The order spine accounts in INR paise throughout. Billing a USD
+        // quotation through it would charge the number without the currency.
+        throw new OrderError(
+          'quote_currency_unsupported',
+          `That quotation is in ${qv.currency}. Orders are raised in INR, and this system will not treat one currency's figure as another's.`
+        );
+      }
+
+      // subtotal + adjustment + tax = total, by construction in computeFee().
+      // Asserted rather than assumed: if the three stored figures do not add up
+      // then something wrote this row that was not the fee engine, and the
+      // right response to that is to refuse rather than to pick two of them.
+      const net = qv.subtotalMinor + qv.adjustmentMinor;
+      const quoteTax = qv.taxMinor;
+      if (!Number.isInteger(net) || !Number.isInteger(quoteTax) || net + quoteTax !== qv.totalMinor) {
+        throw new OrderError(
+          'quote_not_reconcilable',
+          'That quotation\'s stored subtotal, adjustment and tax do not add up to its total. Refusing to charge a figure this system cannot reconstruct.'
+        );
+      }
+      if (qv.totalMinor <= 0) {
+        throw new OrderError(
+          'quote_has_no_figure',
+          'That quotation totals nothing. A zero would be charged as free, which is not something the federation has agreed.'
+        );
+      }
+
+      quotePriced = true;
+      quoteValidUntil = (qv.validUntil as string | null) ?? quoteValidUntil;
+
+      const quoteDescription = String(line.description ?? '').slice(0, 300)
+        || `Quotation ${qv.frameworkCode} v${qv.version}`;
+
+      // ── THE THIRD PRICE SOURCE, JUDGED LIKE THE OTHER TWO ──
+      //
+      // A quotation is computed by the fee framework, which addRule() and
+      // publishFramework() already guard — so on the sanctioned path this can
+      // never fire, and src/db/quote-to-order.ts (the only caller) passes kind
+      // 'other' with a description it composes itself.
+      //
+      // It is here for the row nobody composed. `quote_versions` carries a
+      // total and no line detail, so what an INVOICE ends up SAYING is the
+      // caller's `description` and the caller's `kind`. A directly inserted
+      // 'accepted' quote version, paid for by a line calling itself a junior
+      // membership, would put that sentence and that figure on a federation
+      // receipt without any framework having agreed to it. Every line this
+      // function prices is now read before it is charged, and this was the last
+      // one that was not.
+      const quoteVerdict = classifyScheduledFee({
+        code: null, label: quoteDescription, kind: line.kind,
+      });
+      if (quoteVerdict.studentCharge) {
+        throw new OrderError('student_charge_refused', quoteVerdict.refusal as string);
+      }
+
+      subtotal += net;
+      tax += quoteTax;
+      priced.push({
+        kind: line.kind, variantId: null, feeCode: null,
+        // refType/refId are set HERE and overwrite whatever the caller passed.
+        // A line that is paying for a quotation must say so in the one place a
+        // reconciliation query looks, and letting a caller relabel it would
+        // break the tie-back the invoice depends on.
+        refType: 'quote_version', refId: line.quoteVersionId,
+        description: quoteDescription,
+        quantity: 1,
+        unitPricePaise: net,
+        // ZERO, and not the rate that produced `quoteTax`. A rate stored beside
+        // a frozen amount is an invitation to recompute one from the other, and
+        // the whole point of this line is that nothing recomputes it.
+        taxRateBps: 0,
+        taxPaise: quoteTax,
+        totalPaise: qv.totalMinor,
+      });
+      continue;
+    }
 
     let unit: number;
     let description = String(line.description ?? '').slice(0, 300);
@@ -137,12 +342,136 @@ export async function createOrder(db: DB, ctx: AuditContext | null, draft: Draft
       unit = v.pricePaise;
       taxRateBps = product?.taxRateBps ?? 0;
       description = `${product?.name ?? 'Item'} — ${v.label}`;
+
+      // ── STANDING IS NOT STOCK ──
+      //
+      // Before any question of wording. A variant carries `stock_qty` and a
+      // reservation, and standing with a federation cannot be stocked — there
+      // is no such thing as forty memberships on a shelf. A line claiming to buy
+      // membership or affiliation out of the merchandise catalogue is malformed
+      // whatever the item is called, so this refuses on the SHAPE of the request
+      // and needs to read no names at all.
+      //
+      // `line.kind` is a caller's word and the check below is right not to trust
+      // it in the permissive direction. This one only ever refuses: a caller who
+      // sends 'product' does not escape anything, because the catalogue's own
+      // words are read immediately afterwards.
+      if (STANDING_LINE_KINDS.has(String(line.kind))) {
+        throw new OrderError(
+          'standing_is_not_stock',
+          `A '${line.kind}' line cannot be priced from the merchandise catalogue. ` +
+          'Standing with the federation is not an item with stock — it is bought from the published fee ' +
+          'schedule, which is where the rule that a student pays no membership fee is enforced.'
+        );
+      }
+
+      // ── THE SAME REFUSAL, ONE TABLE ACROSS ──
+      //
+      // The shop catalogue is a third register that can charge somebody, and a
+      // withdrawn fee does not care which table it is sold from: a product
+      // called 'Junior Membership 2026' with a ₹500 variant is the student
+      // subscription with a barcode on it. Guarded here so the refusal does not
+      // depend on which page an operator happened to use.
+      //
+      // NARROWER THAN THE FEE REGISTER, DELIBERATELY. `fee_schedule` is refused
+      // on all three verdicts including 'it never says who pays', because a fee
+      // that cannot name its payer should not charge one. A MERCHANDISE name is
+      // not written to that standard — 'membership certificate frame' and
+      // 'member handbook' are goods, and refusing them would block the shop
+      // while looking like a safety feature, which is how a guard gets deleted.
+      // So only a POSITIVE identification of a student payer refuses here.
+      // The product's OWN name, SKU and variant label — catalogue rows an
+      // operator wrote. `line.kind` is deliberately NOT passed HERE: it is
+      // whatever the browser said, and a caller who could set it could evade
+      // this check by sending 'product'. The caller's word is used only by the
+      // structural refusal above, which it can trip but never escape.
+      const shopVerdict = classifyScheduledFee({
+        // The SKU counts too. 'MEM-JR-2026' is a name; it is just a name typed
+        // by somebody who expected only machines to read it.
+        code: product?.sku ?? null, label: description, kind: null,
+      });
+      if (
+        shopVerdict.studentCharge
+        && shopVerdict.refusalCode !== 'unattributed_standing_charge'
+      ) {
+        throw new OrderError('student_charge_refused', shopVerdict.refusal as string);
+      }
     } else if (line.feeCode) {
+      // ── THE ROW IN FORCE TODAY, NOT MERELY THE NEWEST ONE MARKED ACTIVE ──
+      //
+      // `fee_schedule` is a DATED register. `effective_from` is how the
+      // federation enters next year's fee in advance — which is the only way a
+      // fee change can be approved before it applies — and `effective_to` is
+      // how it closes one that has been superseded. This query read neither.
+      //
+      // `order by effective_from desc limit 1` therefore picked the FUTURE row
+      // the moment it was entered: a fee approved in August to take effect next
+      // April sorts first, and every payer between August and April was charged
+      // next April's price. The mirror of it is as bad — a fee closed in 2022
+      // went on charging for as long as nobody remembered to unset `active`,
+      // because `active` is a switch and `effective_to` is a date, and the two
+      // say different things.
+      //
+      // Neither figure has any authority behind it on the day it is taken,
+      // which makes it the same defect as inventing one. The window is applied
+      // in SQL and the newest row INSIDE it wins; where nothing is in force the
+      // refusal is the ordinary "the federation has not published this", never a
+      // fallback to a lapsed price and never a zero.
+      const today = federationToday();
       const fee = (await db.select().from(s.feeSchedule)
-        .where(and(eq(s.feeSchedule.code, line.feeCode), eq(s.feeSchedule.active, true)))
+        .where(and(
+          eq(s.feeSchedule.code, line.feeCode),
+          eq(s.feeSchedule.active, true),
+          lte(s.feeSchedule.effectiveFrom, today),
+          or(isNull(s.feeSchedule.effectiveTo), gte(s.feeSchedule.effectiveTo, today)),
+        ))
         .orderBy(desc(s.feeSchedule.effectiveFrom)).limit(1))[0];
       // §68: a fee the federation has not published is not invented here.
-      if (!fee) throw new OrderError('fee_not_published', `No published fee for ${line.feeCode}`);
+      if (!fee) {
+        // Distinguish "never published" from "published for another period", so
+        // an operator who has entered next year's fee is told that is what has
+        // happened rather than hunting for a row that is sitting in front of them.
+        const outside = (await db.select({ id: s.feeSchedule.id }).from(s.feeSchedule)
+          .where(and(eq(s.feeSchedule.code, line.feeCode), eq(s.feeSchedule.active, true)))
+          .limit(1))[0];
+        throw new OrderError(
+          'fee_not_published',
+          outside
+            ? `No fee for ${line.feeCode} is in force on ${today}. A fee is entered against the dates it applies between, and one outside its own dates is not charged.`
+            : `No published fee for ${line.feeCode}`
+        );
+      }
+
+      // ── A STUDENT DOES NOT PAY A MEMBERSHIP FEE FOR BEING A STUDENT ──
+      //
+      // THE LAST GATE BEFORE AN INVOICE EXISTS, and the only one on this side
+      // of the system. src/db/student-rule.ts guards `fee_rules` at addRule()
+      // and at publishFramework(); it never saw `fee_schedule`, which is the
+      // table this line is priced from and the table nothing in src/ writes —
+      // so its rows arrive only from a seed, a migration, a restored backup or
+      // an operator's INSERT, none of which pass through a fee framework at all.
+      //
+      // Judged HERE rather than at the INSERT for the same reason the framework
+      // is judged at publishFramework() rather than only at addRule(): this is
+      // the moment the row acquires the power to charge somebody, and it is the
+      // moment every path — the anonymous POST /api/payments/checkout, an
+      // accepted quotation, an admin raising an order by hand — necessarily
+      // arrives at. A row that cannot price a line cannot reach an order line,
+      // a payment, an invoice, a ledger entry or an entitlement.
+      //
+      // It reads the row and never the caller: `line.kind` is whatever the
+      // browser said, and a browser that relabels its student membership as a
+      // 'course' would walk past a check that trusted it.
+      //
+      // NOTHING HISTORICAL IS TOUCHED. This refuses a NEW charge. Orders,
+      // invoices, payments and ledger entries already raised against such a fee
+      // stay exactly as they are and stay readable — see src/db/revenue.ts,
+      // which reports them under `historical_withdrawn` rather than hiding them.
+      const verdict = classifyScheduledFee({ code: fee.code, label: fee.label, kind: fee.kind });
+      if (verdict.studentCharge) {
+        throw new OrderError('student_charge_refused', verdict.refusal as string);
+      }
+
       unit = fee.amountPaise;
       description = fee.label;
     } else if (Number.isInteger(line.unitPricePaise) && line.kind === 'donation') {
@@ -156,7 +485,7 @@ export async function createOrder(db: DB, ctx: AuditContext | null, draft: Draft
     if (!Number.isInteger(unit) || unit < 0) throw new OrderError('bad_amount', 'Invalid price');
 
     const lineTotal = unit * qty;
-    const lineTax = Math.round((lineTotal * taxRateBps) / 10_000);
+    const lineTax = taxOnMinor(lineTotal, taxRateBps);
     subtotal += lineTotal;
     tax += lineTax;
 
@@ -190,6 +519,14 @@ export async function createOrder(db: DB, ctx: AuditContext | null, draft: Draft
   const orderNo = await nextOrderNo(db);
   const needsShipping = priced.some((l) => l.kind === 'product');
 
+  // See the note beside `quoteValidUntil`. An invoice raised against an accepted
+  // quotation is not an abandoned basket, and must not be swept away as one.
+  // End of the last valid day, in UTC — a quotation valid "until the 31st" is
+  // valid ON the 31st, and taking midnight would take a day off it.
+  const expiresAt = quotePriced
+    ? (quoteValidUntil ? new Date(`${quoteValidUntil}T23:59:59.999Z`) : null)
+    : new Date(Date.now() + 45 * 60_000);
+
   const [order] = await db.insert(s.orders).values({
     orderNo,
     personId: draft.personId ?? null,
@@ -204,8 +541,9 @@ export async function createOrder(db: DB, ctx: AuditContext | null, draft: Draft
     shipTo: draft.shipTo ?? null,
     fulfilment: needsShipping ? 'pending' : 'not_required',
     // Unpaid orders release their stock reservation after 45 minutes, so an
-    // abandoned checkout cannot hold the last item indefinitely.
-    expiresAt: new Date(Date.now() + 45 * 60_000),
+    // abandoned checkout cannot hold the last item indefinitely. A quote-derived
+    // order is the exception — see above.
+    expiresAt,
   }).returning();
 
   for (const line of priced) {
@@ -440,6 +778,36 @@ export async function confirmPayment(
 async function activate(db: DB, ctx: AuditContext | null, orderId: number): Promise<void> {
   const { activateForOrder } = await import('./entitlements');
   await activateForOrder(db, ctx, orderId);
+
+  // ── AND THE TRAINING LINES, WHICH activateForOrder() DOES NOT ISSUE ──
+  //
+  // 'training' is not an entitlement subject. entitlements.ts reports such a
+  // line as `not_entitling`, which is an honest statement about THAT module and
+  // says nothing about whether the student may train — and until this call
+  // existed, nothing else was listening. A fully confirmed payment for a
+  // child's classes wrote no row at all: no entitlement, and not even the
+  // BLOCKED record that src/db/training-products.ts exists to leave behind, so
+  // the money was taken, nothing was issued, and blockedTraining() — the finance
+  // desk's refund queue — could not see it either. That is the one state this
+  // whole design is meant to make impossible, and it was the default.
+  //
+  // Gated twice before it runs. On the order carrying a training line, so a
+  // merchandise order pays for no extra queries; and on the order being PAID,
+  // so a replayed confirmation of a refunded order does not acquire a new way
+  // to throw. Idempotent through `training_entitlements_order_line_uk`, exactly
+  // as activateForOrder() is idempotent through its own unique index, so the
+  // gateway's retry and the reconcile cron issue nothing twice.
+  const [current] = await db.select({ status: s.orders.status })
+    .from(s.orders).where(eq(s.orders.id, orderId)).limit(1);
+  if (current?.status !== 'paid' && current?.status !== 'fulfilled') return;
+
+  const [trainingLine] = await db.select({ id: s.orderLines.id }).from(s.orderLines)
+    .where(and(eq(s.orderLines.orderId, orderId), eq(s.orderLines.kind, 'training')))
+    .limit(1);
+  if (!trainingLine) return;
+
+  const { activateTrainingForOrder } = await import('./training-products');
+  await activateTrainingForOrder(db, ctx, orderId);
 }
 
 /** Order statuses that are only reachable once a confirmation has completed. */
@@ -477,7 +845,8 @@ async function assertConfirmationComplete(db: DB, payment: any): Promise<void> {
 
 /** Double-entry postings so the treasurer's report derives from one record. */
 async function postLedger(db: DB, order: any, payment: any, verified: VerifiedPayment) {
-  const today = new Date().toISOString().slice(0, 10);
+  // The federation's own date, not UTC's. See federationToday().
+  const today = federationToday();
   const lines = await db.select().from(s.orderLines).where(eq(s.orderLines.orderId, order.id));
 
   for (const line of lines) {
@@ -486,6 +855,13 @@ async function postLedger(db: DB, order: any, payment: any, verified: VerifiedPa
       direction: 'credit',
       amountPaise: line.totalPaise,
       orderId: order.id,
+      // WHICH line, not merely which order (migration 0044). The account says
+      // `income.other` for both an institutional training quotation and a
+      // facility hire, so a revenue report reading the account alone cannot
+      // tell them apart on the same order. src/db/revenue.ts joins through
+      // this, and reports "not attributable" where it is null rather than
+      // choosing a line — which is what the old rows have to be given.
+      orderLineId: line.id,
       paymentId: payment.id,
       description: line.description,
       occurredOn: today,
@@ -780,7 +1156,7 @@ export async function completeRefund(
 
     // The reversal, posted as its own pair rather than by deleting the original
     // entries. An accounts trail that can be edited is not a trail (§78).
-    const today = now.toISOString().slice(0, 10);
+    const today = federationToday(now);
     await tx.insert(s.ledgerEntries).values({
       account: 'income.refunds',
       direction: 'debit',
@@ -810,6 +1186,14 @@ export async function completeRefund(
   const { revokeForRefund } = await import('./entitlements');
   const revocation = await revokeForRefund(db, ctx, refund.id, { now });
 
+  // AND THE TRAINING IT PAID FOR. revokeForRefund() reads `entitlements`, which
+  // has no term for training, so a refunded family used to get their money back
+  // and keep the mat until the term ran out. Same rules, applied by the module
+  // that owns the table: a completed refund only, a full refund only, and the
+  // row kept with the refund and the reason on it.
+  const { revokeTrainingForRefund } = await import('./training-products');
+  const trainingRevocation = await revokeTrainingForRefund(db, ctx, refund.id, { now });
+
   const after = (await db.select().from(s.refunds).where(eq(s.refunds.id, refund.id)).limit(1))[0];
-  return { refund: after, alreadyCompleted: false, fullyRefunded: full, revocation };
+  return { refund: after, alreadyCompleted: false, fullyRefunded: full, revocation, trainingRevocation };
 }

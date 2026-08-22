@@ -6,9 +6,11 @@
 // because a verification service that cannot say how it knows is not a
 // verification service.
 //
-// Three provenances, rendered so they cannot be mistaken for one another:
+// Four provenances, rendered so they cannot be mistaken for one another:
 //
 //   EXAMINED           traced to a grading with examiner scores behind it
+//   PROGRAMME          a course-completion certificate resting on an attendance
+//                      register. No examination was held and no rank is claimed
 //   LEGACY RECORD      a real grade predating digital records; the federation
 //                      holds evidence, but no examination record exists here
 //   LEGACY REGISTER    the old hand-maintained list, used only while no
@@ -109,6 +111,15 @@ const prefill = (Astro.url.searchParams.get('id') || '').slice(0, 60);
             The credential is traced to a grading held by the federation, with a panel, a scorecard
             and a recorded decision behind it. This is the strongest statement the federation makes
             about a grade.
+          </p>
+        </div>
+        <div class="card">
+          <span class="v-prov v-prov-programme">Programme attendance</span>
+          <p class="card-body" style="margin-top:14px">
+            A certificate of completion for a federation training programme, issued on the attendance
+            register and approved by a named authority. It is <em>not</em> an examination result and it
+            confers no rank or grade — the sessions delivered and the sessions attended are printed on
+            the document itself.
           </p>
         </div>
         <div class="card">
@@ -219,6 +230,7 @@ const prefill = (Astro.url.searchParams.get('id') || '').slice(0, 60);
     border: 1px solid;
   }
   :global(.v-prov-examined) { color: #145A32; border-color: #A9CDB6; background: #EEF6F0; }
+  :global(.v-prov-programme){ color: #1F4E79; border-color: #A9BFD6; background: #EEF3F8; }
   :global(.v-prov-legacy)   { color: var(--gold-3); border-color: var(--gold-dim); background: rgba(160, 124, 30, 0.08); }
   :global(.v-prov-register) { color: var(--red-2); border-color: var(--red-3); background: rgba(142, 18, 18, 0.05); }
 
@@ -338,6 +350,17 @@ const prefill = (Astro.url.searchParams.get('id') || '').slice(0, 60);
         card: 'v-card-ok',
         verdict: 'v-verdict-ok',
       },
+      // NOT a weaker "examined" and NOT a legacy record. A course-completion
+      // certificate rests on an attendance register, confers no rank, and had
+      // no examination behind it because none was held. Rendering it under the
+      // legacy badge told an employer that a 2026 attendance certificate was an
+      // old unexamined GRADE — a claim the federation cannot defend and the
+      // holder never made.
+      programme: {
+        badge: '<span class="v-prov v-prov-programme">Programme attendance — not an examination, confers no grade</span>',
+        card: 'v-card-ok',
+        verdict: 'v-verdict-ok',
+      },
       unverified_legacy: {
         badge: '<span class="v-prov v-prov-legacy">Legacy record — not examined in this system</span>',
         card: 'v-card-legacy',
@@ -352,7 +375,8 @@ const prefill = (Astro.url.searchParams.get('id') || '').slice(0, 60);
 
     type ProvKey = keyof typeof PROV;
     const isProv = (v: unknown): v is ProvKey =>
-      v === 'examined' || v === 'unverified_legacy' || v === 'legacy_register';
+      v === 'examined' || v === 'programme'
+      || v === 'unverified_legacy' || v === 'legacy_register';
 
     const show = (html: string) => { out.innerHTML = html; };
 
@@ -451,6 +475,7 @@ const prefill = (Astro.url.searchParams.get('id') || '').slice(0, 60);
             ${row('Certificate number', c.certificateNo, 'v-v-id')}
             ${row('Holder', c.name)}
             ${row('Member ID', c.federationId)}
+            ${row('Certificate', c.title)}
             ${row('Grade', c.grade)}
             ${row('Awarded on', c.awardedOn)}
             ${row('Syllabus version', c.syllabusVersion)}

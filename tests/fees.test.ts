@@ -488,8 +488,27 @@ describe('no price is hardcoded anywhere outside the engine', () => {
 
     const offenders = files.filter((f) => {
       const src = readFileSync(f, 'utf8');
+      // COMMENT LINES ARE STRIPPED FIRST, and the reason is the same one
+      // tests/student-charge-attack.test.ts and tests/money-safety.test.ts give
+      // for doing it: the note above a fix quotes the line it replaced, and a
+      // guard that reads the explanation as the code fails the file for
+      // documenting itself.
+      //
+      // This was found by src/pages/portal/seller/shipping.astro, which removed
+      // an inline `Math.floor(q.amountMinor / 100)` in favour of a shared
+      // formatter and left a comment saying so. The arithmetic was gone; the
+      // sentence describing it tripped the test. A guard that punishes the fix
+      // teaches people to delete the comment instead, which is the opposite of
+      // what this file wants.
+      const code = src
+        .split(/\r?\n/)
+        .filter((l) => {
+          const t = l.trimStart();
+          return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*');
+        })
+        .join('\n');
       // A multiplication or division against a rupee/paise-looking literal.
-      return /(amountMinor|totalMinor|priceMinor)\s*[*/]/.test(src);
+      return /(amountMinor|totalMinor|priceMinor)\s*[*/]/.test(code);
     });
     expect(offenders, 'a surface is doing fee arithmetic').toEqual([]);
   });
