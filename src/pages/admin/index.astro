@@ -52,32 +52,38 @@ if (authed) {
           <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;justify-content:center">Sign in</button>
 
           <!--
-            Recovery, stated rather than hidden. `details` and not a modal, so it
-            works with JavaScript off like the rest of this form.
+            Recovery, stated rather than hidden — and SHORT.
+
+            This was a hundred and fifty words on a sign-in page: why there is
+            no reset link, why a security question would be weaker than the
+            password it replaced, what the reset does to existing sessions.
+            Every sentence true, and none of it what somebody staring at a
+            rejected password can act on. A page that explains itself at length
+            to a person who is locked out is not being helpful, it is being read
+            past — and the one line that mattered, the command, was buried in
+            the fourth sentence of the second paragraph.
+
+            The reasoning still exists; it lives beside the rule it explains, in
+            src/lib/auth.ts and docs/DEPLOYMENT.md. What is left here is what the
+            reader can do about it.
           -->
           <details style="margin-top:18px">
             <summary style="cursor:pointer;font-size:.78rem;color:var(--gold);font-family:var(--font-display);letter-spacing:.04em">Forgotten your password?</summary>
             <div style="margin-top:10px;font-size:.75rem;color:var(--muted);line-height:1.7">
               <p style="margin:0">
-                There is no self-service reset here, for two reasons worth knowing rather than
-                guessing at. This console has no mail transport configured, so a reset link
-                would have nowhere to go. And a security question — a date of birth, a first
-                school — would be weaker than the password it replaced: this federation's own
-                register stores dates of birth, so an answer anyone could look up would become
-                the way in to an account that can read every record in it.
+                No self-service reset — this console sends no mail. A federation officer
+                reissues it:
+                <code style="font-size:.72rem">npm run user:reset-password -- --email you@mmakf.in</code>
               </p>
-              <p style="margin:10px 0 0">
-                A federation officer with database access reissues the credential instead:
-                <code style="font-size:.72rem">npm run user:reset-password -- --email you@mmakf.in</code>.
-                It is shown once, every existing session for that account is signed out, and
-                the holder must choose a new password on first use.
+              <p style="margin:8px 0 0;opacity:.8">
+                Leave the email blank only when bootstrapping a deployment that has no
+                accounts yet.
               </p>
             </div>
           </details>
 
           <p style="margin-top:20px;font-size:.75rem;color:var(--muted);text-align:center;line-height:1.6">
-            Authorised personnel only. Every action is recorded against your account.<br />
-            <span style="opacity:.8">Leave the email blank only if you are using the shared office password, which is retired once personal accounts exist.</span>
+            Authorised personnel only. Every action is recorded against your account.
           </p>
         </form>
       </div>
