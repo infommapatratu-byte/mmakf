@@ -131,7 +131,7 @@
 // to type is worth more than a null nobody notices.
 
 import {
-  pgTable, serial, text, integer, boolean, timestamp, date,
+  pgTable, serial, text, integer, boolean, timestamp, date, jsonb,
   uniqueIndex, index, pgEnum,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -621,4 +621,36 @@ export const scheduleAnnouncements = pgTable('schedule_announcements', {
 }, (t) => ({
   scheduleIdx: index('schedule_announcements_schedule_idx').on(t.scheduleId, t.createdAt),
   statusIdx: index('schedule_announcements_status_idx').on(t.status, t.createdAt),
+}));
+
+/**
+ * A materialised DirectoryDay, one row per club per date.
+ *
+ * Mirrors drizzle/0054_schedule_day_cache.sql, whose header carries the full
+ * reasoning. The two properties worth restating where the queries can see them:
+ *
+ *   · `fingerprint` is a digest of the WHOLE scheduling configuration, so any
+ *     change anywhere invalidates every row. Coarse deliberately — a targeted
+ *     invalidation would be a second model of what-affects-what, and the day it
+ *     disagreed with the resolver a parent would read a club's old hours. This
+ *     cache can be empty; it cannot be wrong.
+ *   · (dojoId, onDate) is UNIQUE, and the read path upserts on it. Two rows for
+ *     one day would make which answer a visitor gets a coin toss.
+ *
+ * `dojoId` carries NO foreign key, matching the migration. A cache is derived
+ * data: it must never be the reason a club cannot be deleted, and a stale row
+ * for a club that no longer exists is swept by date like any other.
+ */
+export const scheduleDayCache = pgTable('schedule_day_cache', {
+  id: serial('id').primaryKey(),
+  dojoId: integer('dojo_id').notNull(),
+  onDate: date('on_date').notNull(),
+  fingerprint: text('fingerprint').notNull(),
+  /** The DirectoryDay exactly as the resolver returned it. */
+  payload: jsonb('payload').notNull(),
+  computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  targetUk: uniqueIndex('schedule_day_cache_target_uk').on(t.dojoId, t.onDate),
+  dateIdx: index('schedule_day_cache_date_idx').on(t.onDate),
+  fingerprintIdx: index('schedule_day_cache_fingerprint_idx').on(t.fingerprint),
 }));
