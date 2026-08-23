@@ -30,12 +30,15 @@
 
 import Base from '@/layouts/Base.astro';
 import { AUDIENCES } from '@/data/audiences';
-import { href as surfaceHref, canonicalFor, type Surface } from '@/lib/surface';
+import { linkTo, canonicalFor, type Surface } from '@/lib/surface';
 
 export const prerender = false;
 
 const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
-const h = (p: string) => surfaceHref(surface, p);
+// linkTo, not href(): these pages link to paths on the PUBLIC surface
+// (/start/individual, /training/estimate). Rendered relative on learn.mmakf.in
+// they were rewritten into /learn/… and 404d. See linkTo() in src/lib/surface.ts.
+const h = (p: string) => linkTo(surface, p);
 
 // One entry per audience, plus the two routes that are not an institution
 // applying: someone who wants to teach, and someone who has not decided.

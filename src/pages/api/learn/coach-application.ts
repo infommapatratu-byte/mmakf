@@ -93,7 +93,21 @@ export async function submitCoachApplication(
     return { kind: 'invalid', field: 'email', message: 'That does not look like an email address.' };
   }
 
-  const years = Number(fields.teachingYears);
+  // AN UNANSWERED BOX IS NOT A ZERO.
+  //
+  // The form path sends every field through String(form.get(k) ?? '').trim(),
+  // so an untouched optional number input arrives as the EMPTY STRING, not as
+  // undefined. Number('') is 0, which passed the finite-and-non-negative guard
+  // below and filed the applicant as having stated zero years of teaching.
+  // /admin/coaches then renders "· 0 years teaching" — its `!= null` test exists
+  // precisely to tell "not stated" from a real number, and a coerced 0 defeats
+  // it, so a screener reads an unanswered question as a complete beginner.
+  //
+  // The JSON caller was never affected (Number(undefined) is NaN, which stores
+  // null), so the two entry points disagreed — which is how we know null was
+  // always the intent.
+  const rawYears = typeof fields.teachingYears === 'string' ? fields.teachingYears.trim() : fields.teachingYears;
+  const years = rawYears === '' || rawYears == null ? NaN : Number(rawYears);
 
   if (!isConfigured()) {
     return {

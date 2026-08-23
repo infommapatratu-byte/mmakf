@@ -8,7 +8,7 @@ import { get } from '@/lib/storage';
 import { CREST_ABSOLUTE } from '@/lib/brand';
 import {
   PUBLIC_NAV, PUBLIC_ACTIONS, LEARN_NAV, LEARN_ACTIONS,
-  canonicalFor, href as surfaceHref, isIndexable, SURFACE_ORIGIN,
+  canonicalFor, href as surfaceHref, linkTo, isIndexable, SURFACE_ORIGIN,
   type Surface,
 } from '@/lib/surface';
 import { isPrivatePath, breadcrumbGraph, type Crumb } from '@/lib/seo';
@@ -55,6 +55,16 @@ const {
 // layout is rendered outside a request (a test, a prerender), which is the
 // fail-safe direction — an unrecognised context gets the public federation.
 const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+
+// EVERY FOOTER LINK WAS A BARE PUBLIC PATH.
+//
+// The footer is rendered on all three hosts and wrote /start, /programs,
+// /schedule and fourteen more as literals. On learn.mmakf.in and
+// admin.mmakf.in the middleware prefixes every non-shared path, so each one
+// became /learn/start or /admin/programs and 404d — the entire footer, on two
+// of the three surfaces. linkTo() sends them to the origin that actually
+// serves them and leaves the public surface exactly as it was.
+const h = (p: string) => linkTo(surface, p);
 
 const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
 
@@ -304,36 +314,36 @@ const orgSchema = {
               <div class="ft-h">Training</div>
               {/* The intake's first question. Every other link in this column
                   describes the training; this one starts it. */}
-              <a href="/start">Begin an engagement</a>
-              <a href="/programs">Programs</a>
-              <a href="/academy">Online Academy</a>
-              <a href="/schedule">Class Schedule</a>
-              <a href="/belt-system">Belt System & Syllabus</a>
-              <a href="/facilities">Dojo Facilities</a>
-              <a href="/faq">FAQ</a>
+              <a href={h('/start')}>Begin an engagement</a>
+              <a href={h('/programs')}>Programs</a>
+              <a href={h('/academy')}>Online Academy</a>
+              <a href={h('/schedule')}>Class Schedule</a>
+              <a href={h('/belt-system')}>Belt System & Syllabus</a>
+              <a href={h('/facilities')}>Dojo Facilities</a>
+              <a href={h('/faq')}>FAQ</a>
             </div>
 
             <div class="ft-col">
               <div class="ft-h">Federation</div>
-              <a href="/search">Search the federation</a>
-              <a href="/calendar">Federation calendar</a>
-              <a href="/governance">Governance & Officials</a>
+              <a href={h('/search')}>Search the federation</a>
+              <a href={h('/calendar')}>Federation calendar</a>
+              <a href={h('/governance')}>Governance & Officials</a>
               <a href="/governance#documents">Documents & Policies</a>
-              <a href="/registration">Member Registration</a>
+              <a href={h('/registration')}>Member Registration</a>
               <a href="/registration#verify">Verify a Member ID</a>
-              <a href="/affiliation">Affiliation & Certification</a>
+              <a href={h('/affiliation')}>Affiliation & Certification</a>
               <a href="/events#results">Results</a>
-              <a href="/gallery">Gallery</a>
-              <a href="/shop">Shop</a>
+              <a href={h('/gallery')}>Gallery</a>
+              <a href={h('/shop')}>Shop</a>
             </div>
 
             <div class="ft-col">
               <div class="ft-h">Connect</div>
               <a href="mailto:admin@mmakf.in">admin@mmakf.in</a>
               <a href="mailto:karate.pramod@gmail.com">karate.pramod@gmail.com</a>
-              <a href="/contact">Visit the dojo</a>
-              <a href="/unit">Unit Portal →</a>
-              <a href="/admin">Admin →</a>
+              <a href={h('/contact')}>Visit the dojo</a>
+              <a href={h('/unit')}>Unit Portal →</a>
+              <a href={h('/admin')}>Admin →</a>
             </div>
           </div>
 

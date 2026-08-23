@@ -64,7 +64,7 @@ import {
   createSchedule, draftVersion, setRules, publishVersion, withdrawVersion,
   addException, removeException,
   publishedWeek, openingHoursOn, todayIso, addDays,
-  type OwnerScope, type SchedulePurpose, type ScheduleOwner, type RuleInput,
+  type OwnerScope, type SchedulePurpose, type ScheduleOwner, type RuleInput, type IsoDate,
 } from '@/db/scheduling';
 import { directoryDay, directoryRange, openAtAnyPoint, MAX_RANGE_DAYS as DIRECTORY_MAX_DAYS } from '@/db/schedule-directory';
 
@@ -470,10 +470,22 @@ export const POST: APIRoute = async ({ request, params }) => {
       }
 
       case 'season/move': {
+        // moveSeason takes the window as ONE OBJECT, not two positional dates.
+        // Passing them flat made `window` the startsOn STRING, so window.startsOn
+        // was undefined and assertIsoDate threw on every call — season/move has
+        // never once succeeded. Caught by `tsc --noEmit`, which the build does not
+        // run: astro build accepts a wrong arity without a word.
+        //
+        // `reason` is still REQUIRED of the caller so the request contract does not
+        // change, but moveSeason has no parameter for it and does not record it.
+        // Kept visible here rather than dropped silently.
+        requireText(body, 'reason', 1000);
         const season = await moveSeason(
           database, ctx, requireInt(body, 'seasonId'),
-          requireText(body, 'startsOn', 10), requireText(body, 'endsOn', 10),
-          requireText(body, 'reason', 1000),
+          {
+            startsOn: requireText(body, 'startsOn', 10) as IsoDate,
+            endsOn: requireText(body, 'endsOn', 10) as IsoDate,
+          },
         );
         return json({ ok: true, season }, 200);
       }

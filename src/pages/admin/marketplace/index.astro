@@ -86,7 +86,7 @@ const money = (m: number) => `₹${Math.floor(Math.abs(m) / 100).toLocaleString(
 const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
 ---
 
-<AdminShell title="Marketplace" action="marketplace:read">
+<AdminShell title="Marketplace" requires="marketplace:read">
   <section>
     <div class="container">
 

@@ -241,6 +241,8 @@ if (authed) {
           <a href="#products">Shop Products</a>
           <a href="#achievements">Achievements</a>
           <a href="#testimonials">Testimonials</a>
+          <a href="#social">Social Channels</a>
+          <a href="#press">Press Coverage</a>
           <a href="#leads">Enrolment Leads</a>
         </nav>
         <div style="padding:16px;border-top:1px solid var(--border)">
@@ -514,6 +516,30 @@ if (authed) {
             {n:'name',l:'Name'},{n:'role',l:'Role'},{n:'img',l:'Photo (optional)',full:true},{n:'txt',l:'Testimonial',full:true,textarea:true}
           ]} />
 
+        {/*
+          TWO KEYS THIS CONSOLE STORED AND COULD NOT EDIT.
+
+          `social` and `press` have been in KEYS, in the seed and in
+          /api/data/[key] all along — the API would have accepted a write to
+          either of them from the day it was written. What was missing was any
+          panel pointing at them, so the only way to change the federation's own
+          channels was a developer and a commit.
+
+          That is not a small gap: `social` is what the site footer renders on
+          every page, and what /press lists as the federation's channels. A
+          telephone number can be corrected in Federation Profile in ten
+          seconds; a YouTube link could not be corrected at all.
+        */}
+        <ListPanel id="social" title="Social Channels" subtitle="The federation's own channels — the links in the footer of every page, and the channel list on /press. Mark exactly one as Primary: that is the one shown first. A row with no URL is not published." apiKey="social"
+          rows={data!.social} fields={[
+            {n:'platform',l:'Platform (YouTube / Facebook / Instagram)'},{n:'primary',l:'Primary (Yes / No)'},{n:'name',l:'Name shown',full:true},{n:'url',l:'URL',full:true},{n:'note',l:'Note (internal — not published)',full:true}
+          ]} />
+
+        <ListPanel id="press" title="Press Coverage" subtitle="Newspaper and magazine coverage on /press. The clipping image is what the page renders — a row without one is not published. Upload the scan here rather than linking to it elsewhere." apiKey="press"
+          rows={data!.press} fields={[
+            {n:'outlet',l:'Outlet'},{n:'date',l:'Date (e.g. Nov 2023)'},{n:'verified',l:'Evidence held'},{n:'headline',l:'Headline',full:true},{n:'img',l:'Clipping image',full:true},{n:'summary',l:'Summary',full:true,textarea:true}
+          ]} />
+
         <section id="leads" class="admin-panel">
           <h2 class="admin-h">Enrolment Leads &mdash; closed archive</h2>
           {/*
@@ -640,6 +666,25 @@ if (authed) {
       z-index: 999;
     }
     .admin-toast.show { opacity: 1; transform: none; }
+    /*
+      A REFUSAL IS A SENTENCE, NOT A LABEL.
+
+      The success toast is display type: uppercase, letter-spaced, three words
+      at most. Set "You do not have authority to edit federation content" in it
+      and it becomes a wall nobody reads. The error variant is plain body text,
+      wraps, and stays long enough to be read rather than merely noticed.
+    */
+    .admin-toast.is-error {
+      border-color: var(--red-2);
+      color: var(--red-2);
+      font-family: var(--font-body, inherit);
+      font-size: .82rem;
+      letter-spacing: normal;
+      text-transform: none;
+      line-height: 1.55;
+      max-width: min(420px, calc(100vw - 48px));
+      text-align: left;
+    }
 
     .lp-list { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; }
     .lp-item {
@@ -692,7 +737,8 @@ if (authed) {
       color: var(--off-white);
     }
     .lp-upload-btn:hover { border-color: var(--gold); color: var(--gold); }
-    .lp-upload-note { font-size: .72rem; color: var(--muted); }
+    .lp-upload-note { font-size: .72rem; color: var(--muted); line-height: 1.5; }
+    .lp-upload-note.is-error { color: var(--red-2); }
     .lp-img-prev {
       max-width: 100%; max-height: 140px; object-fit: contain;
       border-radius: var(--radius); border: 1px solid var(--border);
@@ -712,13 +758,56 @@ if (authed) {
 
   <script is:inline define:vars={{ data: { ...data, unitAccess: unitAccessList } }}>
     // Toast
-    function toast(msg) {
+    function toast(msg, ms) {
       const t = document.getElementById('toast');
       if (!t) return;
       t.textContent = msg || 'Saved';
+      t.classList.remove('is-error');
       t.classList.add('show');
       clearTimeout(window._tt);
-      window._tt = setTimeout(() => t.classList.remove('show'), 1800);
+      window._tt = setTimeout(() => t.classList.remove('show'), ms || 1800);
+    }
+
+    // WHY A WRITE FAILED, IN WORDS, WHERE THE OPERATOR IS LOOKING.
+    //
+    // Every write on this page reported the same two words — "Save failed" —
+    // whatever had actually happened. The routes it calls do not answer that
+    // way: /api/data/[key] says "You do not have authority to edit federation
+    // content" when an account holds editorial rights at a unit but not
+    // nationally, and names the key and the shape it must keep when a list is
+    // posted as an object. /api/uploads/image says the file is 6.2 MB and the
+    // limit is 3, or that no media store is linked to this deployment.
+    //
+    // None of it reached the screen. A refusal, an expired session and an
+    // outage were one indistinguishable message, so the only way to tell them
+    // apart was the browser's network tab — which is not a thing a federation
+    // officer is going to open, and is why this is reported as "the admin panel
+    // does not work" rather than as any of the six separate things it can be.
+    function toastError(msg) {
+      const t = document.getElementById('toast');
+      if (!t) return;
+      t.textContent = msg;
+      t.classList.add('is-error');
+      t.classList.add('show');
+      clearTimeout(window._tt);
+      // Longer than a success: this one has to be read, not merely noticed.
+      window._tt = setTimeout(() => t.classList.remove('show'), 9000);
+    }
+
+    /** The server's own sentence where it sent one, and a useful reading where it did not. */
+    function reasonFrom(res, payload, fallback) {
+      if (!res) return fallback + ' — the request never reached the server. Check the connection and try again.';
+      const said = payload && typeof payload.error === 'string' ? payload.error : '';
+      if (said) return fallback + ' — ' + said;
+      if (res.status === 401) return fallback + ' — this session has expired. Sign in again.';
+      if (res.status === 403) return fallback + ' — this account may not edit federation content.';
+      if (res.status === 413) return fallback + ' — that was too large to send in one request.';
+      return fallback + ' — the server answered ' + res.status + '.';
+    }
+
+    async function reasonFor(res, fallback) {
+      const payload = res ? await res.json().catch(() => null) : null;
+      return reasonFrom(res, payload, fallback);
     }
 
     // THE "MUST CHANGE THIS PASSWORD" PROMPT.
@@ -778,7 +867,7 @@ if (authed) {
         }).catch(() => null);
         if (btn) btn.disabled = false;
         if (r && r.ok) { data[key] = out; toast('Profile saved'); }
-        else toast('Save failed');
+        else toastError(await reasonFor(r, 'The profile was not saved'));
       });
     });
 
@@ -818,7 +907,7 @@ if (authed) {
           body: bodyFor(rows),
         }).catch(() => null);
         if (r && r.ok) { commit(rows); render(); toast(okMsg); return true; }
-        toast(failMsg);
+        toastError(await reasonFor(r, failMsg));
         return false;
       }
 
@@ -871,15 +960,165 @@ if (authed) {
         // image somebody else already hosts is still legitimate; what was
         // missing was any way to put a file on this federation's own domain
         // without a developer and a git commit.
-        const picker = imageFieldLabel(f)
-          ? '<div class="lp-upload"><label class="lp-upload-btn">Upload a file'
-            + '<input type="file" accept="image/jpeg,image/png,image/webp" data-upload-for="' + f.n + '" hidden />'
-            + '</label><span class="lp-upload-note" data-note-for="' + f.n + '"></span></div>'
-          : '';
-        const prev = imageFieldLabel(f)
-          ? '<div class="lp-img-slot" data-for="' + f.n + '">' + previewHtml(imageInfo(value)) + '</div>'
-          : '';
+        const picker = imageFieldLabel(f) ? pickerHtml(f.n) : '';
+        const prev = imageFieldLabel(f) ? slotHtml(f.n, previewHtml(imageInfo(value))) : '';
         return '<div class="' + (f.full ? 'full' : '') + '">' + label + control + picker + prev + '</div>';
+      }
+
+      function pickerHtml(name) {
+        return '<div class="lp-upload"><label class="lp-upload-btn">Upload a file'
+          + '<input type="file" accept="image/jpeg,image/png,image/webp" data-upload-for="' + name + '" hidden />'
+          + '</label><span class="lp-upload-note" data-note-for="' + name + '"></span></div>';
+      }
+
+      function slotHtml(name, inner) {
+        return '<div class="lp-img-slot" data-for="' + name + '">' + (inner || '') + '</div>';
+      }
+
+      // ─── A PHOTOGRAPH OFF A PHONE DOES NOT FIT THROUGH THIS CONSOLE ────────
+      //
+      // /api/uploads/image caps a file at 3 MB, and it says why: a serverless
+      // request body is limited to about 4.5 MB and base64 adds a third, so a
+      // larger file is cut off by the platform before the route ever sees it —
+      // which reaches the browser as a failure with no sentence attached.
+      //
+      // A current handset writes 4-12 MB per frame. So the ordinary case — take
+      // a photograph of the new instructor and put it on the site — was refused
+      // every single time, and the only repair the console offered was to go
+      // and resize the file somewhere else first. Most people stop there, and
+      // reasonably conclude that uploading does not work.
+      //
+      // The browser can do that resizing, so it does. Nothing here is ever
+      // shown larger than a portrait card, and 1600px on the long edge is more
+      // than that has ever needed.
+      //
+      // A FILE THAT ALREADY FITS IS SENT UNTOUCHED. Re-encoding one that was
+      // fine would throw away quality for nothing.
+      const UPLOAD_FIT_BYTES = 2.4 * 1024 * 1024;
+
+      async function shrinkForUpload(file) {
+        if (file.size <= UPLOAD_FIT_BYTES) return file;
+        if (typeof createImageBitmap !== 'function') return file;
+        let bmp;
+        try { bmp = await createImageBitmap(file); } catch (e) { return file; }
+        const attempts = [[1600, 0.85], [1200, 0.75], [900, 0.7]];
+        try {
+          for (let i = 0; i < attempts.length; i++) {
+            const edge = attempts[i][0], quality = attempts[i][1];
+            const scale = Math.min(1, edge / Math.max(bmp.width, bmp.height));
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, Math.round(bmp.width * scale));
+            canvas.height = Math.max(1, Math.round(bmp.height * scale));
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return file;
+            // A JPEG carries no alpha and an unpainted canvas is transparent
+            // black, so a PNG logo with a clear background would arrive as a
+            // black rectangle. White is what these sit on.
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+            const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+            if (blob && blob.size <= UPLOAD_FIT_BYTES) {
+              const base = String(file.name || 'photo').replace(/\.[^.]+$/, '');
+              return new File([blob], base + '.jpg', { type: 'image/jpeg' });
+            }
+          }
+          // Three passes and still too large — send the original and let the
+          // route say so in its own words rather than guessing at one here.
+          return file;
+        } finally {
+          if (bmp && typeof bmp.close === 'function') bmp.close();
+        }
+      }
+
+      // The preview follows the field as it is typed, so a wrong host or a
+      // broken link is visible before Save rather than after publishing.
+      function wirePreviews(scope) {
+        scope.querySelectorAll('input, textarea').forEach((el) => {
+          const slot = scope.querySelector('.lp-img-slot[data-for="' + el.name + '"]');
+          if (!slot) return;
+          el.addEventListener('input', () => { slot.innerHTML = previewHtml(imageInfo(el.value)); });
+        });
+      }
+
+      function wireUploads(scope) {
+        scope.querySelectorAll('input[data-upload-for]').forEach((fileEl) => {
+          const name = fileEl.dataset.uploadFor;
+          const target = scope.querySelector('[name="' + name + '"]');
+          const note = scope.querySelector('.lp-upload-note[data-note-for="' + name + '"]');
+          const slot = scope.querySelector('.lp-img-slot[data-for="' + name + '"]');
+          const say = (msg, bad) => {
+            if (!note) return;
+            note.textContent = msg;
+            if (bad) note.classList.add('is-error'); else note.classList.remove('is-error');
+          };
+          fileEl.addEventListener('change', async () => {
+            const picked = fileEl.files && fileEl.files[0];
+            if (!picked) return;
+            say('Preparing ' + picked.name + '...', false);
+            const file = await shrinkForUpload(picked).catch(() => picked);
+            const resized = file !== picked;
+            say('Uploading ' + picked.name
+              + (resized ? ' - resized to ' + (file.size / 1048576).toFixed(1) + ' MB' : '') + '...', false);
+            const dataUrl = await new Promise((resolve, reject) => {
+              const fr = new FileReader();
+              fr.onload = () => resolve(String(fr.result || ''));
+              fr.onerror = () => reject(fr.error);
+              fr.readAsDataURL(file);
+            }).catch(() => null);
+            if (!dataUrl) { say('That file could not be read.', true); fileEl.value = ''; return; }
+            const res = await fetch('/api/uploads/image', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filename: file.name, contentType: file.type, data: dataUrl }),
+            }).catch(() => null);
+            const payload = res ? await res.json().catch(() => null) : null;
+            if (res && res.ok && payload && payload.url) {
+              // The field is filled in for the operator; the row is NOT saved
+              // yet. Storing a file and publishing it are two decisions, and
+              // Save is still the one that publishes.
+              if (target) target.value = payload.url;
+              if (slot) slot.innerHTML = previewHtml(imageInfo(payload.url));
+              say(resized
+                ? 'Uploaded, resized to fit. Press Save to publish it.'
+                : 'Uploaded. Press Save to publish it.', false);
+            } else {
+              say(reasonFrom(res, payload, 'The file was not stored'), true);
+            }
+            fileEl.value = '';
+          });
+        });
+      }
+
+      // THE "ADD NEW" FORM HAD NO PICKER AT ALL.
+      //
+      // Only the edit form is built in JavaScript, so only the edit form got
+      // one. A new instructor, event or news item could therefore be given a
+      // photograph only by being saved without one and then opened again —
+      // which is not a sequence anybody discovers, and reads exactly like "I
+      // cannot upload a picture here".
+      //
+      // The markup is grafted on from the same field list the panel already
+      // carries, so both forms behave identically and there is one
+      // implementation of the upload rather than two that drift apart.
+      function graftAddPickers() {
+        if (!addForm) return;
+        fields.filter(imageFieldLabel).forEach((f) => {
+          const input = addForm.querySelector('[name="' + f.n + '"]');
+          const cell = input && input.parentNode;
+          if (!cell || cell.querySelector('.lp-upload')) return;
+          cell.insertAdjacentHTML('beforeend', pickerHtml(f.n) + slotHtml(f.n, ''));
+        });
+        wirePreviews(addForm);
+        wireUploads(addForm);
+      }
+
+      function clearAddPreviews() {
+        if (!addForm) return;
+        addForm.querySelectorAll('.lp-img-slot').forEach((el) => { el.innerHTML = ''; });
+        addForm.querySelectorAll('.lp-upload-note').forEach((el) => {
+          el.textContent = '';
+          el.classList.remove('is-error');
+        });
       }
 
       function render() {
@@ -966,46 +1205,8 @@ if (authed) {
             // back with the operator's typing still in it.
             if (!ok) { editIdx = idx; render(); }
           });
-          // The preview follows the field as it is typed, so a wrong host or a
-          // broken link is visible before Save rather than after publishing.
-          editForm.querySelectorAll('input, textarea').forEach((el) => {
-            const slot = editForm.querySelector('.lp-img-slot[data-for="' + el.name + '"]');
-            if (!slot) return;
-            el.addEventListener('input', () => { slot.innerHTML = previewHtml(imageInfo(el.value)); });
-          });
-          editForm.querySelectorAll('input[data-upload-for]').forEach((fileEl) => {
-            const target = editForm.querySelector('[name="' + fileEl.dataset.uploadFor + '"]');
-            const note = editForm.querySelector('.lp-upload-note[data-note-for="' + fileEl.dataset.uploadFor + '"]');
-            const slot = editForm.querySelector('.lp-img-slot[data-for="' + fileEl.dataset.uploadFor + '"]');
-            fileEl.addEventListener('change', async () => {
-              const file = fileEl.files && fileEl.files[0];
-              if (!file) return;
-              if (note) note.textContent = 'Uploading ' + file.name + '...';
-              const dataUrl = await new Promise((resolve, reject) => {
-                const fr = new FileReader();
-                fr.onload = () => resolve(String(fr.result || ''));
-                fr.onerror = () => reject(fr.error);
-                fr.readAsDataURL(file);
-              }).catch(() => null);
-              if (!dataUrl) { if (note) note.textContent = 'That file could not be read.'; return; }
-              const res = await fetch('/api/uploads/image', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename: file.name, contentType: file.type, data: dataUrl }),
-              }).catch(() => null);
-              const payload = res ? await res.json().catch(() => null) : null;
-              if (res && res.ok && payload && payload.url) {
-                // The field is filled in for the operator; the row is NOT saved
-                // yet. Storing a file and publishing it are two decisions, and
-                // Save is still the one that publishes.
-                if (target) target.value = payload.url;
-                if (slot) slot.innerHTML = previewHtml(imageInfo(payload.url));
-                if (note) note.textContent = 'Uploaded. Press Save to publish it.';
-              } else {
-                if (note) note.textContent = (payload && payload.error) || 'Upload failed.';
-              }
-              fileEl.value = '';
-            });
-          });
+          wirePreviews(editForm);
+          wireUploads(editForm);
           const first = editForm.querySelector('input, textarea');
           if (first) first.focus();
         }
@@ -1044,10 +1245,18 @@ if (authed) {
           body: bodyFor(rows),
         }).catch(() => null);
         if (btn) btn.disabled = false;
-        if (r && r.ok) { commit(rows); addForm.reset(); render(); toast('Added'); }
-        else toast('Add failed');
+        if (r && r.ok) {
+          commit(rows);
+          addForm.reset();
+          clearAddPreviews();
+          render();
+          toast('Added');
+        } else {
+          toastError(await reasonFor(r, 'Nothing was added'));
+        }
       });
 
+      graftAddPickers();
       render();
     });
 

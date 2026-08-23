@@ -154,7 +154,7 @@ const q = (extra: Record<string, string | number | undefined>) => {
 const urgency = (days: number) => (days <= 7 ? 'bad' : days <= 30 ? 'warn' : 'muted');
 ---
 
-<Base title="Renewals — MMAKF administration" showFooter={false}>
+<Base title="Renewals — MMAKF administration" showNav={false} showFooter={false}>
   <section class="ms">
     <div class="container">
       <nav class="crumbs" aria-label="Breadcrumb">

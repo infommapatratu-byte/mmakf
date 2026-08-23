@@ -73,7 +73,7 @@ const done = rows.filter((r: any) => ['paid', 'on_hold', 'cancelled'].includes(r
 const blocked = open.filter((r: any) => r.st.hasUnresolvedCommission);
 ---
 
-<AdminShell title="Settlements" action="marketplace:read">
+<AdminShell title="Settlements" requires="marketplace:read">
   <section>
     <div class="container">
       <p><a href="/admin/marketplace">← Marketplace console</a></p>

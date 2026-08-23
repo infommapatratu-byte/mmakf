@@ -2,6 +2,18 @@
 import Base from '@/layouts/Base.astro';
 
 export const prerender = false;
+
+// THIS PAGE SAYS THAT IT IS THIS PAGE, and src/middleware.ts is the reader.
+//
+// The learn and admin hosts serve everything through context.rewrite(), and a
+// rewrite can land on a REAL page while the response still carries the 404
+// status the platform chose for the un-prefixed path. The middleware corrects
+// that — but a genuine miss must keep its 404, and the only thing that can
+// tell the two apart is this file saying which one it is.
+//
+// Consumed by the middleware and stripped before the response leaves.
+Astro.response.headers.set('X-MMAKF-Not-Found', '1');
+
 ---
 
 <Base title="Page not found — MMAKF" description="The page you were looking for does not exist.">

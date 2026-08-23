@@ -76,7 +76,7 @@ const commission = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.
 const refunded = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.refundedMinor ?? 0), 0);
 ---
 
-<AdminShell title={seller ? seller.tradingName : 'Seller'} action="marketplace:read">
+<AdminShell title={seller ? seller.tradingName : 'Seller'} requires="marketplace:read">
   <section>
     <div class="container">
 

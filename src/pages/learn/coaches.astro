@@ -41,7 +41,22 @@ if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
   const get = (k: string) => String(form.get(k) ?? '').trim();
 
-  submitted = Object.fromEntries([...form.entries()].map(([k, v]) => [k, String(v)]));
+  // EVERY VALUE, NOT THE LAST ONE.
+  //
+  // FormData repeats a key once per ticked box, and Object.fromEntries keeps
+  // only the last. So a coach who ticked five programmes, then tripped a
+  // validation error on some other field, came back to the form with ONE
+  // ticked — and the four that vanished are invisible unless they count them.
+  // The submission itself was never affected: the handler below reads them
+  // with getAll(). It is the way back that lost them.
+  submitted = {};
+  for (const [k, v] of form.entries()) {
+    const value = String(v);
+    const prev = submitted[k];
+    if (prev === undefined) submitted[k] = value;
+    else if (Array.isArray(prev)) prev.push(value);
+    else submitted[k] = [prev, value];
+  }
 
   outcome = await submitCoachApplication(Astro.request, {
     fullName: get('fullName'),
@@ -65,8 +80,22 @@ if (Astro.request.method === 'POST') {
 
 const done = outcome?.kind === 'submitted';
 const errField = outcome?.kind === 'invalid' ? outcome.field : null;
-const val = (k: string) => (done ? '' : String(submitted[k] ?? ''));
-const checked = (k: string, v: string) => !done && String(submitted[k] ?? '').includes(v);
+const val = (k: string) => {
+  if (done) return '';
+  const cur = submitted[k];
+  return Array.isArray(cur) ? String(cur[0] ?? '') : String(cur ?? '');
+};
+// EXACT MATCH, NOT includes().
+//
+// The old test asked whether the stored string CONTAINED the value, so a box
+// whose value is a substring of another ticked one was checked too — 'hi'
+// ticked by 'hindi'. With every value now kept, membership is the question,
+// and it is asked exactly.
+const checked = (k: string, v: string) => {
+  if (done) return false;
+  const cur = submitted[k];
+  return Array.isArray(cur) ? cur.includes(v) : String(cur ?? "") === v;
+};
 
 const STAGES = [
   ['Application', 'You send this form. MMAKF acknowledges it with a reference.'],

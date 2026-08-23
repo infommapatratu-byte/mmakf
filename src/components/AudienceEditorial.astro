@@ -13,7 +13,11 @@
 
 import type { Audience } from '@/data/audiences';
 import { PROCESS_STEPS } from '@/data/audiences';
-import { href as surfaceHref } from '@/lib/surface';
+// linkTo, not href(): audience.action.href can be /start/individual, which
+// lives on the PUBLIC surface. Rendered relative on learn.mmakf.in it was
+// rewritten to /learn/start/individual and 404d — the primary call to action
+// of the individuals page. Same-surface links are unaffected.
+import { linkTo as surfaceHref } from '@/lib/surface';
 import type { Surface } from '@/lib/surface';
 
 export interface Props {

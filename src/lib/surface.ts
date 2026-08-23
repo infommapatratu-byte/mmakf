@@ -144,6 +144,54 @@ export function href(surface: Surface, internalPath: string): string {
   return internalPath;
 }
 
+/** Which surface an INTERNAL path belongs to. */
+export function surfaceOfPath(internalPath: string): Surface {
+  if (internalPath === '/learn' || internalPath.startsWith('/learn/')) return 'learn';
+  if (internalPath === '/admin' || internalPath.startsWith('/admin/')) return 'admin';
+  return 'public';
+}
+
+/**
+ * A link FROM one surface TO a path that may not live on it.
+ *
+ * ───────────────────────────────────────────────────────────────────────────
+ * WHY href() IS NOT ENOUGH, AND WHAT IT COST
+ * ───────────────────────────────────────────────────────────────────────────
+ *
+ * href() strips this surface's prefix off a path that carries it and returns
+ * anything else UNCHANGED. On the public surface that is right: every path is
+ * reachable as written. On learn and admin it is a trap, because the
+ * middleware PREFIXES every non-shared path on the way back in.
+ *
+ * So /start/individual, rendered on learn.mmakf.in, went out as a relative
+ * link, returned as a request the middleware rewrote to
+ * /learn/start/individual, and 404d. Two shipped that way: the individuals
+ * route on /learn/request and the fee estimator on /learn.
+ *
+ * A path belonging to ANOTHER surface has to be linked absolutely, at that
+ * surface's own origin. Same-surface paths come back exactly as href() would
+ * return them, so this is a drop-in where a page links off its own surface
+ * and a no-op where it does not.
+ *
+ * NOT folded into href() itself, deliberately: canonicalFor() is built on
+ * href() and concatenates its result onto an origin, so an absolute return
+ * value there would produce a canonical with two origins in it.
+ */
+export function linkTo(from: Surface, internalPath: string): string {
+  const prefix = SURFACE_PREFIX[from];
+  // The public surface prefixes nothing, so every internal path is reachable
+  // as written — including /learn/… and /admin/…, which is deliberate: the
+  // same page is meant to be reachable both ways.
+  if (!prefix) return internalPath;
+  // /api, /_astro and anything carrying a file extension are never rewritten,
+  // so they are already correct as relative links.
+  if (isSharedPath(internalPath)) return internalPath;
+  if (internalPath === prefix || internalPath.startsWith(`${prefix}/`)) {
+    return href(from, internalPath);
+  }
+  return SURFACE_ORIGIN[surfaceOfPath(internalPath)] + internalPath;
+}
+
 /**
  * The absolute canonical URL for a page.
  *
