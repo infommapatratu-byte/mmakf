@@ -2,7 +2,15 @@
 export interface Field {
   n: string;       // field name
   l: string;       // label
-  type?: 'number' | 'text';
+  /**
+   * 'bool' renders a three-state select and stores a real boolean, because the
+   * pages that read these flags test `=== true` / `=== false` and a string
+   * satisfies neither. 'json' renders a validated textarea for the fields whose
+   * value is a list or an object — a leader's titles, honours and authority —
+   * which had no control here at all and so could not be edited by anyone
+   * without a commit. Both are parsed in src/pages/admin/index.astro:readField.
+   */
+  type?: 'number' | 'text' | 'bool' | 'json';
   full?: boolean;
   textarea?: boolean;
 }
@@ -39,7 +47,15 @@ const { id, title, subtitle, apiKey, rows, fields } = Astro.props;
               admin page renders ~20 of these panels and several share a field
               name (`name`, `type`, `title`), which would otherwise collide. */}
           <label class="input-label" for={`${id}-${f.n}`}>{f.l}</label>
-          {f.textarea ? (
+          {f.type === 'bool' ? (
+            <select class="input" id={`${id}-${f.n}`} name={f.n}>
+              <option value="">Not stated</option>
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+          ) : f.type === 'json' ? (
+            <textarea class="input lp-json" id={`${id}-${f.n}`} name={f.n} rows="8" spellcheck="false"></textarea>
+          ) : f.textarea ? (
             <textarea class="input" id={`${id}-${f.n}`} name={f.n} rows="3"></textarea>
           ) : (
             <input class="input" id={`${id}-${f.n}`} name={f.n} type={f.type || 'text'} />

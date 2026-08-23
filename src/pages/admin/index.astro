@@ -310,9 +310,9 @@ if (authed) {
           </form>
         </section>
 
-        <ListPanel id="leadership" title="Leadership & Governance" subtitle="Office bearers, committees and faculty — drives the /governance page, homepage table and hero card." apiKey="leadership"
+        <ListPanel id="leadership" title="Leadership & Governance" subtitle="Office bearers, committees and faculty — drives the /governance page, homepage table, hero card and each person's /people profile. The four JSON fields hold the structured sections of that profile; leave one empty and its section is simply not published." apiKey="leadership"
           rows={data!.leadership} fields={[
-            {n:'name',l:'Name'},{n:'role',l:'Designation'},{n:'rank',l:'Grade / Credential'},{n:'since',l:'Serving since'},{n:'specialty',l:'Specialty'},{n:'img',l:'Portrait URL (optional)',full:true},{n:'note',l:'Short note',full:true},{n:'bio',l:'Full biography',full:true,textarea:true}
+            {n:'name',l:'Name'},{n:'role',l:'Designation'},{n:'rank',l:'Grade / Credential'},{n:'since',l:'Serving since'},{n:'specialty',l:'Specialty'},{n:'addressedAs',l:'Addressed as (optional)'},{n:'img',l:'Portrait URL (optional)',full:true},{n:'note',l:'Short note',full:true},{n:'bio',l:'Full biography',full:true,textarea:true},{n:'titles',l:'Titles held — JSON list of title and meaning',full:true,type:'json'},{n:'honours',l:'Honours — JSON list of title, year, note and source',full:true,type:'json'},{n:'authority',l:'Authority held — JSON list of role and detail',full:true,type:'json'},{n:'master',l:'Master and lineage — JSON object',full:true,type:'json'},{n:'ownChannels',l:'Own channels — JSON list of URLs',full:true,type:'json'}
           ]} />
 
         <ListPanel id="programs" title="Programs" subtitle="Training programs shown on the public site." apiKey="programs"
@@ -345,9 +345,9 @@ if (authed) {
             {n:'q',l:'Question',full:true},{n:'a',l:'Answer',full:true,textarea:true}
           ]} />
 
-        <ListPanel id="gallery" title="Gallery" subtitle="Items shown on the /gallery page." apiKey="gallery"
+        <ListPanel id="gallery" title="Gallery" subtitle="Items shown on the /gallery page. 'Own picture' prints the provenance label under each image — Yes for a federation photograph, No for an illustrative one. Left unstated, no label is printed." apiKey="gallery"
           rows={data!.gallery} fields={[
-            {n:'title',l:'Title'},{n:'cat',l:'Category'},{n:'icon',l:'Icon (fallback)'},{n:'img',l:'Image URL',full:true},{n:'desc',l:'Caption',full:true}
+            {n:'title',l:'Title'},{n:'cat',l:'Category'},{n:'icon',l:'Icon (fallback)'},{n:'own',l:"The federation's own picture? Yes / No",type:'bool'},{n:'img',l:'Image URL',full:true},{n:'desc',l:'Caption',full:true}
           ]} />
 
         <ListPanel id="syllabus" title="Grading Syllabus" subtitle="Kata syllabus rows on the /belt-system page." apiKey="syllabus"
@@ -739,6 +739,12 @@ if (authed) {
     .lp-upload-btn:hover { border-color: var(--gold); color: var(--gold); }
     .lp-upload-note { font-size: .72rem; color: var(--muted); line-height: 1.5; }
     .lp-upload-note.is-error { color: var(--red-2); }
+    .lp-json {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .78rem;
+      line-height: 1.55;
+      tab-size: 2;
+    }
     .lp-img-prev {
       max-width: 100%; max-height: 140px; object-fit: contain;
       border-radius: var(--radius); border: 1px solid var(--border);
@@ -923,6 +929,11 @@ if (authed) {
       const IMG_HOST_SUFFIX = '.public.blob.vercel-storage.com';
 
       function imageFieldLabel(f) {
+        // A select or a JSON box is never an image field, whatever it is
+        // called. `own` on a gallery row is a Yes/No whose label has to say
+        // the word "photograph" to be understood, and that must not make a
+        // file picker appear underneath it.
+        if (f.type === 'bool' || f.type === 'json') return false;
         return /img|image|photo|thumb|logo|cover/i.test(f.n) || /image|photo/i.test(f.l);
       }
 
@@ -949,13 +960,90 @@ if (authed) {
         return '<img class="lp-img-prev" src="' + esc(info.url) + '" alt="" loading="lazy" />';
       }
 
-      function fieldControl(f, value, idx) {
-        const cid = panel.id + '-edit-' + idx + '-' + f.n;
+      /**
+       * THE CONTROL FOR ONE FIELD, CHOSEN BY THE SHAPE OF THE DATA UNDER IT.
+       *
+       * Two kinds beyond plain text, and each exists because a text box was the
+       * wrong shape for what it was editing:
+       *
+       *  · `bool` — /gallery reads a row's provenance as `own === true` and
+       *    `own === false`, strictly. A text box storing the STRING "true"
+       *    satisfies neither test, so the honest label the page prints
+       *    ("Federation photograph" / "Illustrative") would vanish with nothing
+       *    anywhere to say why. A three-state select keeps the real boolean and
+       *    keeps "not stated" as the distinct third answer it already is.
+       *
+       *  · `json` — a leader's titles, honours, authority and lineage are
+       *    lists of objects that /people renders as structured sections. The
+       *    panel had NO control for them at all, so the founder's own honours
+       *    could be corrected by a developer with a commit and by nobody else.
+       *    A validated JSON box is not a beautiful editor. It is an editor, and
+       *    it refuses to store anything that would empty the page.
+       */
+      function controlHtml(f, cid, value) {
+        if (f.type === 'bool') {
+          const stated = value === true || value === false;
+          return '<select class="input" id="' + cid + '" name="' + f.n + '">'
+            + '<option value=""' + (stated ? '' : ' selected') + '>Not stated</option>'
+            + '<option value="true"' + (value === true ? ' selected' : '') + '>Yes</option>'
+            + '<option value="false"' + (value === false ? ' selected' : '') + '>No</option>'
+            + '</select>';
+        }
+        if (f.type === 'json') {
+          const text = value === undefined || value === null || value === '' ? '' : JSON.stringify(value, null, 2);
+          return '<textarea class="input lp-json" id="' + cid + '" name="' + f.n + '" rows="8" spellcheck="false">' + esc(text) + '</textarea>';
+        }
         const v = esc(String(value == null ? '' : value));
-        const label = '<label class="input-label" for="' + cid + '">' + esc(f.l) + '</label>';
-        const control = f.textarea
+        return f.textarea
           ? '<textarea class="input" id="' + cid + '" name="' + f.n + '" rows="3">' + v + '</textarea>'
           : '<input class="input" id="' + cid + '" name="' + f.n + '" type="' + (f.type || 'text') + '" value="' + v + '" />';
+      }
+
+      /**
+       * Read one field off a submitted form, in the type the store must hold.
+       *
+       * Returns {ok, value} / {ok, omit} / {error}. A JSON field that will not
+       * parse STOPS the save rather than posting the text: writing the raw
+       * string back would replace four honours with a sentence, and /people
+       * guards on Array.isArray — so the section would render empty and correct
+       * and there would be nothing at all to say what had happened.
+       */
+      function readField(f, fd, previous) {
+        let raw = fd.get(f.n);
+        if (raw == null) raw = '';
+        if (f.type === 'number') return { ok: true, value: Number(raw) || 0 };
+        if (f.type === 'bool') {
+          if (raw === 'true') return { ok: true, value: true };
+          if (raw === 'false') return { ok: true, value: false };
+          return { ok: true, omit: true };
+        }
+        if (f.type === 'json') {
+          const text = String(raw).trim();
+          if (!text) return { ok: true, omit: true };
+          let parsed;
+          try {
+            parsed = JSON.parse(text);
+          } catch (err) {
+            return { error: '"' + f.l + '" is not valid JSON — ' + err.message + '. Nothing was saved.' };
+          }
+          if (parsed === null || typeof parsed !== 'object') {
+            return { error: '"' + f.l + '" has to be a list or an object, not a single value. Nothing was saved.' };
+          }
+          if (previous && typeof previous === 'object' && Array.isArray(previous) !== Array.isArray(parsed)) {
+            return {
+              error: '"' + f.l + '" is stored as ' + (Array.isArray(previous) ? 'a list' : 'an object')
+                + ' and has to stay that way. Nothing was saved.',
+            };
+          }
+          return { ok: true, value: parsed };
+        }
+        return { ok: true, value: raw };
+      }
+
+      function fieldControl(f, value, idx) {
+        const cid = panel.id + '-edit-' + idx + '-' + f.n;
+        const label = '<label class="input-label" for="' + cid + '">' + esc(f.l) + '</label>';
+        const control = controlHtml(f, cid, value);
         // A FILE PICKER BESIDE THE URL BOX, not instead of it. A link to an
         // image somebody else already hosts is still legitimate; what was
         // missing was any way to put a file on this federation's own domain
@@ -1137,7 +1225,14 @@ if (authed) {
               + '</div></form>';
           }
           const main = fields.length ? fields[0].n : '';
-          const secondary = fields.filter((f, idx) => idx > 0 && r[f.n] !== undefined && r[f.n] !== '').map((f) => esc(String(r[f.n]).slice(0, 70))).slice(0, 3).join(' · ');
+          // Structured fields are skipped here on purpose: String() on a list
+          // of honours produces "[object Object],[object Object]", which is
+          // worse than saying nothing.
+          const secondary = fields
+            .filter((f, idx) => idx > 0 && f.type !== 'json' && r[f.n] !== undefined && r[f.n] !== '' && typeof r[f.n] !== 'object')
+            .map((f) => esc(String(r[f.n]).slice(0, 70)))
+            .slice(0, 3)
+            .join(' · ');
           const thumbField = fields.filter(imageFieldLabel)[0];
           const thumb = thumbField ? imageInfo(r[thumbField.n]) : null;
           return '<div class="lp-item">'
@@ -1190,12 +1285,17 @@ if (authed) {
             // never renders — ids, image paths, flags set elsewhere — and
             // rebuilding from the form alone would drop every one of them.
             const item = Object.assign({}, next[idx]);
+            const before = next[idx] || {};
+            let refusal = null;
             fields.forEach((f) => {
-              let v = fd.get(f.n);
-              if (v == null) v = '';
-              if (f.type === 'number') v = Number(v) || 0;
-              item[f.n] = v;
+              const read = readField(f, fd, before[f.n]);
+              if (read.error) { refusal = refusal || read.error; return; }
+              if (read.omit) delete item[f.n];
+              else item[f.n] = read.value;
             });
+            // A REFUSAL LEAVES THE FORM EXACTLY WHERE IT IS — open, with the
+            // operator's typing still in it, and nothing posted.
+            if (refusal) { toastError(refusal); return; }
             next[idx] = item;
             const btn = editForm.querySelector('button[type=submit]');
             if (btn) btn.disabled = true;
@@ -1229,12 +1329,13 @@ if (authed) {
         const btn = addForm.querySelector('button[type=submit]');
         const fd = new FormData(addForm);
         const item = {};
+        let refusal = null;
         fields.forEach((f) => {
-          let v = fd.get(f.n);
-          if (v == null) v = '';
-          if (f.type === 'number') v = Number(v) || 0;
-          item[f.n] = v;
+          const read = readField(f, fd, undefined);
+          if (read.error) { refusal = refusal || read.error; return; }
+          if (!read.omit) item[f.n] = read.value;
         });
+        if (refusal) { toastError(refusal); return; }
         if (key === 'news') item.id = Date.now();
         if (key === 'products') item.id = Date.now();
         const rows = readRows().slice();
