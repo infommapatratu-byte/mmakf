@@ -97,3 +97,6 @@ astro.config.verify.mjs
 # It held live KV/Redis tokens and was one `git add -A` from being committed.
 .env*.backup*
 .env.local.backup-*
+
+# Build mutex — one astro build at a time per checkout. See scripts/build-lock.mjs.
+.build-lock/

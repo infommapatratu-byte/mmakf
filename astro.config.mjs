@@ -1,5 +1,6 @@
 import { defineConfig } from 'astro/config';
 import vercel from '@astrojs/vercel';
+import { buildLock } from './scripts/build-lock-core.mjs';
 
 // MMAKF — Astro config. Server-rendered for /api routes and admin auth.
 export default defineConfig({
@@ -7,6 +8,28 @@ export default defineConfig({
   adapter: vercel({
     webAnalytics: { enabled: true },
   }),
+
+  // ONE BUILD AT A TIME AGAINST THIS CHECKOUT.
+  //
+  // Several `astro build` processes were running here at once — parallel
+  // agents, a second terminal, a watch task; five were measured simultaneously.
+  // They share dist/ and .vercel/output/, and the loser fails in whichever way
+  // the collision landed, never naming the cause:
+  //
+  //   Cannot find module 'dist/server/chunks/astro/server_BNNY-17X.mjs'
+  //   EEXIST: file already exists, mkdir '.vercel/output/server'
+  //   EBUSY: resource busy or locked, open 'dist/server/pages/api/export/…'
+  //
+  // Each reads as a broken build. Cleaning and rebuilding reproduces it,
+  // because the other build is still running — so the obvious response
+  // confirms the wrong diagnosis. Hours go into a source bug that is not there.
+  //
+  // IT IS AN INTEGRATION AND NOT AN npm HOOK because `npx astro build` does not
+  // run npm lifecycle scripts, and that was the exact invocation colliding
+  // here. A lock in `prebuild` is bypassed by the thing it needs to stop.
+  // scripts/clean-vercel-output.mjs handles the adapter's own missing
+  // `recursive: true`; this handles the second builder.
+  integrations: [buildLock()],
   // Overridable so a BUILD can be given its own cache directory.
   //
   // ─────────────────────────────────────────────────────────────────────────
