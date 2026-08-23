@@ -36,6 +36,8 @@ import { drizzle } from 'drizzle-orm/pglite';
 import { and, eq } from 'drizzle-orm';
 import crypto from 'node:crypto';
 import * as s from '../src/db/schema';
+import { formatMinor } from '../src/lib/inr';
+import { formatINR } from '../src/db/fees';
 import {
   createFramework, addRule, publishFramework, issueQuote, approveQuoteVersion,
   computeFee, reproduce, activeFramework, applyFactor, PPM,
@@ -1234,3 +1236,86 @@ describe('money never becomes a float', () => {
 //    the commerce side (orders, invoices, ledger_entries) share no function and
 //    no foreign key. TEST 1 bridges them by hand through the fee schedule. A
 //    school that accepts a quotation cannot be invoiced from it.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE BROWSER'S RUPEE FORMATTER — one of them, and only one
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// formatINR() in src/db/fees.ts cannot be used in a client script: that module
+// imports the database layer, the schema and RBAC. So every page rendering a
+// price in JavaScript wrote its own, and there came to be THREE — in
+// /checkout, /portal/seller/shipping and /shop/checkout — which had already
+// begun to differ. One grouped with a hand-written regex; one leaned on
+// toLocaleString('en-IN'); the third nobody had compared with either.
+//
+// src/lib/inr.ts is the single browser-safe implementation. It does NO
+// arithmetic on money — the paise and rupees come out of the integer as digits
+// — so it needs no exemption from the factor rule above, which is the point:
+// a rule with exceptions is a rule people learn to argue with.
+
+describe('the browser rupee formatter', () => {
+  it('groups the Indian way, not the international one', () => {
+    expect(formatMinor(123456789)).toBe('₹12,34,567.89');
+    expect(formatMinor(100000)).toBe('₹1,000.00');
+    expect(formatMinor(99900)).toBe('₹999.00');
+    expect(formatMinor(1)).toBe('₹0.01');
+    expect(formatMinor(0)).toBe('₹0.00');
+  });
+
+  it('agrees with formatINR(), the server-side formatter it stands in for', () => {
+    // The two must never disagree: the same order is priced by one and
+    // displayed by the other, and a buyer comparing an email with a screen
+    // must not see two different figures.
+    for (const minor of [0, 1, 99, 100, 101, 12_345, 999_999, 1_00_00_000, 123456789, 2_147_483_647]) {
+      expect(`${minor}: ${formatMinor(minor)}`).toBe(`${minor}: ${formatINR(minor)}`);
+    }
+  });
+
+  it('carries the sign, and never renders NaN into a checkout page', () => {
+    expect(formatMinor(-45000)).toBe('-₹450.00');
+    // A template that printed "₹NaN" beside a Place Order button would be worse
+    // than one that printed nothing.
+    expect(formatMinor(Number.NaN)).toBe('—');
+    expect(formatMinor(Number.POSITIVE_INFINITY)).toBe('—');
+  });
+
+  it('stays exact past the point where dividing by 100 would not', () => {
+    // Nothing is divided, so there is no precision to lose. 2^53 is
+    // 9,007,199,254,740,992 paise.
+    expect(formatMinor(9007199254740991)).toBe('₹9,00,71,99,25,47,409.91');
+  });
+
+  it('is the ONLY rupee formatter in any client script', () => {
+    // The source guard that stops a fourth copy appearing. A client script
+    // cannot import src/db/fees.ts, so the temptation to hand-roll one is
+    // permanent and this is what makes it fail instead of ship.
+    const walk = (dir: string, out: string[] = []): string[] => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) walk(path, out);
+        else if (/\.astro$/.test(entry.name)) out.push(path);
+      }
+      return out;
+    };
+
+    const offenders: string[] = [];
+    for (const file of walk('src/pages')) {
+      const text = readFileSync(file, 'utf8');
+      // Only the client half: frontmatter may legitimately call money()/formatINR().
+      const scripts = text.match(/<script[\s\S]*?<\/script>/g) ?? [];
+      for (const block of scripts) {
+        // The shape every hand-rolled version had: a rupee sign next to
+        // arithmetic that splits an amount into rupees and paise.
+        if (/[₹]/.test(block) && /(Math\.floor|%)\s*.{0,40}100\b/.test(block)) {
+          offenders.push(file.replace(/\\/g, '/'));
+        }
+      }
+    }
+    expect(
+      [...new Set(offenders)],
+      'These client scripts still split an amount into rupees and paise by hand. ' +
+      'Import formatMinor from src/lib/inr.ts instead — it is browser-safe and does ' +
+      'no arithmetic on money:\n  ' + offenders.join('\n  ')
+    ).toEqual([]);
+  });
+});

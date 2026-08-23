@@ -343,7 +343,11 @@ describe('POLICY — no text, versioned acceptance', () => {
 
     const view = await policiesForSeller(db, sc.principal);
     const agreement = view.find((v: any) => v.code === 'marketplace.seller_agreement');
-    expect(agreement.acceptanceStillValid).toBe(false);
+    // find() can miss. Asserting it was found first means a policy view that
+    // stopped returning the agreement fails as exactly that, rather than as a
+    // TypeError on the next line that reads like a bug in the assertion.
+    expect(agreement, 'the seller agreement should appear in the policy view').toBeDefined();
+    expect(agreement!.acceptanceStillValid).toBe(false);
 
     // Put it back so later tests see the real document.
     await db.update(s.policyVersions)
