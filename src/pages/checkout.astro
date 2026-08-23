@@ -661,6 +661,13 @@ const payNote = pay.automatic
 </style>
 
 <script>
+  // The ONE rupee formatter. src/lib/inr.ts exists precisely because
+  // formatINR() lives in the database layer and cannot ship to a browser — which
+  // is what a hand-rolled copy here used to work around. formatMinor does no
+  // arithmetic on money and renders a non-finite amount as an em dash, so a
+  // failed lookup can no longer print "₹NaN" beside a Place Order button.
+  import { formatMinor } from '@/lib/inr';
+
   // ── Basket (variant ids and quantities only) ──
   const KEY = 'mmakf.basket.v1';
   type Line = { v: number; q: number };
@@ -706,22 +713,6 @@ const payNote = pay.automatic
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
-    /**
-     * Mirrors formatINR() in src/db/orders.ts — integer paise, Indian digit
-     * grouping (12,34,567.89). Duplicated here rather than imported because
-     * that module reaches into the database layer and must not be shipped to
-     * the browser. Kept byte-for-byte identical in behaviour on purpose.
-     */
-    function inr(amountPaise: number): string {
-      const sign = amountPaise < 0 ? '-' : '';
-      const abs = Math.abs(Math.round(amountPaise));
-      const p = String(abs % 100).padStart(2, '0');
-      const str = String(Math.floor(abs / 100));
-      const last3 = str.slice(-3);
-      const rest = str.slice(0, -3);
-      const grouped = rest ? `${rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',')},${last3}` : last3;
-      return `${sign}₹${grouped}.${p}`;
-    }
 
     function officeLine(): string {
       const bits: string[] = [];
@@ -791,7 +782,7 @@ const payNote = pay.automatic
               <div class="co-line-sub">${esc(e.label)} · ${esc(e.priceLabel)} each</div>
               ${short}
             </div>
-            <div class="co-line-amt">${esc(inr(lineTotal))}</div>
+            <div class="co-line-amt">${esc(formatMinor(lineTotal))}</div>
             <div class="co-line-ctl">
               <label for="q-${l.v}">Qty</label>
               <select class="input co-qty" id="q-${l.v}" data-v="${l.v}">${opts}</select>
@@ -802,7 +793,7 @@ const payNote = pay.automatic
 
       panel!.innerHTML =
         rows +
-        `<div class="co-sub"><span>Catalogue subtotal</span><span class="co-sub-amt">${esc(inr(subtotal))}</span></div>` +
+        `<div class="co-sub"><span>Catalogue subtotal</span><span class="co-sub-amt">${esc(formatMinor(subtotal))}</span></div>` +
         (dropped > 0
           ? `<p class="co-note">Some items were removed because they are no longer in the catalogue.</p>`
           : '');
@@ -838,7 +829,7 @@ const payNote = pay.automatic
     /** Manual UPI: an order exists and is AWAITING PAYMENT. Nobody is told they have paid. */
     function renderManualUpi(data: any) {
       const c = data.checkout || {};
-      const amount = inr(Number(data.amountPaise) || 0);
+      const amount = formatMinor(Number(data.amountPaise) || 0);
       const link = typeof c.deepLink === 'string' ? c.deepLink : '';
       const body =
         `<div class="co-kv"><span class="co-k">Order</span><span class="co-v">${esc(data.orderNo)}</span></div>` +
@@ -876,7 +867,7 @@ const payNote = pay.automatic
 
     /** Razorpay: open its checkout with the public parameters the server returned. */
     async function renderRazorpay(data: any) {
-      const amount = inr(Number(data.amountPaise) || 0);
+      const amount = formatMinor(Number(data.amountPaise) || 0);
       const orderLine =
         `<div class="co-kv"><span class="co-k">Order</span><span class="co-v">${esc(data.orderNo)}</span></div>` +
         `<div class="co-kv"><span class="co-k">Amount</span><span class="co-v">${esc(amount)}</span></div>`;
@@ -1003,7 +994,7 @@ const payNote = pay.automatic
             showResult(panelHtml(
               `Order ${data.orderNo} created`,
               `<div class="co-kv"><span class="co-k">Order</span><span class="co-v">${esc(data.orderNo)}</span></div>` +
-              `<div class="co-kv"><span class="co-k">Amount</span><span class="co-v">${esc(inr(Number(data.amountPaise) || 0))}</span></div>` +
+              `<div class="co-kv"><span class="co-k">Amount</span><span class="co-v">${esc(formatMinor(Number(data.amountPaise) || 0))}</span></div>` +
               `<p class="co-warn">This order is not paid yet.</p>` +
               `<p>Payment for this method cannot be completed on this page. Contact the office quoting order ${esc(data.orderNo)} — ${officeLine()}.</p>`,
               true,

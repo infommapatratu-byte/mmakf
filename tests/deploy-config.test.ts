@@ -30,10 +30,35 @@ describe('the deploy runtime is pinned in the repository, not in a dashboard', (
     expect(major, `engines.node is "${pkg.engines.node}"`).toBeGreaterThanOrEqual(22);
   });
 
-  it('the build command is the one Vercel will run', () => {
-    // A build script that drifts from what the adapter expects fails in CI and
-    // nowhere else.
-    expect(pkg.scripts?.build).toBe('astro build');
+  it('starts with astro build, and chains anything after it on SUCCESS', () => {
+    // This used to assert the whole command equalled "astro build", which made
+    // every legitimate addition to the build a test failure. The property worth
+    // guarding was never the exact string: it is that the adapter's own build
+    // runs FIRST, and that a step added after it cannot mask a failure.
+    //
+    // `&&` is the whole point. With `;` a post-build step that succeeded would
+    // hand Vercel exit 0 over a broken build, and the deploy would go out.
+    const build = String(pkg.scripts?.build ?? '');
+    expect(build.startsWith('astro build'), `build script is "${build}"`).toBe(true);
+
+    const rest = build.slice('astro build'.length).trim();
+    if (rest) {
+      expect(rest.startsWith('&&'), `build chains with "${rest.slice(0, 3)}" rather than &&`).toBe(true);
+    }
+  });
+
+  it('patches the Vercel route table, or the learn surface ships 404s again', () => {
+    // Not a style preference. @astrojs/vercel emits no route for /apply, only
+    // for /learn/apply, so every learn.mmakf.in page that lives under /learn/
+    // fell into the catch-all and was served as 404 CARRYING THE CORRECT HTML.
+    // A browser renders it and nobody notices; a crawler reads the status and
+    // drops the surface out of the index.
+    //
+    // scripts/vercel-surface-routes.mjs rewrites that table after the build.
+    // Remove it and the failure is invisible in every browser anybody tests in,
+    // which is exactly why it is pinned here rather than left to review.
+    expect(String(pkg.scripts?.build ?? '')).toContain('vercel-surface-routes.mjs');
+    expect(existsSync('scripts/vercel-surface-routes.mjs'), 'the build names a script that is not in the repository').toBe(true);
   });
 
   it('a lockfile is committed, or the install is not reproducible', () => {
