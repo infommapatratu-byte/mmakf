@@ -126,6 +126,102 @@ role names, non-array `bindings`, null/undefined principals, `scopeType: 'state'
 bindings, string/number `scopeId` coercion, state admins reaching unlocated national resources,
 roles without `person:read` listing people, and federation-ID collision under 40-way concurrency.
 
+### 3.6 Wave 3 — surface routing, intake and authorisation (2026-08-23)
+
+Four independent lenses over the codebase, each finding then handed to a separate
+reviewer told to REFUTE it. 29 candidates, 24 survived. Fixed and verified in
+production unless marked otherwise.
+
+**FIXED — the learn surface was unindexable.** Every page of learn.mmakf.in living
+only under `/learn/` answered HTTP 404 while carrying the correct page. The cause
+was in the adapter's own output: `@astrojs/vercel` writes one route per known page
+into `.vercel/output/config.json`, there is no route for `/apply` because no such
+file exists, and the table ends with
+`{ src: "^/.*$", dest: "_render", status: 404 }`. A request matched nothing else and
+got both halves — the function ran and rendered the right page, and the routing
+layer stamped 404 on the way out. `/` and `/portal` escaped only because those
+paths exist at the top level too.
+
+A middleware fix was tried first, shipped, measured against production, found to do
+nothing, and reverted: the status is applied by the route entry AFTER the function
+returns. `astro dev` has no such table, which is why none of it reproduces locally.
+Fixed instead by `scripts/vercel-surface-routes.mjs`, wired into `npm run build`.
+
+**FIXED** — the marketplace console refused every account (`action=` passed where
+`AdminShell`'s prop is `requires=`; `canAnywhere(principal, undefined)` is false for
+everyone). `season/move` had never once succeeded (`moveSeason` takes the window as
+one object; the route passed two positional dates). Cross-surface links —
+`/start/individual` and all seventeen footer links 404d on two of three hosts —
+now go through `linkTo()`. A blank optional "years teaching" was stored as a stated
+`0`. Repeated checkbox answers were collapsed by `Object.fromEntries`, and
+`checked()` used `includes()`, so `'hindi'` ticked `'hi'`. Two admin pages rendered
+the PUBLIC nav on the admin host.
+
+#### OPEN — P1: the public competition entry form cannot succeed
+
+`src/pages/events.astro` collects `event, name, phone, unit` and posts them verbatim.
+`src/pages/api/event-register.ts` reads `eventCode, categoryCode, federationId, dob`.
+All four arrive `undefined`, `submitPublicEntry()` throws `unknown_category`, and the
+visitor is told to email the office — under a heading promising an instant entry
+reference. **Every entry ever submitted has been discarded.**
+
+Not a rename: the form has no category, membership-number or date-of-birth control,
+and its `<option>` carries no `value`, so the event identity is a free-text KV title
+while the handler resolves `competition_events.code` in Postgres.
+`entryOpenCatalogue()` (`src/db/competition.ts`) was written to feed the replacement
+form and has NO CALLER — the new form was never built and the old one never removed.
+`docs/api/OPENAPI.md` still documents the old contract. This is the `/api/enroll`
+failure repeating and needs the form rebuilt, not patched.
+
+#### OPEN — the register intermittently times out
+
+`/api/health` reports `database: "error"` with `dbFault: "timeout"` in bursts, then
+recovers. `dbUrlShape` stays `ok`, so nothing is misconfigured — the register is not
+answering in time. Register-backed pages (`/clubs`, `/training`, `/dojos`) hang past
+60s while it lasts; content pages are unaffected. Database-side, not a code defect:
+look at connection count and CPU on the provider before changing anything here.
+
+#### OPEN — smaller, verified, unfixed
+
+- `/join` and `/portal/applications` re-render **completely empty** after any refusal:
+  neither form has a single value binding, so a rejected applicant retypes everything.
+- `/api/learn/application` allows 20 POSTs an hour for a TWENTY-STEP wizard, so it
+  cannot survive a single correction.
+- A blank "expected participants" routes an institution as though it answered zero
+  (`src/db/applications.ts`).
+- `/training/estimate` sends individuals into the institutional application.
+- `scripts/reset-password.ts` imports `tlsHint` and never calls it — alone among the
+  scripts. `tlsHint()` itself recognises two of the four TLS fault codes the codebase
+  names, and `FAULT_CODES` omits `CONNECT_TIMEOUT`, the code the driver actually
+  raises for `connect_timeout`.
+
+#### Housekeeping — unreviewed files left in the working tree
+
+Audit agents were instructed to report only and several edited files anyway. Tracked
+modifications were reverted. These UNTRACKED files were left in place rather than
+deleted, and are **unreviewed** — review or remove them before any `git add -A`:
+
+```
+drizzle/0054_schedule_day_cache.sql
+drizzle/0055_data_api_lockdown.sql
+src/db/schedule-cache.ts
+src/pages/shop/brand/
+tests/db-scripts-tls.test.ts
+tests/schedule-cache.test.ts
+```
+
+Two are DATABASE MIGRATIONS. Nothing generated by an agent that ignored its
+instructions should reach the register without a person reading it first.
+
+#### Also recorded
+
+- `you@mmakf.in` — a placeholder address typed literally — held SUPER_ADMIN at
+  national scope and had signed in. Disabled via the new `npm run user:disable`;
+  the row is kept so its actions stay attributable.
+- `/belt-system` states that Dan examinations are conducted personally under the
+  authority of a VI Dan, while the published ladder now runs to X. **REQUIRES MMAKF
+  DECISION** — flagged in place, not invented.
+
 ## 4. Method notes
 
 - **No finding is entered on assertion alone.** Each is reproduced by an independent agent
