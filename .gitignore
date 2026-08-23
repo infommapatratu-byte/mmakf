@@ -33,6 +33,27 @@ dist/
 # database dumps — never committed
 backups/
 
+# TLS material.
+#
+# A provider CA is PUBLIC, so this is not a secrecy rule. It is a tidiness rule
+# with a security edge: a cert arrives in the project root as a download, no
+# source references it, and the next `git add .` sweeps it into a commit where
+# it lives for ever as a certificate nobody can date or attribute. The private
+# half is covered by the same rule, because a *.key or *.pem holding a private
+# key must never be committed and the difference is not visible in a filename.
+*.crt
+*.pem
+*.key
+
+# — EXCEPT the one the tooling depends on.
+#
+# scripts/db-session.ps1 loads this file BY NAME into DATABASE_CA_CERT, and it
+# is the reason a database script can reach Supabase at all. Without this
+# exemption the rule above would silently refuse to re-add it after any
+# delete-and-restore, and that surfaces much later as a TLS failure nobody
+# connects back to a line in .gitignore.
+!supabase-root-2021.crt
+
 # agent scratch files
 *.tmp.mjs
 .tmp-*/
