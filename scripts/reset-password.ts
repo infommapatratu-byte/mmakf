@@ -183,8 +183,31 @@ shown ONCE and is not recoverable. Hand it over on a channel you trust — not t
 same channel as the email address — and the holder must change it on first use.
 `);
 } catch (err: any) {
+  const tls = tlsHint(err);
+
   if (err instanceof Refused) {
     console.error(`\n${err.message}\n`);
+  } else if (tls) {
+    // The one fault here whose outcome is NOT in doubt. TLS is settled before the
+    // startup packet is sent, so there was never a session for an UPDATE to run
+    // in. The generic branch below is right to hedge — a connection that dies
+    // mid-statement genuinely leaves the operator unable to tell — but hedging
+    // HERE would send them hunting for a password change that cannot have
+    // happened, and the way they would check is to try the new password, which
+    // fails and reads as confirmation that something worse went wrong.
+    //
+    // The credential is withheld for the same reason: it belongs to no account.
+    // A password on screen is one somebody eventually writes down or hands on,
+    // and this one never became anybody’s.
+    console.error(`
+Failed: ${err?.message ?? err}`);
+    console.error(tls);
+    console.error(`
+Nothing was changed. The connection failed before authentication, so no
+statement was ever sent and the account still carries its previous password.
+Fix the trust problem above and run the command again — each run mints a fresh
+credential.
+`);
   } else {
     // Not a refusal: the write may or may not have landed. Print the credential,
     // because if it did land this is the only copy that will ever exist.
