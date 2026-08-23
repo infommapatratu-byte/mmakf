@@ -37,16 +37,6 @@ declare global {
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-/** Set by src/pages/404.astro, read in proceed(), never sent to a client. */
-const NOT_FOUND_MARKER = 'x-mmakf-not-found';
-
-/** The marker is internal plumbing. Strip it before the response leaves. */
-function headersWithoutMarker(res: Response): Headers {
-  const headers = new Headers(res.headers);
-  headers.delete(NOT_FOUND_MARKER);
-  return headers;
-}
-
 /**
  * Paths authenticated by cryptographic signature, not by origin.
  *
@@ -115,44 +105,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
   // Deferring it means the checks run first, unconditionally, on every host.
   // Re-entry is harmless either way because rewriteTarget() is idempotent — an
   // already-prefixed path returns null.
-  const proceed = async (): Promise<Response> => {
-    if (!target) return next();
-
-    const res = await context.rewrite(target + url.search);
-    if (res.status !== 404) return res;
-
-    // ── WAS THIS A REAL MISS, OR A REAL PAGE UNDER A BORROWED STATUS? ──────
-    //
-    // Both happen, and they need opposite answers.
-    //
-    // A rewrite that FOUND THE PAGE still carries 404, because the platform
-    // chose that status for the un-prefixed path — /apply — before the rewrite
-    // to /learn/apply ever ran. On learn.mmakf.in that shipped every page of
-    // the surface as a 404 carrying twelve kilobytes of correct HTML: browsers
-    // render it, search engines conclude the page does not exist, and the whole
-    // surface was unindexable while looking perfect. Only / and /portal escaped,
-    // because those paths happen to exist at the top level too.
-    //
-    // A rewrite that FOUND NOTHING must keep its 404, and it arrives in two
-    // shapes — which is why both are tested. On the learn host Astro renders no
-    // page at all and the body is empty; on the admin host it renders the 404
-    // page, body and all. Emptiness alone would have forced that second one to
-    // 200 and told the world every mistyped admin URL was a page.
-    //
-    // NONE OF THIS REPRODUCES LOCALLY: `astro dev` already answers 200 for a
-    // rewritten hit. The wrong status is the platform, which selected the 404
-    // route for the un-prefixed path before this middleware ever ran.
-    //
-    // Only 404 responses are buffered, so nothing that streams is affected.
-    const isNotFoundPage = res.headers.has(NOT_FOUND_MARKER);
-    const headers = headersWithoutMarker(res);
-    const body = await res.arrayBuffer();
-
-    if (isNotFoundPage || body.byteLength === 0) {
-      return new Response(body, { status: 404, statusText: res.statusText, headers });
-    }
-    return new Response(body, { status: 200, statusText: 'OK', headers });
-  };
+  const proceed = () => (target ? context.rewrite(target + url.search) : next());
 
   if (!MUTATING.has(request.method)) return proceed();
 
