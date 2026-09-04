@@ -24,16 +24,29 @@ quietly correcting, because it is the specific failure this document exists to
 prevent: a status file that is wrong is worse than no status file, since it is
 believed.
 
+**Found stale a third time, 5 September 2026.** Every count in the block below
+was low, two of them by more than a third, and the PRODUCTION STATE table under
+it had gone from stale to actively wrong: it described a database that has since
+been configured and migrated. Re-counted by running the commands.
+
 Every figure below came from one of these, run just now:
 
 ```
-ls tests/*.test.ts | wc -l              97 files
-npx vitest run                          3,502 passing, 2 expected fail, 0 skipped
-ls drizzle/*.sql | wc -l                35 migrations
-grep -h 'CREATE TABLE' drizzle/* | wc -l  269 tables
-find src/pages -type f | wc -l          142 route files
-find src/pages/admin -name '*.astro'    33 admin surfaces
+ls tests/*.test.ts | wc -l                140 files
+ls drizzle/*.sql | wc -l                   55 migrations
+grep -h 'CREATE TABLE' drizzle/*.sql | wc -l  286 tables
+find src/pages -type f | wc -l            193 route files
+find src/pages/admin -name '*.astro'       46 admin surfaces
 ```
+
+**`npx vitest run` and `npx astro build` were deliberately NOT run in this pass,
+and their previous figures are marked below rather than repeated as current.**
+Another workstream held six files open mid-edit while this was counted —
+`src/db/engagement.ts`, `src/db/fees.ts`, `src/lib/workflow.ts` and three admin
+pages, the last write landing sixty-eight seconds before the count. A suite run
+across a half-written tree measures the moment, not the tree, and a green number
+obtained that way is exactly the kind of figure this document exists to keep out.
+Whoever finishes that work owns those two lines.
 
 Re-run them before citing a number from here.
 
@@ -41,26 +54,48 @@ Re-run them before citing a number from here.
 
 | | |
 |---|---|
-| Production commit | `eee2319`, verified from `/api/health` on all three hosts |
+| Production commit | `205be61`, verified from `/api/health` on all three hosts, 5 September 2026 |
 | `www.mmakf.in` | serves the public federation ✅ |
 | `learn.mmakf.in` | serves the training platform ✅ (served the public homepage until 16 Aug) |
 | `admin.mmakf.in` | serves the operations console ✅ (same) |
-| Database | **`not_configured`** — the runtime receives no `DATABASE_URL` |
-| Migrations in production | **NONE APPLIED.** No table exists in the production database. |
+| Database | **`ok`** — `DATABASE_URL` is set and the register answers on all three hosts |
+| Migrations in production | **APPLIED.** |
 
-The gap between the two tables above is the honest state of this project: the
-repository is well ahead of what is running.
+**This table has been reversed, not adjusted, and the reversal is the single most
+consequential correction this file has carried.** It said production had no
+`DATABASE_URL` and that no table existed there. Both are false as of 5 September
+2026, and the second one is provable rather than merely reported: `database: ok`
+in the health payload is the return value of
+
+```
+select 1 from _mmakf_migrations limit 1
+```
+
+in `databaseHealthy()` — see [src/db/index.ts](../src/db/index.ts). That statement
+cannot succeed unless the migration ledger exists, so `ok` is positive evidence
+that migrations have been applied, not an assumption about it. What it does not
+establish is WHICH migrations, and nobody should read it as saying all 55 are in.
+Confirming that needs `npm run db:status` against the production connection
+string, which is a Vercel sensitive variable and pulls back empty, so it has to
+come from the operator.
+
+The old gap — the repository far ahead of what was running — has closed, and the
+direction of the remaining difference has flipped. Production serves the same
+commit as local `main`. What is ahead of production now is not the repository's
+history but its **working tree**: seventeen files of uncommitted work, six of
+them still being written while this was counted.
 
 | | |
 |---|---|
-| Database tables | **269** |
-| Migrations | 35 files. **Applied to the test database in CI. NOT applied to production** — see below. |
-| Tests | **3,502** across **97** files, none skipped (`npx vitest run`) |
-| Route files under `src/pages` | 142 |
-| Admin surfaces | 33 |
-| Statuses in the federation dictionary | **170**, across 8 tones |
-| `npx astro build` | succeeds |
-| Live 404s from links the site publishes | **0** (was 2) |
+| Database tables | **286** |
+| Migrations | 55 files. Applied to the test database in CI, **and applied in production** — see above. |
+| Test files | **140** |
+| Tests passing | 3,502 when last measured (23 August, at 97 files). **Not re-measured on 5 September** — see the note above. Any figure quoted from here is a floor at best. |
+| Route files under `src/pages` | 193 |
+| Admin surfaces | 46 |
+| Statuses in the federation dictionary | **261**, across 8 tones (counted from `DICTIONARY` in `src/lib/status.ts`) |
+| `npx astro build` | succeeded when last run (23 August). Not re-run 5 September. |
+| Live 404s from links the site publishes | **0** when last checked (23 August). Not re-checked 5 September. |
 
 > **This table used to contradict the one above it**, carrying 144 tables /
 > 2,670 tests / 79 files / 12 migrations while the Numbers block said 269 / 3,319
@@ -549,11 +584,36 @@ exists as schema with no surface, and what is not started.
 | Fulfilment lifecycle, shipments | `src/db/seller-orders.ts` | accept → pack → ship → deliver with stock movement asserted; `paid → delivered` refused |
 | Commission: rules, versions, resolution, freezing, gaps | `src/db/marketplace-finance.ts` | draft-not-applied, specificity ordering, basis-on-shipping, unresolved blocks close |
 | Settlement, payouts, adjustments, statements | `src/db/marketplace-finance.ts` | accrual, refund commission reversal, idempotency key |
-| Returns, refunds, disputes, buyer reports | `src/db/returns.ts` | policy reconciliation and the inspection arithmetic are enforced in code; **not yet under test** |
+| Returns, refunds, disputes, buyer reports | `src/db/returns.ts` | policy reconciliation and the inspection arithmetic asserted; the refundable figure multiplies before it divides |
+| Verification documents, versioned policy and acceptance | `src/db/seller-documents.ts`, `src/db/marketplace-policy.ts` | the storage key never appears in a list or an audit row; an acceptance names a version and carries its hash twice |
+| Shipping zones, methods and carriage quoting | `src/db/shipping.ts` | one implementation shared by the seller's preview and `checkout()`; an unzoned seller absorbs carriage and the exposure is counted |
+| Browse, storefronts, category and brand pages | `src/db/marketplace-browse.ts` | every public query goes through `publicListingPredicate()`; no filter exists without a column behind it |
+| Bulk product import | `src/db/product-import.ts` | four acts, staged; `import/submit` creates **drafts only**, into the same moderation queue a hand-typed item goes through |
+| Payout rails | `src/lib/payouts/`, `src/db/marketplace-finance.ts` | a send never writes `paid`; only the provider's own answer does. The RazorpayX adapter answers `isConfigured() === false` even with correct credentials until `RAZORPAYX_VERIFIED=true` |
+| Domain events and notifications | `src/db/marketplace-events.ts` | 21 event types, 14 notices, two new audiences; the catalogue and the producer module are asserted to agree |
 
-`tests/marketplace-platform.test.ts` — 44 tests, all passing, against PGlite with
-all 31 migrations applied. `tests/marketplace.test.ts` — 89 pre-existing tests,
-still passing after the schema change.
+### Tests, counted by running them
+
+| Suite | Tests |
+|---|---|
+| `marketplace-payouts` | 55 |
+| `marketplace.test.ts` | 51 |
+| `marketplace-browse` | 47 |
+| `marketplace-platform` (the brief's own critical and security tests) | 44 |
+| `marketplace-import` | 39 |
+| `marketplace-portal` | 38 |
+| `marketplace-shipping` | 29 |
+| `marketplace-returns` | 27 |
+| `marketplace-documents-policy` | 25 |
+| `marketplace-events` | 25 |
+| `marketplace-sitemap` | 22 |
+| `marketplace-checkout` | 17 |
+| **Total** | **419** |
+
+All passing against PGlite with every migration applied. Run together with
+`notifications`, `domain-events`, `money-safety`, `data-api-lockdown` and
+`api-contract`, the combined result is 532 passing and 2 expected failures.
+`npx tsc --noEmit` reports no errors and `npm run build` completes.
 
 Migration `0029_marketplace_platform.sql` adds 54 tables and 64 columns;
 `0030_data_api_lockdown.sql` puts every one behind row-level security. Verified:
@@ -765,3 +825,109 @@ And one new item, discovered while building documents:
 - **Object storage.** `UPLOAD_STORAGE_URL` is unset, so no file can be attached
   to anything anywhere on the platform — not only to a seller record. Until it
   is configured, verification rests on evidence supplied out of band.
+
+
+---
+
+# Addendum II — the four remaining slices, and what the wiring cost
+
+Added 23 August 2026. Counted the same way: by running it.
+
+The list at the end of the first addendum named four things as not started.
+All four are now built, and the entries above them are stale in the ways this
+section corrects. **Where the two addenda disagree, this one is right.**
+
+## The four
+
+| Slice | Module | Surface | Tests |
+|---|---|---|---|
+| Carriage and zones | `src/db/shipping.ts` | `/portal/seller/shipping` | 29 |
+| Verification documents, versioned policy | `src/db/seller-documents.ts`, `src/db/marketplace-policy.ts` | `/portal/seller/documents` | 25 |
+| Payout rails | `src/lib/payouts/` (4 files), `sendPayoutThroughProvider()` / `refreshPayoutFromProvider()` | `/portal/seller/money` | 55 |
+| Marketplace browse and SEO | `src/db/marketplace-browse.ts` | `/shop/category/[...path]`, `/shop/brand/[slug]` | 47 |
+| Bulk product import | `src/db/product-import.ts` | `/portal/seller/import` | 39 |
+| Domain events and notifications | `src/db/marketplace-events.ts` | — (feed and inbox) | 25 |
+
+**Marketplace suite total: 291 tests, all passing** — the six above plus
+`marketplace-platform` (44) and `marketplace-returns` (27), against PGlite with
+every migration applied.
+
+## Corrections to Addendum I
+
+- **API actions: 90, not 47.** The dispatch table gained bulk import
+  (`import/start|validate|submit|cancel`) and the payout rails
+  (`payout/send|refresh`) on top of the earlier waves.
+- **Returns are under test.** Addendum I originally said "not yet under test";
+  that stopped being true when `tests/marketplace-returns.test.ts` landed, and
+  the row has since been corrected in place rather than left to mislead.
+
+## The bug the event wiring existed to fix, and the worse one it nearly introduced
+
+`src/db/marketplace-events.ts` was written with twenty-one event types that were
+not in `src/lib/domain-events.ts`. `publish()` validates against `EVENT_TYPES` at
+runtime and refuses an unknown type outright, so **every producer would have
+thrown the first time a real order was placed.** Nothing in the type system said
+so: the module casts past the union deliberately, so that it can be written and
+tested before the catalogue change lands.
+
+The first attempt at that wiring was worse, and is why
+`tests/marketplace-events.test.ts` asserts what it does. The floors were chosen
+on sensitivity — a seller's order flow is commercial information, so `official`;
+a verification outcome, `confidential`. Both readings are defensible. Both are
+fatal, because the notifications drain in `src/pages/api/cron/reconcile.ts` runs
+
+```
+consume(db, 'notifications', ..., { maxClassification: 'member' })
+```
+
+and `consume()` **steps over anything above its cap without erroring**. Eight
+seller notices would never have been delivered, and the feed would have shown
+the events sitting there looking exactly like ones that had been.
+
+So the rule, asserted directly rather than inferred:
+
+> A marketplace event with a notifications consumer sits at `member`.
+> Sensitivity is held by keeping the material **off the payload**, not by
+> raising the floor.
+
+Which is what the producers do. No marketplace event carries a public field. The
+payloads omit the buyer's address, phone and email, the seller's bank details,
+the evidence behind a fraud signal, and the storage key of any document. A
+dispatch carries `trackingRecorded: true` — a boolean, because the number itself
+would let anybody reading the feed follow a stranger's parcel across a carrier's
+website. Where a figure genuinely must travel it goes on a separate, higher
+event that no consumer delivers: `MARKETPLACE_PAYOUT_INITIATED` carries the
+amount at `confidential` **precisely so** `MARKETPLACE_PAYOUT_PAID` can be the
+seller's notice.
+
+Two audiences were added to `resolveRecipients()` rather than reusing the
+near-miss `subject`, which ends in `Number(payload?.personId ?? entityId)`. For a
+grading the entity *is* the person and that fallback is right. Every marketplace
+entity is an order, a shop or a parcel, so it would address a federation notice
+to whoever happens to hold that number in `persons`. Both new audiences resolve
+through a real query and **both return `[]` when they cannot** — a guest
+checkout notifies nobody rather than somebody arbitrary.
+
+## Still not done
+
+- **Object storage.** `UPLOAD_STORAGE_URL` is unset, so no file can be attached
+  to anything on the platform. The documents slice is built and gated; until
+  storage is configured there is no upload control, because a control that
+  cannot work is worse than a stated absence.
+- **RazorpayX is not verified.** The adapter answers `isConfigured() === false`
+  **even with correct credentials**, until `RAZORPAYX_VERIFIED=true` is set by
+  somebody who has tested a transfer end to end. `mapPayoutStatus()` maps
+  nothing, deliberately, until the provider's status vocabulary is confirmed
+  against its documentation rather than guessed. So `payout/send` reports that
+  no rail can send money and refuses, and payouts are recorded by hand through
+  `payout/paid`.
+- **Federation-facing notices.** The events above `member` — payout
+  instructions, settlement blocks, payment mismatches, fraud signals — are on
+  the feed and read by nobody automatically, because the only consumer draining
+  it is capped at `member`. `ADMIN_NOTICES_NOT_WIRED` in
+  `src/db/marketplace-events.ts` states this rather than a second consumer being
+  invented to look complete.
+- **Commission remains unconfigured.** No rule is seeded. A sale MMAKF has
+  published no commission for records a `commission_gaps` row, keeps
+  `commissionMinor` NULL rather than 0, and blocks the settlement. That is the
+  designed behaviour, not a gap in the build.
