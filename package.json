@@ -18,6 +18,7 @@
     "db:status": "node scripts/migrate.mjs --status",
     "db:verify": "node scripts/verify-migrate.mjs",
     "dev:db": "node scripts/dev-db.mjs",
+    "user:list": "node scripts/user-list.ts",
     "user:create": "node scripts/create-user.ts",
     "user:reset-password": "node scripts/reset-password.ts",
     "user:status": "node scripts/user-status.ts",

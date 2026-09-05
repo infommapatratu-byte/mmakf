@@ -63,6 +63,27 @@ if ($plain -match '^[<\[].*[>\]]$') {
     return
 }
 
+# A PLACEHOLDER INSIDE THE STRING, WHICH IS THE ONE THAT ACTUALLY HAPPENS.
+#
+# The check above catches a value that is ENTIRELY a placeholder. Supabase's own
+# Connect dialog hands out the other shape:
+#
+#   postgresql://postgres.<ref>:[YOUR-PASSWORD]@aws-0-ap-south-1.pooler.supabase.com:6543/postgres
+#
+# and that string parses, passes every check below it, reaches the server and
+# fails as `password authentication failed for user "postgres.<ref>"` — which
+# reads as a WRONG password rather than as one never substituted. The operator
+# then goes looking for the right password, which they may already have had.
+#
+# Word characters are required between the brackets so an IPv6 literal host
+# ([2001:db8::1]) is not mistaken for a placeholder. That has its own failure and
+# its own note in DEPLOYMENT.md section 3 step 1.
+if ($plain -match '[<\[][A-Za-z][A-Za-z0-9 _-]*[>\]]') {
+    Write-Host ('That string still contains a placeholder: ' + $Matches[0]) -ForegroundColor Red
+    Write-Host 'Substitute the real value before pasting. Nothing was set.' -ForegroundColor Red
+    return
+}
+
 if ($plain -notmatch '^postgres(ql)?://') {
     Write-Host 'That does not start with postgres:// or postgresql://' -ForegroundColor Red
     Write-Host 'Nothing was set. Check you copied the whole string.' -ForegroundColor Red
@@ -94,7 +115,21 @@ $hasSslMode = $plain -match '[?&]sslmode='
 
 Write-Host ''
 Write-Host ('Host      : ' + $uri.Host) -ForegroundColor Green
+Write-Host ('Port      : ' + $uri.Port) -ForegroundColor Green
 Write-Host ('Database  : ' + $uri.AbsolutePath.TrimStart('/')) -ForegroundColor Green
+
+# THE TWO POOLER STRINGS DIFFER ONLY IN THE PORT, and DEPLOYMENT.md calls that
+# one digit the mistake to expect. 6543 is the transaction pooler the APP uses;
+# 5432 is the session pooler an OPERATOR uses. Plain DML runs over either, so
+# user:list and friends would work — but db:migrate cannot, because the DDL
+# transaction each migration opens needs a session the pooler will not hold.
+# Said here rather than left to the failure, which arrives mid-migration.
+if ($uri.Port -eq 6543) {
+    Write-Host ''
+    Write-Host 'NOTE      : 6543 is the TRANSACTION pooler — the string the app uses.' -ForegroundColor Yellow
+    Write-Host '            Reads and plain DML work (user:list, user:status, backup),' -ForegroundColor Yellow
+    Write-Host '            but db:migrate needs the SESSION pooler: same host, port 5432.' -ForegroundColor Yellow
+}
 if ($hasSslMode) {
     Write-Host 'TLS       : sslmode in the URL — it wins, no certificate needed' -ForegroundColor Green
 } else {

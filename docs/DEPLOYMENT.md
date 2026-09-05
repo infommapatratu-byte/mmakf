@@ -306,6 +306,7 @@ applied history is how environments silently diverge.
 | **A status code does not prove a link works.** `wkf.net` serves a superseded PDF as HTTP 200 with `image/png` and 1.6KB. `npm run links:check` verifies content type and size |
 | **Local Node 25 vs Vercel Node 22** produces a build warning. Harmless — the deploy uses 22 |
 | **Supabase's direct host is IPv6-only.** `db.<project-ref>.supabase.co` publishes AAAA and no A record, so a migration aimed at it fails `ENOTFOUND`/`ENETUNREACH` before one statement runs — from a workstation and from a Vercel function alike. Operator commands go through the **session** pooler, `aws-N-ap-south-1.pooler.supabase.com:5432`; the app uses the same host on `6543`. §3 step 1 has the measurements, and why pasting the IPv6 literal makes it worse |
+| **The shared office password stops working the moment the first account exists**, and the console cannot name a replacement. It answers `403 The shared password has been retired` — true, and useless to an office that no longer remembers which address was created in §3 step 6. `npm run user:list` is the answer: read-only, prints every account with its roles and whatever is blocking it, and no credential. Production crossed this line at its own step 6 |
 
 ---
 
