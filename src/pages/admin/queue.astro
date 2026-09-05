@@ -323,15 +323,58 @@ const signedInAs = identity
         'Reload to take this item off the open list and see the new history entry.';
       if (fieldset instanceof HTMLFieldSetElement) fieldset.disabled = true;
       if (refresh instanceof HTMLElement) refresh.hidden = false;
+
+      // A DECISION CAN LAND AND THE REGISTER STILL NOT FOLLOW, and until now
+      // this branch threw away every word the server wrote about it.
+      //
+      // /api/queue/decide accumulates notes while it provisions — contacts
+      // recorded as UNVERIFIED, no membership issued for this category, and the
+      // one that matters most: "the membership could not be issued to the
+      // register. This needs an administrator: the queue now shows Approved and
+      // the member is not registered." It sends them on a 200 whose `ok` is
+      // still true, because the decision itself DID succeed, so this success
+      // branch is the only place they can ever be shown. It read body.from and
+      // body.to and nothing else, so all of it was discarded — the office saw
+      // "Recorded by the server" and had no way to learn the register had not
+      // received the member.
+      //
+      // Announced through the alert channel rather than appended to the status
+      // line: these notes name work somebody now has to do, and a red alert is
+      // the honest rendering of that even though the transition succeeded.
+      if (body.warning) fail(String(body.warning));
       return;
     }
 
-    const code = body && body.code ? String(body.code) : '';
-    let message = body && body.error ? String(body.error) : '';
+    // decide.ts answers in TWO SHAPES and this read only one of them. A
+    // QueueError carries the human sentence in `error` and the machine code in
+    // `code`; the fail-visible provisioning paths carry the machine code in
+    // `error` and the human sentence in `message`. Reading `error` alone
+    // therefore showed the operator a bare identifier —
+    // "decision_recorded_but_not_registered" — as though it were an
+    // explanation, and dropped the sentence written to explain it.
+    const code = body && body.code ? String(body.code)
+      : body && body.error === 'decision_recorded_but_not_registered' ? String(body.error)
+      : '';
+    let message = body && body.message ? String(body.message)
+      : body && body.error ? String(body.error) : '';
     if (!message) {
       if (response.status === 401) message = 'Your session has ended.';
       else if (response.status === 429) message = 'Too many decisions in a short time. Wait a minute and try again.';
       else message = 'The decision was not recorded (HTTP ' + response.status + ').';
+    }
+
+    // THE ONE FAILURE THAT MUST NOT SAY "Nothing was changed", because
+    // something was. decide.ts sends this only after `decide()` has committed
+    // the transition and the register work then failed, so the queue row is
+    // already Approved. The generic tail below would have told the office
+    // nothing happened and sent them looking for an item that is no longer in
+    // the open list — the precise invisible failure the endpoint's own
+    // fail-visible returns exist to prevent.
+    if (code === 'decision_recorded_but_not_registered') {
+      if (fieldset instanceof HTMLFieldSetElement) fieldset.disabled = true;
+      if (refresh instanceof HTMLElement) refresh.hidden = false;
+      fail(message);
+      return;
     }
 
     // Only `forbidden` means the authority is missing. A bare 403 without that
