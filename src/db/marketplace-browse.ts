@@ -127,7 +127,7 @@
 // equally-priced rows differently between page 1 and page 2, and the buyer sees
 // one item twice and never sees another at all.
 
-import { and, asc, desc, eq, gte, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lte, ne, or, sql, type SQL } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { publicListingPredicate } from '@/db/onboarding.schema';
 import { MarketplaceError } from '@/db/marketplace';
@@ -824,7 +824,27 @@ export async function browseBrand(
     description: s.brands.description,
     website: s.brands.website,
     logoUrl: s.brands.logoUrl,
-  }).from(s.brands).where(eq(s.brands.slug, slug)).limit(1))[0] ?? null;
+  })
+    .from(s.brands)
+    // A BLOCKED BRAND HAS NO PUBLIC PAGE. `brands.status` is
+    // ('active' | 'restricted' | 'blocked') and this lookup matched on slug
+    // alone, so a brand the federation had blocked still rendered a full
+    // storefront on the public domain — name, logo, description and website,
+    // with its items beneath. Blocking it in the register meant nothing to
+    // anybody browsing.
+    //
+    // The predicate is HERE rather than in the page, for the same reason
+    // publicListingPredicate() is: a visibility rule restated by each caller is
+    // a visibility rule one caller will get wrong.
+    //
+    // 'restricted' is deliberately still public. Nothing in the schema says it
+    // means hidden — requiresAuthorisation is the separate column that governs
+    // who may list under the brand — and silently withdrawing a restricted
+    // brand's page would remove real, lawfully sold inventory from the
+    // marketplace on a guess. If the federation wants that too, it is one more
+    // value in this predicate and a decision somebody has made on purpose.
+    .where(and(eq(s.brands.slug, slug), ne(s.brands.status, 'blocked')))
+    .limit(1))[0] ?? null;
 
   const empty: BrandBrowse = {
     brand, items: [], total: 0, limit, offset, limitCapped, filters,

@@ -1,0 +1,231 @@
+---
+// /shop/brand/… — everything on the marketplace carrying one brand.
+//
+// ─── THE ONE THING THIS PAGE MUST NOT IMPLY ─────────────────────────────────
+//
+// That listing a brand is the same as being authorised to sell it.
+//
+// `listings.brandId` is a CLAIM the seller made. A verified authorisation is a
+// separate record MMAKF wrote after looking at a letter, and the two are
+// routinely different: a reseller may lawfully stock branded goods without
+// holding any authorisation at all. So this page shows both items, and marks
+// which sellers hold a current verified authorisation — from
+// `authorisedSellerIds`, which browseBrand() resolves through
+// verifiedBrandAuthorisation() with its expiry check.
+//
+// A brand page that presented every listing as "authorised" would be doing the
+// forgery the whole counterfeit regime exists to prevent, on the federation's
+// own domain.
+//
+// Every row still comes through publicListingPredicate(), in SQL.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db } from '@/db';
+import { browseBrand, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/db/marketplace-browse';
+
+export const prerender = false;
+
+const slug = String(Astro.params.slug ?? '').trim().toLowerCase();
+const q = Astro.url.searchParams;
+
+const intParam = (k: string): number | null => {
+  const v = q.get(k);
+  return v != null && /^\d{1,9}$/.test(v) ? Number(v) : null;
+};
+
+const page = Math.max(1, intParam('page') ?? 1);
+// `?per=0` PASSES intParam — "0" is digits — and `??` does not replace it,
+// because 0 is not null. That put a zero here, and every arithmetic below
+// divides by it: lastPage became Math.ceil(total / 0) = Infinity, so "Next"
+// was rendered on every page forever, each link advancing `page` while the
+// offset stayed at 0. The count line read "showing 1–0" over an item that was
+// plainly there, since browseBrand's own normalisePaging clamps the limit it
+// receives to at least 1 and returned one anyway. An infinite chain of
+// near-identical crawlable URLs is the worst possible shape for a public page.
+const perPage = Math.max(1, Math.min(MAX_PAGE_SIZE, intParam('per') ?? DEFAULT_PAGE_SIZE));
+
+// Navigation, not content — the rule /shop/category/[...path].astro already
+// applies and this page was the one storefront exception. A crawler that
+// indexed every sort and page of a brand would spend the federation's crawl
+// budget on near-identical URLs; Base.astro canonicalises them to the bare
+// brand address, and this stops them competing in the first place.
+const filtered = q.get('inStock') === '1' || Boolean(q.get('sort'));
+if (filtered || page > 1) Astro.response.headers.set('X-Robots-Tag', 'noindex, follow');
+
+const configured = isConfigured();
+let result: any = null;
+let loadError = false;
+/** A refused query parameter, which is NOT the same as an unknown brand. */
+let paramError: string | null = null;
+
+if (configured && slug) {
+  try {
+    result = await browseBrand(db(), {
+      slug,
+      filters: { inStock: q.get('inStock') === '1' ? true : undefined, sort: (q.get('sort') ?? undefined) as any },
+      limit: perPage,
+      offset: (page - 1) * perPage,
+    });
+  } catch (err: any) {
+    // A REFUSED PARAMETER USED TO DELETE THE BRAND. Every MarketplaceError was
+    // flattened to `result = null`, which made `brand` null, which rendered
+    // "No such brand. It is not in the marketplace brand register" under a 404
+    // — for a brand that exists. `?sort=cheapest` was enough: normaliseFilters
+    // throws `bad_sort` on an unrecognised ordering, and the visitor was told
+    // the brand was not real rather than that the ordering was not.
+    //
+    // Only `bad_brand_slug` is genuinely about the address. Everything else is
+    // a bad request against a brand whose existence is still an open question,
+    // so it is reported as itself, with the module's own sentence.
+    if (err?.name === 'MarketplaceError') {
+      if (err.code === 'bad_brand_slug') result = null;
+      else paramError = String(err.message);
+    } else { console.error('[shop/brand]', err); loadError = true; }
+  }
+}
+
+const brand = result?.brand ?? null;
+if (!loadError && configured && paramError) Astro.response.status = 400;
+else if (!loadError && configured && !brand) Astro.response.status = 404;
+
+const items: any[] = result?.items ?? [];
+const total: number = result?.total ?? 0;
+const authorised = new Set<number>(result?.authorisedSellerIds ?? []);
+const lastPage = Math.max(1, Math.ceil(total / perPage));
+
+const money = (m: number, currency = 'INR') =>
+  `${currency === 'INR' ? '₹' : `${currency} `}${Math.floor(m / 100).toLocaleString('en-IN')}.${String(m % 100).padStart(2, '0')}`;
+
+const pageHref = (n: number) => {
+  const next = new URLSearchParams(q);
+  next.set('page', String(n));
+  return `?${next.toString()}`;
+};
+
+/** Items whose seller holds no verified authorisation for this brand. */
+const unauthorisedCount = items.filter((it: any) => !authorised.has(Number(it.sellerId))).length;
+---
+
+<Base
+  title={brand ? `${brand.name} — MMAKF marketplace` : 'Brand not found — MMAKF'}
+  description={brand
+    ? (brand.description || `${brand.name} equipment on the MMAKF marketplace.`)
+    : 'This brand is not available.'}
+  breadcrumbs={brand ? [
+    { name: 'Shop', url: '/shop' },
+    { name: brand.name, url: `/shop/brand/${brand.slug}` },
+  ] : undefined}
+>
+  <section>
+    <div class="container">
+
+      {!configured && <div class="card"><h1 class="display-2">Not available on this deployment.</h1></div>}
+
+      {configured && loadError && (
+        <div class="card" role="alert"><h1 class="display-2">This brand could not be loaded.</h1></div>
+      )}
+
+      {configured && !loadError && paramError && (
+        <div class="card" role="alert">
+          <h1 class="display-2">That request could not be read.</h1>
+          <p>{paramError}</p>
+          <p>
+            <a href={`/shop/brand/${slug}`}>Show this brand without the extra options</a>
+            {' · '}
+            <a href="/shop">Browse the marketplace</a>.
+          </p>
+        </div>
+      )}
+
+      {configured && !loadError && !paramError && !brand && (
+        <div class="card">
+          <h1 class="display-2">No such brand.</h1>
+          {/* Deliberately not "it is not in the register": a BLOCKED brand is in
+              the register and reaches here too, and telling the public which of
+              the two it is discloses a moderation decision to anybody who can
+              type a URL. */}
+          <p>There is no brand page at this address. <a href="/shop">Browse the marketplace</a>.</p>
+        </div>
+      )}
+
+      {brand && (
+        <>
+          <header class="brandhead">
+            {brand.logoUrl && <img src={brand.logoUrl} alt="" class="logo" width="88" height="88" />}
+            <div>
+              <div class="eyebrow">MMAKF marketplace</div>
+              <h1 class="display-1" style="margin-top:8px">{brand.name}</h1>
+              {brand.description && <p class="lede">{brand.description}</p>}
+            </div>
+          </header>
+
+          <div class="card">
+            <h2 class="h4">What a brand name here means</h2>
+            <p>
+              The brand shown on an item is what its <strong>seller</strong> recorded. It is a description
+              of the goods, not a statement that MMAKF has approved that seller to represent the brand.
+            </p>
+            <p>
+              Where a seller holds an authorisation the federation has seen and verified — and which has
+              not expired — the item below says so. {unauthorisedCount > 0
+                ? `${unauthorisedCount} of the items on this page are sold by sellers holding no such authorisation, which is ordinary and lawful for a reseller.`
+                : ''}
+            </p>
+          </div>
+
+          <p class="muted">
+            {total === 0
+              ? 'Nothing carrying this brand is on sale.'
+              : `${total} item${total === 1 ? '' : 's'} · showing ${(page - 1) * perPage + 1}–${Math.min(page * perPage, total)}`}
+          </p>
+
+          {total === 0 ? (
+            <div class="card"><p>Nothing at the moment. No substitutes have been added to fill the page.</p></div>
+          ) : (
+            <div class="items">
+              {items.map((it: any) => (
+                <article class="card item">
+                  {it.image && <img src={it.image} alt={it.imageAlt ?? ''} width="240" height="240" loading="lazy" />}
+                  <h3 class="h4"><a href={`/shop/product/${it.ref}`}>{it.title}</a></h3>
+                  <p class="price">{it.variantCount > 1 ? 'from ' : ''}{money(it.priceMinor, it.currency)}</p>
+                  <p class="muted">
+                    {it.sellerStoreSlug
+                      ? <a href={`/shop/seller/${it.sellerStoreSlug}`}>{it.sellerTradingName}</a>
+                      : it.sellerTradingName}
+                  </p>
+                  {authorised.has(Number(it.sellerId))
+                    ? <p class="badge">MMAKF has verified this seller’s authorisation for {brand.name}</p>
+                    : <p class="muted small">This seller holds no verified {brand.name} authorisation with MMAKF.</p>}
+                  {!it.inStock && <p class="muted">Out of stock</p>}
+                </article>
+              ))}
+            </div>
+          )}
+
+          {lastPage > 1 && (
+            <nav class="pager" aria-label="Pages">
+              {page > 1 && <a class="btn" href={pageHref(page - 1)}>Previous</a>}
+              <span class="muted">Page {page} of {lastPage}</span>
+              {page < lastPage && <a class="btn" href={pageHref(page + 1)}>Next</a>}
+            </nav>
+          )}
+        </>
+      )}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .brandhead { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 18px; }
+  .logo { border-radius: 12px; object-fit: contain; }
+  .lede { font-size: 1.1rem; opacity: 0.9; }
+  .items { display: grid; gap: 14px; grid-template-columns: 1fr; }
+  @media (min-width: 640px) { .items { grid-template-columns: 1fr 1fr; } }
+  @media (min-width: 1000px) { .items { grid-template-columns: repeat(3, 1fr); } }
+  .item img { width: 100%; height: auto; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
+  .price { font-weight: 700; font-size: 1.1rem; margin: 6px 0; }
+  .badge { border: 1px solid currentColor; border-radius: 6px; padding: 4px 8px; font-size: 0.85em; display: inline-block; }
+  .muted { opacity: 0.75; }
+  .small { font-size: 0.85em; }
+  .pager { display: flex; gap: 12px; align-items: center; margin: 20px 0; }
+</style>

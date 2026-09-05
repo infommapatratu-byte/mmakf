@@ -727,6 +727,35 @@ describe('BRAND PAGES — a claim by a seller, and what MMAKF verified', () => {
     expect(cheap.items.every((i) => i.priceMinor <= 90000)).toBe(true);
     expect(cheap.total).toBe(cheap.items.length);
   });
+
+  it('a BLOCKED brand has no public page at all, and a restricted one still does', async () => {
+    // brands.status is ('active' | 'restricted' | 'blocked') and this lookup
+    // matched on slug alone, so blocking a brand in the register changed
+    // nothing a visitor could see: the name, logo, description and every item
+    // beneath them were still served on the public domain.
+    const [blocked] = await db.insert(s.brands)
+      .values({ slug: 'forged-co', name: 'Forged Co', status: 'blocked' })
+      .returning();
+    const bc = await seller('blockedbrand');
+    await product(bc, 'Forged Co mitts', 120000, 2, { categoryId: await catId('mitts'), brandId: blocked.id });
+
+    const gone = await browseBrand(db, { slug: 'forged-co', limit: MAX_PAGE_SIZE });
+    expect(gone.brand).toBeNull();
+    expect(gone.items).toEqual([]);
+
+    // 'restricted' is deliberately NOT hidden. requiresAuthorisation is the
+    // column that governs who may list under a brand; withdrawing a restricted
+    // brand's page would take lawfully sold stock off the marketplace on a guess.
+    const [restricted] = await db.insert(s.brands)
+      .values({ slug: 'guarded-co', name: 'Guarded Co', status: 'restricted' })
+      .returning();
+    const rc = await seller('restrictedbrand');
+    await product(rc, 'Guarded Co pads', 130000, 2, { categoryId: await catId('pads'), brandId: restricted.id });
+
+    const still = await browseBrand(db, { slug: 'guarded-co', limit: MAX_PAGE_SIZE });
+    expect(still.brand?.name).toBe('Guarded Co');
+    expect(still.items.map((i) => i.title)).toContain('Guarded Co pads');
+  });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
