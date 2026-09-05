@@ -98,5 +98,12 @@ astro.config.verify.mjs
 .env*.backup*
 .env.local.backup-*
 
-# Build mutex — one astro build at a time per checkout. See scripts/build-lock.mjs.
+# Build mutex — one astro build at a time per checkout. See
+# scripts/build-lock-core.mjs. (This used to point at scripts/build-lock.mjs,
+# which has never existed in this repository.)
 .build-lock/
+
+# Build sentinel — present between prebuild and a successful postbuild, so one
+# found at startup means the last build was interrupted. It lives at the root
+# rather than in dist/ because astro build empties dist/ and would destroy it.
+.build-in-progress

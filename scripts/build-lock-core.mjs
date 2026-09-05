@@ -1,17 +1,23 @@
 // The build mutex itself. One `astro build` at a time against this checkout.
 //
-// The reasoning lives in scripts/build-lock.mjs; this file is the mechanism,
-// factored out so THREE callers share one implementation and cannot drift:
+// This file is the mechanism, factored out so its callers share one
+// implementation and cannot drift:
 //
-//   · scripts/build-lock.mjs      — npm `prebuild`
-//   · scripts/build-unlock.mjs    — npm `postbuild`
-//   · the integration in astro.config.mjs
+//   · the integration in astro.config.mjs   — takes and releases the lock
+//   · scripts/clean-vercel-output.mjs       — asks who holds it, through
+//                                             activeBuildOwner()
 //
-// THE INTEGRATION IS THE ONE THAT MATTERS, and the npm hooks are belt to its
-// braces. `npx astro build` does not run npm lifecycle scripts, so a lock wired
-// only into `prebuild` is bypassed entirely by the exact invocation that was
-// causing the collisions here — five simultaneous `npx astro build` processes.
-// An integration hook runs for every build however it was started.
+// THE INTEGRATION IS THE ONE THAT MATTERS. `npx astro build` does not run npm
+// lifecycle scripts, so a lock wired only into `prebuild` is bypassed entirely
+// by the exact invocation that was causing the collisions here — five
+// simultaneous `npx astro build` processes. An integration hook runs for every
+// build however it was started.
+//
+// THIS HEADER USED TO NAME scripts/build-lock.mjs AND scripts/build-unlock.mjs
+// as the npm-hook callers, and said the reasoning lived in the first of them.
+// Neither file has ever existed in this repository. A reader following that
+// pointer found nothing and could not tell whether a file had been deleted or
+// the comment was simply wrong; .gitignore carried the same dead reference.
 
 import { mkdirSync, rmSync, writeFileSync, readFileSync, statSync, existsSync } from 'node:fs';
 import path from 'node:path';
@@ -44,6 +50,31 @@ function readOwner() {
   } catch {
     return null;
   }
+}
+
+/**
+ * The build that currently holds the mutex, or null if none does.
+ *
+ * EXPORTED SO NOBODY HAS TO GUESS A PID AGAIN. scripts/clean-vercel-output.mjs
+ * used to answer "is a build running?" by recording `process.ppid` in a
+ * sentinel and signalling it later. That was wrong on every platform: an npm
+ * lifecycle script's parent is the short-lived shell npm spawns for that one
+ * hook, and it exits the moment the hook returns — so the recorded pid was
+ * already dead when `astro build` started, the guard never fired once, and
+ * concurrent builds cleared dist/ out from under each other.
+ *
+ * The lock owner is the pid that is actually correct: acquire() is called from
+ * inside the astro process, so owner.json holds a pid that lives for exactly as
+ * long as the build it represents.
+ *
+ * @returns {{pid: number, at: string} | null}
+ */
+export function activeBuildOwner() {
+  const owner = readOwner();
+  if (!owner) return null;
+  const pid = Number(owner.pid) || 0;
+  if (!pid || pid === process.pid) return null;
+  return alive(pid) ? { pid, at: owner.at } : null;
 }
 
 function breakIfStale() {
