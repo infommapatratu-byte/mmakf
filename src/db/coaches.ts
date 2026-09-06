@@ -68,7 +68,16 @@ export type CoachStatus = (typeof COACH_STATUSES)[number];
  * 'candidate' straight to 'approved', because then nothing was screened and the
  * record would say otherwise.
  */
-const COACH_TRANSITIONS: Record<CoachStatus, CoachStatus[]> = {
+/**
+ * The stage machine, EXPORTED so a screen cannot offer a move the module will
+ * refuse.
+ *
+ * `/admin/coaches` builds its "move to…" control from this table. Keeping a
+ * second copy in the page would mean the two drift the first time a stage is
+ * added, and the symptom would be an administrator picking a stage that is then
+ * rejected — which reads as a broken screen rather than as a rule.
+ */
+export const COACH_TRANSITIONS: Record<CoachStatus, CoachStatus[]> = {
   candidate: ['screening', 'withdrawn', 'rejected'],
   screening: ['interview', 'technical_review', 'withdrawn', 'rejected'],
   interview: ['technical_review', 'screening', 'withdrawn', 'rejected'],
@@ -992,4 +1001,296 @@ export async function setAvailability(
   }).returning();
 
   return row;
+}
+
+// ─── The public teaching faculty ────────────────────────────────────────────
+
+export interface FacultyMember {
+  federationId: string | null;
+  fullName: string;
+  photoUrl: string | null;
+  headline: string | null;
+  bio: string | null;
+  /**
+   * THE VERIFIED RANK — read from `rank_records`, the examination register.
+   *
+   * Null when MMAKF holds no active Dan record for this person, and null is
+   * printed as an absence rather than filled in from `statedGrade` below.
+   */
+  verifiedGrade: string | null;
+  /** True when that rank traces to a grading event with examiner scores. */
+  verifiedExamined: boolean;
+  /**
+   * WHAT THEY WROTE ON THEIR APPLICATION — `coach_profiles.dan_grade`, free text
+   * somebody typed about themselves.
+   *
+   * It is carried SEPARATELY and never merged into `verifiedGrade`, because
+   * merging them is precisely the fake-credential problem this federation's
+   * verification service exists to end. The surface renders it only when there
+   * is no verified rank, and labels it as unverified when it does.
+   */
+  statedGrade: string | null;
+  teachingSince: string | null;
+  languages: string[];
+  ageBands: string[];
+  state: string | null;
+  district: string | null;
+  dojo: string | null;
+  dojoSlug: string | null;
+  baseCity: string | null;
+}
+
+/**
+ * THE PUBLIC TEACHING FACULTY — instructors who actually teach through MMAKF.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * TAKES NO PRINCIPAL, LIKE publicTeam() AND FOR THE SAME REASON
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * It accepts no parameter that could widen it past `status = 'active'`. A
+ * candidate, somebody in screening, somebody suspended, withdrawn or rejected
+ * cannot be returned by any call — there is no argument to pass.
+ *
+ * `suspended_at IS NULL` is tested as well as the status, belt and braces: a
+ * suspension that set the timestamp and left the status behind would otherwise
+ * keep a suspended instructor in front of parents looking for a teacher.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * TWO GRADES, NEVER MERGED — THE ONE RULE THIS FUNCTION EXISTS FOR
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * `coach_profiles.dan_grade` is free text an applicant typed about themselves.
+ * `rank_records` is the federation's examination register.
+ *
+ * Reading the first and printing it beside an MMAKF masthead as though it were
+ * the second is how a federation publishes credentials it never awarded. So
+ * they travel as two fields with two names, and the page renders the stated one
+ * only in the absence of a verified one, labelled as unverified.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WHAT IT DELIBERATELY DOES NOT RETURN
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * SAFEGUARDING CLEARANCE. `coach_profiles` holds `safeguarding_cleared_on` and
+ * `safeguarding_expires_on`, and a parent's most important question about a
+ * children's instructor is exactly that. It is still not here, because the
+ * public form of this data is a decision MMAKF has not taken and both readings
+ * are harmful if guessed:
+ *
+ *   · publishing "cleared" makes its ABSENCE a public statement that a named
+ *     instructor is not cleared to work with children — the most damaging thing
+ *     this system could say about somebody, published by omission and with no
+ *     process behind it; and
+ *   · publishing nothing at all, which is what this does, leaves a parent to ask
+ *     the federation.
+ *
+ * The second is recoverable and the first is not. `assertSafeguardingCleared()`
+ * already enforces the real control where it matters — an uncleared coach is not
+ * assignable to work with minors — and that enforcement is not weakened by this
+ * page staying quiet.
+ *
+ * NO CONTACT DETAIL, no availability, no travel radius, no maximum sessions, no
+ * performance band. A visitor is choosing a teacher, not reading an operations
+ * record.
+ */
+export async function publicFaculty(
+  db: DB,
+  filters: { stateUnitId?: number; dojoId?: number; language?: string; limit?: number } = {}
+): Promise<FacultyMember[]> {
+  const where: any[] = [
+    eq(o.coachProfiles.status, 'active'),
+    isNull(o.coachProfiles.suspendedAt),
+    eq(s.persons.status, 'active'),
+  ];
+  if (filters.stateUnitId != null) where.push(eq(o.coachProfiles.stateUnitId, filters.stateUnitId));
+  if (filters.dojoId != null) where.push(eq(o.coachProfiles.homeDojoId, filters.dojoId));
+
+  const rows = await db
+    .select({
+      federationId: s.persons.federationId,
+      fullName: s.persons.fullName,
+      photoUrl: s.persons.photoUrl,
+      headline: o.coachProfiles.headline,
+      bio: o.coachProfiles.bio,
+      statedGrade: o.coachProfiles.danGrade,
+      teachingSince: o.coachProfiles.teachingSince,
+      languages: o.coachProfiles.languages,
+      ageBands: o.coachProfiles.ageBands,
+      baseCity: o.coachProfiles.baseCity,
+      verifiedGrade: s.rankRecords.gradeLabel,
+      verifiedEventId: s.rankRecords.gradingEventId,
+      state: s.stateUnits.name,
+      district: s.districtUnits.name,
+      dojo: s.dojos.name,
+      dojoSlug: s.dojos.slug,
+    })
+    .from(o.coachProfiles)
+    .innerJoin(s.persons, eq(s.persons.id, o.coachProfiles.personId))
+    // The ONE active Dan record, if there is one. A partial unique index on
+    // `rank_records` guarantees at most one active row per person per kind, so
+    // this join cannot multiply the faculty list.
+    .leftJoin(s.rankRecords, and(
+      eq(s.rankRecords.personId, o.coachProfiles.personId),
+      eq(s.rankRecords.kind, 'dan'),
+      eq(s.rankRecords.status, 'active')
+    ))
+    .leftJoin(s.stateUnits, eq(s.stateUnits.id, o.coachProfiles.stateUnitId))
+    .leftJoin(s.districtUnits, eq(s.districtUnits.id, o.coachProfiles.districtUnitId))
+    .leftJoin(s.dojos, eq(s.dojos.id, o.coachProfiles.homeDojoId))
+    .where(and(...where))
+    .orderBy(desc(s.rankRecords.gradeOrdinal), asc(s.persons.fullName))
+    .limit(Math.min(filters.limit ?? 200, 500));
+
+  const list: FacultyMember[] = rows.map((r: any) => ({
+    federationId: r.federationId ?? null,
+    fullName: r.fullName,
+    photoUrl: r.photoUrl ?? null,
+    headline: r.headline ?? null,
+    bio: r.bio ?? null,
+    verifiedGrade: r.verifiedGrade ?? null,
+    verifiedExamined: Boolean(r.verifiedEventId),
+    statedGrade: r.statedGrade ?? null,
+    teachingSince: r.teachingSince ?? null,
+    languages: Array.isArray(r.languages) ? r.languages.map(String) : [],
+    ageBands: Array.isArray(r.ageBands) ? r.ageBands.map(String) : [],
+    state: r.state ?? null,
+    district: r.district ?? null,
+    dojo: r.dojo ?? null,
+    dojoSlug: r.dojoSlug ?? null,
+    baseCity: r.baseCity ?? null,
+  }));
+
+  // Filtered in JS rather than SQL because `languages` is jsonb written by the
+  // application and its shape is not enforced by the column. A `@>` containment
+  // query would silently return nothing for a profile that stored a string where
+  // an array was expected, and a filter that quietly finds nobody is worse than
+  // one that costs a pass over at most 500 rows.
+  if (filters.language) {
+    const want = filters.language.toLowerCase();
+    return list.filter((m) => m.languages.some((l) => l.toLowerCase() === want));
+  }
+  return list;
+}
+
+/** Facets derived from the faculty that exists — never an enumerated list. */
+export async function facultyFacets(db: DB) {
+  const rows = await publicFaculty(db, { limit: 500 });
+  const states = [...new Set(rows.map((r) => r.state).filter(Boolean))].sort() as string[];
+  const languages = [...new Set(rows.flatMap((r) => r.languages))].sort();
+  const ageBands = [...new Set(rows.flatMap((r) => r.ageBands))].sort();
+  return { states, languages, ageBands, total: rows.length };
+}
+
+// ─── The join that made /teachers permanently empty ─────────────────────────
+
+/**
+ * Approve-to-active, creating the person record if the candidate has no one.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * THE GAP THIS CLOSES
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * `activateCoach()` is written, tested, and had NO CALLER ANYWHERE IN `src/`.
+ * It is the only thing that creates a `coach_profiles` row with
+ * `status = 'active'`, and `publicFaculty()` — the read behind the public
+ * `/teachers` page — returns only active profiles.
+ *
+ * So the entire coach pipeline could run to `approved` and stop. However many
+ * instructors MMAKF approved, the faculty page could never contain a single
+ * one, and nothing anywhere failed. `/admin/coaches` said so in its own
+ * frontmatter — "neither has a screen yet" — which is the honest version of a
+ * feature that does not work.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WHY IT CREATES THE PERSON HERE AND NOT EARLIER
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * `coach_applications.person_id` is NULLABLE, and an applicant who is turned
+ * down must never enter the federation's people register — that register is
+ * members, coaches, officials and athletes, and filing every unsuccessful
+ * applicant into it makes the national member count a figure nobody can defend.
+ *
+ * So the `persons` row appears at ACTIVATION, which is the moment the
+ * relationship becomes real. That is the same shape as
+ * `provisionFromRegistration()` on the institutional intake path and
+ * `acceptOffer()` on the hiring path — three doors, one rule.
+ *
+ * `activateCoach()` is called rather than reimplemented: it is the tested
+ * function, it writes the audit row and the stage event, and duplicating its
+ * body here would be a second definition of what "active" means.
+ *
+ * IDEMPOTENT. An application already carrying a `personId` reuses it, and
+ * `activateCoach()` upserts on `coachProfiles.personId`, so a retried
+ * activation finds what the first run made instead of minting a second person.
+ */
+export async function activateApprovedCoach(
+  db: DB,
+  ctx: AuditContext,
+  applicationId: number,
+  now: Date = new Date()
+) {
+  // Both gates, in the order the two acts need them: creating a person is
+  // 'coach:write' territory here because it happens only as part of activation,
+  // and activateCoach() re-asserts it regardless.
+  assertCanAnywhere(ctx.principal, 'coach:write');
+
+  const [app] = await db.select().from(o.coachApplications)
+    .where(eq(o.coachApplications.id, applicationId)).limit(1);
+  if (!app) throw new CoachError('not_found', `No coach application ${applicationId}.`);
+
+  // ALREADY DONE — return the first run's answer rather than a refusal.
+  //
+  // `activateCoach()` sets the application to 'active', so a second call would
+  // otherwise fail the `!== 'approved'` test below and report "the candidate is
+  // active, not approved" — which reads as an error to somebody who
+  // double-clicked, retried after a dropped connection, or resubmitted the
+  // page. Every one of those is a person who did the right thing.
+  //
+  // Checked BEFORE the approval test for exactly that reason, and it returns
+  // the existing profile rather than making a second: `coach_profiles` is
+  // unique on `person_id`, so there is only ever one to find.
+  if (app.status === 'active' && app.personId) {
+    const [existing] = await db.select().from(o.coachProfiles)
+      .where(eq(o.coachProfiles.personId, app.personId)).limit(1);
+    if (existing) {
+      return { profile: existing, personId: app.personId as number, createdPerson: false };
+    }
+  }
+
+  if (app.status !== 'approved') {
+    throw new CoachError(
+      'not_approved',
+      `The candidate is ${app.status}, not approved. The stages exist so that activating somebody means the screening, the interview and the technical review actually happened.`
+    );
+  }
+
+  let personId: number | null = app.personId ?? null;
+  let createdPerson = false;
+
+  if (!personId) {
+    // THE CANDIDATE ENTERS THE REGISTER HERE, and only here.
+    const federationId = await allocateFederationId(db, 'MEM', now.getFullYear());
+    const [person] = await db.insert(s.persons).values({
+      federationId,
+      fullName: app.fullName,
+      email: app.email ?? null,
+      phone: app.phone ?? null,
+      city: app.city ?? null,
+      stateUnitId: app.stateUnitId ?? null,
+      districtUnitId: app.districtUnitId ?? null,
+      status: 'active',
+      // Where this person came from, so the register can always answer it.
+      sourceRef: app.ref,
+    }).returning({ id: s.persons.id });
+    personId = person.id;
+    createdPerson = true;
+
+    await db.update(o.coachApplications)
+      .set({ personId, updatedAt: now })
+      .where(eq(o.coachApplications.id, applicationId));
+  }
+
+  const profile = await activateCoach(db, ctx, applicationId, personId!, now);
+
+  return { profile, personId: personId!, createdPerson };
 }

@@ -28,9 +28,16 @@ import Status from '@/components/Status.astro';
 import EmptyState from '@/components/states/EmptyState.astro';
 import ErrorState from '@/components/states/ErrorState.astro';
 import { isConfigured, db } from '@/db';
-import { identify } from '@/lib/session';
-import { canAnywhere } from '@/lib/rbac';
-import { coachPipeline, expiringQualifications, COACH_STATUSES, type CoachStatus } from '@/db/coaches';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import { readSubmission } from '@/lib/form-intake';
+import {
+  coachPipeline, expiringQualifications, COACH_STATUSES,
+  advanceCoachApplication, activateApprovedCoach, isCoachError, COACH_TRANSITIONS,
+  type CoachStatus,
+} from '@/db/coaches';
 import { statusOf } from '@/lib/status';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 
@@ -38,9 +45,128 @@ export const prerender = false;
 
 const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
 const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/coaches');
+// The stage machine itself, so the control can never offer a move the module
+// refuses. One definition, in src/db/coaches.ts.
+const NEXT_STAGES = COACH_TRANSITIONS;
 
 const identity = await identify(Astro.request.headers.get('cookie'));
 const principal = identity?.principal ?? null;
+
+// ─── The write path this screen never had ───────────────────────────────────
+//
+// This page's own frontmatter used to say "neither has a screen yet", and it
+// was right: `advanceCoachApplication()` and `activateCoach()` were written,
+// tested and CALLED BY NOTHING. The consequence was not a missing button — it
+// was that `/teachers` could never contain a single instructor, because
+// `publicFaculty()` reads only ACTIVE coach profiles and nothing could create
+// one. However many coaches MMAKF approved, the public faculty page stayed
+// empty and nothing failed.
+//
+// TWO ACTIONS, TWO PERMISSIONS, DELIBERATELY.
+//
+//   `coach:review`  moves a candidate between recorded stages.
+//   `coach:write`   turns an approved candidate into a coach, which creates a
+//                   `persons` row and puts them on a public page.
+//
+// The module enforces both; this re-checks them so the refusal is a sentence
+// rather than a bare 403, and so the controls are not drawn for somebody who
+// cannot use them.
+const mayReview = Boolean(principal) && canAnywhere(principal!, 'coach:review');
+const mayActivate = Boolean(principal) && canAnywhere(principal!, 'coach:write');
+
+const DONE_MESSAGES: Record<string, string> = {
+  advanced: 'The candidate has moved on, and the stage is recorded with who moved them.',
+  rejected: 'The candidate is turned down, with your reason recorded against the application.',
+  activated: 'The coach is active. They now appear on the public teaching faculty, and a person record exists for them in the federation register.',
+};
+
+let actionError: string | null = null;
+
+// Posts to this page rather than to /api/: the middleware requires
+// application/json on /api/ paths and a form cannot send one, while the
+// same-origin check that answers CSRF applies here identically.
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const act = get('act');
+  const reason = get('reason');
+  const applicationId = Number(get('applicationId'));
+
+  const rl = await rateLimit(Astro.request, 'coach-decide', 40, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    actionError = `Too many decisions in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    actionError = 'Your session has ended. Sign in again — nothing was changed.';
+    // isConfigured() rather than the `configured` const, which is declared
+    // below this block — the read setup runs after the write, so that a
+    // successful act redirects before anything is queried.
+  } else if (!isConfigured()) {
+    Astro.response.status = 503;
+    actionError = 'The federation database is not reachable from this deployment, so there is nothing to record against.';
+  } else if (!Number.isInteger(applicationId) || applicationId <= 0) {
+    Astro.response.status = 400;
+    actionError = 'Name the candidate to act on.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: reason || null,
+    };
+    try {
+      if (act === 'advance') {
+        if (!mayReview) {
+          Astro.response.status = 403;
+          actionError = 'Moving a candidate between stages requires coach:review, which this account does not hold in any scope.';
+        } else {
+          const to = get('to') as CoachStatus;
+          if (!(COACH_STATUSES as readonly string[]).includes(to)) {
+            Astro.response.status = 400;
+            actionError = 'That is not a recorded stage.';
+          } else {
+            await advanceCoachApplication(db(), ctx, applicationId, to, { reason: reason || null });
+            return Astro.redirect(
+              `${h('/admin/coaches')}?done=${to === 'rejected' ? 'rejected' : 'advanced'}`, 303
+            );
+          }
+        }
+      } else if (act === 'activate') {
+        if (!mayActivate) {
+          Astro.response.status = 403;
+          actionError = 'Activating a coach requires coach:write, which this account does not hold. Moving somebody through the stages and putting them on the public faculty are separate authorities.';
+        } else {
+          await activateApprovedCoach(db(), ctx, applicationId);
+          return Astro.redirect(`${h('/admin/coaches')}?done=activated`, 303);
+        }
+      } else {
+        Astro.response.status = 400;
+        actionError = 'Unknown action.';
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        actionError = 'Your credential does not hold the authority this act requires at that scope.';
+      } else if (isCoachError(err)) {
+        // The module's refusals are written for the person reading them — "a
+        // candidate cannot go from screening to approved" — so they are shown
+        // as they are rather than replaced with a generic message.
+        Astro.response.status = 400;
+        actionError = err.message;
+      } else {
+        console.error('[admin/coaches] act failed', err);
+        Astro.response.status = 500;
+        actionError = 'Nothing was changed.';
+      }
+    }
+  }
+}
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE_MESSAGES[done] ? DONE_MESSAGES[done] : null;
 
 // Only a stage the enum actually holds reaches the query. `?status=` is a URL
 // people type and share, and an unrecognised value used to travel all the way
@@ -180,6 +306,9 @@ const emptyAction = filter
     />
   ) : (
     <>
+      {doneMessage && <p class="c-ok" role="status">{doneMessage}</p>}
+      {actionError && <p class="c-bad" role="alert">{actionError}</p>}
+
       {expiring.length > 0 && (
         <section class="expiring" role="status">
           <h2 class="sec-h">Qualifications lapsing within sixty days</h2>
@@ -225,16 +354,97 @@ const emptyAction = filter
                     is exactly what the domain argument is for. */}
                 <Status value={r.status} domain="coach" />
                 <span class="c-when">{fmt(r.submittedAt)}</span>
+
+                {/* THE STAGES, AS THE MACHINE ALLOWS THEM.
+                    Only the transitions COACH_TRANSITIONS actually permits are
+                    offered, so the screen cannot suggest a move the module will
+                    refuse. The module re-checks regardless — this is the
+                    courteous half of a gate that holds either way. */}
+                {mayReview && NEXT_STAGES[r.status as CoachStatus]?.length > 0 && (
+                  <form method="post" action={SELF} class="c-act">
+                    <input type="hidden" name="act" value="advance" />
+                    <input type="hidden" name="applicationId" value={String(r.id)} />
+                    <label class="sr-only" for={`to-${r.id}`}>Move {r.fullName} to</label>
+                    <select class="input input-sm" id={`to-${r.id}`} name="to" required>
+                      <option value="">Move to…</option>
+                      {NEXT_STAGES[r.status as CoachStatus].map((s) => (
+                        <option value={s}>{statusOf(s, 'coach').label}</option>
+                      ))}
+                    </select>
+                    <label class="sr-only" for={`why-${r.id}`}>Reason</label>
+                    <input class="input input-sm" id={`why-${r.id}`} name="reason"
+                           placeholder="Reason (required to reject)" maxlength="400" />
+                    <button class="btn btn-sm" type="submit">Record</button>
+                  </form>
+                )}
+
+                {/* ACTIVATION — the act that makes somebody a member of the
+                    public teaching faculty, and the one that was missing. */}
+                {mayActivate && r.status === 'approved' && (
+                  <form method="post" action={SELF} class="c-act">
+                    <input type="hidden" name="act" value="activate" />
+                    <input type="hidden" name="applicationId" value={String(r.id)} />
+                    <button class="btn btn-sm btn-primary" type="submit">
+                      Activate as coach
+                    </button>
+                    <span class="c-note">
+                      {r.personId
+                        ? 'Creates their coach profile and puts them on /teachers.'
+                        : 'Creates their federation person record and their coach profile, and puts them on /teachers.'}
+                    </span>
+                  </form>
+                )}
               </div>
             </li>
           ))}
         </ul>
       )}
+
+      <p class="c-standing">
+        <strong>Activating a coach publishes them.</strong> It creates a coach
+        profile, and <code>/teachers</code> lists every active profile — so this
+        is the moment a name and a grade appear on the public federation site.
+        A candidate who is not activated never enters the federation's people
+        register at all, which is why an unsuccessful applicant cannot inflate
+        the membership count.
+        <br />
+        <strong>A stated grade is not a verified one.</strong> The Dan grade on
+        an application is what the candidate wrote about themselves.
+        <code>/teachers</code> shows it separately from, and visibly weaker
+        than, a grade the federation's own examination register holds — and only
+        <a href={h('/admin/grading')}> a recorded grading</a> produces the
+        second.
+      </p>
     </>
   )}
 </AdminShell>
 
 <style>
+  .c-ok, .c-bad {
+    padding: 0.7rem 1rem; border-radius: var(--radius, 6px);
+    border: 1px solid var(--c-border, #ddd); margin-bottom: 1rem; max-width: 72ch;
+  }
+  .c-bad { border-color: var(--c-bad-border, #c66); }
+
+  .c-act { display: flex; gap: 0.35rem; flex-wrap: wrap; align-items: center; margin-top: 0.45rem; }
+  .input-sm { font-size: 0.78rem; padding: 0.2rem 0.4rem; max-width: 11rem; }
+  .btn-sm { font-size: 0.78rem; padding: 0.2rem 0.6rem; }
+  .c-note { font-size: 0.75rem; color: var(--c-muted, #777); flex: 1 1 100%; }
+
+  .c-standing {
+    margin-top: 1.75rem; padding: 0.85rem 1rem;
+    border: 1px solid var(--c-border, #ddd); border-radius: var(--radius, 6px);
+    font-size: 0.9rem; max-width: 76ch;
+  }
+
+  /* Labels for the per-row controls: the row already names the candidate, so a
+     visible label on every select would be noise — but a control with no
+     accessible name is unusable with a screen reader. */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
   .expiring {
     padding: 20px 22px; border-left: 3px solid var(--red);
     background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;
