@@ -168,3 +168,64 @@ registration certificate), the syllabus content, the governance documents, and t
 Schema and workflow are built regardless; they stay empty and say so until the federation supplies
 the content, because inventing a grading syllabus or a constitution is the one failure this
 directive treats as unforgivable.
+
+---
+
+# Addendum — 6 September 2026
+
+## §1 above is STALE, and it is the headline of this document
+
+**"`DATABASE_URL` is not set in production"** was true on 12 August 2026 and is
+false now. `/api/health` reports `database: ok` on all three hosts, and
+`docs/IMPLEMENTATION-STATUS.md` records the reversal with its evidence: the
+health check's `ok` is the return value of `select 1 from _mmakf_migrations`,
+which cannot succeed unless the migration ledger exists.
+
+It is corrected here rather than edited above, because this file's own method
+section claims a verification date and rewriting a finding under it would make
+the date a lie. **What §1 still gets right is the shape of the argument** — a
+subsystem with no system of record is blocked however well it is tested. That is
+simply no longer the situation.
+
+Every other figure in §2 (25 tables, 16 roles, 254 tests) is from the same
+August pass and should be read as a floor, not a count. `IMPLEMENTATION-STATUS.md`
+carries the current numbers and a record of having been found stale three times.
+
+## Three subsystems the directive names that had no register at all
+
+Audited 6 September 2026 by reading the schema and grepping for callers, not by
+reading this document.
+
+| Directive subsystem | Was | Now |
+|---|---|---|
+| Federation team / operational organisation (§1–3) | **X — missing.** Three registers of people existed (`committees`, `role_bindings`, `persons`) and none held the people who run the federation. `/people` reads the content store: an editorial page, not a register. | **W** — `departments`, `team_appointments`, `team_appointment_history` (migration 0056); `src/db/team.ts`; `/team`, `/admin/team`. 32 tests. |
+| Black Belt register (§7) | **X — missing.** `publicRegister()` in `src/db/grading.ts` had been written, tested and left with **no caller anywhere in `src/`** since wave 2c — and returns kyu grades as well as Dan. | **W** — `blackBeltRegister()` / `blackBeltFacets()`; `/black-belts`, derived from active Dan rank records, filterable. 14 tests. |
+| Teaching faculty (§9) | **X — missing surface.** The coach domain was complete — stages, qualifications, safeguarding exclusion, assignment, double-booking — with **no public page**. A visitor could not find out who teaches for MMAKF. | **W** — `publicFaculty()` / `facultyFacets()`; `/teachers`. 13 tests. |
+
+## What this pass confirmed already exists, and did NOT rebuild
+
+Checked against the source before writing anything, because the directive's
+first instruction is not to duplicate what is there:
+
+| Directive asks for | Already built |
+|---|---|
+| Public credential verification (§6) | `/verify` + `/api/verify` → `verifyCredential()`. Four provenances, never merged; a revoked credential reports as REVOKED **with its reason**. |
+| Grading → credential pipeline (§8) | `src/db/grading.ts` — eligibility, application, examiner, scores, decision, certificate, revocation. |
+| Enrolment engine (§13) | `training_enrolments`, `enrolments`, `applications`, `automations`, 20-step institutional intake that works with scripting off. |
+| Recurring payment engine (§15–16) | `src/lib/payments/` with a provider abstraction, `razorpay.ts`, signature-verified idempotent webhooks, `payment_events`, `payment_intents`, the ledger. |
+| **Training fees ≠ membership (§14)** | **Guaranteed structurally.** Migration 0045's header (`0045_training_products.sql`): there is NO foreign key between any training table and `memberships`, in either direction. "The check that must never be written has nothing to be written against." This is the directive's §14 already satisfied by construction. |
+| Parent / minor (§19) | `person_relationships`, `guardian_authorizations`, `/my/family`, `/admin/guardianships`. |
+| RBAC / ABAC (§25) | 32 roles, deny-by-default, scope as a SQL predicate, HR and medical outside `NATIONAL_FULL`. |
+| Calendar (§22) | `src/lib/calendar.ts`, `calendar-feed.ts`, conflict detection in `coaches.ts` (half-open intervals). |
+| Fee configuration (§34) | `src/db/fees.ts` — integer paise, immutable published frameworks, existing quotes keep their pricing version. |
+
+## The largest gap this pass did NOT close
+
+**Nothing consumes the domain-event feed.** It was already the biggest item in
+`IMPLEMENTATION-QUEUE.md` (item 2) and this pass added six more producers to it.
+
+Concretely, and worth stating plainly because the directive's §35 forbids fake
+automation: `publishAppointment()` puts a named private individual's photograph
+and biography on the public internet and **tells them nothing**. No claim of
+automatic notification is made anywhere in the new code or the new surfaces. The
+events are published; the consumer does not exist; both facts are recorded.

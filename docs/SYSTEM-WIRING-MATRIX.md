@@ -1335,3 +1335,533 @@ operator not having configured a key — but nothing was retrying the backlog, a
 a backlog never retried is a backlog dropped slowly. No guard needed at the call
 site: `deliverQueuedPush()` checks `pushStatus()` itself and, unconfigured,
 retries nothing, marks nothing failed, and reports how deep the backlog is.
+
+
+---
+
+# Addendum II — re-traced 23 August 2026
+
+Three rows in the table above ended in `✗ none`, and one more said the public
+visibility predicate had four callers. Both are now out of date. **Where the two
+addenda disagree, this one is right.**
+
+| Feature | UI | AUTH | API | VALIDATION | DB | AUDIT | TEST |
+|---|---|---|---|---|---|---|---|
+| Shipping zones | ✓ `/portal/seller/shipping` | ✓ owner-only | ✓ `shipping/*` | ✓ one quote function for preview and checkout | ✓ | ✓ | ✓ 29 |
+| Bulk import | ✓ `/portal/seller/import` | ✓ owner-only | ✓ `import/start\|validate\|submit\|cancel` | ✓ drafts only, into moderation | ✓ | ✓ | ✓ 39 |
+| Policy documents | ✓ console | ✓ `marketplace:review` | ✓ `policy/*` | ✓ published body immutable, hash stored twice | ✓ | ✓ | ✓ 25 |
+| Verification documents | ✓ `/portal/seller/documents` | ✓ `marketplace:verify` to resolve a key | ✓ `document/*` | ✓ key is not a URL; supersede, never delete | ✓ | ✓ export audited | ✓ 25 |
+| Category + brand browse | ✓ `/shop/category/[...path]`, `/shop/brand/[slug]` | n/a | n/a | ✓ public predicate, no draft indexed | ✓ | n/a | ✓ 47 |
+| Payout rails | ✓ `/portal/seller/money` | ✓ `marketplace:settle` | ✓ `payout/send`, `payout/refresh` | ✓ **refuses to send — unverified adapter** | ✓ | ✓ | ✓ 55 |
+| Marketplace events | — feed and inbox | ✓ classification floors | n/a — producers, not endpoints | ✓ catalogue is an allow-list | ✓ | ✓ | ✓ 25 |
+
+**Marketplace suite total: 291 tests.**
+
+## Corrections to the links section above
+
+**The public visibility predicate has five conditions, invoked 39 times across 14 files.** The
+addendum above says four callers. `publicListingPredicate()` is interpolated —
+never re-implemented — by the shop, the product page, checkout pricing, the
+category and brand pages, and `myListings()`, which previously hand-copied three
+of the five conditions and so told sellers an item was visible when the shop
+would not show it.
+
+**Two producers now share a recipient rule, and the matrix is how the mismatch
+was caught.** `sellerRecipient()` in `src/db/marketplace-events.ts` resolves a
+seller's person in two hops: the seller row first, then the user behind the
+account. The `'seller'` audience in `src/lib/notifications.ts` must resolve
+*exactly the same set*, because the producer decides whether to publish at all
+by asking that function. An audience resolving fewer sellers would publish an
+event about a trader and then deliver it to nobody — and the feed row would look
+exactly like one that had been delivered.
+
+## The wire that was drawn on the diagram and not in the code
+
+Worth recording as the failure mode this document exists to catch.
+
+`src/db/marketplace-events.ts` carried twenty-one event types. `EVENT_TYPES` in
+`src/lib/domain-events.ts` carried none of them. Every column of the matrix
+would have read ✓ — the producers existed, the audiences existed, the tables
+existed — and **every producer would have thrown the first time a real order was
+placed**, because `publish()` validates against that catalogue at runtime and
+refuses an unknown type outright.
+
+The second failure was quieter and would not have thrown at all. Floors chosen
+on sensitivity (`official` for a seller's order flow) put eight notifiable
+events above the notifications drain's `{ maxClassification: 'member' }` cap,
+and `consume()` steps over anything above the cap **without erroring**. The
+notices would simply never have arrived, with the events visible on the feed
+looking exactly like delivered ones.
+
+Both are now asserted directly in `tests/marketplace-events.test.ts`, against
+the module's own `marketplaceCatalogueGaps()` and `marketplaceNotificationGaps()`
+rather than against a copy of the rule that could drift with it.
+
+
+---
+
+# Addendum III — the producers were never called
+
+Added 23 August 2026, an hour after Addendum II, which did not catch this.
+
+`src/db/marketplace-events.ts` had 21 producers, a catalogue entry for each, a
+`NOTIFIABLE` entry for fourteen, two purpose-built audiences and 25 passing
+tests. **Nothing in production called any of them.**
+
+Every column of the wiring matrix read ✓. The tests passed, because they called
+the producers directly. And not one buyer would ever have been told their order
+had shipped, because `checkout()`, `onOrderPaid()`, `shipSellerOrder()`,
+`markDelivered()`, `decideReturn()`, `refundReturn()`, `markPayoutPaid()` and
+the rest returned without publishing anything at all.
+
+This is the third failure mode in the same subsystem, and they form a sequence
+worth keeping:
+
+1. **Producers with no catalogue entry** — `publish()` refuses an unknown type,
+   so every producer would have thrown on the first real order. Loud, at least.
+2. **Catalogue entries above the consumer's cap** — `consume()` steps over
+   anything above `member` without erroring, so eight notices would simply never
+   have arrived. Silent.
+3. **Producers nothing calls** — no error, no missing notice, no failing test.
+   Just a feed that stays empty for ever. Silent, and invisible to every check
+   the first two taught us to run.
+
+A test suite that exercises a module directly cannot see (3). What sees it is
+asking, of each producer, *who calls this?*
+
+## Where each one is now called
+
+| Producer | Called from |
+|---|---|
+| `publishOrderPlaced`, `publishSellerOrderPlaced` | `checkout()`, after the seller orders are written |
+| `publishOrderPaid`, `publishSellerOrderPaid` | `onOrderPaid()` |
+| `publishOrderShipped` | `shipSellerOrder()` |
+| `publishOrderDelivered` | `markDelivered()` |
+| `publishSellerReturnRequested` | `requestReturn()` |
+| `publishReturnDecided` | `decideReturn()` — **both** branches, a refusal included |
+| `publishRefundIssued`, `publishSellerRefundPosted` | `refundReturn()` |
+| `publishPayoutInitiated` | `createPayout()`, in the success branch only |
+| `publishPayoutPaid` | `markPayoutPaid()`, below the already-paid early return |
+| `publishSettlementBlocked` | `closeSettlement()`, **before** the throw |
+| `publishVerificationDecided` | `decideVerification()` |
+| `publishSellerApplied` | `applyToSell()` |
+| `publishPolicyPublished` | `publishPolicyVersion()` |
+| `publishSellerReviewPublished` | `moderateReview()`, on `published` only |
+| `publishFraudSignal` | `raiseFraudSignal()`, only when the insert wrote a row |
+| `publishProductReported` | `reportProblem()` in `returns.ts` |
+| `publishPaymentMismatch` | `confirmPayment()` in `orders.ts`, before the throw |
+
+Four of those placements are decisions rather than mechanics:
+
+- **A refusal is published.** `decideReturn()` publishes on both branches. A
+  buyer is entitled to hear that their return was refused; the producer reads
+  the outcome from the row, so the event cannot claim 'authorised' about a
+  rejected one.
+- **A block is published before the throw.** A settlement nobody can close is
+  money a seller is not being paid. If the only trace is an exception shown to
+  whichever operator pressed the button, it is gone when they close the tab.
+- **A deduplicated fraud signal publishes nothing.** `onConflictDoNothing()`
+  returns no row for a signal already raised, and re-announcing it would put a
+  second undecided accusation about the same trader on the feed.
+- **A mismatch publishes from the authoritative comparison**, in
+  `confirmPayment()`, not from the pre-fulfilment `assertGatewayAmount()`. The
+  producer self-guards with `NOT_A_MARKETPLACE_ORDER`, so a membership fee
+  paid through the same path raises no marketplace event.
+
+## The one that is still not called, on purpose
+
+`publishLowStock()` takes a `noticeKey` and **refuses to run without one**,
+because how often a seller should be told their stock is low is a decision
+nobody at MMAKF has made. Wiring a sweep here would mean this system choosing a
+cadence on the federation's behalf and then notifying real traders on it.
+`LOW_STOCK_CADENCE_NOT_SET` states that instead. The producer, its sweep
+(`publishLowStockForSeller()`) and its tests are ready for whichever cadence is
+chosen.
+
+## Import cycles
+
+`marketplace-events.ts` statically imports `@/db/marketplace` and
+`@/db/inventory`, so those two — and only those two — need `await import()` when
+calling back into it. `applyToSell()` in `marketplace.ts` and the mismatch call
+in `orders.ts` use a dynamic import; the other five modules take a plain
+top-level one, because reaching for `await import()` everywhere would hide the
+one real constraint behind a habit.
+
+## Verified
+
+Whole suite: **142 files, 4,750 tests, 0 failures.** `npm run build` completes.
+`tsc --noEmit` is clean.
+
+
+---
+
+# Addendum IV — four more things nothing called, and a register nobody could see
+
+Added 23 August 2026, after auditing every marketplace export for a caller.
+
+Addendum III recorded that the 21 event producers were dead code. The same
+question — *who calls this?* — asked of every export in the fourteen marketplace
+modules found four more, three of them serious.
+
+## 1. A paid marketplace basket did not move
+
+**`onOrderPaid()` was reachable from the test suite and from nowhere else.**
+
+`confirmPayment()` in `src/db/orders.ts` marks the order paid and commits
+`product_variants` stock — the legacy shop's columns. A marketplace basket holds
+none of those: its stock is in `listing_variants` and its work is in
+`seller_orders`. Neither was touched by a real payment.
+
+So a cleared marketplace payment left every seller order at `payment_pending`
+for ever, the buyer's reservation committed to nothing and released never, no
+dispatch clock started, no seller told they had anything to pack, and no accrual
+— therefore no commission, no settlement, no payout. **The money was taken and
+the marketplace did not move.**
+
+Nothing failed. The order said `paid`, the receipt was issued, the ledger
+balanced, and `tests/marketplace-platform.test.ts` — including the brief's own
+critical multi-seller test — passed, because it calls `onOrderPaid()` itself.
+
+Now called from `confirmPayment()` through `fulfilMarketplace()`, after the
+commit for the reason `activate()` gives: seller-orders.ts opens its own
+transactions, and nesting them would make a failure while committing stock roll
+back the record that money was taken. Idempotent and self-guarding — an order
+with no seller orders returns `{ updated: 0 }`.
+
+## 2. Abandoned baskets held stock for ever
+
+**`releaseExpiredReservations()` had no caller.**
+
+`expireStaleOrders()` in the reconcile cron releases the legacy shop's holds. A
+marketplace basket reserves in `stock_reservations` against `listing_variants`,
+with an expiry `checkout()` sets, and nothing released them.
+
+Silent and cumulative: a seller's available quantity fell with every abandoned
+checkout and never recovered, until the item read out of stock while the goods
+sat on the shelf. No error, no queue, nothing to notice. Now step 1b of
+`/api/cron/reconcile`, in its own try/catch so one sweep's fault does not stop
+the other.
+
+## 3. The policy register had no screen
+
+`src/db/marketplace-policy.ts` could create the eight documents, draft a version,
+publish it, mark it mandatory and record acceptance — five API actions, 25 tests
+— and **`policyRegister()`, `policiesForSeller()` and `acceptanceRegister()` had
+no caller anywhere.** An officer could publish a seller agreement and had no way
+to see that they had; a seller could be required to accept a document they could
+not find. An obligation nobody can see is not an obligation.
+
+Built:
+
+- **`/admin/marketplace/policies`** — the eight documents, every version with its
+  hash, draft and publish as separate acts, mandatory toggled only with a stated
+  reason, and the acceptance register per document. Linked from the console, so
+  the page is not itself unreachable. Publishing warns that the text is sealed
+  and that sellers who accepted an earlier version become outstanding again.
+- **A section on `/portal/seller`** — what the seller has been asked to accept,
+  in three distinct states (no text published, published and outstanding,
+  accepted), the text itself to read, and an accept button that sends a
+  **version id, never a policy code**.
+
+Both surface the hash comparison: the digest is stored on the version and again
+on the acceptance, so a published body altered in place stops matching what was
+signed, and both screens say so rather than letting it pass.
+
+## 4. And the buyer had nowhere to stand
+
+Found by the same question, and the largest of the four.
+
+The marketplace could take a buyer's money, split their basket across sellers,
+accept a return, record a report and raise a dispute — `return/request`,
+`report/create` and `dispute/raise` are all buyer actions on the API, all
+tested. **`orderForBuyer()` had no caller anywhere in `src/`, and there was no
+page under `/my` for an order at all.**
+
+So a buyer could be sold goods and then could not see the order, could not tell
+whether it had been dispatched, and could not ask to return it. The remedy
+existed in the engine and was unreachable by the only person entitled to use it.
+
+Built: **`/my/orders`** — the buyer's own orders, resolved from the session with
+no identifier in the URL. Each basket shows the shops it was split across, each
+shop's progress in a buyer's words, the lines, and the consignments. From it a
+buyer can ask to return items and report a problem to MMAKF.
+
+Three things it is careful about:
+
+- **Tracking is not faked.** A number appears only where a seller recorded one;
+  otherwise it says the parcel was dispatched without tracking, because
+  "dispatched" and "dispatched, here is where it is" are different promises.
+- **The return window is not invented.** Whether a return may be asked for is
+  the engine's decision against the policy frozen onto the order. The page
+  offers the request and lets `requestReturn()` refuse it in its own words,
+  rather than computing an eligibility rule that would immediately disagree with
+  the one that matters.
+- **A dispatch deadline is never shown as a delivery date.** An SLA is the
+  seller's commitment to MMAKF, not a promise to the buyer.
+
+## The guard
+
+`tests/marketplace-wiring.test.ts` — six tests:
+
+- a real payment, confirmed through `beginPayment()` → `confirmPayment()` and
+  **not** `onOrderPaid()` by hand, pays both sellers' orders, commits the stock,
+  publishes the seller's event, and does none of it twice on a replay;
+- **every marketplace event producer has a caller in `src/`**;
+- the stock-expiry sweep has one, and it is the cron;
+- the marketplace fulfilment step has one, and it is `orders.ts`.
+
+The reachability tests read the corpus once rather than re-reading 397 files per
+producer — the first version took four minutes and failed in a full-suite run
+while passing alone, which is the signature of a test that races rather than one
+that has found something.
+
+`publishLowStockForSeller()` is exempted **with its reason in the assertion**: it
+takes a notice key because how often a seller is told their stock is low is a
+decision MMAKF has not made, and choosing a cadence here would be this system
+notifying real traders on its own authority.
+
+## Verified
+
+Whole suite green, `tsc --noEmit` clean, `npm run build` completes.
+
+
+## 5. The fraud queue could only ever be empty
+
+Two more with no caller, found in the same pass and wired as step 8 of
+`/api/cron/reconcile`:
+
+- **`detectReviewPatterns()`** — the admin console has a fraud-signal queue that
+  nothing could ever put anything into. It raises a SIGNAL and decides nothing:
+  four or more reviews averaging 4.75+ from one buyer against one seller in
+  fourteen days is worth a person's look, and is also what a delighted dojo
+  owner buying six things looks like. Its window and thresholds were already
+  chosen inside the module, so calling it adds no decision — and its signals now
+  reach the feed too, through the `publishFraudSignal()` wiring above.
+- **`computeAllPerformance()`** — every seller row carries a performance band
+  that had never been written since the column was added.
+
+The performance sweep is the one place in this round where a figure had to be
+chosen: a snapshot must be *of* some period, and the function requires one. The
+trailing 30 days is stated in the code with its reasoning rather than left
+implicit, and it is defensible only because **nothing enforces on the result** —
+the module says so outright ("NOT read by any enforcement path — there is none"),
+and a seller with too few completed orders gets a null score and
+`PERFORMANCE_NOT_COMPUTED` rather than a number computed from a sample too small
+to defend. If performance ever gains consequences, that window stops being a
+reporting detail and belongs in configuration.
+
+## What is still unreferenced, and why that is now correct
+
+31 exports across the fourteen marketplace modules have no caller outside their
+own file. They were checked one at a time and fall into three groups:
+
+- **Internal helpers exported for testability** — `matchZone`, `priceMethod`,
+  `basisForLine`, `normaliseFilters`, `assertBrowsablePath`, `resolveCommission`,
+  `refreshSellerRating` and the like. Called within their module; exported so a
+  test can reach them directly.
+- **Deliberate** — `publishLowStock` and `publishLowStockForSeller`, which take
+  a notice key because the cadence is a federation decision nobody has made.
+- **Read surfaces nobody has asked for yet** — `mySellerOrder`,
+  `sellerOrdersForAdmin`, `movementsForVariant`, `importsForSeller`,
+  `updateZone`. Each is a screen that does not exist: a seller can create a
+  shipping zone but not edit one, and there is no stock-movement ledger view.
+  Recorded here rather than built, because none of them leaves a user unable to
+  complete a journey — unlike the four in Addendum IV, every one of which did.
+
+---
+
+# Addendum VI — the operational team register, the Black Belt register
+
+**6 September 2026.** Migrations `0056_federation_team.sql` and
+`0057_data_api_lockdown.sql`; `src/db/team.schema.ts`, `src/db/team.ts`;
+`blackBeltRegister()` and `blackBeltFacets()` in `src/db/grading.ts`;
+`/team`, `/black-belts`, `/admin/team`. 46 tests in `tests/team.test.ts` and
+`tests/black-belt-register.test.ts`, all against a real Postgres (PGlite) with
+every migration applied.
+
+## The gap this closed
+
+The federation had **three** registers of people and none of them held the
+people who run it.
+
+| Register | Holds | Does not hold |
+|---|---|---|
+| `committees` / `committee_appointments` | Offices held under the constitution | A job |
+| `role_bindings` | What a login may DO | What a person's post IS |
+| `persons` + `rank_records` | Members and their grades | Employment or responsibility |
+
+So the media desk, the competition office, the credential registry and every
+state coordinator had **nowhere to be recorded**. The two ways to publish them
+were to invent a fourth people table — which is how one human being ends up with
+two records and a certificate issued against the wrong one — or to file a content
+editor under `committees`, which states something false about a real person's
+standing.
+
+`/people` existed and reads `get('leadership')` from the content store: an
+editorial page, not a register. Nothing derived from it can be audited.
+
+## The Black Belt register was written and unwired
+
+`publicRegister()` has been in `src/db/grading.ts` since wave 2c with **no caller
+anywhere in `src/`** — a derived member register, tested, that nothing rendered.
+It is also not quite a Black Belt register: it returns kyu grades as well as Dan,
+offers no filter, and its docstring claimed a `memberships` join the query has
+never performed. The claim is now corrected in place rather than quietly deleted,
+because a comment on a PUBLIC register that describes a **stricter** rule than
+the code applies is the more dangerous direction to be wrong in.
+
+`blackBeltRegister()` is the Dan-only, filterable read `/black-belts` renders.
+`publicRegister()` is left alone and still has no caller.
+
+## The fifteen links
+
+### The operational team register
+
+| Link | Status | Where |
+|---|---|---|
+| PUBLIC UI | REAL+WIRED | `/team`, linked from `PUBLIC_NAV` under Federation |
+| AUTH | N/A by design | `publicTeam()` takes **no principal** and accepts no parameter |
+| API | Page handles its own POST | `/admin/team`; works with scripting off |
+| VALIDATION | REAL | `normaliseScope()`, `sanitiseLinks()` (https-only), plus 5 CHECK constraints |
+| SERVICE | REAL | `src/db/team.ts` — no SQL in the page |
+| DATABASE | Postgres | `departments`, `team_appointments`, `team_appointment_history` |
+| EVENT | REAL | 6 types on the catalogue, published from `src/db/team.ts` |
+| WORKFLOW | NONE | Deliberate: an appointment is a decision, not a process |
+| AUTOMATION | NONE | Deliberate — see below |
+| NOTIFICATION | **ABSENT** | Nothing tells a person they were published. See the queue. |
+| CALENDAR | N/A | An appointment is not an event |
+| AUDIT | REAL | `audit_events` **and** a before/after row in `team_appointment_history` |
+| ADMIN UI | REAL+WIRED | `/admin/team`, gated `team:read`, acts gated `team:write` / `team:publish` |
+| USER UI | **ABSENT** | A person cannot see their own appointment. See the queue. |
+| TEST | REAL | 32 tests, four of them asserting *absences* |
+
+### The Black Belt register
+
+| Link | Status | Where |
+|---|---|---|
+| PUBLIC UI | REAL+WIRED | `/black-belts`, linked from `PUBLIC_NAV` under Verify |
+| AUTH | N/A by design | Takes no principal; returns 11 fields, none private |
+| API | GET form | Filters are the query string, so every filtered view is a shareable URL |
+| VALIDATION | REAL | `intParam()` rejects `Number('') === 0`; `%` and `_` escaped before ILIKE |
+| SERVICE | REAL | `blackBeltRegister()`, `blackBeltFacets()` in `src/db/grading.ts` |
+| DATABASE | Postgres | Derived from `rank_records` — no register table of its own |
+| EVENT | Inherited | `RANK_AWARDED` / `RANK_REVOKED` already exist upstream |
+| AUDIT | Inherited | `awardRank()` and `revokeRank()` write it |
+| ADMIN UI | Inherited | `/admin/grading` |
+| TEST | REAL | 14 tests, including that a revoked grade disappears with no second act |
+
+## Four things these deliberately do NOT do
+
+- **NOBODY IS TOLD.** Publishing somebody's name and photograph on
+  www.mmakf.in sends them no notification, because the fan-out named in
+  IMPLEMENTATION-QUEUE.md item 2 still has no consumer. The events are on the
+  feed and nothing walks it. Queued, not claimed.
+- **A PERSON CANNOT SEE THEIR OWN ENTRY.** There is no `/my/appointments`, so
+  the person on the page has no in-system way to ask for a correction. The
+  domain read exists (`personRelationships()`); the surface does not.
+- **THE REGISTER DOES NOT PUBLISH WITHDRAWN GRADES.** A revoked Dan grade
+  vanishes from `/black-belts`. It is not re-published as "revoked", because a
+  browsable list of people whose black belts MMAKF has withdrawn is a
+  publication decision with consequences for real people and MMAKF has published
+  no policy on it. `/verify` answers the specific question and reports REVOKED
+  with its reason. The register carries a standing note saying exactly this, so
+  absence cannot be read as proof no grade was awarded.
+- **NO DISCIPLINE FILTER.** `rank_records` carries no discipline column and
+  MMAKF grades one syllabus. A filter that always returns everything teaches a
+  reader the register holds distinctions it does not.
+
+## Two decisions worth knowing about
+
+**`publicTeam()` takes no principal, and that is the security model.** Every
+other read in the module takes one and filters by scope. The public one cannot
+be called with a widening filter because it accepts none — there is no
+`includeDrafts` parameter for a page to pass `true` by accident. The alternative
+(one function, a `public` flag) is precisely how a draft reaches a public page.
+
+**Publication is gated separately from writing, and the database enforces it.**
+`team:write` records a post; `team:publish` puts a name on the federation's
+masthead. A STATE_ADMIN holds the first and not the second — `/team` is a
+national page. Beneath that, `team_appointments_publish_ck` refuses to mark
+anything but an `active` appointment published, so a draft, a suspended officer
+and somebody who left cannot reach `/team` **even by a direct UPDATE**. A test
+asserts the constraint by bypassing the module entirely.
+
+## One asymmetry that is not an oversight
+
+`TEAM_APPOINTMENT_SUSPENDED` sits at `restricted` while the other five sit at
+`official`. `official` is `canAnywhere('person:read_pii')` — every state and
+dojo administrator in India. Who now runs the competition desk is ordinary
+establishment news for that population; **that a named officer is under review
+is not**, and broadcasting it would break migration 0056's promise that this
+register never exposes disciplinary information — through the feed rather than
+the table, which is the kind of leak a schema guarantee does not catch. The
+suspension REASON stays off the feed entirely: it is free text a human typed,
+and no allowlist can bound that.
+
+### Same wave: the public teaching faculty
+
+`publicFaculty()` and `facultyFacets()` in `src/db/coaches.ts`; `/teachers`,
+linked from `PUBLIC_NAV` under Training. **13 tests** in
+`tests/teaching-faculty.test.ts`.
+
+The coach domain was already built and complete — application, stages,
+qualifications, safeguarding exclusion, assignment, double-booking prevention —
+and had **no public surface at all**. A visitor could not find out who teaches
+for MMAKF.
+
+**The rule the whole surface is built around:** `coach_profiles.dan_grade` is
+free text an applicant typed about themselves; `rank_records` is the federation's
+examination register. Printing the first under the MMAKF masthead as though it
+were the second is how a federation publishes credentials it never awarded — the
+exact failure `/verify` exists to end. So they travel as two named fields,
+`verifiedGrade` and `statedGrade`, and the page:
+
+- renders the verified grade as a credential, saying whether it traces to a
+  recorded examination or is a legacy record;
+- renders the stated one **only** when there is no verified grade, in a visibly
+  different (dashed, differently coloured) block, labelled "Not verified by
+  MMAKF";
+- never fills an absent verified grade in from the stated one.
+
+A test asserts the data separation with a profile whose stated grade
+(`Godan`) deliberately disagrees with the register (`Yondan`), and a second
+asserts the page renders the two through different CSS classes.
+
+**Safeguarding clearance is deliberately absent, in both directions.** It is the
+most important thing a parent wants to know, and publishing "cleared" would make
+its ABSENCE a public statement that a named instructor is not cleared to work
+with children — published by omission, with no process behind it and no way for
+the person to answer it. The real control is unaffected: an uncleared coach is
+still not assignable to work with minors. The page carries a standing note
+telling a parent to ask the federation, so the silence is explained rather than
+left as a gap for them to fill with the worst reading.
+
+**One defect found and closed while writing it:** `publicFaculty()` filters on
+`suspended_at IS NULL` **as well as** `status = 'active'`. A suspension that set
+the timestamp and left the status behind would otherwise have kept a suspended
+instructor in front of parents looking for a teacher. A test covers exactly that
+row.
+
+### Reviewing the wave against itself found two defects, both mine
+
+Recorded in full, because the point of this file is to be checkable and because
+both were in code that read as correct on the page.
+
+They are the **same class** of mistake the sixth-wave adversarial review found in
+`decideDuplicate()`: a gate that asks *"does this caller hold the action
+SOMEWHERE"* standing in for one that should ask *"may they do it HERE"*.
+
+| Severity | Defect | Fixed |
+|---|---|---|
+| **High** | `publishAppointment()` and `unpublishAppointment()` gated on `assertCanAnywhere('team:publish')`. GENERAL_SECRETARY carries that action, and a role can be bound at a STATE — so **a state-bound secretary would have passed the gate and could then publish or withdraw any appointment in the country by id**, the national secretariat's own included. The module's header already said `/team` is a national page; the code did not check it. | `assertNationalPublish()` requires `visibleScopes(...).kind === 'all'`. Two tests, one for publish and one for withdraw. |
+| **Medium** | `personRelationships()` gated the whole function on `team:read` and returned ranks, instructor qualifications and memberships. MEDIA_OFFICER holds `team:read` and neither `rank:read` nor `membership:read` — so **the press office could read the rank and membership history of anybody in the federation by walking person ids.** | Each section behind the action that governs it, following the `/my/family` pattern. A withheld section returns `null`, never `[]`, so a surface can say "not yours to see" instead of implying a 5th Dan holds no grades. |
+
+**Neither was reachable through the GRANTS table as it stands today**, and that is
+precisely why they are worth pinning rather than quietly correcting: the code was
+safe because of who happens to hold what, not because of what it checked. One
+binding at a different scope, or one action added to a role, and both open. The
+second one needed no new binding at all — only for somebody to call the function
+from a screen a MEDIA_OFFICER can reach, which is a change a future author would
+make without thinking about it.
+
+`tests/team.test.ts` carries four tests for these, bringing that file to 36.
