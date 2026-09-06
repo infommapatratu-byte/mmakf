@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
+    "prebuild": "node scripts/clean-vercel-output.mjs",
     "build": "astro build && node scripts/vercel-surface-routes.mjs",
+    "postbuild": "node scripts/disarm-build-sentinel.mjs",
     "preview": "astro preview",
     "astro": "astro",
     "test": "vitest run",
