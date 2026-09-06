@@ -1,0 +1,577 @@
+---
+// /my/devices — which devices the federation may notify, and about what.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE GAP THIS CLOSES
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// src/lib/push.ts is a complete RFC 8291 / RFC 8292 implementation with
+// subscribe(), unsubscribe(), myDevices(), myPreferences(), setPreference() and
+// sendTestToSelf() written, tested, and authorised by construction. TWO of its
+// exports were imported anywhere: pushStatus() by /admin/notifications, and
+// deliverQueuedPush() by the reconcile cron.
+//
+// So the federation had a push transport that could deliver to nobody, because
+// no page let a member register a device — and it had a preference model
+// governing four channels that no member could see or change. The preferences
+// half is the more consequential of the two: it applies to the IN-APP and EMAIL
+// channels as well, both of which work today, and until now every member was
+// held to whatever the column defaults happened to be.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// TWO HALVES, AND ONLY ONE OF THEM NEEDS JAVASCRIPT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// PREFERENCES post to this page as an ordinary form, like every other write in
+// this codebase, so they work with scripting off. They are not push-specific.
+//
+// DEVICES cannot. A subscription is created by navigator.serviceWorker and
+// PushManager.subscribe(), which is where the endpoint and the two encryption
+// keys come from; there is nothing to submit without JavaScript. The device
+// half is therefore progressive enhancement, and the page says so rather than
+// showing a control that silently does nothing.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHEN VAPID IS NOT CONFIGURED THE SUBSCRIBE CONTROL IS ABSENT, NOT DISABLED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// vapidPublicKey() returns null without VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY,
+// and its own docstring says it exists "so a page can render 'push is not
+// available' instead of a button that cannot work". That is the same posture as
+// /portal/seller/documents, which ships with no upload control while
+// UPLOAD_STORAGE_URL is unset: a button that cannot work teaches somebody their
+// request was received.
+//
+// The preference controls stay, because they are not blocked by it — a member
+// choosing to receive grading results by email is a choice the system honours
+// today, with or without push keys.
+
+import Base from '@/layouts/Base.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { rateLimit } from '@/lib/ratelimit';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+import {
+  myDevices, myPreferences, setPreference,
+  pushStatus, vapidPublicKey, isEssentialTopic, DEFAULT_CHANNEL_PUSH,
+} from '@/lib/push';
+import { NOTIFIABLE } from '@/lib/notifications';
+import { readSubmission } from '@/lib/form-intake';
+
+export const prerender = false;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/my/devices');
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+
+// Devices, timezones and what somebody has chosen not to hear about. Never a
+// shared-cache document.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+type Gate = 'no_database' | 'signed_out' | 'shared_credential' | 'ok';
+
+/**
+ * FOUR ABSENCES, NOT ONE. A deployment with no database, a reader who is not
+ * signed in, and a reader signed in with a SHARED credential are different
+ * facts and are told in different words. The third one matters here more than
+ * elsewhere: every function in push.ts refuses a principal with no userId, and
+ * a shared credential is attributable to no person — so it has no devices, and
+ * it must not be told its session expired.
+ */
+const gate: Gate = !configured
+  ? 'no_database'
+  : !identity
+    ? 'signed_out'
+    : identity.userId == null
+      ? 'shared_credential'
+      : 'ok';
+
+/**
+ * The topics a member may express a preference about.
+ *
+ * Derived from NOTIFIABLE, never listed again. A hand-kept copy disagrees with
+ * the engine the day a topic is added, and the disagreement surfaces as a
+ * member switching something off in a screen that has no effect on anything.
+ */
+const TOPICS = Object.entries(NOTIFIABLE).map(([topic, spec]: [string, any]) => ({
+  topic,
+  title: spec.title as string,
+  essential: isEssentialTopic(topic),
+}));
+
+const DONE_MESSAGES: Record<string, string> = {
+  saved: 'Saved. It applies to messages sent from now on.',
+};
+
+let actError: string | null = null;
+
+// ─── Setting a preference ───────────────────────────────────────────────────
+//
+// Posts here rather than to /api/push/preference, so it works with scripting
+// off — the middleware requires application/json on /api/ paths and a plain
+// form cannot send one. Both paths call the same setPreference().
+//
+// A CHECKBOX THAT IS NOT TICKED SENDS NOTHING, which is the whole difficulty of
+// posting a form of booleans: an absent field means "off", and an absent field
+// also means "this form did not carry that control at all". The form therefore
+// posts one topic at a time and names every channel it is submitting in a
+// hidden `channels` field, so "off" and "not offered" stay distinguishable.
+
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+
+  const rl = await rateLimit(Astro.request, 'push-preference-page', 60, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    actError = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (gate === 'no_database') {
+    Astro.response.status = 503;
+    actError = 'The federation database is not reachable from this deployment, so nothing could be saved.';
+  } else if (gate !== 'ok') {
+    Astro.response.status = 401;
+    actError = 'Your session has ended, or you are signed in with a shared credential. Nothing was changed.';
+  } else if (get('act') !== 'preference') {
+    Astro.response.status = 400;
+    actError = 'That is not something this page does.';
+  } else {
+    const submitted = new Set(get('channels').split(',').filter(Boolean));
+    const on = (channel: string) => (submitted.has(channel) ? form.get(channel) === 'on' : undefined);
+    const hourOf = (k: string) => {
+      const raw = get(k);
+      if (raw === '') return null;
+      const n = Number(raw);
+      return Number.isInteger(n) ? n : NaN;
+    };
+
+    const quietFrom = hourOf('quietFromHour');
+    const quietTo = hourOf('quietToHour');
+
+    if (Number.isNaN(quietFrom) || Number.isNaN(quietTo)) {
+      Astro.response.status = 400;
+      actError = 'Quiet hours are whole hours from 0 to 23, or blank for none.';
+    } else {
+      try {
+        await setPreference(db(), principal!, {
+          topic: get('topic'),
+          channelInApp: on('channelInApp'),
+          channelEmail: on('channelEmail'),
+          channelPush: on('channelPush'),
+          channelSms: on('channelSms'),
+          quietFromHour: quietFrom,
+          quietToHour: quietTo,
+          // The browser's own zone, submitted by the enhancement script when it
+          // is running. Absent without scripting, and then left alone rather
+          // than guessed: a wrong timezone silences somebody at the wrong hour.
+          timezone: submitted.has('timezone') ? (get('timezone') || null) : undefined,
+        });
+        return Astro.redirect(`${SELF}?done=saved#${encodeURIComponent(get('topic'))}`, 303);
+      } catch (err: any) {
+        if (err?.name === 'PushError') {
+          // The module's refusals are written for this reader — an essential
+          // topic that cannot be switched off, an hour outside 0–23. Shown as
+          // they are rather than flattened.
+          Astro.response.status = err.code === 'essential_topic' ? 409 : 400;
+          actError = err.message;
+        } else {
+          console.error('[my/devices] preference failed', err);
+          Astro.response.status = 500;
+          actError = 'Nothing was changed.';
+        }
+      }
+    }
+  }
+}
+
+const doneMessage = DONE_MESSAGES[Astro.url.searchParams.get('done') ?? ''] ?? null;
+
+// ─── The read ───────────────────────────────────────────────────────────────
+
+const status = pushStatus();
+const vapidKey = vapidPublicKey();
+
+let devices: any[] = [];
+let preferences: any[] = [];
+let readError: string | null = null;
+
+if (gate === 'ok') {
+  try {
+    devices = await myDevices(db(), principal!);
+    preferences = await myPreferences(db(), principal!);
+  } catch (err: any) {
+    readError = String(err?.message ?? err);
+  }
+}
+
+/** The stored preference for a topic, or the column defaults when none exists. */
+const prefFor = (topic: string) => {
+  const row = preferences.find((p: any) => p.topic === topic);
+  return {
+    channelInApp: row ? row.channelInApp : true,
+    channelEmail: row ? row.channelEmail : true,
+    channelPush: row ? row.channelPush : DEFAULT_CHANNEL_PUSH,
+    channelSms: row ? row.channelSms : false,
+    quietFromHour: row?.quietFromHour ?? null,
+    quietToHour: row?.quietToHour ?? null,
+    timezone: row?.timezone ?? null,
+    stored: Boolean(row),
+  };
+};
+
+const activeDevices = devices.filter((d) => d.status === 'active');
+
+const fmtWhen = (v: unknown) => {
+  if (!v) return 'never';
+  const d = new Date(v as string);
+  return Number.isNaN(d.getTime())
+    ? 'never'
+    : d.toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+---
+
+<Base
+  title="Notification settings — MMAKF"
+  description="Which devices the federation may notify, and which messages you want on each channel."
+>
+  <div class="wrap">
+    <h1>Notification settings</h1>
+
+    {actError && <p class="msg msg-bad" role="alert">{actError}</p>}
+    {doneMessage && !actError && <p class="msg msg-ok" role="status">{doneMessage}</p>}
+
+    {gate === 'no_database' ? (
+      <p class="note">
+        This deployment has no federation database configured, so there are no
+        devices or preferences to show. Nothing is wrong with your account —
+        this copy of the site simply has nothing to read from.
+      </p>
+    ) : gate === 'signed_out' ? (
+      <EmptyState
+        title="Sign in to manage your notifications"
+        body="Devices and preferences belong to a person, so this page has nothing to show until it knows who you are."
+        action={{ label: 'Sign in', href: h('/portal') }}
+      />
+    ) : gate === 'shared_credential' ? (
+      <p class="note">
+        You are signed in with a shared credential. A shared login is
+        attributable to no one person, so it has no devices and no notification
+        preferences of its own — and the federation will not send somebody's
+        grading result to an account several people hold. Sign in with your own
+        account to manage these.
+      </p>
+    ) : readError ? (
+      <p class="msg msg-bad" role="alert">
+        Your settings could not be read just now. Nothing has been changed.
+      </p>
+    ) : (
+      <>
+        {/* ── Devices ──────────────────────────────────────────────────── */}
+        <section aria-labelledby="dev-h">
+          <h2 id="dev-h">Devices</h2>
+
+          {!status.configured ? (
+            <p class="note">
+              <strong>Push notifications are not available on this deployment.</strong>
+              {' '}The federation has not published the keys a browser needs to
+              accept them, so there is no control here to switch them on — a
+              button that cannot work would teach you your device was
+              registered when it was not. Your in-app notifications are
+              unaffected and are at <a href={h('/my/notifications')}>your notifications</a>.
+            </p>
+          ) : (
+            <>
+              <p class="lede">
+                A device is this browser, on this machine. Registering one lets
+                the federation reach you when the site is closed. Nothing is sent
+                until you also choose a message type below — granting permission
+                subscribes the device, it does not opt you in to everything.
+              </p>
+
+              {/* Absent without scripting rather than broken with it: a
+                  subscription is created by PushManager, so there is nothing a
+                  plain form could submit. */}
+              <div id="push-controls" hidden>
+                <p class="row">
+                  <button type="button" class="btn btn-primary" id="push-subscribe">Register this device</button>
+                  <button type="button" class="btn btn-ghost" id="push-test">Send a test</button>
+                </p>
+                <p class="hint" id="push-msg" role="status"></p>
+              </div>
+              <noscript>
+                <p class="note">
+                  Registering a device needs JavaScript — the browser itself
+                  creates the subscription and its encryption keys, and there is
+                  nothing a plain form could send. The message preferences below
+                  work without it.
+                </p>
+              </noscript>
+            </>
+          )}
+
+          {devices.length === 0 ? (
+            <p class="muted">No device is registered to your account.</p>
+          ) : (
+            <ul class="devices">
+              {devices.map((d) => (
+                <li class={d.status === 'active' ? 'dev' : 'dev off'}>
+                  <p class="d-top">
+                    <strong>{d.service ?? 'A browser'}</strong>
+                    <span class="pill">{d.status === 'active' ? 'Active' : d.status === 'unsubscribed' ? 'Removed' : 'Expired'}</span>
+                  </p>
+                  <p class="d-meta">
+                    {d.userAgent ? <>{d.userAgent}<br /></> : null}
+                    Last seen {fmtWhen(d.lastSeenAt)}
+                    {d.timezone ? <> · {d.timezone}</> : null}
+                    {d.failureCount > 0 ? <> · {d.failureCount} failed {d.failureCount === 1 ? 'delivery' : 'deliveries'}</> : null}
+                  </p>
+                  {/* The endpoint and both encryption keys are never rendered.
+                      safeDevice() drops them before this page sees them, which
+                      is why there is no id to remove a device BY here — the
+                      script below removes the subscription this browser holds,
+                      which is the only one it can prove it owns. */}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {status.configured && activeDevices.length > 0 && (
+            <p class="row" id="push-remove-row" hidden>
+              <button type="button" class="btn btn-ghost" id="push-unsubscribe">Remove this device</button>
+            </p>
+          )}
+        </section>
+
+        {/* ── Preferences ──────────────────────────────────────────────── */}
+        <section aria-labelledby="pref-h">
+          <h2 id="pref-h">What you are told about</h2>
+          <p class="lede">
+            One row per kind of message. <strong>Some cannot be switched off</strong> —
+            a decision the federation has made about you is told to you, and a
+            setting that claimed otherwise would be a setting you could read back
+            and be wrong about.
+          </p>
+
+          {TOPICS.map(({ topic, title, essential }) => {
+            const p = prefFor(topic);
+            return (
+              <form method="POST" class="pref" id={topic}>
+                <input type="hidden" name="act" value="preference" />
+                <input type="hidden" name="topic" value={topic} />
+                {/* Which controls this form carries. An unticked checkbox sends
+                    nothing, so without this "off" and "not offered" would be
+                    the same request. */}
+                <input
+                  type="hidden"
+                  name="channels"
+                  value={essential ? 'channelSms' : 'channelInApp,channelEmail,channelPush,channelSms'}
+                />
+
+                <p class="p-title">
+                  {title}
+                  {essential && <span class="pill pill-essential">Always sent</span>}
+                </p>
+
+                <div class="p-channels">
+                  <label><input type="checkbox" name="channelInApp" checked={p.channelInApp} disabled={essential} /> In-app</label>
+                  <label><input type="checkbox" name="channelEmail" checked={p.channelEmail} disabled={essential} /> Email</label>
+                  <label><input type="checkbox" name="channelPush" checked={p.channelPush} disabled={essential || !status.configured} /> Push</label>
+                  <label><input type="checkbox" name="channelSms" checked={p.channelSms} /> SMS</label>
+                </div>
+
+                <div class="p-quiet">
+                  <label class="q">Quiet from <input type="number" name="quietFromHour" min="0" max="23" value={p.quietFromHour ?? ''} /></label>
+                  <label class="q">until <input type="number" name="quietToHour" min="0" max="23" value={p.quietToHour ?? ''} /></label>
+                  <span class="hint">
+                    Whole hours, 0–23, in {p.timezone ?? 'your device’s timezone'}. Leave blank for none.
+                    {essential && ' Quiet hours do not hold an essential message back — it is delayed by nothing.'}
+                  </span>
+                </div>
+
+                <button type="submit" class="btn btn-ghost">Save</button>
+              </form>
+            );
+          })}
+
+          <p class="hint">
+            Email and SMS have no transport configured on this deployment, so a
+            message chosen for either is <strong>queued and not sent</strong>.
+            The choice is recorded and honoured the day a provider is
+            configured; it is not silently discarded.
+          </p>
+        </section>
+      </>
+    )}
+  </div>
+</Base>
+
+<script define:vars={{ vapidKey, configured: status.configured }}>
+  // Progressive enhancement, and nothing else on this page depends on it. The
+  // preference forms above are plain form posts and work with this script
+  // absent, blocked or broken.
+  (() => {
+    if (!configured || !vapidKey) return;
+    const controls = document.getElementById('push-controls');
+    const msg = document.getElementById('push-msg');
+    const removeRow = document.getElementById('push-remove-row');
+    if (!controls || !msg) return;
+
+    const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+    if (!supported) {
+      msg.textContent = 'This browser cannot receive push notifications. Your in-app notifications are unaffected.';
+      controls.hidden = false;
+      controls.querySelectorAll('button').forEach((b) => b.remove());
+      return;
+    }
+    controls.hidden = false;
+
+    const say = (text, bad) => {
+      msg.textContent = text;
+      msg.className = bad ? 'hint hint-bad' : 'hint';
+    };
+
+    // The application server key travels as base64url and must reach
+    // PushManager as bytes. Written out rather than pulled from a library
+    // because a dependency for eight lines is a dependency to keep current.
+    const toBytes = (b64u) => {
+      const pad = '='.repeat((4 - (b64u.length % 4)) % 4);
+      const raw = atob((b64u + pad).replace(/-/g, '+').replace(/_/g, '/'));
+      return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+    };
+
+    const post = async (action, body) => {
+      const res = await fetch(`/api/push/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify(body ?? {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'That did not work.');
+      return data;
+    };
+
+    const registration = () => navigator.serviceWorker.register('/sw.js');
+
+    const refreshRemove = async () => {
+      if (!removeRow) return;
+      const reg = await navigator.serviceWorker.getRegistration();
+      const sub = reg ? await reg.pushManager.getSubscription() : null;
+      removeRow.hidden = !sub;
+    };
+    refreshRemove().catch(() => {});
+
+    document.getElementById('push-subscribe')?.addEventListener('click', async () => {
+      try {
+        say('Asking your browser for permission…');
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') {
+          // A refusal is the member's decision and is reported as such. It is
+          // NOT retried: asking twice is how a browser starts blocking the
+          // prompt permanently.
+          say('Your browser refused permission, so nothing was registered. You can change that in the site settings for this page.', true);
+          return;
+        }
+        const reg = await registration();
+        await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.subscribe({
+          // Required by every current browser, and honest: this worker shows a
+          // notification for every push it receives.
+          userVisibleOnly: true,
+          applicationServerKey: toBytes(vapidKey),
+        });
+        const json = sub.toJSON();
+        await post('subscribe', {
+          endpoint: sub.endpoint,
+          p256dh: json.keys?.p256dh,
+          auth: json.keys?.auth,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        });
+        say('This device is registered. Choose which messages you want below — registering a device does not switch any of them on.');
+        await refreshRemove();
+        location.reload();
+      } catch (err) {
+        say(err?.message || 'This device could not be registered.', true);
+      }
+    });
+
+    document.getElementById('push-unsubscribe')?.addEventListener('click', async () => {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        const sub = reg ? await reg.pushManager.getSubscription() : null;
+        if (!sub) { say('This browser holds no subscription to remove.'); return; }
+        // The server is told FIRST. If the browser dropped the subscription and
+        // the request then failed, the federation would keep sending to an
+        // endpoint nobody is listening to, with nothing recording why.
+        await post('unsubscribe', { endpoint: sub.endpoint });
+        await sub.unsubscribe();
+        say('This device has been removed.');
+        location.reload();
+      } catch (err) {
+        say(err?.message || 'This device could not be removed.', true);
+      }
+    });
+
+    document.getElementById('push-test')?.addEventListener('click', async () => {
+      try {
+        const report = await post('test');
+        const sent = report?.report?.sent ?? 0;
+        say(sent > 0
+          ? `Sent to ${sent} ${sent === 1 ? 'device' : 'devices'}. If nothing appears, your operating system is holding it back rather than the federation.`
+          : 'Nothing was sent — no active device is registered to your account on this browser.');
+      } catch (err) {
+        say(err?.message || 'The test could not be sent.', true);
+      }
+    });
+
+    // The device's timezone, submitted with every preference form so quiet
+    // hours mean the hours the member actually keeps. Added by script because
+    // only the browser knows it; absent without script, and then left alone
+    // rather than guessed.
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) {
+      document.querySelectorAll('form.pref').forEach((form) => {
+        const field = document.createElement('input');
+        field.type = 'hidden';
+        field.name = 'timezone';
+        field.value = tz;
+        form.appendChild(field);
+        const channels = form.querySelector('input[name="channels"]');
+        if (channels) channels.value = `${channels.value},timezone`;
+      });
+    }
+  })();
+</script>
+
+<style>
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { margin: 0 0 6px; }
+  h2 { margin: 32px 0 6px; }
+  .lede { margin: 0 0 14px; max-width: 62ch; }
+  .note { margin: 12px 0; padding: 12px 14px; border-radius: 10px; background: var(--surface-2, #f4f4f5); max-width: 70ch; }
+  .msg { margin: 12px 0; padding: 10px 12px; border-radius: 10px; }
+  .msg-ok { background: var(--ok-bg, #e8f5ed); color: var(--ok-fg, #14532d); }
+  .msg-bad { background: var(--bad-bg, #fdeaea); color: var(--bad-fg, #7f1d1d); }
+  .muted, .hint { color: var(--muted-fg, #666); font-size: 0.9rem; }
+  .hint-bad { color: var(--bad-fg, #7f1d1d); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+  .devices { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 10px; }
+  .dev { border: 1px solid var(--line, #e3e3e3); border-radius: 10px; padding: 10px 12px; }
+  .dev.off { opacity: 0.62; }
+  .d-top { margin: 0 0 4px; display: flex; gap: 8px; align-items: center; }
+  .d-meta { margin: 0; font-size: 0.85rem; color: var(--muted-fg, #666); }
+  .pill { font-size: 0.75rem; border: 1px solid var(--line, #d8d8d8); border-radius: 999px; padding: 1px 8px; }
+  .pill-essential { margin-left: 8px; }
+  .pref { border: 1px solid var(--line, #e3e3e3); border-radius: 10px; padding: 12px; margin: 10px 0; }
+  .p-title { margin: 0 0 8px; font-weight: 600; }
+  .p-channels { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 8px; }
+  .p-channels label { display: inline-flex; gap: 6px; align-items: center; }
+  .p-quiet { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+  .p-quiet input { width: 4.5rem; }
+  .p-quiet .hint { flex: 1 1 22rem; }
+</style>
