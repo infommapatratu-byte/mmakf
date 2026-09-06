@@ -41,7 +41,12 @@ export { SITE_ORIGIN };
  * yet: it is the name the federation uses for member surfaces, and the cost of
  * reserving it now is nothing.
  */
-export const PRIVATE_PREFIXES = ['/admin', '/api', '/my', '/portal'] as const;
+// `/employee` is the workforce portal (migration 0058). It is private for a
+// stronger reason than the other four: behind it sit leave records, expense
+// claims, timesheets and a person's standing with their employer. Nothing under
+// it should ever be advertised, and declaring the prefix here means a page
+// added to it tomorrow inherits that without anybody remembering to.
+export const PRIVATE_PREFIXES = ['/admin', '/api', '/my', '/portal', '/employee'] as const;
 
 /**
  * Directories under src/pages whose contents are public. Declaring these is
@@ -108,6 +113,17 @@ export const DYNAMIC_ROUTE_POLICY: Record<string, string> = {
   '/shotokan/techniques/[slug]': 'Expanded from TECHNIQUES in src/data/shotokan. These are the technique reference pages — substantive editorial content about public martial-arts knowledge, and exactly the kind of page §45 asks to be indexable. The set is small, fixed and editorial, with no register of real people behind it, which is what makes expanding it safe.',
   '/shotokan/kumite/[slug]': 'Expanded from SYSTEMS and CONCEPTS in src/data/shotokan, for the same reason as the technique pages: fixed, editorial, and about the sport rather than about any person.',
   '/clubs/[slug]': 'Expanded from the affiliation register, and ONLY from clubs that are currently affiliated AND carry a slug an administrator set — see publishableClubs() in src/db/clubs.ts. Both halves matter. Expanding lapsed clubs would put the federation\'s recommendation behind a charter that has expired; minting a slug from a name would publish a URL that moves the next time somebody corrects a spelling, breaking a link a parent had bookmarked. The federation\'s instruction is explicit: "DO NOT generate fake location pages. Only index real verified locations."',
+  '/careers/[slug]':
+    'Expanded from publicVacancies() in src/db/workforce.ts, and ONLY through the same two '
+    + 'conditions the page itself resolves through — published = true AND status = \'open\'. That '
+    + 'reuse is the safety property, on the identical reasoning to /shop/product/[ref]: one '
+    + 'predicate decides both, so a draft, withdrawn, filled or closed post cannot be advertised '
+    + 'into a page that then tells the reader it is not open. Expanding is the right answer here '
+    + 'rather than the cautious one, because a vacancy is editorial content about a POST and not '
+    + 'about any person, and somebody searching for coaching work at a national federation is '
+    + 'exactly the reader this route exists for. The risk a job board carries is the stale listing, '
+    + 'and the status filter is what answers it: a post closes and leaves the sitemap in the same '
+    + 'query that stops it rendering. Capped at 200 by publicVacancies() itself.',
   '/my/calendar/[secret].ics':
     'NOT expanded, and it also sits inside /my, which is a PRIVATE prefix — so this entry is belt '
     + 'and braces. The dynamic segment is a BEARER SECRET: expanding it would publish the very '

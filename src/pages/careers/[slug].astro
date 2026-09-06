@@ -1,0 +1,362 @@
+---
+// /careers/[slug] — one advertised post, and the form that applies for it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE FORM WORKS WITH SCRIPTING OFF, AND IT REALLY SUBMITS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// It posts to this page, not to /api/: the middleware requires
+// application/json on /api/ paths and a plain form cannot send one, while the
+// same-origin check that answers CSRF applies here identically. §23 is explicit
+// that a form whose backend rejects what the frontend sends is worse than no
+// form, so the field names here and the parameter names in `applyForVacancy()`
+// are the same names.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE APPLICANT IS NOT LOGGED IN AND WILL NEVER BE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `applyForVacancy()` takes no principal at all. Requiring one would mean
+// nobody outside the federation could apply for a job at it, which is most of
+// the point of advertising.
+//
+// It also creates no `persons` row. A candidate who is not hired must not enter
+// the federation's people register — that register is members, coaches,
+// officials and athletes, and filing every unsuccessful applicant into it would
+// make the national member count a number nobody could defend. The person is
+// created when an offer is ACCEPTED, in `acceptOffer()`.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE REFERENCE IS THE ONLY THING THEY GET, SO IT IS UNGUESSABLE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `reference('JOB')` is CSPRNG-derived. A sequential candidate reference would
+// let anybody who applied enumerate every other applicant's by subtracting one,
+// and an application carries a name, an email, a CV and eventually a panel's
+// opinion.
+
+export const prerender = false;
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { isConfigured, db } from '@/db';
+import { rateLimit } from '@/lib/ratelimit';
+import { publicVacancy, applyForVacancy, isWorkforceError } from '@/db/workforce';
+import { readSubmission } from '@/lib/form-intake';
+
+const { slug } = Astro.params;
+const configured = isConfigured();
+
+// An application carries somebody's name, email and employment history. Never a
+// shared-cache document, even though the advert above it is public.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+let vacancy: any = null;
+let readFailed = false;
+if (configured && slug) {
+  try {
+    vacancy = await publicVacancy(db(), slug);
+  } catch {
+    readFailed = true;
+  }
+}
+
+let error: string | null = null;
+let submitted: { reference: string; vacancyTitle: string } | null = null;
+// Kept so a refused submission does not empty the form the applicant filled in.
+let sent: Record<string, string> = {};
+
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  sent = {
+    applicantName: get('applicantName'),
+    applicantEmail: get('applicantEmail'),
+    applicantPhone: get('applicantPhone'),
+    currentEmployer: get('currentEmployer'),
+    yearsExperience: get('yearsExperience'),
+    coverNote: get('coverNote'),
+  };
+
+  // Spam control. An advertised post on a public page with no login is the one
+  // form on this site anybody at all can reach.
+  const rl = await rateLimit(Astro.request, 'job-apply', 5, 3600);
+
+  // A HONEYPOT, not a CAPTCHA. The field is hidden from people and from screen
+  // readers; a bot that fills every input fills this one too. It refuses
+  // silently-looking-successful rather than telling the bot which check it
+  // failed — but a human who somehow triggers it still gets a real sentence,
+  // because a form that lies to a person to catch a robot is a form that
+  // eventually loses a real application.
+  const trap = get('website');
+
+  if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so an application cannot be recorded. Nothing was sent.';
+  } else if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many applications from this address. Nothing was sent. Try again in ${Math.ceil(rl.retryAfterSeconds / 60)} minutes.`;
+  } else if (trap) {
+    Astro.response.status = 400;
+    error = 'That submission looked automated and was not recorded. If you are a person, please try again without a browser extension filling the form.';
+  } else if (!vacancy) {
+    Astro.response.status = 404;
+    error = 'That post is no longer open for applications. Nothing was sent.';
+  } else {
+    try {
+      const years = sent.yearsExperience === '' ? null : Number(sent.yearsExperience);
+      submitted = await applyForVacancy(db(), {
+        slug: slug!,
+        applicantName: sent.applicantName,
+        applicantEmail: sent.applicantEmail,
+        applicantPhone: sent.applicantPhone || null,
+        currentEmployer: sent.currentEmployer || null,
+        // Number('') is 0 and passes Number.isInteger — the exact defect an
+        // adversarial review found on the registration location step. Parsed to
+        // null explicitly rather than allowed to become a claim of zero years.
+        yearsExperience: years != null && Number.isFinite(years) ? Math.trunc(years) : null,
+        coverNote: sent.coverNote || null,
+      });
+    } catch (err: any) {
+      if (isWorkforceError(err)) {
+        Astro.response.status = err.code === 'duplicate_application' ? 409 : 400;
+        error = err.message;
+      } else {
+        console.error('[careers/apply] failed', err);
+        Astro.response.status = 500;
+        error = 'Your application could not be recorded, and nothing was sent. Please try again.';
+      }
+    }
+  }
+}
+
+const TYPE_LABEL: Record<string, string> = {
+  permanent: 'Permanent', fixed_term: 'Fixed term', contract: 'Contract',
+  consultant: 'Consultant', intern: 'Internship', apprentice: 'Apprenticeship',
+  volunteer: 'Voluntary', secondment: 'Secondment',
+};
+
+if (!vacancy && !readFailed && configured) Astro.response.status = 404;
+---
+
+<Base
+  title={vacancy ? `${vacancy.title} — Careers — MMAKF` : 'Post not found — Careers — MMAKF'}
+  description={vacancy?.summary ?? 'A post advertised by the Modern Martial Arts Karate-Do Federation of India.'}
+  breadcrumbs={[
+    { name: 'Federation', url: '/about' },
+    { name: 'Careers', url: '/careers' },
+    ...(vacancy ? [{ name: vacancy.title, url: `/careers/${vacancy.slug}` }] : []),
+  ]}
+>
+  {!configured ? (
+    <section class="container v-wrap">
+      <p class="v-note">
+        The federation register is not configured on this deployment, so this post
+        cannot be read.
+      </p>
+    </section>
+  ) : readFailed ? (
+    <>
+      {/*
+        EVERY BRANCH OF THIS PAGE TAKES ITS TITLE FROM PageHero.
+        
+        This one had no heading of any kind, so a screen-reader user meeting the
+        error had nothing to land on and no way to tell which page had failed.
+        The branch below wrote its own h1, which was correct in isolation but
+        left the FILE containing both an h1 and a PageHero — and the WCAG 2.4.6
+        guard reads source, not branches, so it could not tell "two headings on
+        one render" from "one heading per alternative". Routing all three
+        through PageHero answers the guard and the screen reader with the same
+        change.
+      */}
+      <PageHero
+        eyebrow="MMAKF"
+        title="This post could not be loaded."
+        lead="The vacancy could not be read just now. Please try again shortly — this is not a statement that the post has closed."
+      />
+      <section class="container v-wrap">
+        <p>
+          The federation's current vacancies are on
+          <a href="/careers"> the careers page</a>.
+        </p>
+      </section>
+    </>
+  ) : !vacancy ? (
+    <>
+      <PageHero
+        eyebrow="MMAKF"
+        title="That post is not open."
+        lead="It may have closed, or the address may be wrong."
+      />
+      <section class="container v-wrap">
+        <p>
+          The federation's current vacancies are on
+          <a href="/careers"> the careers page</a>.
+        </p>
+      </section>
+    </>
+  ) : (
+    <>
+      <PageHero
+        eyebrow={vacancy.departmentName ? `MMAKF · ${vacancy.departmentName}` : 'MMAKF'}
+        title={vacancy.title}
+        lead={vacancy.summary ?? undefined}
+      />
+
+      <section class="container v-wrap">
+        <div class="v-grid">
+          <article class="v-body">
+            <dl class="v-facts">
+              <div><dt>Type</dt><dd>{TYPE_LABEL[vacancy.employmentType] ?? vacancy.employmentType}</dd></div>
+              {vacancy.location && <div><dt>Location</dt><dd>{vacancy.location}</dd></div>}
+              {vacancy.departmentName && <div><dt>Department</dt><dd>{vacancy.departmentName}</dd></div>}
+              {(vacancy.openings > 1) && <div><dt>Posts</dt><dd>{vacancy.openings}</dd></div>}
+              {vacancy.closesOn && <div><dt>Closes</dt><dd><time datetime={vacancy.closesOn}>{vacancy.closesOn}</time></dd></div>}
+              <div><dt>Reference</dt><dd class="v-ref">{vacancy.reference}</dd></div>
+            </dl>
+
+            {vacancy.description && (
+              <section class="v-prose">
+                <h2>The post</h2>
+                {vacancy.description.split(/\n\n+/).map((p: string) => <p>{p}</p>)}
+              </section>
+            )}
+            {vacancy.requirements && (
+              <section class="v-prose">
+                <h2>What the federation is looking for</h2>
+                {vacancy.requirements.split(/\n\n+/).map((p: string) => <p>{p}</p>)}
+              </section>
+            )}
+          </article>
+
+          <aside class="v-apply" id="apply">
+            {submitted ? (
+              <div class="v-done" role="status">
+                <h2>Your application is with the federation.</h2>
+                <p>
+                  Reference <strong class="v-ref">{submitted.reference}</strong> —
+                  for <strong>{submitted.vacancyTitle}</strong>.
+                </p>
+                <p class="v-keep">
+                  <strong>Keep this reference.</strong> It is the only handle you
+                  have on your application, and the federation cannot look it up
+                  from your name alone.
+                </p>
+                <p class="v-honest">
+                  {/*
+                    TRUE, and said rather than implied. There is no email
+                    transport wired in this repository, so promising a
+                    confirmation email would be exactly the fake automation §35
+                    forbids. When one is configured this paragraph changes.
+                  */}
+                  MMAKF has not published a response time for applications, and no
+                  confirmation email is sent — so this page is your receipt.
+                </p>
+              </div>
+            ) : (
+              <>
+                <h2>Apply for this post</h2>
+                {error && <p class="v-err" role="alert">{error}</p>}
+
+                <form method="post" action={`/careers/${vacancy.slug}#apply`} class="v-form">
+                  <label class="input-label" for="ap-name">Your name</label>
+                  <input class="input" id="ap-name" name="applicantName" maxlength="120" required value={sent.applicantName ?? ''} />
+
+                  <label class="input-label" for="ap-email">Email</label>
+                  <input class="input" id="ap-email" name="applicantEmail" type="email" maxlength="160" required value={sent.applicantEmail ?? ''} />
+                  <p class="v-hint">The federation replies to this address. One application per address per post.</p>
+
+                  <label class="input-label" for="ap-phone">Telephone (optional)</label>
+                  <input class="input" id="ap-phone" name="applicantPhone" maxlength="40" value={sent.applicantPhone ?? ''} />
+
+                  <label class="input-label" for="ap-emp">Current employer (optional)</label>
+                  <input class="input" id="ap-emp" name="currentEmployer" maxlength="160" value={sent.currentEmployer ?? ''} />
+
+                  <label class="input-label" for="ap-yrs">Years of relevant experience (optional)</label>
+                  <input class="input" id="ap-yrs" name="yearsExperience" type="number" min="0" max="80" step="1" value={sent.yearsExperience ?? ''} />
+
+                  <label class="input-label" for="ap-note">Why you are applying</label>
+                  <textarea class="input" id="ap-note" name="coverNote" rows="6" maxlength="4000">{sent.coverNote ?? ''}</textarea>
+
+                  {/*
+                    The honeypot. `hidden` keeps it out of the accessibility tree
+                    as well as off the screen, so a screen-reader user is never
+                    asked to fill a field that would refuse their application.
+                  */}
+                  <div hidden aria-hidden="true">
+                    <label for="ap-website">Leave this empty</label>
+                    <input id="ap-website" name="website" tabindex="-1" autocomplete="off" />
+                  </div>
+
+                  <button class="btn btn-primary v-go" type="submit">Send application</button>
+
+                  <p class="v-hint">
+                    {/*
+                      §34: no invented turnaround. The federation has published
+                      no service standard, so this says what actually happens.
+                    */}
+                    Your application goes to the federation's recruiting office
+                    against a reference shown on the next screen. There is no
+                    account to create and no CV upload — write what matters in
+                    the box above.
+                  </p>
+                </form>
+              </>
+            )}
+          </aside>
+        </div>
+      </section>
+    </>
+  )}
+</Base>
+
+<style>
+  .v-wrap { padding-block: var(--space-8, 2rem) var(--space-12, 3rem); }
+  .v-note { padding: var(--space-4, 1rem); border: 1px solid var(--c-border, #ddd); border-radius: var(--radius, 6px); max-width: 65ch; }
+  .v-bad { border-color: var(--c-warn-border, #c99); }
+
+  .v-grid {
+    display: grid; gap: var(--space-8, 2rem);
+    grid-template-columns: minmax(0, 1.6fr) minmax(min(100%, 20rem), 1fr);
+    align-items: start;
+  }
+  @media (max-width: 60rem) { .v-grid { grid-template-columns: 1fr; } }
+
+  .v-facts {
+    display: grid; gap: 0.6rem 1.5rem;
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd); border-radius: var(--radius, 6px);
+    background: var(--c-surface-2, #fafafa);
+    margin: 0 0 var(--space-6, 1.5rem);
+  }
+  .v-facts dt { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-muted, #777); }
+  .v-facts dd { margin: 0.1rem 0 0; font-weight: 600; }
+  .v-ref { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+
+  .v-prose { margin-bottom: var(--space-6, 1.5rem); }
+  .v-prose h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-muted, #666); }
+  .v-prose p { max-width: 68ch; }
+
+  .v-apply {
+    padding: var(--space-5, 1.25rem);
+    border: 1px solid var(--c-border, #ddd); border-radius: var(--radius, 6px);
+    background: var(--c-surface, #fff);
+    position: sticky; top: 1rem;
+  }
+  @media (max-width: 60rem) { .v-apply { position: static; } }
+  .v-apply h2 { margin-top: 0; font-size: 1.05rem; }
+
+  .v-form .input, .v-form textarea { width: 100%; margin-bottom: 0.15rem; }
+  .v-form .input-label { margin-top: 0.7rem; display: block; }
+  .v-go { margin-top: 1rem; width: 100%; }
+  .v-hint { font-size: 0.8rem; color: var(--c-muted, #666); margin: 0.3rem 0 0; }
+  .v-err {
+    padding: 0.6rem 0.8rem; border: 1px solid var(--c-bad-border, #c66);
+    border-radius: var(--radius, 6px); margin-bottom: 0.8rem; font-size: 0.9rem;
+  }
+
+  .v-done h2 { margin-top: 0; font-size: 1.05rem; }
+  .v-keep { padding: 0.6rem 0.8rem; background: var(--c-surface-2, #f6f6f6); border-radius: var(--radius, 6px); }
+  .v-honest { font-size: 0.85rem; color: var(--c-muted, #666); }
+</style>

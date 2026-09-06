@@ -99,6 +99,36 @@ const DICTIONARY: Record<string, StatusMeaning> = {
   superseded:         { label: 'Superseded', tone: 'neutral', meaning: 'Replaced by a later version, which is kept intact.', terminal: true },
   cancelled:          { label: 'Cancelled', tone: 'bad', meaning: 'Called off.', terminal: true },
 
+  // ── The workforce: posts, employment and recruitment (migration 0058) ────
+  //
+  // Eight values, covering ten enum labels: `offered` and `filled` each appear
+  // in two of the four vocabularies and mean the same thing in both, which is
+  // the condition this dictionary shares an entry under.
+  //
+  // These describe REAL PEOPLE'S STANDING WITH THEIR EMPLOYER, so the tones are
+  // chosen with more care than a colour usually deserves. Nothing here is
+  // `actionable`: that flag counts a row as outstanding work on /admin, and an
+  // offer somebody has not answered yet is not the federation's task to do.
+  onboarding:   { label: 'Onboarding', tone: 'progress', meaning: 'Appointed and joining. Not yet fully in post.' },
+  // NEUTRAL, deliberately. Leave is an ordinary and expected state, not a
+  // problem — painting it `warn` would put a caution chip beside the name of
+  // everybody taking the leave they are entitled to. What it does mean is "do
+  // not roster this person", and the meaning line says so rather than the tone.
+  on_leave:     { label: 'On leave', tone: 'neutral', meaning: 'Employed and currently away. Not available to be rostered.' },
+  // WARN, and this one earns it: a post is about to become vacant on a known
+  // date, and the work of covering or refilling it has to start before then.
+  notice:       { label: 'Serving notice', tone: 'warn', meaning: 'Leaving on an agreed date. Cover or replacement needs arranging.' },
+  // Waiting on the CANDIDATE, which is why it takes the waiting tone and not
+  // the actionable flag.
+  offered:      { label: 'Offered', tone: 'waiting', meaning: 'An offer has been made and the person has not yet answered.' },
+  filled:       { label: 'Filled', tone: 'good', meaning: 'Somebody is in the post. It is not open to applications.' },
+  // STOPPED rather than neutral: the post exists in the establishment and is
+  // deliberately not being recruited to. A reader must be able to tell that
+  // from "closed", which means the post is gone.
+  frozen:       { label: 'Frozen', tone: 'stopped', meaning: 'The post exists but recruitment to it is suspended.' },
+  shortlisted:  { label: 'Shortlisted', tone: 'progress', meaning: 'Through the first sift and to be interviewed.' },
+  interviewing: { label: 'Interviewing', tone: 'progress', meaning: 'Interviews are arranged or under way.' },
+
   // ── Institutional applications ───────────────────────────────────────────
   acknowledged:         { label: 'Acknowledged', tone: 'progress', meaning: 'MMAKF has confirmed receipt to the applicant.' },
   information_requested:{ label: 'Information requested', tone: 'warn', meaning: 'Waiting on the institution to supply something.', actionable: true },
@@ -1671,6 +1701,22 @@ export const LIFECYCLES: Record<string, readonly string[]> = {
     'won', 'lost', 'accepted', 'expired', 'cancelled',
   ],
   gateway: ['unknown', 'healthy', 'degraded', 'down', 'not_configured'],
+
+  // ── The workforce (migration 0058) ───────────────────────────────────────
+  //
+  // In lifecycle order, so a filter menu on /employee and the HR console reads
+  // as the path a person actually travels rather than as alphabetical soup.
+  // `suspended` sits where it does because it can be entered from `active`
+  // only, and `ended` is the one terminal state all routes reach.
+  employment: ['offered', 'onboarding', 'active', 'on_leave', 'suspended', 'notice', 'ended'],
+  position: ['draft', 'open', 'filled', 'frozen', 'closed'],
+  vacancy: ['draft', 'open', 'filled', 'closed', 'withdrawn'],
+  job_application: [
+    'received', 'screening', 'shortlisted', 'interviewing',
+    'offered', 'accepted', 'declined', 'rejected', 'withdrawn',
+  ],
+  leave_request: ['draft', 'submitted', 'approved', 'rejected', 'cancelled', 'withdrawn'],
+  expense_claim: ['draft', 'submitted', 'approved', 'rejected', 'paid', 'cancelled'],
 };
 
 /** Every raw value the dictionary knows. Used by the drift guard in tests. */

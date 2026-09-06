@@ -143,7 +143,6 @@ describe('seed integrity', () => {
       expect(c[f].length).toBeGreaterThan(0);
     }
     expect(c.email).toBe('admin@mmakf.in');
-    expect(c.emailSecondary).toBe('karate.pramod@gmail.com');
 
     // What must NOT. This test used to assert the opposite — that a phone number
     // and a UPI handle were present — and it passed while the site published
@@ -151,6 +150,20 @@ describe('seed integrity', () => {
     // the federation's payment route. The federation asked twice for both to go.
     expect(c.phone).toBe('');
     expect(SEED.federation.upi).toBe('');
+
+    // AND THE SECOND MAILBOX, WHICH THIS TEST USED TO REQUIRE.
+    //
+    // It asserted `emailSecondary === 'karate.pramod@gmail.com'` — a personal
+    // consumer mailbox — inside a test called "publishes the federation address
+    // and NOTHING personal". The contradiction sat there because the address was
+    // removed from src/data/seed.ts on exactly the reasoning this test enforces
+    // for the phone number and the UPI handle: a consumer mailbox cannot be
+    // delegated when somebody is away, cannot be audited, does not survive the
+    // person leaving the post, and invites a parent with a safeguarding concern
+    // to write to an individual rather than to the office that must answer for
+    // it. A named officer is reachable through /team, where the route published
+    // is a desk rather than a person.
+    expect(c.emailSecondary).toBe('');
   });
 });
 
@@ -183,6 +196,22 @@ describe('content the federation has asked to be removed', () => {
    */
   const codeOf = (src: string) =>
     src
+      // BLOCK COMMENTS FIRST, BECAUSE THEY SPAN LINES.
+      //
+      // The line filter below recognises a comment only by how its own line
+      // STARTS — `//`, ` *`, `/*` — and nothing else. An Astro comment is
+      // `{/* ... */}`, and the interesting lines inside one begin with whatever
+      // the prose begins with: a quote, a bullet, a capital letter.
+      //
+      // src/pages/about.astro carries exactly that — a block recording the three
+      // claims removed from the paragraph beneath it, quoting the seed file's own
+      // removal note. It failed this guard while src/data/seed.ts, saying the
+      // same thing behind `//`, passed. The difference was comment syntax, not
+      // content, and a guard that forbids explaining a removal in one dialect of
+      // comment while permitting it in another enforces punctuation rather than
+      // the claim.
+      .replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
       .split(/\r?\n/)
       .filter((l) => {
         const t = l.trim();

@@ -37,6 +37,7 @@ import { TECHNIQUES, SYSTEMS, CONCEPTS } from '@/data/shotokan';
 import { KATA } from '@/data/kata';
 import { isConfigured, db } from '@/db';
 import { publishableClubs } from '@/db/clubs';
+import { publicVacancies } from '@/db/workforce';
 import {
   publishableListings, publishableStorefronts,
   SITEMAP_LISTING_CAP, SITEMAP_STOREFRONT_CAP,
@@ -164,6 +165,29 @@ async function clubRoutes(): Promise<string[]> {
 }
 
 /**
+ * The open vacancies that have a public page.
+ *
+ * ONE PREDICATE DECIDES BOTH THIS AND THE PAGE. publicVacancies() filters on
+ * `published = true AND status = 'open'`, and publicVacancy() — which
+ * /careers/[slug] resolves through — applies the identical pair. So a post that
+ * is filled, withdrawn or closed leaves the sitemap in the same query that
+ * stops it rendering, and the stale listing a job board usually accumulates
+ * cannot form here.
+ *
+ * A database failure returns NOTHING rather than throwing, exactly as
+ * clubRoutes() does and for the same reason.
+ */
+async function vacancyRoutes(): Promise<string[]> {
+  if (!isConfigured()) return [];
+  try {
+    const vacancies = await publicVacancies(db());
+    return vacancies.map((v: any) => `/careers/${v.slug}`);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * The marketplace — items and storefronts.
  *
  * BOTH COME FROM publicListingPredicate(), the same predicate the shop, the
@@ -265,6 +289,7 @@ export const GET: APIRoute = async ({ site }) => {
   if (routes.includes('/shotokan/techniques/[slug]')) paths.push(...techniqueRoutes());
   if (routes.includes('/shotokan/kumite/[slug]')) paths.push(...kumiteRoutes());
   if (routes.includes('/clubs/[slug]')) paths.push(...(await clubRoutes()));
+  if (routes.includes('/careers/[slug]')) paths.push(...(await vacancyRoutes()));
   if (routes.includes('/shop/product/[ref]')) paths.push(...(await productRoutes()));
   if (routes.includes('/shop/seller/[slug]')) paths.push(...(await storefrontRoutes()));
   if (routes.includes('/shop/category/[...path]')) paths.push(...(await categoryRoutes()));

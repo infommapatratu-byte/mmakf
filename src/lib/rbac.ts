@@ -281,6 +281,45 @@ export type Action =
   // DISTRICT_ADMIN drafts; the club and the state publish.
   | 'schedule:read' | 'schedule:write' | 'schedule:publish'
 
+  // ── The operational team register (migration 0056) ────────────────────────
+  //
+  // WHO WORKS FOR MMAKF, as distinct from who governs it ('content:write' over
+  // the Governance page) and from what a login may do ('role:grant').
+  //
+  // 'team:publish' is separated from 'team:write' for the reason
+  // 'schedule:publish' is separated from 'schedule:write': recording that
+  // somebody joined the competition desk and putting their name, face and
+  // biography on the public internet under the federation's masthead are
+  // different acts with different consequences. The second one is the federation
+  // making a public statement about a named private individual, and it should
+  // not be reachable by whoever was given the authority to correct a job title.
+  //
+  // NEITHER OF THEM IS 'hr:read'. This register holds no salary, no private
+  // contact and no HR note — migration 0056 gives those nowhere to sit — so
+  // 'team:write' confers no access to employment data, and a future HR module
+  // must not be built on top of these actions.
+  | 'team:read' | 'team:write' | 'team:publish'
+
+  // ── Recruitment (migration 0058) ──────────────────────────────────────────
+  //
+  // SEPARATE FROM 'hr:*', AND THIS IS THE POINT OF THE SPLIT.
+  //
+  // A hiring manager needs to read a vacancy, see who applied, sit on a panel
+  // and record their own feedback. They must NOT thereby be able to read the
+  // employment record, the leave history or the exit reason of everybody
+  // already working for the federation, which is what `hr:read` opens.
+  //
+  // 'hiring:decide' is separated from 'hiring:write' for the reason
+  // 'quote:approve' is separated from 'quote:issue': arranging an interview and
+  // ISSUING AN OFFER OF EMPLOYMENT are different acts, and the second one
+  // commits the federation to paying somebody. Only the second creates a
+  // `persons` row and an employment.
+  //
+  // Note that 'hiring:*' does NOT let its holder read interview feedback other
+  // panellists have written — that check is on the panel membership, not on the
+  // action, and it lives in src/db/workforce.ts.
+  | 'hiring:read' | 'hiring:write' | 'hiring:decide'
+
   // HR and medical sit deliberately outside NATIONAL_FULL. PART X says HR data
   // must not be exposed to ordinary administrators, and for this purpose a
   // federation administrator is an ordinary administrator.
@@ -387,6 +426,11 @@ const NATIONAL_FULL: Action[] = [
   // run its own timetable, and a FEDERATION_ADMIN who did not hold them could
   // not appoint a club administrator at all.
   'schedule:read', 'schedule:write', 'schedule:publish',
+  // The operational team register. All three, for the canGrantRole() reason
+  // above: GENERAL_SECRETARY holds 'team:publish' — the secretariat is the
+  // office that says who speaks for the federation — and a FEDERATION_ADMIN who
+  // did not hold it could not appoint a general secretary at all.
+  'team:read', 'team:write', 'team:publish',
   // Note the two that are ABSENT: 'hr:*' and 'medical:*'. Their absence is why
   // HR_OFFICER and MEDICAL_OFFICER appear in RESTRICTED_ROLES below — the
   // no-amplification rule in canGrantRole() then stops a FEDERATION_ADMIN from
@@ -418,6 +462,23 @@ const GRANTS: Record<Role, Action[]> = {
     'safeguarding:read', 'safeguarding:write',
     'hr:read', 'hr:write',
     'medical:read', 'medical:write',
+    // AND THE SAME ARGUMENT AGAIN, FOR THE FAMILY THAT ARRIVED LATER.
+    //
+    // 'hiring:*' was added with the workforce layer and given to HR_OFFICER
+    // alone — not to NATIONAL_FULL, correctly, because recruitment holds what
+    // an unsuccessful candidate wrote about themselves and what an interview
+    // panel said about them in private. But it was not given to SUPER_ADMIN
+    // either, and the no-amplification rule in canGrantRole() reads the target
+    // role's WHOLE action set: one action the granter lacks refuses the grant.
+    // So HR_OFFICER became ungrantable by anybody, exactly as 'hr:*' and
+    // 'medical:*' had made it before — a role that exists, is documented, and
+    // can never be conferred on a person.
+    //
+    // The containment that PART X asks for is not this omission. It is
+    // RESTRICTED_ROLES, which keeps conferring HR_OFFICER a SUPER_ADMIN act,
+    // and NATIONAL_FULL's continued silence on 'hiring:*', which keeps a
+    // FEDERATION_ADMIN from minting the role to read the data through it.
+    'hiring:read', 'hiring:write', 'hiring:decide',
   ],
 
   // Operational national administration — no safeguarding case access.
@@ -452,6 +513,9 @@ const GRANTS: Record<Role, Action[]> = {
     // where the second pair of eyes is actually enforced.
     'source:read', 'source:write',
     'policy:read', 'policy:write', 'policy:approve', 'policy:publish',
+    // The secretariat maintains the establishment and says who speaks for the
+    // federation, so it holds the publish authority as well as the write one.
+    'team:read', 'team:write', 'team:publish',
   ],
 
   // Technical authority: syllabus, gradings, ranks — not finance or users.
@@ -515,6 +579,17 @@ const GRANTS: Record<Role, Action[]> = {
     // scope check does the containing, so this reaches the state's dojos and no
     // others.
     'schedule:read', 'schedule:write', 'schedule:publish',
+    // Maintains its own state's coordinators and district officers — the scope
+    // predicate in src/db/team.ts filters to appointments scoped at or beneath
+    // this binding, so a Kerala administrator cannot reach an Assam desk.
+    //
+    // NOT 'team:publish', and this is the one asymmetry in the block worth
+    // stating: /team is a NATIONAL page under the federation's masthead. A
+    // state office may record who works for it; deciding that a name and a
+    // photograph appear on www.mmakf.in is a national editorial act. The state
+    // prepares the row and the secretariat publishes it, exactly as a district
+    // drafts a timetable and the club publishes it.
+    'team:read', 'team:write',
   ],
 
   DISTRICT_ADMIN: [
@@ -772,6 +847,13 @@ const GRANTS: Record<Role, Action[]> = {
   MEDIA_OFFICER: [
     'content:read', 'content:write', 'document:read',
     'seo:read', 'seo:write', 'person:read', 'notification:read',
+    // READ ONLY, and the asymmetry is deliberate. A media officer writes about
+    // the federation and needs to know who holds which desk; changing the
+    // establishment — or putting a colleague's photograph on the public site —
+    // is the secretariat's act, not the press office's. 'content:write' already
+    // lets them write the words around the register; it does not let them edit
+    // the register the words cite.
+    'team:read',
   ],
 
   // Answers tickets. Deliberately has no person:read_pii: a support agent needs
@@ -793,6 +875,10 @@ const GRANTS: Record<Role, Action[]> = {
     'task:read', 'task:write',
     'document:read', 'document:write',
     'report:read', 'audit:read',
+    // The HR office runs recruitment end to end, offer included. A hiring
+    // manager gets 'hiring:read' and 'hiring:write' WITHOUT 'hiring:decide' and
+    // without any 'hr:*' — see the note at the Action union.
+    'hiring:read', 'hiring:write', 'hiring:decide',
   ],
 
   MEDICAL_OFFICER: [

@@ -957,10 +957,22 @@ export async function revokeCertificate(
 /**
  * The public member register, DERIVED from authoritative records.
  *
- * Replaces a hand-typed list. A person appears only if they hold an active
- * membership and an active rank; the grade shown is the one on the rank record,
- * and its provenance travels with it so a legacy entry is never mistaken for an
+ * Replaces a hand-typed list. A person appears if their record is active and
+ * they hold an active rank; the grade shown is the one on the rank record, and
+ * its provenance travels with it so a legacy entry is never mistaken for an
  * examined one.
+ *
+ * NOTE, corrected 6 September 2026: this paragraph previously said "an active
+ * membership AND an active rank". The query below joins `rank_records` and
+ * filters `persons.status` — it does not touch `memberships` at all, and never
+ * has. The sentence was describing a stricter rule than the code applies, which
+ * is the more dangerous direction for a comment on a PUBLIC register to be wrong
+ * in: a reader checking whether a lapsed member could appear here would have
+ * been told no on the strength of a join that does not exist.
+ *
+ * The behaviour is left as it is rather than tightened to match the old comment,
+ * because whether a lapsed membership should strip somebody's rank from the
+ * public register is MMAKF's decision and not a comment's.
  *
  * No contact details, no date of birth, no address — verification is a lookup,
  * not a directory of members' personal data.
@@ -991,4 +1003,191 @@ export async function publicRegister(db: DB, limit = 500) {
     ...r,
     provenance: r.gradingEventId ? 'examined' : 'unverified_legacy',
   }));
+}
+
+// ─── The Black Belt register ────────────────────────────────────────────────
+
+export interface BlackBeltFilters {
+  /** Free text over the name. Matched case-insensitively as a prefix or word. */
+  q?: string;
+  /** 1..10. A single Dan grade. */
+  dan?: number;
+  stateUnitId?: number;
+  districtUnitId?: number;
+  dojoId?: number;
+  /** Calendar year the grade was awarded. */
+  year?: number;
+  /** 'examined' restricts to grades traceable to a recorded examination. */
+  provenance?: 'examined' | 'unverified_legacy';
+  limit?: number;
+}
+
+export interface BlackBeltEntry {
+  federationId: string;
+  fullName: string;
+  gradeLabel: string;
+  dan: number;
+  awardedOn: string;
+  state: string | null;
+  district: string | null;
+  dojo: string | null;
+  dojoSlug: string | null;
+  city: string | null;
+  /**
+   * 'examined'          traced to a grading event with examiner scores behind it
+   * 'unverified_legacy' a real grade predating digital records; the federation
+   *                     holds evidence, but no examination record exists here
+   *
+   * The two are NEVER collapsed. Reporting a legacy record as though it were
+   * examined is the specific dishonesty /verify was built to end, and a register
+   * that did it would undo that page one row at a time.
+   */
+  provenance: 'examined' | 'unverified_legacy';
+}
+
+/**
+ * THE PUBLIC BLACK BELT REGISTER — derived, never typed.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WHAT APPEARS, AND WHAT CANNOT
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * A person appears when they hold a rank record of kind 'dan' with status
+ * 'active', and their person record is 'active'. That is the whole rule.
+ *
+ * A SUSPENDED OR REVOKED GRADE DOES NOT APPEAR. `rank_records.status` leaves
+ * 'active' when a grade is revoked, and this query filters on it — so removal
+ * from this page is a consequence of the revocation itself rather than a second
+ * act somebody has to remember to perform.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WHAT THIS DOES *NOT* DO, AND WHY IT IS NOT A GAP TO BE FILLED LATER
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * IT DOES NOT SHOW A REVOKED GRADE AS REVOKED. A public list of people whose
+ * black belts MMAKF has withdrawn is a publication decision with consequences
+ * for real people, and MMAKF has published no policy on it. So the register is
+ * silent and /verify is not: presenting a revoked certificate number there
+ * reports REVOKED with the reason, because somebody holding a certificate and
+ * asking about it is a different question from a browsable list of the
+ * disgraced. When MMAKF publishes a policy, this is where it lands.
+ *
+ * IT DOES NOT FILTER BY DISCIPLINE. `rank_records` carries no discipline column
+ * — MMAKF grades Shotokan karate-do, and there is no second syllabus in the
+ * register to separate. A discipline filter would be a control that always
+ * returns everything, which teaches a reader that the register holds
+ * distinctions it does not.
+ *
+ * IT RETURNS NO CONTACT DETAIL, NO DATE OF BIRTH AND NO SCORE. The column list
+ * below is the whole of what a visitor sees.
+ */
+export async function blackBeltRegister(
+  db: DB,
+  filters: BlackBeltFilters = {}
+): Promise<BlackBeltEntry[]> {
+  const where: any[] = [
+    eq(s.rankRecords.kind, 'dan'),
+    eq(s.rankRecords.status, 'active'),
+    eq(s.persons.status, 'active'),
+  ];
+
+  if (filters.dan != null && Number.isInteger(filters.dan)) {
+    where.push(eq(s.rankRecords.gradeOrdinal, filters.dan));
+  }
+  if (filters.stateUnitId != null) where.push(eq(s.persons.stateUnitId, filters.stateUnitId));
+  if (filters.districtUnitId != null) where.push(eq(s.persons.districtUnitId, filters.districtUnitId));
+  if (filters.dojoId != null) where.push(eq(s.persons.dojoId, filters.dojoId));
+  if (filters.year != null && Number.isInteger(filters.year)) {
+    where.push(sql`extract(year from ${s.rankRecords.awardedOn}) = ${filters.year}`);
+  }
+  if (filters.provenance === 'examined') {
+    where.push(sql`${s.rankRecords.gradingEventId} is not null`);
+  } else if (filters.provenance === 'unverified_legacy') {
+    where.push(sql`${s.rankRecords.gradingEventId} is null`);
+  }
+  if (filters.q) {
+    // Bound and escaped. ILIKE with a caller-supplied string would otherwise let
+    // '%' and '_' turn a name search into a full scan of the national register.
+    const needle = filters.q.slice(0, 60).replace(/[%_\\]/g, (c) => `\\${c}`);
+    where.push(sql`${s.persons.fullName} ilike ${'%' + needle + '%'}`);
+  }
+
+  const rows = await db
+    .select({
+      federationId: s.persons.federationId,
+      fullName: s.persons.fullName,
+      city: s.persons.city,
+      gradeLabel: s.rankRecords.gradeLabel,
+      dan: s.rankRecords.gradeOrdinal,
+      awardedOn: s.rankRecords.awardedOn,
+      gradingEventId: s.rankRecords.gradingEventId,
+      state: s.stateUnits.name,
+      district: s.districtUnits.name,
+      dojo: s.dojos.name,
+      dojoSlug: s.dojos.slug,
+    })
+    .from(s.rankRecords)
+    .innerJoin(s.persons, eq(s.persons.id, s.rankRecords.personId))
+    .leftJoin(s.stateUnits, eq(s.stateUnits.id, s.persons.stateUnitId))
+    .leftJoin(s.districtUnits, eq(s.districtUnits.id, s.persons.districtUnitId))
+    .leftJoin(s.dojos, eq(s.dojos.id, s.persons.dojoId))
+    .where(and(...where))
+    .orderBy(desc(s.rankRecords.gradeOrdinal), desc(s.rankRecords.awardedOn), s.persons.fullName)
+    .limit(Math.min(filters.limit ?? 500, 1000));
+
+  return rows.map((r: any) => ({
+    federationId: r.federationId,
+    fullName: r.fullName,
+    gradeLabel: r.gradeLabel,
+    dan: r.dan,
+    awardedOn: r.awardedOn,
+    state: r.state ?? null,
+    district: r.district ?? null,
+    dojo: r.dojo ?? null,
+    dojoSlug: r.dojoSlug ?? null,
+    city: r.city ?? null,
+    provenance: r.gradingEventId ? 'examined' : 'unverified_legacy',
+  }));
+}
+
+/**
+ * The facets the register can honestly offer, derived from the rows that exist.
+ *
+ * DERIVED, NOT ENUMERATED. A state appears in the filter only when somebody in
+ * it holds an active Dan grade, so the control never offers a choice that
+ * returns nothing. A select listing all 28 states over a register holding four
+ * is a page inviting the reader to discover emptiness twenty-four times.
+ */
+export async function blackBeltFacets(db: DB) {
+  const rows = await db
+    .select({
+      dan: s.rankRecords.gradeOrdinal,
+      awardedOn: s.rankRecords.awardedOn,
+      stateUnitId: s.persons.stateUnitId,
+      state: s.stateUnits.name,
+    })
+    .from(s.rankRecords)
+    .innerJoin(s.persons, eq(s.persons.id, s.rankRecords.personId))
+    .leftJoin(s.stateUnits, eq(s.stateUnits.id, s.persons.stateUnitId))
+    .where(and(
+      eq(s.rankRecords.kind, 'dan'),
+      eq(s.rankRecords.status, 'active'),
+      eq(s.persons.status, 'active')
+    ))
+    .limit(5000);
+
+  // The generic arguments are given rather than inferred. `rows` comes back
+  // from a dynamic select, so `.map()` produces `unknown[]`, and both a numeric
+  // sort and a `.localeCompare` on the result are then unchecked — TS18046,
+  // reported against `a`, `b` and `a.name`. Stating the element types restores
+  // the check without changing a value.
+  const dans = [...new Set<number>(rows.map((r: any) => Number(r.dan)))].sort((a, b) => b - a);
+  const years = [...new Set<string>(rows.map((r: any) => String(r.awardedOn).slice(0, 4)))]
+    .filter(Boolean).sort().reverse();
+  const states = [...new Map<number, string>(
+    rows.filter((r: any) => r.stateUnitId && r.state)
+        .map((r: any) => [Number(r.stateUnitId), String(r.state)] as [number, string])
+  ).entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+
+  return { dans, years, states, total: rows.length };
 }

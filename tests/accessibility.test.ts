@@ -565,6 +565,11 @@ describe('WCAG 2.4.6 — every surface has a top-level heading', () => {
     { tag: 'PageHero', file: 'src/components/PageHero.astro' },
     { tag: 'AudienceEditorial', file: 'src/components/AudienceEditorial.astro' },
     { tag: 'AdminShell', file: 'src/components/AdminShell.astro' },
+    // The employee portal's shell, on the same terms as AdminShell: it prints
+    // the title as the page's h1 so that five /employee pages do not each
+    // repeat it. Listed here only because the assertion above proves it really
+    // does render one.
+    { tag: 'EmployeeShell', file: 'src/components/EmployeeShell.astro' },
   ];
 
   for (const c of HEADING_COMPONENTS) {

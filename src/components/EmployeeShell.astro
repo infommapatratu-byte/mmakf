@@ -1,0 +1,221 @@
+---
+// The chrome for employee.mmakf.in.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT GATES THIS SURFACE, AND WHY IT IS NOT AN RBAC ACTION
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// AdminShell takes `requires: Action` and refuses the page without it. This
+// shell takes none, because the question here is not "what may you do" but
+// "does the federation employ you" — a fact about a row in `employments`, not
+// about a role grant.
+//
+// So there are three distinct outcomes, and they are three different pages:
+//
+//   NOT SIGNED IN      → sign in. Says nothing about whether an employment
+//                        exists, because that would let anybody test an email
+//                        address against the federation's payroll.
+//   SIGNED IN, NOT EMPLOYED
+//                      → says so plainly, and says what to do about it. A
+//                        federation officer who is not an employee is a normal
+//                        and common case, not an error.
+//   SIGNED IN, EMPLOYED → the surface.
+//
+// The middle one matters. A national administrator who is not on the payroll
+// reaching this host must get a sentence, not an empty dashboard that reads as
+// though their leave balance is zero.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// NEVER CACHED, NEVER INDEXED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Every page under it holds somebody's leave, their pay band or their team's
+// approvals. `isIndexable('employee')` is false, and this sets `no-store` on
+// every response rather than leaving it to each page to remember.
+
+import Base from '@/layouts/Base.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { myEmployment } from '@/db/workforce';
+import { EMPLOYEE_NAV, href as surfaceHref, linkTo, type Surface } from '@/lib/surface';
+
+export interface Props {
+  title: string;
+  intro?: string;
+}
+
+const { title, intro } = Astro.props;
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'employee';
+const h = (p: string) => surfaceHref(surface, p);
+// Absolute, at the admin origin — see the note beside the control.
+const signInHref = linkTo(surface, '/admin');
+
+// Somebody's leave and pay band. Never a shared-cache document.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+
+let employment: any = null;
+let readFailed = false;
+if (configured && identity) {
+  try {
+    employment = await myEmployment(db(), identity.principal);
+  } catch {
+    // A read failure is not "you are not employed", and the two must never
+    // render the same sentence.
+    readFailed = true;
+  }
+}
+
+const here = Astro.url.pathname;
+const active = (p: string) => here === h(p) || here === p;
+---
+
+<Base title={`${title} — MMAKF`} showNav={false}>
+  <div class="emp">
+    <header class="emp-bar">
+      <div class="emp-bar-in">
+        <a class="emp-brand" href={h('/employee')}>
+          <strong>MMAKF</strong> <span>Workforce</span>
+        </a>
+        {employment && (
+          <nav class="emp-nav" aria-label="Workforce">
+            {EMPLOYEE_NAV.map((n) => (
+              <a href={h(n.href)} class:list={['emp-nav-a', { on: active(n.href) }]}>{n.label}</a>
+            ))}
+          </nav>
+        )}
+        <div class="emp-who">
+          {identity ? (
+            <>
+              <span class="emp-name">{identity.principal.label}</span>
+              {/*
+                The sign-out endpoint is shared across all four surfaces, like
+                every /api path — one session, one place to end it.
+              */}
+              <a href="/api/auth/logout" class="emp-out">Sign out</a>
+            </>
+          ) : (
+            /*
+              There is ONE sign-in form in this application and it is the one on
+              /admin. Linking to a second would mean a second place for the
+              lockout counter, the session epoch and the MFA challenge to be got
+              wrong. `linkTo` renders it at the admin origin, because a relative
+              /admin on employee.mmakf.in would be rewritten to /employee/admin
+              by the middleware and 404 — the exact defect recorded in the
+              linkTo() docstring.
+            */
+            <a href={signInHref} class="emp-out">Sign in</a>
+          )}
+        </div>
+      </div>
+    </header>
+
+    {/*
+      A plain div, and deliberately NOT the main landmark. Base.astro already
+      declares the page's one and only one, and a second nested inside it gives
+      a screen-reader user two "main content" targets with no way to tell which
+      is the page. AdminShell.astro is the precedent: it prints the h1 and
+      leaves the landmark to the layout. This shell now matches it.
+
+      The element name is spelled out in prose here rather than in angle
+      brackets on purpose — the accessibility guard greps this file's markup for
+      the opening tag, and a comment mentioning it would fail the check it is
+      explaining.
+    */}
+    <div class="emp-main container">
+      <h1 class="emp-h1">{title}</h1>
+      {intro && <p class="emp-intro">{intro}</p>}
+
+      {!configured ? (
+        <p class="emp-note">
+          The federation database is not configured on this deployment, so no
+          workforce record can be read. This is a statement about this server.
+        </p>
+      ) : !identity ? (
+        <p class="emp-note">
+          {/*
+            Says nothing about whether an employment exists for any address.
+            An unauthenticated page that distinguished "no such employee" from
+            "wrong password" would let anybody test an email address against
+            the federation's payroll.
+          */}
+          Sign in to reach the workforce surface.
+          <a href={signInHref}> Sign in →</a>
+        </p>
+      ) : readFailed ? (
+        <p class="emp-note emp-bad">
+          Your workforce record could not be read just now. Nothing here should
+          be taken to mean you have no employment on file — please try again
+          shortly.
+        </p>
+      ) : !employment ? (
+        <div class="emp-note">
+          <p>
+            <strong>This account is not linked to a live employment.</strong>
+          </p>
+          <p>
+            employee.mmakf.in is for people the federation employs. Holding a
+            federation role — even a national one — is a different thing, and
+            many officers and volunteers correctly have no record here.
+          </p>
+          <p>
+            If you believe you should have one, the HR office maintains the
+            establishment. Your membership, rank and federation access are
+            unaffected by this and are reached at
+            <a href="https://www.mmakf.in/my"> your member area</a>.
+          </p>
+        </div>
+      ) : (
+        <slot />
+      )}
+    </div>
+  </div>
+</Base>
+
+<style>
+  .emp-bar {
+    border-bottom: 1px solid var(--c-border, #ddd);
+    background: var(--c-surface, #fff);
+    position: sticky; top: 0; z-index: 20;
+  }
+  .emp-bar-in {
+    max-width: 76rem; margin: 0 auto; padding: 0.6rem 1rem;
+    display: flex; align-items: center; gap: 1.25rem; flex-wrap: wrap;
+  }
+  .emp-brand { text-decoration: none; color: inherit; letter-spacing: 0.04em; }
+  .emp-brand span { color: var(--c-muted, #777); text-transform: uppercase; font-size: 0.72rem; }
+
+  .emp-nav { display: flex; gap: 0.25rem; flex-wrap: wrap; flex: 1 1 auto; }
+  .emp-nav-a {
+    padding: 0.35rem 0.7rem; border-radius: var(--radius, 6px);
+    text-decoration: none; color: inherit; font-size: 0.9rem;
+  }
+  .emp-nav-a:hover, .emp-nav-a:focus-visible { background: var(--c-surface-2, #f2f2f2); }
+  .emp-nav-a.on { background: var(--c-surface-2, #eee); font-weight: 600; }
+
+  .emp-who { display: flex; align-items: center; gap: 0.75rem; margin-left: auto; font-size: 0.85rem; }
+  .emp-name { color: var(--c-muted, #666); }
+
+  .emp-main { padding-block: var(--space-6, 1.5rem) var(--space-12, 3rem); }
+  .emp-h1 { font-size: clamp(1.4rem, 3vw, 2rem); margin: 0 0 0.4rem; }
+  .emp-intro { color: var(--c-muted, #666); margin: 0 0 1.5rem; max-width: 60ch; }
+
+  .emp-note {
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface-2, #fafafa);
+    max-width: 60ch;
+  }
+  .emp-note p { margin: 0 0 0.6rem; }
+  .emp-note p:last-child { margin-bottom: 0; }
+  .emp-bad { border-color: var(--c-warn-border, #c99); }
+
+  @media (max-width: 40rem) {
+    .emp-bar-in { gap: 0.6rem; }
+    .emp-who { width: 100%; margin-left: 0; }
+  }
+</style>

@@ -1,0 +1,20 @@
+{
+  "//": [
+    "Typecheck gate for the parts of the tree tsc can read on its own: the data",
+    "layer, the library and the API routes. Astro components are excluded because",
+    "they are not TypeScript files; `astro check` is the tool for those.",
+    "",
+    "`astro/client` is in `types` and has to be. Without it `import.meta.env` is",
+    "undeclared, and src/lib/auth.ts and src/pages/api/auth/login.ts report three",
+    "TS2339 errors for code that is correct and ships every day. A gate that",
+    "reports failures nobody can act on is a gate people learn to skip, which is",
+    "worse than not having one -- it was masking two real TS7022s and three",
+    "TS18046s when this was found.",
+    "",
+    "src/env.d.ts carries the same reference for the editor, but `include` below",
+    "deliberately does not cover it, so it has to be named here as well."
+  ],
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true, "skipLibCheck": true, "types": ["node", "astro/client"] },
+  "include": ["src/db/**/*.ts", "src/lib/**/*.ts", "src/pages/api/**/*.ts"]
+}
