@@ -108,7 +108,14 @@ export const POST: APIRoute = async ({ request }) => {
     // generic engine for three unrelated queues and has no database access by
     // design. The registration queue is the one whose decision has a
     // consequence in Postgres.
-    let registerWarning: string | null = null;
+    // ACCUMULATED, not overwritten. Provisioning the person and issuing a
+    // membership are two INDEPENDENT outcomes, and each can have something the
+    // office must be told. A single assignable string meant whichever ran last
+    // silently erased the other — so an application in a non-issuable category
+    // (every athlete, which is most of them) discarded "a possible duplicate was
+    // raised" and "the address could not be resolved", reporting only the
+    // membership rule.
+    const registerNotes: string[] = [];
 
     if (queue === 'registrations' && /^approved$/i.test(result.to)) {
       if (!isConfigured()) {
@@ -176,8 +183,9 @@ export const POST: APIRoute = async ({ request }) => {
             // to say so — the office is about to tell somebody they are
             // registered.
             if (provisioned.notes.length) {
-              registerWarning = 'Registered as '
-                + `${provisioned.federationId}. ${provisioned.notes.join(' ')}`;
+              registerNotes.push(
+                `Registered as ${provisioned.federationId}. ${provisioned.notes.join(' ')}`
+              );
             }
           } catch (err: any) {
             // FAIL VISIBLY. The queue row has already moved.
@@ -225,14 +233,15 @@ export const POST: APIRoute = async ({ request }) => {
         const issuable = (ISSUABLE as readonly string[]).includes(category);
 
         if (!Number.isInteger(personId) || personId <= 0) {
-          registerWarning =
+          registerNotes.push(
             'The decision was recorded. No membership was issued because this application ' +
-            'carries no linked person record — link it to a person and re-run the approval.';
+            'carries no linked person record — link it to a person and re-run the approval.'
+          );
         } else if (!issuable) {
           // The applicant IS registered: the person record stands, the approval
           // stands, and they can be enrolled and taught. What they do not get is
           // a membership, and that is the rule rather than a failure.
-          registerWarning =
+          registerNotes.push(
             'The decision was recorded and the person is registered. No membership was issued: ' +
             (category === 'athlete' || category === 'junior' || category === 'student'
               ? `this application is recorded as '${category}', and a student does not pay a membership fee ` +
@@ -243,7 +252,8 @@ export const POST: APIRoute = async ({ request }) => {
                 : 'this application names no membership category, and this system will not choose one ' +
                   'for the federation.') +
             ' The membership register admits an instructor, an official or a dojo — record that category ' +
-            'and re-run the approval if this applicant is one.';
+            'and re-run the approval if this applicant is one.'
+          );
         } else {
           // renew() underneath supersedes rather than duplicating, so a replayed
           // approval does not stack two memberships on one person.
@@ -261,13 +271,20 @@ export const POST: APIRoute = async ({ request }) => {
         // Reported, never swallowed. The office needs to know the register did
         // not receive this, because the queue now says Approved.
         console.error('[queue] membership issue failed', err);
-        registerWarning =
+        registerNotes.push(
           'The decision was recorded and the membership could not be issued to the register. ' +
-          'This needs an administrator: the queue now shows Approved and the member is not registered.';
+          'This needs an administrator: the queue now shows Approved and the member is not registered.'
+        );
       }
     }
 
-    return json(registerWarning ? { ...result, registered: false, warning: registerWarning } : result, 200);
+    // EVERY note the run produced, not merely the last one written.
+    return json(
+      registerNotes.length
+        ? { ...result, registered: false, warning: registerNotes.join(' ') }
+        : result,
+      200
+    );
   } catch (err: any) {
     if (err instanceof QueueError) {
       const status =

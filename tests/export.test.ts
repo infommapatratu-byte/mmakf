@@ -12,7 +12,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, sql } from 'drizzle-orm';
 import * as s from '../src/db/schema';
 import {
   runExport, csvField, toCsv, availableKinds, allKindIds,
@@ -343,7 +343,21 @@ describe('filters', () => {
     // The off-by-one this guards: `created_at <= '<today>'` on a timestamp
     // column means midnight, so every row written today would be dropped and
     // the file would still look plausible.
-    const today = new Date().toISOString().slice(0, 10);
+    //
+    // TODAY IS ASKED OF THE DATABASE, NOT OF JAVASCRIPT, and that is not
+    // fussiness. `persons.created_at` is written by `defaultNow()`, so the rows
+    // are stamped in the database session's timezone — which PGlite takes from
+    // the machine. `new Date().toISOString()` is UTC. On a machine east of
+    // Greenwich the two disagree about which day it is for the whole of the
+    // early morning: at 01:59 in India the database says 2026-09-05 and
+    // toISOString() says 2026-09-04, so the window excluded every row and this
+    // test failed — nightly, between midnight and dawn, and never in the
+    // daytime run that was used to check it. Deriving the day from the same
+    // clock that stamped the rows makes the comparison well-defined wherever it
+    // runs.
+    // drizzle's pglite driver returns { rows, fields, affectedRows }, not an
+    // array — destructuring the result itself throws "is not iterable".
+    const { rows: [{ today }] } = (await db.execute(sql`select current_date::text as today`)) as any;
     const result = await runExport(db, ctxOf(federationAdmin), {
       kind: 'persons', format: 'json', filters: { from: today, to: today },
     });

@@ -374,7 +374,60 @@ describe('the unresolved-locality escape hatch is honoured', () => {
   });
 });
 
-// ─── 5. The two crashes ─────────────────────────────────────────────────────
+// ─── 5. The approval endpoint keeps every outcome, and leaks no record ──────
+
+describe('the approval endpoint reports all of what happened', () => {
+  const SRC = 'src/pages/api/queue/decide.ts';
+  /** The file with comment lines stripped, so a note ABOUT the fix is not read as the fix. */
+  const codeOf = () =>
+    readFileSync(SRC, 'utf8')
+      .split(/\r?\n/)
+      .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+      .join('\n');
+
+  it('ACCUMULATES its notes rather than overwriting them', () => {
+    // The defect: provisioning wrote its notes to `registerWarning`, and the
+    // membership branches below ASSIGNED to the same variable. So an application
+    // in a non-issuable category — every athlete, which is most of them —
+    // silently discarded "a possible duplicate was raised" and "the address
+    // could not be resolved", reporting only the membership rule.
+    //
+    // Two independent outcomes need two notes, and the office needs both.
+    const code = codeOf();
+    expect(code).toMatch(/const registerNotes: string\[\] = \[\]/);
+    expect((code.match(/registerNotes\.push\(/g) ?? []).length).toBeGreaterThanOrEqual(4);
+    expect(code, 'a note is assigned, which erases whatever came before')
+      .not.toMatch(/registerWarning\s*=/);
+    expect(code).toMatch(/registerNotes\.join\(/);
+  });
+
+  it('never serialises the applicant record into a response', () => {
+    // decide() returns the decided row so the endpoint can provision from it,
+    // and that row is the applicant's name, date of birth, email and address.
+    // Three response bodies are built by spreading the decision result.
+    const code = codeOf();
+    expect(code).toMatch(/const \{ record: sourceRecord, \.\.\.result \} = decided/);
+    expect(code).not.toMatch(/\.\.\.decided/);
+
+    // `sourceRecord` is read in exactly TWO places and both are safe: the
+    // destructure that separates it, and the line handing it to provisioning.
+    // Counted rather than pattern-matched — two earlier attempts at this
+    // assertion were wrong in the same direction, one matching the destructuring
+    // line that makes the code safe and one matching the `json` helper's own
+    // definition. A count is unambiguous.
+    expect((code.match(/sourceRecord/g) ?? []).length,
+      'sourceRecord is read somewhere new — check it cannot reach a response').toBe(2);
+    expect(code).toMatch(/const record = sourceRecord \?\? null;/);
+  });
+
+  it('fails visibly when provisioning throws — the queue row has already moved', () => {
+    const code = readFileSync(SRC, 'utf8');
+    expect(code).toMatch(/decision_recorded_but_not_registered/);
+    expect(code).toMatch(/NOT entered in the/);
+  });
+});
+
+// ─── 6. The two crashes ─────────────────────────────────────────────────────
 
 describe('the state components are called with the props they declare', () => {
   // EmptyState dereferences action.href unconditionally and declares no
