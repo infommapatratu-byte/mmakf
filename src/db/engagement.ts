@@ -331,6 +331,296 @@ export async function identifyLead(
   return { leadId, ...target };
 }
 
+// ─── Acting on a lead ───────────────────────────────────────────────────────
+//
+// /admin/leads could read the whole pipeline and change nothing in it. Every
+// enquiry the federation had ever received sat at the status the capture path
+// gave it — `new`, almost always — because the only two functions that could
+// move one were captureLead(), which sets it on the way in, and identifyLead(),
+// which nudges `new` to `qualifying` as a side effect of attaching a record.
+//
+// So the pipeline board showed one column. A screen that shows work and cannot
+// record that the work was done teaches its users to keep the real state
+// somewhere else, and the somewhere else is a spreadsheet the federation cannot
+// audit.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPE IS RE-DERIVED FROM THE STORED ROW, NOT TAKEN FROM THE CALLER
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Each of these loads the lead FIRST and then asserts against the placement on
+// that row, exactly as leadDetail() does. A lead id in a form body therefore
+// buys nothing: posting another state's lead id reaches the same refusal as
+// opening it would.
+//
+// This is deliberately stricter than identifyLead() above, which asserts with an
+// empty scope object and so checks only that the caller holds engagement:write
+// SOMEWHERE. That is a hole — a district administrator can identify a lead
+// belonging to another district — and it is left alone here rather than changed
+// silently, because narrowing it changes who can do something that has been
+// permitted since the function was written. It is recorded in
+// docs/IMPLEMENTATION-QUEUE.md instead, where a decision can be taken about it.
+
+/**
+ * The transitions a lead may make, and the ones it may not.
+ *
+ * NOT a free enum assignment. `won` and `lost` are terminal commercial facts,
+ * and a pipeline that lets somebody walk a lead back out of `won` to
+ * `qualifying` is a pipeline whose conversion figures cannot be trusted — the
+ * row would count in the numerator today and not at all tomorrow, with nothing
+ * recording that it changed its mind.
+ *
+ * `dormant` is the one legitimate way back: an enquiry that went quiet and
+ * later returns is the same enquiry, and forcing a new lead for it would break
+ * the first-touch attribution the whole module is built to preserve.
+ *
+ * `disqualified` is terminal and separate from `lost` on purpose. Lost means
+ * MMAKF competed and did not win; disqualified means the enquiry was never one
+ * the federation could serve. Counting them together would make the federation
+ * look worse at converting than it is.
+ */
+export const LEAD_TRANSITIONS: Record<string, readonly string[]> = {
+  new: ['qualifying', 'disqualified', 'dormant'],
+  qualifying: ['qualified', 'disqualified', 'dormant', 'lost'],
+  qualified: ['quoted', 'dormant', 'lost'],
+  quoted: ['proposed', 'won', 'lost', 'dormant'],
+  proposed: ['won', 'lost', 'dormant'],
+  dormant: ['qualifying', 'qualified', 'disqualified'],
+  won: [],
+  lost: [],
+  disqualified: [],
+};
+
+/** The statuses that end a lead's life in the pipeline. */
+export const TERMINAL_LEAD_STATUSES: readonly string[] = ['won', 'lost', 'disqualified'];
+
+/**
+ * Move a lead along the pipeline.
+ *
+ * A REASON IS REQUIRED FOR EVERY TRANSITION, not only the unhappy ones. "Why is
+ * this qualified?" is the question a second administrator asks three weeks
+ * later, and the answer being absent is what makes a pipeline board an argument
+ * rather than a record. It is written to the activity trail AND carried into
+ * the audit context, so it survives in both places the federation looks.
+ *
+ * `lostReason` is stored on the lead itself only for the statuses where the
+ * column means something. Writing the reason for `qualified` into a column
+ * named `lost_reason` would put a sentence in a field every report reads as
+ * "why we did not win".
+ */
+export async function setLeadStatus(
+  db: DB,
+  ctx: AuditContext,
+  input: { leadId: number; status: string; reason: string }
+) {
+  const reason = String(input.reason ?? '').trim();
+  if (!reason) {
+    throw new EngagementError(
+      'reason_required',
+      'Moving a lead requires a recorded reason. It is written to the lead’s activity trail and to the audit.'
+    );
+  }
+
+  const [lead] = await db.select().from(s.leads).where(eq(s.leads.id, input.leadId)).limit(1);
+  if (!lead) throw new EngagementError('unknown_lead', 'No such lead.');
+
+  // Authority over a lead is authority over where the lead is placed.
+  assertCan(ctx.principal, 'engagement:write', {
+    stateUnitId: lead.stateUnitId,
+    districtUnitId: lead.districtUnitId,
+  });
+
+  if (lead.status === input.status) {
+    throw new EngagementError('no_change', `This lead is already ${input.status}.`);
+  }
+
+  const allowed = LEAD_TRANSITIONS[lead.status] ?? [];
+  if (!allowed.includes(input.status)) {
+    throw new EngagementError(
+      'bad_transition',
+      TERMINAL_LEAD_STATUSES.includes(lead.status)
+        ? `This lead is ${lead.status}, which is final. Record the new enquiry rather than reopening the old one — `
+          + 'reopening would lose the fact that this one closed, and the first-touch attribution with it.'
+        : `A lead at ${lead.status} can move to ${allowed.join(', ') || 'nothing'} — not to ${input.status}.`
+    );
+  }
+
+  const isLoss = input.status === 'lost' || input.status === 'disqualified';
+
+  await db.update(s.leads).set({
+    status: input.status as any,
+    lostReason: isLoss ? reason : lead.lostReason,
+    updatedAt: new Date(),
+  }).where(eq(s.leads.id, input.leadId));
+
+  await db.insert(s.leadActivities).values({
+    leadId: input.leadId,
+    kind: 'status_change',
+    byUserId: ctx.principal.userId ?? null,
+    summary: `${lead.status} → ${input.status}`,
+    detail: { from: lead.status, to: input.status, reason } as any,
+  });
+
+  await writeAudit(db, ctx, {
+    entityType: 'lead',
+    entityId: input.leadId,
+    action: 'update',
+    oldValue: { status: lead.status },
+    newValue: { status: input.status },
+  });
+
+  return { leadId: input.leadId, from: lead.status, to: input.status };
+}
+
+/**
+ * Give a lead an owner, or take one away.
+ *
+ * THE OWNER MUST BE A REAL, ACTIVE USER. `leads.owner_user_id` is a foreign key,
+ * so a bad id would be refused by the database — but as a driver error rendered
+ * as a 500, which tells the administrator nothing about what they typed. It is
+ * checked here so the refusal is a sentence.
+ *
+ * IT DOES NOT CHECK WHAT THE OWNER MAY SEE, and that is deliberate rather than
+ * an omission. Assignment is how work is handed to somebody, and a federation
+ * that could only assign a lead to people who already had authority over it
+ * could never hand one to a newly appointed officer. What the owner may actually
+ * OPEN is decided by leadDetail() at the moment they open it, which is the only
+ * place that decision stays correct as roles change.
+ */
+export async function assignLeadOwner(
+  db: DB,
+  ctx: AuditContext,
+  input: { leadId: number; ownerUserId: number | null; reason?: string }
+) {
+  const [lead] = await db.select().from(s.leads).where(eq(s.leads.id, input.leadId)).limit(1);
+  if (!lead) throw new EngagementError('unknown_lead', 'No such lead.');
+
+  assertCan(ctx.principal, 'engagement:write', {
+    stateUnitId: lead.stateUnitId,
+    districtUnitId: lead.districtUnitId,
+  });
+
+  let ownerLabel: string | null = null;
+  if (input.ownerUserId != null) {
+    // `users` carries no name of its own — the name is on the person the account
+    // belongs to, and an account may have no person attached at all (the
+    // bootstrap operator does not). The email is the fallback label, because a
+    // lead assigned to "user 41" tells the next administrator nothing.
+    const [owner] = await db
+      .select({
+        id: s.users.id,
+        email: s.users.email,
+        status: s.users.status,
+        name: s.persons.fullName,
+      })
+      .from(s.users)
+      .leftJoin(s.persons, eq(s.persons.id, s.users.personId))
+      .where(eq(s.users.id, input.ownerUserId))
+      .limit(1);
+    if (!owner) throw new EngagementError('unknown_user', 'No such user, so the lead was not assigned.');
+    if (owner.status !== 'active') {
+      throw new EngagementError(
+        'inactive_user',
+        `That account is ${owner.status}. Assigning work to it would file the enquiry somewhere nobody is looking.`
+      );
+    }
+    ownerLabel = owner.name ?? owner.email ?? null;
+  }
+
+  if ((lead.ownerUserId ?? null) === (input.ownerUserId ?? null)) {
+    throw new EngagementError('no_change', input.ownerUserId == null
+      ? 'This lead already has no owner.'
+      : 'This lead is already assigned to that person.');
+  }
+
+  await db.update(s.leads).set({
+    ownerUserId: input.ownerUserId,
+    updatedAt: new Date(),
+  }).where(eq(s.leads.id, input.leadId));
+
+  await db.insert(s.leadActivities).values({
+    leadId: input.leadId,
+    kind: 'status_change',
+    byUserId: ctx.principal.userId ?? null,
+    summary: input.ownerUserId == null
+      ? 'Owner removed'
+      : `Assigned to ${ownerLabel ?? `user ${input.ownerUserId}`}`,
+    detail: { from: lead.ownerUserId ?? null, to: input.ownerUserId ?? null, reason: input.reason ?? null } as any,
+  });
+
+  await writeAudit(db, ctx, {
+    entityType: 'lead',
+    entityId: input.leadId,
+    action: 'update',
+    oldValue: { ownerUserId: lead.ownerUserId ?? null },
+    newValue: { ownerUserId: input.ownerUserId },
+  });
+
+  return { leadId: input.leadId, ownerUserId: input.ownerUserId };
+}
+
+/** The kinds of contact an administrator can record by hand. */
+export const LEAD_ACTIVITY_KINDS: readonly string[] = ['note', 'call', 'email', 'meeting'];
+
+/**
+ * Record something that happened.
+ *
+ * `status_change` is NOT in the list above, and cannot be written through this
+ * function. The activity trail is the evidence that a status moved; letting
+ * somebody hand-write a `status_change` row would let them file a transition
+ * that never happened, against a lead whose status column disagrees. Those rows
+ * are written only by the functions that actually move the status.
+ *
+ * NO AUDIT ROW. A note is not a change to the federation's record of anything —
+ * it is somebody writing down that they telephoned a school. The activity trail
+ * already carries who wrote it and when, and copying every note into the audit
+ * would bury the acts that matter under the correspondence.
+ */
+export async function addLeadActivity(
+  db: DB,
+  ctx: AuditContext,
+  input: { leadId: number; kind: string; summary: string }
+) {
+  const summary = String(input.summary ?? '').trim();
+  if (!summary) throw new EngagementError('empty_note', 'A note needs something in it.');
+  if (summary.length > 2000) {
+    throw new EngagementError(
+      'note_too_long',
+      'A note is limited to 2000 characters. Attach the detail elsewhere and summarise it here.'
+    );
+  }
+  if (!LEAD_ACTIVITY_KINDS.includes(input.kind)) {
+    throw new EngagementError(
+      'bad_kind',
+      `A recorded contact is one of ${LEAD_ACTIVITY_KINDS.join(', ')}. A status change is written by the act that changes it, never by hand.`
+    );
+  }
+
+  const [lead] = await db.select().from(s.leads).where(eq(s.leads.id, input.leadId)).limit(1);
+  if (!lead) throw new EngagementError('unknown_lead', 'No such lead.');
+
+  assertCan(ctx.principal, 'engagement:write', {
+    stateUnitId: lead.stateUnitId,
+    districtUnitId: lead.districtUnitId,
+  });
+
+  const [row] = await db.insert(s.leadActivities).values({
+    leadId: input.leadId,
+    kind: input.kind,
+    byUserId: ctx.principal.userId ?? null,
+    summary,
+  }).returning({ id: s.leadActivities.id });
+
+  // The lead has been touched, and the board orders on updatedAt. A note that
+  // did not move the row would leave a lead somebody worked on today sitting at
+  // the bottom of the list under leads nobody has opened in a month.
+  await db.update(s.leads)
+    .set({ updatedAt: new Date() })
+    .where(eq(s.leads.id, input.leadId));
+
+  return { activityId: row?.id ?? null, leadId: input.leadId };
+}
+
 // ─── Training requests ──────────────────────────────────────────────────────
 
 /**
