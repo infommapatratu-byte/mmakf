@@ -1,0 +1,348 @@
+---
+// employee.mmakf.in/leave — ask for time off, and see where a request got to.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE FORM POSTS TO THIS PAGE, AND WORKS WITH SCRIPTING OFF
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Same reason as /admin/guardianships: the middleware requires
+// application/json on /api/ paths and a plain form cannot send one, while the
+// same-origin check that answers CSRF applies here identically.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE PAGE NEVER SENDS AN EMPLOYMENT ID
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `requestLeave()` resolves the caller's own employment from the session and
+// takes no employment parameter at all, so there is nothing in this form that
+// could be edited to book leave against somebody else. The only id it posts is
+// a leave TYPE, which is a public list.
+//
+// The duration is not posted either — `requestLeave()` computes half-days from
+// the dates and the two half-day flags. A form that could name its own duration
+// is one that can claim half a day off across thirty.
+
+export const prerender = false;
+
+import EmployeeShell from '@/components/EmployeeShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  myEmployment, myLeave, listLeaveTypes, leaveBalance,
+  requestLeave, withdrawLeave, isWorkforceError,
+} from '@/db/workforce';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'employee';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/employee/leave');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+
+const DONE: Record<string, string> = {
+  requested: 'Your request has gone to your line manager. You will see it below as soon as they decide.',
+  withdrawn: 'The request is withdrawn. Nothing is booked and no balance was used.',
+};
+
+let error: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const act = get('act');
+
+  const rl = await rateLimit(Astro.request, 'employee-leave', 30, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many requests in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: get('reason') || null,
+    };
+    try {
+      if (act === 'request') {
+        const leaveTypeId = Number(get('leaveTypeId'));
+        if (!Number.isInteger(leaveTypeId) || leaveTypeId <= 0) {
+          Astro.response.status = 400;
+          error = 'Choose the kind of leave you are asking for.';
+        } else {
+          await requestLeave(db(), ctx, {
+            leaveTypeId,
+            fromDate: get('fromDate'),
+            toDate: get('toDate'),
+            firstDayHalf: form.get('firstDayHalf') === 'on',
+            lastDayHalf: form.get('lastDayHalf') === 'on',
+            reason: get('reason') || null,
+          });
+          return Astro.redirect(`${SELF}?done=requested`, 303);
+        }
+      } else if (act === 'withdraw') {
+        const requestId = Number(get('requestId'));
+        if (!Number.isInteger(requestId) || requestId <= 0) {
+          Astro.response.status = 400;
+          error = 'Name the request to withdraw.';
+        } else {
+          await withdrawLeave(db(), ctx, requestId);
+          return Astro.redirect(`${SELF}?done=withdrawn`, 303);
+        }
+      } else {
+        Astro.response.status = 400;
+        error = 'Unknown action.';
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = 'That is not your request.';
+      } else if (isWorkforceError(err)) {
+        Astro.response.status = 400;
+        // The module's messages are written for the person reading them —
+        // "That is 6 days and you have 4 left of Casual leave for 2026" — so
+        // they are shown as they are rather than replaced with a generic one.
+        error = err.message;
+      } else {
+        console.error('[employee/leave] failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was changed.';
+      }
+    }
+  }
+}
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE[done] ? DONE[done] : null;
+
+let employment: any = null;
+let types: any[] = [];
+let mine: any[] = [];
+let balances: any[] = [];
+const year = Number(new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Kolkata' })
+  .format(new Date()).slice(0, 4));
+
+if (configured && identity) {
+  try {
+    employment = await myEmployment(db(), identity.principal);
+    if (employment) {
+      [types, mine] = await Promise.all([
+        listLeaveTypes(db()),
+        myLeave(db(), identity.principal, { limit: 60 }),
+      ]);
+      balances = await Promise.all(types.map(async (t: any) => ({
+        type: t,
+        ...(await leaveBalance(db(), employment.id, t.id, year)),
+      })));
+    }
+  } catch (err) {
+    console.error('[employee/leave] read failed', err);
+  }
+}
+
+const OPEN = new Set(['submitted', 'approved']);
+---
+
+<EmployeeShell
+  title="Leave"
+  intro="Ask for time off, and see where each request got to."
+>
+  {employment && (
+    <>
+      {doneMessage && <p class="ok" role="status">{doneMessage}</p>}
+      {error && <p class="bad" role="alert">{error}</p>}
+
+      {types.length === 0 ? (
+        <p class="l-empty">
+          <strong>MMAKF has not yet published its leave policy.</strong> Casual,
+          sick and earned leave — their names, their entitlements and how they
+          accrue — are the federation's to define, and nothing here was invented
+          on its behalf. Until the HR office records them there is no leave type
+          to request, and this page has no form rather than a form that cannot
+          be submitted.
+        </p>
+      ) : (
+        <>
+          <section class="l-sec">
+            <h2>Your balance for {year}</h2>
+            <ul class="l-bal">
+              {balances.map((b: any) => (
+                <li>
+                  <span class="l-bal-n">{b.type.name}</span>
+                  {b.configured ? (
+                    <>
+                      <span class="l-bal-v">{b.remaining / 2} of {b.entitled / 2} days left</span>
+                      {b.pending > 0 && <span class="l-bal-p">{b.pending / 2} awaiting a decision</span>}
+                    </>
+                  ) : (
+                    <span class="l-bal-u">No entitlement recorded for {year}</span>
+                  )}
+                  {!b.type.paid && <span class="l-tag">unpaid</span>}
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <section class="l-sec">
+            <h2>Request leave</h2>
+            <form method="post" action={SELF} class="l-form">
+              <input type="hidden" name="act" value="request" />
+
+              <div class="l-f">
+                <label class="input-label" for="lv-type">Kind of leave</label>
+                <select class="input" id="lv-type" name="leaveTypeId" required>
+                  {types.map((t: any) => <option value={String(t.id)}>{t.name}{t.paid ? '' : ' (unpaid)'}</option>)}
+                </select>
+              </div>
+
+              <div class="l-f">
+                <label class="input-label" for="lv-from">First day</label>
+                <input class="input" id="lv-from" name="fromDate" type="date" required />
+                <label class="l-half">
+                  <input type="checkbox" name="firstDayHalf" /> Half day
+                </label>
+              </div>
+
+              <div class="l-f">
+                <label class="input-label" for="lv-to">Last day</label>
+                <input class="input" id="lv-to" name="toDate" type="date" required />
+                <label class="l-half">
+                  <input type="checkbox" name="lastDayHalf" /> Half day
+                </label>
+              </div>
+
+              <div class="l-f l-f-wide">
+                <label class="input-label" for="lv-reason">Reason (optional)</label>
+                <input class="input" id="lv-reason" name="reason" maxlength="300" />
+                <p class="l-hint">
+                  Your manager sees this. It is not required, and it is
+                  deliberately never put on the federation's event feed — a leave
+                  reason is routinely medical.
+                </p>
+              </div>
+
+              <div class="l-f l-f-go">
+                <button class="btn btn-primary" type="submit">Request leave</button>
+              </div>
+            </form>
+          </section>
+        </>
+      )}
+
+      <section class="l-sec">
+        <h2>Your requests</h2>
+        {mine.length === 0 ? (
+          <p class="l-empty">You have not requested any leave.</p>
+        ) : (
+          <div class="l-scroll">
+            <table class="l-table">
+              <thead>
+                <tr>
+                  <th scope="col">Reference</th>
+                  <th scope="col">Kind</th>
+                  <th scope="col">Dates</th>
+                  <th scope="col">Days</th>
+                  <th scope="col">Status</th>
+                  <th scope="col"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {mine.map((r: any) => (
+                  <tr>
+                    <td class="l-ref">{r.reference}</td>
+                    <td>{r.typeName}</td>
+                    <td>{r.fromDate} → {r.toDate}</td>
+                    <td>{r.halfDays / 2}</td>
+                    <td>
+                      <span class={`l-st l-st-${r.status}`}>{r.status}</span>
+                      {r.decisionNote && <div class="l-note">{r.decisionNote}</div>}
+                    </td>
+                    <td>
+                      {OPEN.has(r.status) && (
+                        <form method="post" action={SELF}>
+                          <input type="hidden" name="act" value="withdraw" />
+                          <input type="hidden" name="requestId" value={String(r.id)} />
+                          <button class="btn btn-sm" type="submit">Withdraw</button>
+                        </form>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </>
+  )}
+</EmployeeShell>
+
+<style>
+  .ok, .bad {
+    padding: 0.7rem 1rem; border-radius: var(--radius, 6px);
+    border: 1px solid var(--c-border, #ddd); margin-bottom: 1rem; max-width: 70ch;
+  }
+  .bad { border-color: var(--c-bad-border, #c66); }
+
+  .l-sec { margin-bottom: var(--space-8, 2rem); }
+  .l-sec h2 {
+    font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--c-muted, #666);
+    border-bottom: 1px solid var(--c-border, #ddd);
+    padding-bottom: 0.4rem; margin-bottom: 0.8rem;
+  }
+  .l-empty { color: var(--c-muted, #555); max-width: 65ch; }
+
+  .l-bal { list-style: none; margin: 0; padding: 0; }
+  .l-bal li {
+    display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: baseline;
+    padding: 0.45rem 0; border-bottom: 1px solid var(--c-border, #eee);
+  }
+  .l-bal-n { font-weight: 600; min-width: 12rem; }
+  .l-bal-p { font-size: 0.82rem; color: var(--c-muted, #777); }
+  .l-bal-u { color: var(--c-muted, #999); font-style: italic; }
+  .l-tag { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-muted, #777); }
+
+  .l-form {
+    display: grid; gap: var(--space-4, 1rem);
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+    align-items: start;
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface-2, #fafafa);
+  }
+  .l-f { display: flex; flex-direction: column; gap: 0.3rem; }
+  .l-f-wide { grid-column: 1 / -1; }
+  .l-f-go { grid-column: 1 / -1; }
+  .l-half { font-size: 0.82rem; display: flex; gap: 0.35rem; align-items: center; }
+  .l-hint { font-size: 0.8rem; color: var(--c-muted, #666); margin: 0.2rem 0 0; }
+
+  .l-scroll { overflow-x: auto; }
+  .l-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  .l-table th, .l-table td {
+    text-align: left; padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--c-border, #eee); vertical-align: top;
+  }
+  .l-table thead th {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--c-muted, #666);
+  }
+  .l-ref { font-family: ui-monospace, monospace; font-size: 0.8rem; white-space: nowrap; }
+  .l-st { text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.05em; }
+  .l-st-approved { color: var(--c-ok, #1b6b3a); font-weight: 600; }
+  .l-st-rejected { color: var(--c-bad, #a33); }
+  .l-note { font-size: 0.8rem; color: var(--c-muted, #666); margin-top: 0.2rem; }
+  .btn-sm { font-size: 0.8rem; padding: 0.2rem 0.6rem; }
+</style>

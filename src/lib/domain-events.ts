@@ -1122,6 +1122,308 @@ export const EVENT_TYPES = {
     floor: 'restricted', publicFields: [],
     means: 'A governed change request was approved or rejected, and either applied or not.',
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // THE MARKETPLACE (migration 0029)
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // Producers live in src/db/marketplace-events.ts, which carries its own copy
+  // of these specs and a marketplaceCatalogueGaps() that compares the two. The
+  // copy is not duplication for its own sake: every one of these was on that
+  // module before it was on this catalogue, which meant publish() rejected all
+  // twenty-one at runtime — this object is an ALLOW-LIST, and a producer naming
+  // a type it does not carry throws the first time a real order is placed.
+  // tests/marketplace-events.test.ts fails if the two ever drift.
+  //
+  // ─── WHY THE NOTIFIABLE ONES ARE ALL 'member' ─────────────────────────────
+  //
+  // Not because a stranger's purchase is public. Because THE NOTIFICATIONS
+  // DRAIN IS CAPPED THERE: src/pages/api/cron/reconcile.ts consumes this feed
+  // with { maxClassification: 'member' }, and consume() steps over anything
+  // above the cap WITHOUT ERRORING. An event that carries a notifications
+  // consumer and sits at 'official' is a notice nobody ever receives, and the
+  // feed row looks exactly like one that was delivered.
+  //
+  // So the sensitivity is handled by the PAYLOAD instead, which is the honest
+  // place for it. Not one of these carries a public field, and the payloads
+  // built in marketplace-events.ts deliberately omit the buyer's address, phone
+  // and email, the seller's bank details, the amount of a payout, the evidence
+  // behind a fraud signal, and the storage key of any document. Where a figure
+  // genuinely must travel it goes on a SEPARATE, higher-classified event with
+  // no notifications consumer — MARKETPLACE_PAYOUT_INITIATED carries the amount
+  // at 'confidential' precisely so MARKETPLACE_PAYOUT_PAID can reach the seller.
+  //
+  // A producer may still be MORE careful than its floor: publishFraudSignal()
+  // asks for 'restricted' when the subject is a named individual rather than a
+  // shop. publish() permits that and refuses the reverse.
+
+  // ── The buyer's side of the transaction ───────────────────────────────────
+  MARKETPLACE_ORDER_PLACED: {
+    floor: 'member', publicFields: [],
+    payload: ['orderId', 'orderNo', 'buyerPersonId', 'sellerOrderCount'],
+    consumers: ['notifications'],
+    means: 'A marketplace basket was placed and split into one seller order per seller.',
+  },
+  MARKETPLACE_ORDER_PAID: {
+    floor: 'member', publicFields: [],
+    payload: ['orderId', 'orderNo', 'buyerPersonId'],
+    consumers: ['notifications'],
+    means: 'A marketplace basket was paid for against a verified capture.',
+  },
+  MARKETPLACE_ORDER_SHIPPED: {
+    floor: 'member', publicFields: [],
+    payload: ['sellerOrderId', 'sellerOrderNo', 'orderId', 'buyerPersonId', 'trackingRecorded'],
+    consumers: ['notifications'],
+    means: 'A seller dispatched their part of a marketplace basket.',
+  },
+  MARKETPLACE_ORDER_DELIVERED: {
+    floor: 'member', publicFields: [],
+    payload: ['sellerOrderId', 'sellerOrderNo', 'orderId', 'buyerPersonId'],
+    consumers: ['notifications'],
+    means: 'A dispatched consignment was recorded as delivered.',
+  },
+  MARKETPLACE_RETURN_DECIDED: {
+    floor: 'member', publicFields: [],
+    payload: ['returnRequestId', 'returnRef', 'sellerOrderId', 'buyerPersonId', 'outcome'],
+    consumers: ['notifications'],
+    means: 'A seller decided a buyer’s return request; the reason stays on the record.',
+  },
+  MARKETPLACE_REFUND_ISSUED: {
+    floor: 'member', publicFields: [],
+    payload: ['returnRequestId', 'returnRef', 'sellerOrderId', 'buyerPersonId'],
+    consumers: ['notifications'],
+    means: 'A refund was issued to a buyer against a return. The amount is not on the feed.',
+  },
+
+  // ── The seller's side of the same transaction ─────────────────────────────
+  //
+  // SEPARATE TYPES from the buyer's, not one event addressed twice. The two
+  // audiences need different facts: a buyer is told their parcel is on its way,
+  // a seller is told they have an order to pack. Publishing once and choosing
+  // the recipient later is how a buyer receives a seller's dispatch deadline —
+  // and how a seller's notice would have to carry the buyer's person id.
+  MARKETPLACE_SELLER_ORDER_PLACED: {
+    floor: 'member', publicFields: [],
+    payload: ['sellerOrderId', 'sellerOrderNo', 'sellerId'],
+    consumers: ['notifications'],
+    means: 'A seller received a new order to fulfil.',
+  },
+  MARKETPLACE_SELLER_ORDER_PAID: {
+    floor: 'member', publicFields: [],
+    payload: ['sellerOrderId', 'sellerOrderNo', 'sellerId', 'dispatchByIso'],
+    consumers: ['notifications'],
+    means: 'Payment cleared on a seller order; the dispatch clock, where one exists, started.',
+  },
+  MARKETPLACE_SELLER_RETURN_REQUESTED: {
+    floor: 'member', publicFields: [],
+    payload: ['returnRequestId', 'returnRef', 'sellerId', 'sellerOrderId', 'respondByIso'],
+    consumers: ['notifications'],
+    means: 'A buyer asked to return goods and the seller has to decide.',
+  },
+  MARKETPLACE_SELLER_REFUND_POSTED: {
+    floor: 'member', publicFields: [],
+    payload: ['returnRequestId', 'sellerId', 'sellerOrderId'],
+    consumers: ['notifications'],
+    means: 'A refund was posted against a seller’s account. The figure stays on the settlement.',
+  },
+  MARKETPLACE_SELLER_REVIEW_PUBLISHED: {
+    floor: 'member', publicFields: [],
+    payload: ['reviewId', 'reviewKind', 'sellerId'],
+    consumers: ['notifications'],
+    means: 'A moderated review of a seller or of their product was published.',
+  },
+  MARKETPLACE_SELLER_LOW_STOCK: {
+    floor: 'member', publicFields: [],
+    payload: ['variantId', 'sellerId', 'noticeKey'],
+    consumers: ['notifications'],
+    means: 'A variant fell to or below a threshold the seller themselves published.',
+  },
+  MARKETPLACE_SELLER_VERIFICATION_DECIDED: {
+    floor: 'member', publicFields: [],
+    payload: ['sellerId'],
+    consumers: ['notifications'],
+    means: 'A verification decision was recorded on a seller account. The check and the outcome stay on the record.',
+  },
+  MARKETPLACE_PAYOUT_PAID: {
+    floor: 'member', publicFields: [],
+    payload: ['payoutId', 'payoutRef', 'sellerId', 'settlementId'],
+    consumers: ['notifications'],
+    means: 'A payout to a seller was confirmed as paid. The amount is on the statement, not on the feed.',
+  },
+
+  // ── Published to everybody who trades here ────────────────────────────────
+  MARKETPLACE_POLICY_PUBLISHED: {
+    floor: 'member', publicFields: [],
+    means: 'A version of a marketplace policy was published and became the current one.',
+  },
+
+  // ── Money, and the decisions behind it. NO notifications consumer. ────────
+  MARKETPLACE_PAYOUT_INITIATED: {
+    floor: 'confidential', publicFields: [],
+    means: 'A payout instruction was created against an approved settlement. No money has moved.',
+  },
+  MARKETPLACE_SETTLEMENT_BLOCKED: {
+    floor: 'confidential', publicFields: [],
+    means: 'A settlement or payout could not proceed, with a stated reason from a closed list.',
+  },
+  MARKETPLACE_PAYMENT_MISMATCH: {
+    floor: 'confidential', publicFields: [],
+    means: 'A captured amount did not match a marketplace order total. An integration fault or an attack; a human decides which.',
+  },
+
+  // ── Governance, and things nobody has decided yet ─────────────────────────
+  MARKETPLACE_SELLER_APPLIED: {
+    floor: 'official', publicFields: [],
+    means: 'Somebody applied to sell on the MMAKF marketplace and is waiting for a decision.',
+  },
+  MARKETPLACE_PRODUCT_REPORTED: {
+    floor: 'official', publicFields: [],
+    means: 'A buyer reported a problem with a product or an order to the federation.',
+  },
+  MARKETPLACE_FRAUD_SIGNAL_RAISED: {
+    floor: 'confidential', publicFields: [],
+    means: 'A detector raised a fraud signal for a human to look at. A signal decides nothing.',
+  },
+
+  // ── The operational team register (src/db/team.ts) ────────────────────────
+  //
+  // WHY EVERY ENTRY HERE DECLARES `publicFields: []`, INCLUDING THE PUBLISHED
+  // ONE. It is tempting to give TEAM_APPOINTMENT_PUBLISHED a public projection
+  // — the appointment is, after all, about to appear on www.mmakf.in over the
+  // federation's masthead, so nothing in it is secret.
+  //
+  // The page is the federation's public statement, and it can be corrected,
+  // unpublished or scoped. The feed is APPEND-ONLY. A public projection here
+  // would mean that unpublishing somebody removes them from the page and leaves
+  // a permanent public record that they once held the post — the opposite of
+  // what the person who asked to be taken down expects, and a worse leak than
+  // the page itself because it cannot be undone. So the public form is the
+  // page; the feed stays internal.
+  //
+  // The floors: an appointment is ordinary establishment news, and 'official'
+  // is `canAnywhere('person:read_pii')` — every state and dojo administrator.
+  // Knowing who now runs the competition desk is squarely within that.
+  TEAM_APPOINTMENT_CREATED: {
+    floor: 'official', publicFields: [],
+    means: 'A person was recorded as holding a post in the federation office. Not yet public.',
+  },
+  TEAM_APPOINTMENT_UPDATED: {
+    floor: 'official', publicFields: [],
+    means: 'The title, department, responsibility or public profile of an appointment changed.',
+  },
+  TEAM_APPOINTMENT_PUBLISHED: {
+    floor: 'official', publicFields: [],
+    means: 'An appointment was made visible on the public federation site.',
+  },
+  TEAM_APPOINTMENT_UNPUBLISHED: {
+    floor: 'official', publicFields: [],
+    means: 'An appointment was withdrawn from the public federation site. The post itself may continue.',
+  },
+  TEAM_APPOINTMENT_ENDED: {
+    floor: 'official', publicFields: [],
+    means: 'A person stopped holding a post. Says nothing about why, and nothing about their membership or rank.',
+  },
+  /**
+   * SUSPENSION IS THE ONE THAT IS NOT ESTABLISHMENT NEWS.
+   *
+   * An officer suspended from their post is, in almost every real case, an
+   * officer under investigation — and 'official' would broadcast that to every
+   * dojo administrator in India. Migration 0056's header promises this register
+   * never exposes disciplinary information; publishing the suspension at
+   * 'official' would break that promise through the feed rather than the table,
+   * which is exactly the kind of leak a schema guarantee does not catch.
+   *
+   * 'restricted' is national `audit:read` — the same population that already
+   * reads the audit row this act writes, and no wider. NOT 'confidential',
+   * which admits the national finance officer, who has no business in it.
+   *
+   * The REASON stays off the feed entirely. It is free text somebody typed, and
+   * no allowlist can bound what a human put in a free-text field.
+   */
+  TEAM_APPOINTMENT_SUSPENDED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A post was suspended. The reason is deliberately not on the feed.',
+  },
+
+  // ── The workforce (src/db/workforce.ts, migration 0058) ───────────────────
+  //
+  // THE FLOOR FOR THIS WHOLE SECTION IS 'restricted', AND THE REASONING IS THE
+  // SAME ONE THE IDENTITY SECTION SETS OUT ABOVE, so it is written once here.
+  //
+  // `domain_events` carries no scope column, so classification is the ONLY
+  // filter a read passes through. That makes 'official' — which is
+  // `canAnywhere('person:read_pii')`, every state and dojo administrator in
+  // India — the wrong answer for anything about somebody's employment.
+  //
+  // 'confidential' is national reach but admits the national finance officer,
+  // who holds `finance:read`. A finance officer has no business knowing that a
+  // named colleague took sick leave or that another was dismissed.
+  //
+  // So: 'restricted', which is national `audit:read` — the same population that
+  // already reads the audit row every one of these acts writes, and no wider.
+  // PART X of the directive says HR data must not reach ordinary
+  // administrators, and `hr:read` sits outside NATIONAL_FULL precisely so that
+  // holds. An event feed that leaked the same facts at a lower floor would undo
+  // that control through a side door, which is the failure mode a schema
+  // guarantee cannot catch.
+  //
+  // EVERY ENTRY DECLARES `publicFields: []`, AND ALWAYS WILL. None of this has
+  // a public form. An allowlist on an employment event is a leak waiting for
+  // the first producer who adds a field.
+  //
+  // NO REASON, NO EXIT REASON AND NO AMOUNT IS ON THE FEED. 'dismissed' is a
+  // fact about a named person; a leave reason is routinely medical; and both
+  // are free text or near it, which no allowlist can bound.
+  EMPLOYMENT_STARTED: {
+    floor: 'restricted', publicFields: [],
+    means: 'The federation began employing somebody. Carries no pay and no personal detail.',
+  },
+  EMPLOYMENT_ENDED: {
+    floor: 'restricted', publicFields: [],
+    means: 'An employment ended. The exit reason is deliberately not on the feed.',
+  },
+  LEAVE_REQUESTED: {
+    floor: 'restricted', publicFields: [],
+    means: 'An employee asked for leave. The reason they gave is not on the feed — it is routinely medical.',
+  },
+  LEAVE_DECIDED: {
+    floor: 'restricted', publicFields: [],
+    means: 'A leave request was approved or refused.',
+  },
+  EXPENSE_CLAIM_SUBMITTED: {
+    floor: 'restricted', publicFields: [],
+    means: 'An employee submitted an expense claim for a decision.',
+  },
+  /**
+   * The one that is genuinely about the federation rather than about a person.
+   *
+   * A published vacancy is an advertisement MMAKF is actively making to the
+   * world, so 'official' is right: it should reach the administrators who might
+   * pass it on. It carries the reference and the title and names nobody.
+   */
+  VACANCY_PUBLISHED: {
+    floor: 'official', publicFields: [],
+    means: 'MMAKF advertised a post. Names nobody; carries the reference and the title.',
+  },
+  /**
+   * NOT 'official', unlike the vacancy above, and the difference is the point.
+   *
+   * A vacancy is about a job; an application is about a named private
+   * individual who has told the federation, in confidence, that they want to
+   * leave their current employer. Broadcasting that at 'official' — every dojo
+   * administrator in India — could cost somebody their existing job.
+   *
+   * The applicant's NAME AND EMAIL ARE NOT ON THE FEED even at 'restricted'.
+   */
+  JOB_APPLICATION_RECEIVED: {
+    floor: 'restricted', publicFields: [],
+    means: 'Somebody applied for a post. The applicant is not named on the feed.',
+  },
+  JOB_OFFER_ISSUED: {
+    floor: 'restricted', publicFields: [],
+    means: 'An offer of employment was issued. Carries no pay and does not name the candidate.',
+  },
+
 } as const satisfies Record<string, EventTypeSpec>;
 
 export type DomainEventType = keyof typeof EVENT_TYPES;

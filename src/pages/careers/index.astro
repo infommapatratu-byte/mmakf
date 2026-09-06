@@ -1,0 +1,208 @@
+---
+// /careers — working for the federation, and the posts it is advertising.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ON THE PUBLIC SURFACE, DELIBERATELY
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Everything else about the workforce lives behind employee.mmakf.in, which
+// `isIndexable()` keeps out of every search index. A vacancy is the exception
+// and the reason that exclusion costs nothing: an advertisement exists to be
+// found by people who do not yet work for MMAKF.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IT CAN AND CANNOT SHOW
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `publicVacancies()` takes no principal and accepts no widening parameter. It
+// returns published, open vacancies through a fixed column list that carries no
+// internal id, no position id and no pay band — the advert, not the
+// establishment record behind it. A CHECK constraint in migration 0058 refuses
+// to mark anything but an `open` vacancy published, so a draft or a withdrawn
+// post cannot reach this page even by a direct UPDATE.
+//
+// WHEN THERE IS NOTHING TO ADVERTISE the page still says something useful. A
+// federation with no current vacancy is the normal case, not an error, and the
+// page tells a would-be applicant what the federation is and where else to
+// look rather than showing them an empty list.
+
+export const prerender = false;
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import { isConfigured, db } from '@/db';
+import { publicVacancies } from '@/db/workforce';
+
+const configured = isConfigured();
+
+let vacancies: any[] = [];
+let failed = false;
+
+if (configured) {
+  try {
+    vacancies = await publicVacancies(db());
+  } catch {
+    // A read failure is not "no vacancies", and the two must never render alike.
+    failed = true;
+  }
+}
+
+const TYPE_LABEL: Record<string, string> = {
+  permanent: 'Permanent',
+  fixed_term: 'Fixed term',
+  contract: 'Contract',
+  consultant: 'Consultant',
+  intern: 'Internship',
+  apprentice: 'Apprenticeship',
+  volunteer: 'Voluntary',
+  secondment: 'Secondment',
+};
+---
+
+<Base
+  title="Careers — MMAKF"
+  description="Work for the Modern Martial Arts Karate-Do Federation of India. Current vacancies in federation administration, competition operations, coaching, education, media and finance."
+  breadcrumbs={[
+    { name: 'Federation', url: '/about' },
+    { name: 'Careers', url: '/careers' },
+  ]}
+>
+  <PageHero
+    eyebrow="Working at MMAKF"
+    title="Careers at the <em>federation</em>"
+    lead="MMAKF is run by an office as well as by instructors — competition operations, credentials, membership, education, media and finance. These are the posts it is currently advertising."
+  />
+
+  <section class="container c-wrap">
+    {!configured ? (
+      <p class="c-note">
+        The federation register is not configured on this deployment, so vacancies
+        cannot be read. This is a statement about this server, not about MMAKF.
+      </p>
+    ) : failed ? (
+      <p class="c-note c-bad">
+        The vacancy register could not be read just now. Please try again shortly —
+        nothing here should be taken to mean the federation is not recruiting.
+      </p>
+    ) : vacancies.length === 0 ? (
+      <div class="c-none">
+        <h2>No post is currently advertised.</h2>
+        <p>
+          The federation advertises here when it recruits. Nothing is held on
+          file between advertisements, so there is no general application to
+          make — a post appears on this page when it opens, with its own closing
+          date and its own form.
+        </p>
+        <p>
+          If you teach, the route in is different and it is open now: MMAKF
+          approves instructors through the <a href="/learn/coaches">coaching
+          pathway</a>, which is a credential process rather than a vacancy.
+        </p>
+        <p>
+          Clubs join the federation through <a href="/affiliation">affiliation</a>.
+        </p>
+      </div>
+    ) : (
+      <>
+        <p class="c-count">
+          {vacancies.length} {vacancies.length === 1 ? 'post' : 'posts'} currently advertised.
+        </p>
+        <ul class="c-list">
+          {vacancies.map((v: any) => (
+            <li class="c-item">
+              <div class="c-item-main">
+                <h2 class="c-title">
+                  <a href={`/careers/${v.slug}`}>{v.title}</a>
+                </h2>
+                <p class="c-meta">
+                  <span>{TYPE_LABEL[v.employmentType] ?? v.employmentType}</span>
+                  {v.departmentName && <span>{v.departmentName}</span>}
+                  {v.location && <span>{v.location}</span>}
+                  {(v.openings > 1) && <span>{v.openings} posts</span>}
+                </p>
+                {v.summary && <p class="c-sum">{v.summary}</p>}
+              </div>
+              <div class="c-item-side">
+                {v.closesOn && <p class="c-closes">Closes {v.closesOn}</p>}
+                <a class="btn btn-primary" href={`/careers/${v.slug}`}>Read and apply →</a>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </>
+    )}
+
+    <div class="c-standing">
+      <h2>How MMAKF recruits</h2>
+      <dl>
+        <dt>Every post is advertised here</dt>
+        <dd>
+          A vacancy appears on this page only once the federation has opened it
+          and decided to publish it — two separate acts, held by two different
+          authorities inside the federation office.
+        </dd>
+        <dt>You apply against the post, not to a database</dt>
+        <dd>
+          Applying gives you a reference. It does not create a membership record
+          and does not enter you in the federation's register of people —
+          MMAKF's people register is its members, coaches, officials and
+          athletes, and an application is none of those.
+        </dd>
+        <dt>What happens to your application</dt>
+        <dd>
+          It is read by the recruiting office, and you may be invited to an
+          interview with a panel. A panel member records their own view
+          independently and cannot revise it after reading the others'.
+        </dd>
+      </dl>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .c-wrap { padding-block: var(--space-8, 2rem) var(--space-12, 3rem); }
+
+  .c-note {
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    max-width: 65ch;
+  }
+  .c-bad { border-color: var(--c-warn-border, #c99); }
+
+  .c-none { max-width: 62ch; }
+  .c-none h2 { font-size: 1.15rem; }
+  .c-none p { color: var(--c-text-2, #444); }
+
+  .c-count { color: var(--c-muted, #666); font-size: 0.9rem; }
+
+  .c-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-4, 1rem); }
+  .c-item {
+    display: flex; gap: var(--space-5, 1.25rem); flex-wrap: wrap;
+    justify-content: space-between; align-items: flex-start;
+    padding: var(--space-5, 1.25rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface, #fff);
+  }
+  .c-item-main { flex: 1 1 22rem; min-width: 0; }
+  .c-item-side { flex: 0 0 auto; display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+  .c-title { margin: 0; font-size: 1.15rem; }
+  .c-meta {
+    margin: 0.35rem 0 0; font-size: 0.85rem; color: var(--c-muted, #666);
+    display: flex; flex-wrap: wrap; gap: 0.75rem;
+  }
+  .c-meta span + span::before { content: '· '; margin-right: 0.4rem; }
+  .c-sum { margin: 0.5rem 0 0; }
+  .c-closes { margin: 0; font-size: 0.82rem; color: var(--c-muted, #666); }
+
+  .c-standing {
+    margin-top: var(--space-10, 2.5rem);
+    padding-top: var(--space-5, 1.25rem);
+    border-top: 1px solid var(--c-border, #ddd);
+    font-size: 0.92rem; max-width: 70ch;
+  }
+  .c-standing h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-muted, #666); }
+  .c-standing dt { font-weight: 600; margin-top: var(--space-3, 0.75rem); }
+  .c-standing dd { margin: 0.2rem 0 0; color: var(--c-text-2, #444); }
+</style>

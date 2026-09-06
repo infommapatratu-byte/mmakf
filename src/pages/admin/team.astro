@@ -1,0 +1,497 @@
+---
+// /admin/team — the federation establishment: who holds which post, and which
+// of those posts the public site names.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE TWO AUTHORITIES THIS SCREEN KEEPS APART, VISIBLY
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `team:write` records that somebody holds a post.
+// `team:publish` puts their name and photograph on www.mmakf.in.
+//
+// A STATE_ADMIN holds the first and not the second, so this page renders the
+// publish control only to a holder and SAYS why it is withheld otherwise. A
+// missing button with no explanation reads as a bug and gets reported as one.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THIS SCREEN REFUSES TO IMPLY
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ENDING AN APPOINTMENT DOES NOT REMOVE ANYBODY'S ACCESS. `endAppointment()`
+// closes one row; the person's `role_bindings` are untouched, and so are their
+// membership, their rank and their black belt. An administrator who ends an
+// appointment and believes they have revoked a login has been misled by the
+// software, so the control says so where the control is.
+//
+// THE PUBLIC CONTACT FIELD IS AN OFFICE ROUTE. No validator can tell a desk
+// number from somebody's mobile, so this is stated in words beside the field
+// rather than enforced by a check that would only pretend to.
+
+export const prerender = false;
+
+import AdminShell from '@/components/AdminShell.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  adminAppointments, listDepartments, createDepartment, createAppointment,
+  activateAppointment, publishAppointment, unpublishAppointment,
+  suspendAppointment, endAppointment, isTeamError,
+  type AdminAppointment, type OrgLevel,
+} from '@/db/team';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'admin';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/team');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+const mayWrite = Boolean(identity) && canAnywhere(identity!.principal, 'team:write');
+const mayPublish = Boolean(identity) && canAnywhere(identity!.principal, 'team:publish');
+
+// Draft appointments and suspensions. Never a shared-cache document.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+const ORG_LEVELS: OrgLevel[] = [
+  'executive', 'director', 'head', 'manager',
+  'officer', 'coordinator', 'staff', 'volunteer',
+];
+
+const DONE_MESSAGES: Record<string, string> = {
+  created: 'The appointment is recorded as a draft. It is not on the public site — activate it, then publish it.',
+  activated: 'The appointment is active. It is still not public until it is published.',
+  published: 'The appointment is now on the public federation site.',
+  unpublished: 'The appointment has been withdrawn from the public site. The post itself continues.',
+  suspended: 'The post is suspended and has been withdrawn from the public site.',
+  ended: 'The appointment is closed. The person’s membership, rank and login are unchanged — removing access is a separate act.',
+  department: 'The department is recorded.',
+};
+
+let error: string | null = null;
+
+// Posts to this page rather than to /api/: the middleware requires
+// application/json on /api/ paths, and a form without JavaScript cannot send
+// one. The same-origin check that answers CSRF applies here identically.
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const act = get('act');
+  const reason = get('reason');
+
+  const rl = await rateLimit(Astro.request, 'team-write', 40, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment, so there is nothing to record against.';
+  } else if (!mayWrite) {
+    // Re-checked against the session on every act. The rendered page is not
+    // evidence of authority.
+    Astro.response.status = 403;
+    error = 'Changing the establishment requires team:write, which this account does not hold in any scope.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: reason || null,
+    };
+    const id = Number(get('appointmentId'));
+    const needsId = ['activate', 'publish', 'unpublish', 'suspend', 'end'].includes(act);
+
+    try {
+      if (needsId && (!Number.isInteger(id) || id <= 0)) {
+        Astro.response.status = 400;
+        error = 'Name the appointment to act on.';
+      } else if (act === 'department') {
+        await createDepartment(db(), ctx, {
+          code: get('code'), name: get('name'),
+          description: get('description') || null,
+        });
+        return Astro.redirect(`${SELF}?done=department`, 303);
+      } else if (act === 'create') {
+        const personId = Number(get('personId'));
+        if (!Number.isInteger(personId) || personId <= 0) {
+          Astro.response.status = 400;
+          error = 'Name the person this appointment is for. An appointment attaches to somebody already in the register — there is deliberately no way to create a person from here, because that is how one human being ends up with two records.';
+        } else {
+          const departmentId = Number(get('departmentId'));
+          const scopeStateUnitId = Number(get('scopeStateUnitId'));
+          await createAppointment(db(), ctx, {
+            personId,
+            title: get('title'),
+            orgLevel: (get('orgLevel') || 'staff') as OrgLevel,
+            departmentId: Number.isInteger(departmentId) && departmentId > 0 ? departmentId : null,
+            responsibility: get('responsibility') || null,
+            scopeType: get('scopeType') || 'national',
+            scopeStateUnitId: Number.isInteger(scopeStateUnitId) && scopeStateUnitId > 0 ? scopeStateUnitId : null,
+            publicBio: get('publicBio') || null,
+            publicContact: get('publicContact') || null,
+          });
+          return Astro.redirect(`${SELF}?done=created`, 303);
+        }
+      } else if (act === 'activate') {
+        await activateAppointment(db(), ctx, id);
+        return Astro.redirect(`${SELF}?done=activated`, 303);
+      } else if (act === 'publish' || act === 'unpublish') {
+        if (!mayPublish) {
+          Astro.response.status = 403;
+          error = 'Publishing to the public federation site requires team:publish, which this account does not hold. Recording who holds a post and putting their name on www.mmakf.in are separate authorities.';
+        } else if (act === 'publish') {
+          await publishAppointment(db(), ctx, id);
+          return Astro.redirect(`${SELF}?done=published`, 303);
+        } else {
+          await unpublishAppointment(db(), ctx, id, reason || null);
+          return Astro.redirect(`${SELF}?done=unpublished`, 303);
+        }
+      } else if (act === 'suspend') {
+        if (!reason) {
+          Astro.response.status = 400;
+          error = 'A suspension requires a recorded reason. This is the one act here that touches a person’s standing, and one nobody had to justify cannot be defended later.';
+        } else {
+          await suspendAppointment(db(), ctx, id, reason);
+          return Astro.redirect(`${SELF}?done=suspended`, 303);
+        }
+      } else if (act === 'end') {
+        await endAppointment(db(), ctx, id, { endedOn: get('endedOn') || undefined, reason: reason || null });
+        return Astro.redirect(`${SELF}?done=ended`, 303);
+      } else {
+        Astro.response.status = 400;
+        error = 'Unknown action.';
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = 'Your credential does not hold the authority this act requires at that scope. A state office may record its own coordinators; a national appointment is the secretariat’s.';
+      } else if (isTeamError(err)) {
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[admin/team] act failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was changed.';
+      }
+    }
+  }
+}
+
+// ─── The read ───────────────────────────────────────────────────────────────
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE_MESSAGES[done] ? DONE_MESSAGES[done] : null;
+
+let rows: AdminAppointment[] = [];
+let departments: any[] = [];
+let readFailed = false;
+
+if (configured && identity && canAnywhere(identity.principal, 'team:read')) {
+  try {
+    [rows, departments] = await Promise.all([
+      adminAppointments(db(), identity.principal, { limit: 400 }),
+      listDepartments(db(), { includeInactive: true }),
+    ]);
+  } catch (err) {
+    console.error('[admin/team] read failed', err);
+    readFailed = true;
+  }
+}
+
+const live = rows.filter((r) => r.status !== 'ended');
+const closed = rows.filter((r) => r.status === 'ended');
+const publicCount = rows.filter((r) => r.published).length;
+---
+
+<AdminShell
+  title="Federation team"
+  requires="team:read"
+  intro="Who holds which post in the federation office, and which of those posts the public site names. Governance committees are a separate register."
+>
+  {doneMessage && <p class="ok" role="status">{doneMessage}</p>}
+  {error && <p class="bad" role="alert">{error}</p>}
+
+  {!configured ? (
+    <ErrorState
+      title="The federation database is not configured on this deployment."
+      safe="Nothing was read and nothing can be changed here."
+      retryHref={null}
+      secondary={{ label: 'Back to the dashboard', href: h('/admin') }}
+    />
+  ) : readFailed ? (
+    <ErrorState
+      title="The establishment register could not be read."
+      safe="No change has been made. Reading this register writes nothing."
+      retryHref={SELF}
+      secondary={{ label: 'Back to the dashboard', href: h('/admin') }}
+    />
+  ) : (
+    <>
+      <p class="tm-summary">
+        {rows.length} appointment{rows.length === 1 ? '' : 's'} in your scope
+        · {publicCount} on the public site
+        · {departments.length} department{departments.length === 1 ? '' : 's'}
+      </p>
+
+      {!mayPublish && (
+        <p class="tm-gate">
+          This account holds <code>team:write</code> and not <code>team:publish</code>, so the
+          publish controls are withheld rather than shown disabled. Recording who
+          holds a post and deciding that their name and photograph appear on
+          www.mmakf.in are separate authorities: <code>/team</code> is a national
+          page, so the second one is the secretariat's. Prepare the appointment
+          here and ask them to publish it.
+        </p>
+      )}
+
+      {live.length === 0 ? (
+        <EmptyState
+          title="No appointment is recorded in your scope."
+          body="The register ships empty: MMAKF's organisational structure is the federation's to state, so nothing here was seeded. Record a department, then an appointment."
+          action={{ label: 'Governance committees', href: h('/admin/governance') }}
+        />
+      ) : (
+        <div class="tm-scroll">
+          <table class="tm-table">
+            <thead>
+              <tr>
+                <th scope="col">Person</th>
+                <th scope="col">Post</th>
+                <th scope="col">Department</th>
+                <th scope="col">Scope</th>
+                <th scope="col">State</th>
+                <th scope="col">Public</th>
+                <th scope="col">Acts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {live.map((r) => (
+                <tr>
+                  <th scope="row">
+                    {r.fullName}
+                    <span class="tm-fid">{r.federationId}</span>
+                  </th>
+                  <td>
+                    {r.title}
+                    <span class="tm-lvl">{r.orgLevel}</span>
+                  </td>
+                  <td>{r.department ?? <span class="tm-unset">Unfiled</span>}</td>
+                  <td>{r.scopeLabel ?? r.scopeType}</td>
+                  <td><span class={`tm-st tm-st-${r.status}`}>{r.status}</span></td>
+                  <td>{r.published ? 'On the site' : <span class="tm-unset">Not published</span>}</td>
+                  <td class="tm-acts">
+                    {mayWrite && r.status === 'draft' && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="activate" />
+                        <input type="hidden" name="appointmentId" value={String(r.appointmentId)} />
+                        <button class="btn btn-sm" type="submit">Activate</button>
+                      </form>
+                    )}
+                    {mayWrite && r.status === 'suspended' && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="activate" />
+                        <input type="hidden" name="appointmentId" value={String(r.appointmentId)} />
+                        <button class="btn btn-sm" type="submit">Reinstate</button>
+                      </form>
+                    )}
+                    {mayPublish && r.status === 'active' && !r.published && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="publish" />
+                        <input type="hidden" name="appointmentId" value={String(r.appointmentId)} />
+                        <button class="btn btn-sm" type="submit">Publish</button>
+                      </form>
+                    )}
+                    {mayPublish && r.published && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="unpublish" />
+                        <input type="hidden" name="appointmentId" value={String(r.appointmentId)} />
+                        <input class="input input-sm" name="reason" placeholder="Reason" maxlength="200" />
+                        <button class="btn btn-sm" type="submit">Withdraw</button>
+                      </form>
+                    )}
+                    {mayWrite && r.status !== 'suspended' && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="suspend" />
+                        <input type="hidden" name="appointmentId" value={String(r.appointmentId)} />
+                        <input class="input input-sm" name="reason" placeholder="Reason (required)" maxlength="200" required />
+                        <button class="btn btn-sm btn-warn" type="submit">Suspend</button>
+                      </form>
+                    )}
+                    {mayWrite && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="end" />
+                        <input type="hidden" name="appointmentId" value={String(r.appointmentId)} />
+                        <input class="input input-sm" type="date" name="endedOn" aria-label="Last day" />
+                        <button class="btn btn-sm" type="submit">End post</button>
+                      </form>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p class="tm-caveat">
+        <strong>Ending a post removes no access.</strong> It closes one row. The
+        person's membership, rank, black belt and <em>login</em> are all
+        untouched — one person holds many relationships with MMAKF, and closing
+        one must not quietly end the others. Removing a login is a role change
+        under <code>role:grant</code> on <a href={h('/admin/queue')}>the role
+        queue</a>.
+      </p>
+
+      {closed.length > 0 && (
+        <details class="tm-closed">
+          <summary>{closed.length} closed appointment{closed.length === 1 ? '' : 's'}</summary>
+          <ul>
+            {closed.map((r) => (
+              <li>{r.fullName} — {r.title}, until {r.endedOn}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {mayWrite && (
+        <div class="tm-forms">
+          <section class="tm-form">
+            <h2>Record an appointment</h2>
+            <p class="tm-hint">
+              Creates a <strong>draft</strong>. Nothing reaches the public site
+              from this form — that is a separate act under a separate permission.
+            </p>
+            <form method="post" action={SELF}>
+              <input type="hidden" name="act" value="create" />
+              <label class="input-label" for="tm-person">Person ID in the federation register</label>
+              <input class="input" id="tm-person" name="personId" type="number" min="1" required />
+              <p class="tm-hint">
+                The appointment attaches to somebody already in the register.
+                There is deliberately no way to create a person from here: that is
+                how one human being ends up with two records, and a certificate
+                issued against one of them.
+              </p>
+
+              <label class="input-label" for="tm-title">Title</label>
+              <input class="input" id="tm-title" name="title" maxlength="120" required />
+
+              <label class="input-label" for="tm-level">Organisational level</label>
+              <select class="input" id="tm-level" name="orgLevel">
+                {ORG_LEVELS.map((l) => <option value={l}>{l}</option>)}
+              </select>
+
+              <label class="input-label" for="tm-dept">Department</label>
+              <select class="input" id="tm-dept" name="departmentId">
+                <option value="">Unfiled</option>
+                {departments.map((d: any) => <option value={String(d.id)}>{d.name}</option>)}
+              </select>
+
+              <label class="input-label" for="tm-resp">Areas of responsibility</label>
+              <input class="input" id="tm-resp" name="responsibility" maxlength="300" />
+
+              <label class="input-label" for="tm-bio">Public biography</label>
+              <textarea class="input" id="tm-bio" name="publicBio" rows="3" maxlength="1200"></textarea>
+
+              <label class="input-label" for="tm-contact">Public contact — an office route</label>
+              <input class="input" id="tm-contact" name="publicContact" maxlength="160" />
+              <p class="tm-hint tm-warn">
+                A desk the federation publishes on purpose — <code>media@mmakf.in</code>,
+                an office line. <strong>Never a person's own mobile or private
+                email.</strong> Nothing in the software can tell the difference, so
+                this one is on you: whatever goes here is printed on a public page.
+              </p>
+
+              <button class="btn" type="submit">Record as draft</button>
+            </form>
+          </section>
+
+          <section class="tm-form">
+            <h2>Add a department</h2>
+            <p class="tm-hint">
+              The register ships empty. MMAKF's structure is the federation's to
+              state, so no department was seeded — a plausible invented one is
+              indistinguishable six months later from one an officer confirmed.
+            </p>
+            <form method="post" action={SELF}>
+              <input type="hidden" name="act" value="department" />
+              <label class="input-label" for="tm-code">Code</label>
+              <input class="input" id="tm-code" name="code" maxlength="32" required placeholder="COMPETITION" />
+              <label class="input-label" for="tm-name">Name</label>
+              <input class="input" id="tm-name" name="name" maxlength="120" required />
+              <label class="input-label" for="tm-desc">Description</label>
+              <input class="input" id="tm-desc" name="description" maxlength="300" />
+              <button class="btn" type="submit">Add department</button>
+            </form>
+          </section>
+        </div>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .ok, .bad {
+    padding: 0.75rem 1rem; border-radius: var(--radius, 6px);
+    border: 1px solid var(--c-border, #ddd); margin-bottom: 1rem;
+  }
+  .bad { border-color: var(--c-bad-border, #c66); }
+
+  .tm-summary { color: var(--c-muted, #666); font-size: 0.9rem; }
+  .tm-gate {
+    padding: 0.75rem 1rem; margin: 1rem 0;
+    border-left: 3px solid var(--c-accent, #b8860b);
+    background: var(--c-surface-2, #fafafa);
+    font-size: 0.9rem;
+  }
+
+  .tm-scroll { overflow-x: auto; }
+  .tm-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  .tm-table th, .tm-table td {
+    text-align: left; padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--c-border, #eee); vertical-align: top;
+  }
+  .tm-fid, .tm-lvl {
+    display: block; font-size: 0.72rem; color: var(--c-muted, #888);
+    font-weight: 400; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .tm-unset { color: var(--c-muted, #999); font-style: italic; }
+  .tm-st { text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.06em; }
+  .tm-st-suspended { color: var(--c-bad, #a33); font-weight: 600; }
+  .tm-st-draft { color: var(--c-muted, #777); }
+
+  .tm-acts { display: flex; flex-direction: column; gap: 0.4rem; min-width: 12rem; }
+  .tm-acts form { display: flex; gap: 0.3rem; align-items: center; flex-wrap: wrap; }
+  .input-sm { font-size: 0.8rem; padding: 0.2rem 0.4rem; max-width: 9rem; }
+  .btn-sm { font-size: 0.8rem; padding: 0.2rem 0.6rem; }
+  .btn-warn { border-color: var(--c-bad-border, #c66); }
+
+  .tm-caveat {
+    margin-top: 1.5rem; padding: 0.75rem 1rem;
+    border: 1px solid var(--c-border, #ddd); border-radius: var(--radius, 6px);
+    font-size: 0.9rem;
+  }
+
+  .tm-closed { margin-top: 1.5rem; font-size: 0.9rem; }
+
+  .tm-forms {
+    display: grid; gap: 1.5rem; margin-top: 2rem;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  }
+  .tm-form {
+    padding: 1rem; border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+  }
+  .tm-form h2 { margin-top: 0; font-size: 1rem; }
+  .tm-form .input, .tm-form textarea { width: 100%; margin-bottom: 0.5rem; }
+  .tm-hint { font-size: 0.82rem; color: var(--c-muted, #666); margin: 0 0 0.75rem; }
+  .tm-warn { color: var(--c-bad, #a33); }
+</style>

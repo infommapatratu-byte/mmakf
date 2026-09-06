@@ -1,0 +1,225 @@
+---
+// employee.mmakf.in — what an employee sees when they arrive.
+//
+// It answers the four questions somebody actually opens this surface with:
+// where do I stand, what have I asked for, what is waiting on me, and who is my
+// manager. Everything on it is the caller's own record, resolved from the
+// session by `myEmployment()` — no page under /employee accepts an employment
+// id from the client.
+
+export const prerender = false;
+
+import EmployeeShell from '@/components/EmployeeShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import {
+  myEmployment, myLeave, myClaims, myDirectReports, leaveQueue, claimQueue,
+  listLeaveTypes, leaveBalance,
+} from '@/db/workforce';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'employee';
+const h = (p: string) => surfaceHref(surface, p);
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+
+let employment: any = null;
+let leave: any[] = [];
+let claims: any[] = [];
+let reports: any[] = [];
+let waiting = 0;
+let balances: Array<{ name: string; remaining: number; pending: number; configured: boolean }> = [];
+
+if (configured && identity) {
+  try {
+    employment = await myEmployment(db(), identity.principal);
+    if (employment) {
+      const year = Number(new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Kolkata' })
+        .format(new Date()).slice(0, 4));
+      const [l, c, r, lq, cq, types] = await Promise.all([
+        myLeave(db(), identity.principal, { limit: 5 }),
+        myClaims(db(), identity.principal),
+        myDirectReports(db(), identity.principal),
+        leaveQueue(db(), identity.principal),
+        claimQueue(db(), identity.principal),
+        listLeaveTypes(db()),
+      ]);
+      leave = l; claims = c.slice(0, 5); reports = r;
+      waiting = lq.length + cq.length;
+      balances = await Promise.all(types.map(async (t: any) => {
+        const b = await leaveBalance(db(), employment.id, t.id, year);
+        return { name: t.name, remaining: b.remaining, pending: b.pending, configured: b.configured };
+      }));
+    }
+  } catch (err) {
+    console.error('[employee] dashboard read failed', err);
+  }
+}
+
+const money = (minor: number) =>
+  `₹${(minor / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+---
+
+<EmployeeShell
+  title="My work"
+  intro="Your employment record, your requests, and anything waiting on you."
+>
+  {employment && (
+    <>
+      <section class="w-grid">
+        <div class="w-card">
+          <div class="w-k">Employee number</div>
+          <div class="w-v">{employment.employeeNo}</div>
+          <div class="w-s">Quote this to the HR office</div>
+        </div>
+        <div class="w-card">
+          <div class="w-k">Status</div>
+          <div class="w-v">{employment.status}</div>
+          <div class="w-s">Since {employment.startedOn}</div>
+        </div>
+        <div class="w-card">
+          <div class="w-k">Waiting on you</div>
+          <div class="w-v">{waiting}</div>
+          <div class="w-s">
+            {waiting === 0
+              ? 'Nothing to approve'
+              : <a href={h('/employee/team')}>Leave and claims to decide →</a>}
+          </div>
+        </div>
+        <div class="w-card">
+          <div class="w-k">Direct reports</div>
+          <div class="w-v">{reports.length}</div>
+          <div class="w-s">
+            {reports.length === 0 ? 'Nobody reports to you' : <a href={h('/employee/team')}>Your team →</a>}
+          </div>
+        </div>
+      </section>
+
+      <section class="w-sec">
+        <h2>Leave balance</h2>
+        {balances.length === 0 ? (
+          <p class="w-empty">
+            {/*
+              TRUE, and stated as what it is. `leave_types` ships empty because
+              MMAKF's leave policy — casual, sick, earned, their entitlements and
+              their accrual — is the federation's to publish, not a developer's
+              to guess. This is not a loading state and not an error.
+            */}
+            MMAKF has not yet published its leave policy, so there is no leave type
+            to hold a balance in. The HR office defines these.
+          </p>
+        ) : (
+          <ul class="w-bal">
+            {balances.map((b) => (
+              <li>
+                <span class="w-bal-n">{b.name}</span>
+                {b.configured ? (
+                  <>
+                    <span class="w-bal-v">{b.remaining / 2} days left</span>
+                    {b.pending > 0 && <span class="w-bal-p">{b.pending / 2} awaiting a decision</span>}
+                  </>
+                ) : (
+                  /* An entitlement nobody set is not zero days — it is a figure
+                     the HR office has not recorded, and saying "0 days left"
+                     would be a statement the register cannot support. */
+                  <span class="w-bal-u">No entitlement recorded for this year</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        <a class="w-more" href={h('/employee/leave')}>Request leave →</a>
+      </section>
+
+      <section class="w-sec">
+        <h2>Your recent leave</h2>
+        {leave.length === 0 ? (
+          <p class="w-empty">You have not requested any leave.</p>
+        ) : (
+          <ul class="w-list">
+            {leave.map((r: any) => (
+              <li>
+                <span class="w-list-m">{r.typeName}</span>
+                <span>{r.fromDate} → {r.toDate}</span>
+                <span class="w-tag">{r.status}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section class="w-sec">
+        <h2>Your recent claims</h2>
+        {claims.length === 0 ? (
+          <p class="w-empty">You have not made an expense claim.</p>
+        ) : (
+          <ul class="w-list">
+            {claims.map((c: any) => (
+              <li>
+                <span class="w-list-m">{c.title}</span>
+                <span>{money(c.totalMinor)}</span>
+                <span class="w-tag">{c.status}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <a class="w-more" href={h('/employee/expenses')}>Expenses →</a>
+      </section>
+
+      <p class="w-foot">
+        {/*
+          Stated because an employee reasonably assumes otherwise. This surface
+          shows employment; a member's rank, grading history and club sit on the
+          member area, and one person legitimately has both.
+        */}
+        This is your <strong>employment</strong> record. Your membership, rank and
+        grading history are a separate register and live at
+        <a href="https://www.mmakf.in/my"> your member area</a> — one person,
+        several relationships with the federation.
+      </p>
+    </>
+  )}
+</EmployeeShell>
+
+<style>
+  .w-grid {
+    display: grid; gap: var(--space-4, 1rem); margin-bottom: var(--space-8, 2rem);
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  }
+  .w-card {
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface, #fff);
+  }
+  .w-k { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--c-muted, #777); }
+  .w-v { font-size: 1.5rem; font-weight: 600; margin-top: 0.2rem; }
+  .w-s { font-size: 0.82rem; color: var(--c-muted, #666); margin-top: 0.2rem; }
+
+  .w-sec { margin-bottom: var(--space-8, 2rem); }
+  .w-sec h2 {
+    font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--c-muted, #666);
+    border-bottom: 1px solid var(--c-border, #ddd);
+    padding-bottom: 0.4rem; margin-bottom: 0.8rem;
+  }
+  .w-empty { color: var(--c-muted, #666); max-width: 60ch; }
+
+  .w-bal, .w-list { list-style: none; margin: 0; padding: 0; }
+  .w-bal li, .w-list li {
+    display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: baseline;
+    padding: 0.45rem 0; border-bottom: 1px solid var(--c-border, #eee);
+  }
+  .w-bal-n, .w-list-m { font-weight: 600; min-width: 12rem; }
+  .w-bal-p { font-size: 0.82rem; color: var(--c-muted, #777); }
+  .w-bal-u { color: var(--c-muted, #999); font-style: italic; }
+  .w-tag { margin-left: auto; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-muted, #666); }
+  .w-more { display: inline-block; margin-top: 0.6rem; font-size: 0.9rem; }
+
+  .w-foot {
+    margin-top: var(--space-10, 2.5rem); padding-top: var(--space-4, 1rem);
+    border-top: 1px solid var(--c-border, #ddd);
+    font-size: 0.9rem; color: var(--c-muted, #666); max-width: 65ch;
+  }
+</style>

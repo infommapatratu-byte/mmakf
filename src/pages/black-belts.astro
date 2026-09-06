@@ -1,0 +1,338 @@
+---
+// /black-belts — THE PUBLIC BLACK BELT REGISTER.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THIS IS NOT A LIST SOMEBODY TYPED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Every row is derived from an ACTIVE Dan rank record held by an ACTIVE person.
+// Nothing on this page can be added by editing a template, and nothing can be
+// added by an administrator typing a name: a rank record comes from
+// `awardRank()` or `recordLegacyGrade()`, both of which write an audit row and
+// both of which are gated on `rank:award`.
+//
+// The chain the federation asked for is therefore real end to end:
+//
+//   grading registration → examination → examiner → scores → decision →
+//   result → approval → certificate → credential → verification → this page
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// TWO PROVENANCES, NEVER MERGED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// EXAMINED           traced to a grading event with examiner scores behind it.
+// LEGACY RECORD      a real grade predating digital records. The federation
+//                    holds evidence; no examination record exists here.
+//
+// /verify already refuses to render those two identically, and a register that
+// did would undo that page one row at a time. They get different wording and
+// different colour here for the same reason.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// A REVOKED GRADE IS ABSENT, NOT SHOWN AS REVOKED — AND THE PAGE SAYS SO
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `blackBeltRegister()` filters on `status = 'active'`, so a revoked or
+// suspended grade drops out of this list as a consequence of the revocation
+// rather than as a second act somebody has to remember.
+//
+// It is NOT re-published as "revoked". A browsable list of people whose black
+// belts MMAKF has withdrawn is a publication decision with real consequences for
+// real people, and MMAKF has published no policy on it. /verify answers the
+// specific question — presenting a revoked certificate number there reports
+// REVOKED with the reason — because somebody holding a certificate and asking
+// about it is a different thing from a public register of the disgraced.
+//
+// The standing notice below states that, so a visitor cannot read absence as
+// proof that no such grade was ever awarded.
+
+export const prerender = false;
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import { isConfigured, db } from '@/db';
+import { blackBeltRegister, blackBeltFacets, type BlackBeltEntry } from '@/db/grading';
+
+const configured = isConfigured();
+const url = Astro.url;
+
+/** Parsed defensively: an unparseable filter is IGNORED, never applied as 0. */
+function intParam(name: string): number | undefined {
+  const raw = url.searchParams.get(name);
+  if (raw == null || raw.trim() === '') return undefined;
+  const n = Number(raw);
+  // `Number('')` is 0 and passes Number.isInteger — the exact defect an
+  // adversarial review found on the registration location step, where an empty
+  // district became `within = 0` and silently dropped the applicant's state.
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+const q = (url.searchParams.get('q') || '').slice(0, 60).trim();
+const dan = intParam('dan');
+const stateUnitId = intParam('state');
+const year = intParam('year');
+const provenanceRaw = url.searchParams.get('provenance');
+const provenance = provenanceRaw === 'examined' || provenanceRaw === 'unverified_legacy'
+  ? provenanceRaw : undefined;
+
+const LIMIT = 500;
+
+let entries: BlackBeltEntry[] = [];
+let facets: { dans: number[]; years: string[]; states: { id: number; name: string }[]; total: number } =
+  { dans: [], years: [], states: [], total: 0 };
+let failed = false;
+
+if (configured) {
+  try {
+    [entries, facets] = await Promise.all([
+      blackBeltRegister(db(), { q: q || undefined, dan, stateUnitId, year, provenance, limit: LIMIT }),
+      blackBeltFacets(db()),
+    ]);
+  } catch {
+    failed = true;
+  }
+}
+
+const filtered = Boolean(q || dan || stateUnitId || year || provenance);
+const capped = entries.length >= LIMIT;
+---
+
+<Base
+  title="Black Belt register — MMAKF"
+  description="The Modern Martial Arts Karate-Do Federation of India's register of Dan grades, derived from the federation's own examination and credential records. Search by name, Dan, state or year."
+>
+  <PageHero
+    eyebrow="Credentials"
+    title="Black Belt <em>register</em>"
+    lead="Every Dan grade MMAKF holds an active record for. This register is derived from the federation's examination and credential records — it is not a list anybody types."
+  />
+
+  <section class="container bb-wrap">
+    <form class="bb-filters" method="get" action="/black-belts">
+      <div class="bb-f">
+        <label class="input-label" for="bb-q">Name</label>
+        <input class="input" id="bb-q" name="q" type="search" maxlength="60" value={q} autocomplete="off" />
+      </div>
+
+      <div class="bb-f">
+        <label class="input-label" for="bb-dan">Dan</label>
+        <select class="input" id="bb-dan" name="dan">
+          <option value="">Any</option>
+          {facets.dans.map((d) => (
+            <option value={String(d)} selected={dan === d}>{d}{d === 1 ? 'st' : d === 2 ? 'nd' : d === 3 ? 'rd' : 'th'} Dan</option>
+          ))}
+        </select>
+      </div>
+
+      {facets.states.length > 0 && (
+        <div class="bb-f">
+          <label class="input-label" for="bb-state">State</label>
+          <select class="input" id="bb-state" name="state">
+            <option value="">Any</option>
+            {facets.states.map((st) => (
+              <option value={String(st.id)} selected={stateUnitId === st.id}>{st.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {facets.years.length > 0 && (
+        <div class="bb-f">
+          <label class="input-label" for="bb-year">Year awarded</label>
+          <select class="input" id="bb-year" name="year">
+            <option value="">Any</option>
+            {facets.years.map((y) => (
+              <option value={y} selected={year === Number(y)}>{y}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div class="bb-f">
+        <label class="input-label" for="bb-prov">Record</label>
+        <select class="input" id="bb-prov" name="provenance">
+          <option value="">Any</option>
+          <option value="examined" selected={provenance === 'examined'}>Traced to an examination</option>
+          <option value="unverified_legacy" selected={provenance === 'unverified_legacy'}>Legacy record</option>
+        </select>
+      </div>
+
+      <div class="bb-f bb-f-go">
+        {/* Works with scripting off: it is a GET form and the filters are the
+            query string, so every filtered view is a shareable URL. */}
+        <button class="btn" type="submit">Search</button>
+        {filtered && <a class="bb-clear" href="/black-belts">Clear</a>}
+      </div>
+    </form>
+
+    {!configured ? (
+      <p class="bb-note">
+        The federation register is not configured on this deployment, so no grade
+        can be read. This is a statement about this server, not about MMAKF's
+        records.
+      </p>
+    ) : failed ? (
+      <p class="bb-note bb-bad">
+        The register could not be read just now. Nothing here should be taken to
+        mean a grade does not exist — please try again shortly, or
+        <a href="/verify"> verify a specific certificate</a>.
+      </p>
+    ) : entries.length === 0 ? (
+      <EmptyState
+        title={filtered
+          ? 'No Dan grade in the register matches those filters.'
+          : 'The federation holds no active Dan grade in the register yet.'}
+        body={filtered
+          ? 'Absence here is not a statement that a grade was never awarded — a withdrawn grade is not listed. To check a specific certificate, use the verification service.'
+          : 'Entries appear as gradings are recorded and legacy grades are entered. To check a specific certificate now, use the verification service.'}
+        action={{ label: 'Verify a credential', href: '/verify' }}
+        secondary={filtered ? { label: 'Clear the filters', href: '/black-belts' } : { label: 'Grades and belts', href: '/belt-system' }}
+      />
+    ) : (
+      <>
+        <p class="bb-count">
+          {entries.length} {entries.length === 1 ? 'entry' : 'entries'}
+          {filtered && ' matching those filters'}
+          {capped && ` (the first ${LIMIT} — narrow the search to see more)`}
+        </p>
+
+        <div class="bb-scroll">
+          <table class="bb-table">
+            <caption class="sr-only">Black Belt register, sorted by Dan grade then date awarded</caption>
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Grade</th>
+                <th scope="col">Awarded</th>
+                <th scope="col">Club</th>
+                <th scope="col">Where</th>
+                <th scope="col">Record</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => (
+                <tr>
+                  <th scope="row" class="bb-name">{e.fullName}</th>
+                  <td>{e.gradeLabel}</td>
+                  <td><time datetime={e.awardedOn}>{e.awardedOn}</time></td>
+                  <td>
+                    {e.dojo
+                      ? (e.dojoSlug ? <a href={`/clubs/${e.dojoSlug}`}>{e.dojo}</a> : e.dojo)
+                      : <span class="bb-unrec">Not recorded</span>}
+                  </td>
+                  <td>{[e.district, e.state].filter(Boolean).join(', ') || e.city || <span class="bb-unrec">Not recorded</span>}</td>
+                  <td>
+                    {e.provenance === 'examined' ? (
+                      <span class="bb-prov bb-prov-ex">Examined</span>
+                    ) : (
+                      <span class="bb-prov bb-prov-lg">Legacy record</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </>
+    )}
+
+    <div class="bb-standing">
+      <h2>How to read this register</h2>
+      <dl>
+        <dt>Examined</dt>
+        <dd>
+          The grade is traced to a grading event in the federation's records, with
+          examiner scores behind it.
+        </dd>
+        <dt>Legacy record</dt>
+        <dd>
+          A real grade awarded before the federation kept digital examination
+          records. MMAKF holds evidence of it; no examination record exists in
+          this system, and it is never presented as though one did.
+        </dd>
+        <dt>A grade that is not listed</dt>
+        <dd>
+          Absence is not proof that a grade was never awarded. A grade the
+          federation has withdrawn or suspended stops appearing here, and this
+          register does not publish a list of withdrawn grades. To ask about a
+          specific certificate — including one that has been revoked, which is
+          reported as revoked with its reason — use <a href="/verify">the
+          verification service</a>.
+        </dd>
+      </dl>
+      <p class="bb-priv">
+        This register shows no contact details, no date of birth and no
+        examination scores. It is a credential register, not a directory of
+        members' personal data.
+      </p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .bb-wrap { padding-block: var(--space-8, 2rem) var(--space-12, 3rem); }
+
+  .bb-filters {
+    display: flex; flex-wrap: wrap; gap: var(--space-4, 1rem);
+    align-items: end;
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface-2, #fafafa);
+    margin-bottom: var(--space-6, 1.5rem);
+  }
+  .bb-f { display: flex; flex-direction: column; gap: 0.25rem; min-width: 8rem; flex: 1 1 8rem; }
+  .bb-f-go { flex-direction: row; align-items: center; gap: 0.75rem; flex: 0 0 auto; }
+  .bb-clear { font-size: 0.85rem; }
+
+  .bb-note {
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+  }
+  .bb-bad { border-color: var(--c-warn-border, #c99); }
+
+  .bb-count { font-size: 0.9rem; color: var(--c-muted, #666); margin-bottom: var(--space-3, 0.75rem); }
+
+  /* Wide content scrolls inside its own box — the page body never scrolls
+     sideways on a phone. */
+  .bb-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .bb-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  .bb-table th, .bb-table td {
+    text-align: left; padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--c-border, #eee);
+    vertical-align: top; white-space: nowrap;
+  }
+  .bb-table thead th {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--c-muted, #666);
+    border-bottom-width: 2px;
+  }
+  .bb-name { font-weight: 600; white-space: normal; }
+  .bb-unrec { color: var(--c-muted, #999); font-style: italic; }
+
+  .bb-prov {
+    display: inline-block; padding: 0.1rem 0.5rem;
+    border-radius: 999px; font-size: 0.75rem;
+    border: 1px solid currentColor;
+  }
+  .bb-prov-ex { color: var(--c-ok, #1b6b3a); }
+  .bb-prov-lg { color: var(--c-muted, #7a6a3a); }
+
+  .bb-standing {
+    margin-top: var(--space-10, 2.5rem);
+    padding-top: var(--space-5, 1.25rem);
+    border-top: 1px solid var(--c-border, #ddd);
+    font-size: 0.92rem;
+  }
+  .bb-standing h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-muted, #666); }
+  .bb-standing dt { font-weight: 600; margin-top: var(--space-3, 0.75rem); }
+  .bb-standing dd { margin: 0.2rem 0 0; color: var(--c-text-2, #444); }
+  .bb-priv { margin-top: var(--space-4, 1rem); color: var(--c-muted, #666); }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+</style>

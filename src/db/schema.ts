@@ -560,3 +560,41 @@ export * from './practice.schema';
 // multi-angle material, and an angle nobody wrote down stays `unknown` rather
 // than being guessed from a thumbnail.
 export * from './media-angles.schema';
+
+// THE OPERATIONAL FEDERATION TEAM — who runs the media desk, the competition
+// office, the credential registry. Kept apart from governance.schema.ts for the
+// reason practice is kept apart from grading: a job is not an office held under
+// the constitution, and putting a content editor into `committees` so that a
+// public page could show them would state something false about a real person's
+// standing. No foreign key joins the two in either direction. Every row hangs
+// off `persons.id` — there is no second name column — and there is nowhere in
+// the file to put a salary, a private number or an HR note.
+//
+// NOT RE-EXPORTED HERE, unlike the modules above, and the reason is mechanical
+// rather than editorial. `export * from` is hoisted: it evaluates the target
+// module BEFORE this file's own body runs. Every module above survives that
+// because the only thing it takes from this file is used lazily, inside a
+// `references(() => …)` callback. `team.schema.ts` needs the `scope_type` enum
+// EAGERLY — `scopeType('scope_type')` is called while the column is being
+// declared — and under the re-export that call lands on an undefined binding
+// with `TypeError: scopeType is not a function`.
+//
+// So it follows the `operations.schema.ts` / `scheduling.schema.ts` precedent
+// instead and is imported directly by its consumers:
+//
+//     import * as team from '@/db/team.schema';
+//
+// The alternative — re-declaring `pgEnum('scope_type', …)` inside
+// team.schema.ts — would put the federation's scope vocabulary in two files,
+// and the day somebody adds a sixth scope to one of them is the day an
+// appointment can be filed at a scope the rest of the system cannot read.
+
+// THE WORKFORCE — employment, leave, time, expenses and recruitment (0058).
+// Also NOT re-exported here, for the same mechanical reason as team.schema.ts
+// above: it uses `scopeType` and `orgLevel` eagerly while declaring columns, and
+// `export * from` would evaluate it before this file's own body has defined
+// them. Import it directly:  import * as w from '@/db/workforce.schema';
+//
+// It reaches `persons` and it does NOT reach `team_appointments`. Employment is
+// private and an appointment is public; a volunteer coordinator is the second
+// and not the first, and a payroll clerk is the first and not the second.

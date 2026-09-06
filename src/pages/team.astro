@@ -1,0 +1,264 @@
+---
+// /team — THE OPERATIONAL FEDERATION TEAM.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS IS NOT /governance AND NOT /people
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// /governance is the constitution: the Executive Committee, the Technical
+// Committee, offices held under the federation's own rules. /people is the
+// technical leadership as an editorial page, driven from the content store.
+//
+// This is the ORGANISATION — the desks that answer the telephone, run the
+// competition calendar, check a credential, chase an unpaid fee. A content
+// editor is not a committee member, and putting them on /governance to get them
+// a public profile would state something false about their standing.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// EVERY NAME ON THIS PAGE CAME FROM A DECISION SOMEBODY TOOK AND SIGNED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// There is no seed file behind this page and no hard-coded array. It renders
+// `publicTeam()` — appointments that are ACTIVE and were PUBLISHED by a holder
+// of `team:publish`, in a query that takes no principal and cannot be widened,
+// because it accepts no parameter that would widen it.
+//
+// A draft, a suspended officer and somebody who has left cannot appear here.
+// That is guaranteed twice: by the WHERE clause, and by a CHECK constraint in
+// migration 0056 that refuses to mark anything but an active appointment
+// published — so even a direct UPDATE against the database cannot put a former
+// Finance Officer back on this page.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IS DELIBERATELY NOT HERE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// No private telephone, no private email, no date of birth, no address, no
+// employment data — not because this page filters them out, but because
+// `publicTeam()` selects a fixed column list that does not contain them and
+// `team_appointments` has no column for them to sit in. A test asserts both.
+//
+// `contact` is an OFFICE ROUTE the federation published on purpose.
+
+export const prerender = false;
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import { isConfigured, db } from '@/db';
+import { publicTeam, type PublicTeamMember, type OrgLevel } from '@/db/team';
+
+const configured = isConfigured();
+
+let team: PublicTeamMember[] = [];
+let failed = false;
+
+if (configured) {
+  try {
+    team = await publicTeam(db());
+  } catch {
+    // A read failure is NOT an empty register, and the two must never render
+    // the same. An empty page saying "MMAKF has published no team" when the
+    // database was merely unreachable is the federation making a false
+    // statement about itself.
+    failed = true;
+  }
+}
+
+/**
+ * The order the federation is read in. Not alphabetical: a visitor looking for
+ * "who do I write to about a grading" is helped by seeing directorates before
+ * volunteers, and `org_level` exists precisely so this ordering needs no
+ * English parsing.
+ */
+const LEVEL_ORDER: OrgLevel[] = [
+  'executive', 'director', 'head', 'manager',
+  'officer', 'coordinator', 'staff', 'volunteer',
+];
+
+const LEVEL_LABEL: Record<OrgLevel, string> = {
+  executive: 'Executive leadership',
+  director: 'Directorate',
+  head: 'Department heads',
+  manager: 'Management',
+  officer: 'Officers',
+  coordinator: 'Coordinators',
+  staff: 'Office and operations',
+  volunteer: 'Volunteers',
+};
+
+/** Group by level, dropping levels nobody holds rather than printing an empty heading. */
+const groups = LEVEL_ORDER
+  .map((level) => ({ level, label: LEVEL_LABEL[level], members: team.filter((m) => m.orgLevel === level) }))
+  .filter((g) => g.members.length > 0);
+
+const departments = [...new Set(team.map((m) => m.department).filter(Boolean))] as string[];
+
+function initials(name: string) {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? '').join('');
+}
+---
+
+<Base
+  title="Federation team — MMAKF"
+  description="The operational team of the Modern Martial Arts Karate-Do Federation of India: the departments, officers and coordinators who run the federation day to day."
+>
+  <PageHero
+    eyebrow="The federation"
+    title="Federation <em>team</em>"
+    lead="The people who run MMAKF day to day — the departments, the officers and the regional coordinators. Governance is a separate register: the committees that direct the federation are published under Governance."
+    pills={departments.slice(0, 6)}
+  />
+
+  <section class="container t-wrap">
+    <nav class="t-cross" aria-label="Related registers">
+      <a href="/governance">Governance and committees →</a>
+      <a href="/people">Technical leadership →</a>
+      <a href="/officials">Competition officials →</a>
+    </nav>
+
+    {!configured ? (
+      <p class="t-note">
+        The federation register is not configured on this deployment, so the team
+        cannot be read. This is a statement about this server, not about MMAKF.
+      </p>
+    ) : failed ? (
+      <p class="t-note t-note-bad">
+        The federation register could not be read just now. Nothing here should be
+        taken as a statement that MMAKF has no team — please try again shortly.
+      </p>
+    ) : team.length === 0 ? (
+      <EmptyState
+        title="MMAKF has not yet published its operational team."
+        body="Profiles appear here once the federation office publishes them. The committees that govern the federation are already published under Governance."
+        action={{ label: 'Governance and committees', href: '/governance' }}
+        secondary={{ label: 'Contact the federation', href: '/contact' }}
+      />
+    ) : (
+      groups.map((g) => (
+        <section class="t-group">
+          <h2 class="t-group-h">{g.label}</h2>
+          <ul class="t-grid">
+            {g.members.map((m) => (
+              <li class="t-card">
+                <div class="t-face" aria-hidden="true">
+                  {m.photoUrl
+                    ? <img src={m.photoUrl} alt="" loading="lazy" width="64" height="64" />
+                    : <span class="t-mono">{initials(m.fullName)}</span>}
+                </div>
+                <div class="t-body">
+                  <h3 class="t-name">{m.fullName}</h3>
+                  <p class="t-title">{m.title}</p>
+                  {m.department && <p class="t-dept">{m.department}</p>}
+                  {m.scopeLabel && <p class="t-scope">{m.scopeLabel}</p>}
+                  {m.responsibility && <p class="t-resp">{m.responsibility}</p>}
+                  {m.bio && <p class="t-bio">{m.bio}</p>}
+                  {m.contact && (
+                    <p class="t-contact">
+                      <span class="t-contact-k">Office route</span> {m.contact}
+                    </p>
+                  )}
+                  {m.links.length > 0 && (
+                    <ul class="t-links">
+                      {m.links.map((l) => (
+                        <li>
+                          {/* rel on every outbound link: these URLs were typed by an
+                              administrator, and the federation is not vouching for
+                              what sits at the other end. */}
+                          <a href={l.url} rel="noopener noreferrer nofollow" target="_blank">{l.label}</a>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))
+    )}
+
+    <p class="t-foot">
+      Every profile on this page rests on a published appointment recorded in the
+      federation's own register. A rank or a title shown elsewhere on this site can
+      be checked independently — <a href="/verify">verify a credential</a>.
+    </p>
+  </section>
+</Base>
+
+<style>
+  .t-wrap { padding-block: var(--space-8, 2rem) var(--space-12, 3rem); }
+
+  .t-cross {
+    display: flex; flex-wrap: wrap; gap: var(--space-4, 1rem);
+    margin-bottom: var(--space-8, 2rem);
+    font-size: 0.9rem;
+  }
+  .t-cross a { color: var(--c-accent, #b8860b); text-decoration: none; }
+  .t-cross a:hover, .t-cross a:focus-visible { text-decoration: underline; }
+
+  .t-note {
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface-2, #fafafa);
+  }
+  .t-note-bad { border-color: var(--c-warn-border, #c99); }
+
+  .t-group { margin-bottom: var(--space-10, 2.5rem); }
+  .t-group-h {
+    font-size: 1rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--c-muted, #666);
+    border-bottom: 1px solid var(--c-border, #ddd);
+    padding-bottom: var(--space-2, 0.5rem);
+    margin-bottom: var(--space-5, 1.25rem);
+  }
+
+  .t-grid {
+    list-style: none; margin: 0; padding: 0;
+    display: grid; gap: var(--space-5, 1.25rem);
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
+  }
+
+  .t-card {
+    display: flex; gap: var(--space-4, 1rem);
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface, #fff);
+  }
+
+  .t-face {
+    flex: 0 0 auto; width: 64px; height: 64px;
+    border-radius: 50%; overflow: hidden;
+    background: var(--c-surface-2, #f0f0f0);
+    display: grid; place-items: center;
+  }
+  .t-face img { width: 100%; height: 100%; object-fit: cover; }
+  .t-mono { font-weight: 600; color: var(--c-muted, #666); }
+
+  .t-body { min-width: 0; }
+  .t-name { margin: 0; font-size: 1.05rem; }
+  .t-title { margin: 0.15rem 0 0; font-weight: 600; }
+  .t-dept, .t-scope { margin: 0.1rem 0 0; font-size: 0.85rem; color: var(--c-muted, #666); }
+  .t-resp, .t-bio { margin: 0.5rem 0 0; font-size: 0.9rem; }
+  .t-contact { margin: 0.5rem 0 0; font-size: 0.85rem; overflow-wrap: anywhere; }
+  .t-contact-k {
+    display: block; text-transform: uppercase; letter-spacing: 0.06em;
+    font-size: 0.7rem; color: var(--c-muted, #666);
+  }
+
+  .t-links { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.75rem; }
+  .t-links a { font-size: 0.85rem; }
+
+  .t-foot {
+    margin-top: var(--space-10, 2.5rem);
+    padding-top: var(--space-5, 1.25rem);
+    border-top: 1px solid var(--c-border, #ddd);
+    font-size: 0.9rem; color: var(--c-muted, #666);
+  }
+
+  @media (max-width: 30rem) {
+    .t-card { flex-direction: column; }
+  }
+</style>

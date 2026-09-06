@@ -34,14 +34,34 @@
 // three surfaces three different login endpoints, which is exactly the
 // duplication this file exists to avoid.
 
-export type Surface = 'public' | 'learn' | 'admin';
+export type Surface = 'public' | 'learn' | 'admin' | 'employee';
 
-export const SURFACES: readonly Surface[] = ['public', 'learn', 'admin'];
+export const SURFACES: readonly Surface[] = ['public', 'learn', 'admin', 'employee'];
 
 export const SURFACE_ORIGIN: Record<Surface, string> = {
   public: 'https://www.mmakf.in',
   learn: 'https://learn.mmakf.in',
   admin: 'https://admin.mmakf.in',
+  /**
+   * THE WORKFORCE SURFACE, AND WHY IT IS NOT PART OF admin.
+   *
+   * admin.mmakf.in is where the federation is RUN — the register, the queues,
+   * the money, the credentials. employee.mmakf.in is where somebody who works
+   * for MMAKF does their OWN administration: their leave, their timesheet,
+   * their expenses, their team's approvals.
+   *
+   * They are separate because the populations barely overlap. A payroll clerk
+   * and a media officer need this surface and hold no federation authority at
+   * all; a state administrator holds a great deal of federation authority and
+   * may not be employed by MMAKF in any capacity. Serving both from
+   * admin.mmakf.in would mean an employee needs an admin login to book a day
+   * off, which is how `hr:read` ends up granted to people who only wanted to
+   * see their holiday balance.
+   *
+   * PART X is the other half of the reason: HR data must not reach ordinary
+   * administrators, and the cleanest expression of that is a different door.
+   */
+  employee: 'https://employee.mmakf.in',
 };
 
 /** The path prefix each surface's routes live under inside src/pages. */
@@ -49,6 +69,7 @@ export const SURFACE_PREFIX: Record<Surface, string> = {
   public: '',
   learn: '/learn',
   admin: '/admin',
+  employee: '/employee',
 };
 
 /**
@@ -73,10 +94,13 @@ export const SURFACE_PREFIX: Record<Surface, string> = {
 const SURFACE_HOSTS: Record<string, Surface> = {
   'learn.mmakf.in': 'learn',
   'admin.mmakf.in': 'admin',
+  'employee.mmakf.in': 'employee',
   'learn.localhost': 'learn',
   'admin.localhost': 'admin',
+  'employee.localhost': 'employee',
   'learn.127.0.0.1.nip.io': 'learn',
   'admin.127.0.0.1.nip.io': 'admin',
+  'employee.127.0.0.1.nip.io': 'employee',
 };
 
 /**
@@ -148,6 +172,7 @@ export function href(surface: Surface, internalPath: string): string {
 export function surfaceOfPath(internalPath: string): Surface {
   if (internalPath === '/learn' || internalPath.startsWith('/learn/')) return 'learn';
   if (internalPath === '/admin' || internalPath.startsWith('/admin/')) return 'admin';
+  if (internalPath === '/employee' || internalPath.startsWith('/employee/')) return 'employee';
   return 'public';
 }
 
@@ -214,7 +239,12 @@ export function canonicalFor(surface: Surface, internalPath: string): string {
  * admin is not, and never will be.
  */
 export function isIndexable(surface: Surface): boolean {
-  return surface !== 'admin';
+  // `employee` joins `admin` here and will never leave it. Everything behind it
+  // is somebody's leave, their timesheet, their expenses and their team — and
+  // the careers pages, which ARE meant to be found, live on the PUBLIC surface
+  // at /careers precisely so that this one can stay closed without costing the
+  // federation the one thing it wants crawled.
+  return surface !== 'admin' && surface !== 'employee';
 }
 
 export interface NavItem {
@@ -223,6 +253,13 @@ export interface NavItem {
   label: string;
   /** Shown in the primary bar; the rest live in the fuller menu. */
   primary?: boolean;
+  /**
+   * A sentence describing what is behind the link. Declared at this level as
+   * well as on `children` because EMPLOYEE_NAV is flat — its entries are the
+   * top level, and a surface whose links carry no explanation is one a new
+   * employee has to click through to understand.
+   */
+  note?: string;
   children?: Array<{ href: string; label: string; note?: string }>;
 }
 
@@ -247,6 +284,19 @@ export const PUBLIC_NAV: NavItem[] = [
       { href: '/about', label: 'About MMAKF' },
       { href: '/governance', label: 'Governance' },
       { href: '/people', label: 'People' },
+      // THREE REGISTERS OF PEOPLE, AND THEY ARE NOT THE SAME REGISTER.
+      // /governance is the constitution — committees and the offices held under
+      // it. /people is the technical leadership as an editorial page. /team is
+      // the OPERATION: the desks that answer the telephone. A content editor is
+      // not a committee member, and listing them under Governance to give them a
+      // public profile would state something false about their standing.
+      { href: '/team', label: 'Federation team', note: 'The departments and officers who run MMAKF day to day' },
+      // Deliberately on the PUBLIC surface and not behind employee.mmakf.in.
+      // A vacancy is an advertisement — the one part of the workforce system
+      // that exists to be found by people who do not yet work for MMAKF, and
+      // the reason isIndexable() can keep the employee surface closed without
+      // costing the federation anything it wanted crawled.
+      { href: '/careers', label: 'Careers', note: 'Working for the federation, and posts currently advertised' },
       { href: '/network', label: 'Network' },
       { href: '/documents', label: 'Documents' },
     ],
@@ -308,6 +358,13 @@ export const PUBLIC_NAV: NavItem[] = [
       { href: '/karate-for-corporates', label: 'For corporates' },
       { href: '/karate-for-universities', label: 'For universities' },
       { href: '/training/individual', label: 'For individuals' },
+      // WHO teaches, as against WHAT is taught and WHERE. Under Training rather
+      // than Federation because a visitor looking for an instructor is choosing
+      // training, not reading about the organisation — /team is the office and
+      // this is the mat. Every rank it shows as an MMAKF credential is read from
+      // the examination register, never from what an instructor typed about
+      // themselves, and the page states which is which.
+      { href: '/teachers', label: 'Teaching faculty', note: 'Instructors who teach through MMAKF, with their verified grades' },
       { href: '/academy', label: 'Education and courses' },
     ],
   },
@@ -330,6 +387,13 @@ export const PUBLIC_NAV: NavItem[] = [
     href: '/verify', label: 'Verify', primary: true,
     children: [
       { href: '/verify', label: 'Verify a credential' },
+      // The register and the lookup answer DIFFERENT questions and are listed
+      // as two entries rather than one. /verify answers "is this certificate
+      // real?" for somebody holding one — and reports a REVOKED credential as
+      // revoked. /black-belts answers "who holds a Dan grade?" and lists only
+      // active ones. Neither is a substitute for the other, and the register
+      // says so in a standing note so that absence is not read as proof.
+      { href: '/black-belts', label: 'Black Belt register', note: 'Every active Dan grade, derived from the federation’s own records' },
       { href: '/press', label: 'Media and press' },
       { href: '/contact', label: 'Support' },
     ],
@@ -358,6 +422,39 @@ export const LEARN_NAV: NavItem[] = [
   { href: '/learn/communities', label: 'Communities', primary: true },
   { href: '/learn/individuals', label: 'Individuals', primary: true },
   { href: '/learn/coaches', label: 'Coaches', primary: true },
+];
+
+/**
+ * THE WORKFORCE SURFACE — employee.mmakf.in.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THERE IS NO `action` ON THESE ENTRIES, UNLIKE ADMIN_GROUPS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Every page here is SELF-SERVICE. What gates them is not an RBAC action but
+ * whether the caller has a live employment at all — which is a fact about a row
+ * in `employments`, not about a role grant.
+ *
+ * That distinction is the whole reason this surface exists. Line management
+ * changes weekly; minting a `MANAGER` role would mean a role grant every time
+ * somebody's reporting line moved, and a stale grant is somebody still
+ * approving their old team's leave. `src/db/workforce.ts` resolves the caller's
+ * own employment from `users.personId` and reads `managerPersonId` off the row.
+ *
+ * The two pages that ARE action-gated say so in their own frontmatter: the HR
+ * register and the hiring console live on the ADMIN surface behind `hr:read`
+ * and `hiring:read`, because those read other people's records.
+ *
+ * `note` on each entry is what the page will actually show somebody who has no
+ * employment — the surface must not be a wall of dead links for a federation
+ * officer who happens not to be an employee.
+ */
+export const EMPLOYEE_NAV: NavItem[] = [
+  { href: '/employee', label: 'My work', primary: true },
+  { href: '/employee/leave', label: 'Leave', primary: true, note: 'Request time off and see your balance' },
+  { href: '/employee/timesheet', label: 'Timesheet', primary: true, note: 'Record and submit your working time' },
+  { href: '/employee/expenses', label: 'Expenses', primary: true, note: 'Claim what you spent on federation business' },
+  { href: '/employee/team', label: 'My team', primary: true, note: 'Approvals waiting on you' },
 ];
 
 export const LEARN_ACTIONS = [
@@ -464,6 +561,23 @@ export const ADMIN_GROUPS: AdminGroup[] = [
     modules: [
       { href: '/admin/coaches', label: 'Coaches', action: 'coach:read' },
       { href: '/admin/membership', label: 'Members', action: 'membership:read' },
+      // The establishment — who holds which post in the federation office.
+      // Gated on 'team:read' and not on 'person:read': this is a register of
+      // JOBS, and the authority to see the org chart is not the authority to
+      // read a member's record. The screen's own publish control is gated
+      // separately again, on 'team:publish'.
+      { href: '/admin/team', label: 'Federation team', action: 'team:read' },
+      // THE WORKFORCE. Gated on `hr:read` and `hiring:read`, neither of which is
+      // in NATIONAL_FULL — so these two entries are invisible to a
+      // FEDERATION_ADMIN, which is PART X working as designed rather than a
+      // navigation oversight. Until migration 0058 those actions guarded no
+      // table at all.
+      //
+      // Recruitment is separate from HR deliberately: a hiring manager reads a
+      // vacancy and sits on a panel, and must not thereby be able to read the
+      // leave history and exit reason of everybody already employed.
+      { href: '/admin/hr', label: 'Human resources', action: 'hr:read', note: 'Establishment, employment, leave policy' },
+      { href: '/admin/hiring', label: 'Recruitment', action: 'hiring:read', note: 'Vacancies, applicants and offers' },
       { href: '/admin/onboarding', label: 'Role applications', action: 'role:grant' },
       // Two records that may be one person. Gated on its own action rather than
       // on 'person:write': every dojo administrator holds that so they can

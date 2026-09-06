@@ -1,0 +1,345 @@
+---
+// employee.mmakf.in/expenses — claim what you spent on federation business.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE TOTAL IS NEVER POSTED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The form sends a line — a date, a category, a description, an amount — and
+// `addClaimLine()` re-totals the claim from its own lines. A claim whose total
+// disagrees with the sum of its lines is not a state this code can reach,
+// because the client never gets to name a total.
+//
+// Amounts are INTEGER PAISE end to end, like every other money column in this
+// repository. The form asks for rupees because that is what somebody has on a
+// receipt; the conversion happens once, here, and is rounded rather than
+// truncated.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// APPROVING IS NOT PAYING, AND THE PAGE SAYS SO
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A manager approves; finance records the payment under `finance:write`. There
+// is deliberately NO payment-gateway path for an employee expense — the
+// federation pays it through its own banking, and wiring a gateway to it would
+// be the fake automation §35 forbids.
+
+export const prerender = false;
+
+import EmployeeShell from '@/components/EmployeeShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  myEmployment, myClaims, createClaim, addClaimLine, submitClaim,
+  EXPENSE_CATEGORIES, isWorkforceError,
+} from '@/db/workforce';
+import * as w from '@/db/workforce.schema';
+import { eq, asc } from 'drizzle-orm';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'employee';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/employee/expenses');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+
+const DONE: Record<string, string> = {
+  created: 'Claim started. Add what you spent, then submit it.',
+  line: 'Added.',
+  submitted: 'Submitted. Your manager sees it in their approvals.',
+};
+
+let error: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const act = get('act');
+
+  const rl = await rateLimit(Astro.request, 'employee-expense', 60, 60);
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+    };
+    try {
+      if (act === 'create') {
+        await createClaim(db(), ctx, { title: get('title') });
+        return Astro.redirect(`${SELF}?done=created`, 303);
+      } else if (act === 'line') {
+        const claimId = Number(get('claimId'));
+        const rupees = Number(get('amount'));
+        if (!Number.isInteger(claimId) || claimId <= 0) {
+          Astro.response.status = 400;
+          error = 'Name the claim to add to.';
+        } else if (!Number.isFinite(rupees) || rupees <= 0) {
+          Astro.response.status = 400;
+          error = 'Enter the amount in rupees.';
+        } else {
+          await addClaimLine(db(), ctx, {
+            claimId,
+            spentOn: get('spentOn'),
+            category: get('category'),
+            description: get('description'),
+            // ONE conversion, rounded. Paise are the storage unit everywhere in
+            // this codebase; a float rupee amount never reaches the database.
+            amountMinor: Math.round(rupees * 100),
+            receiptRef: get('receiptRef') || null,
+          });
+          return Astro.redirect(`${SELF}?done=line`, 303);
+        }
+      } else if (act === 'submit') {
+        const claimId = Number(get('claimId'));
+        if (!Number.isInteger(claimId) || claimId <= 0) {
+          Astro.response.status = 400;
+          error = 'Name the claim to submit.';
+        } else {
+          await submitClaim(db(), ctx, claimId);
+          return Astro.redirect(`${SELF}?done=submitted`, 303);
+        }
+      } else {
+        Astro.response.status = 400;
+        error = 'Unknown action.';
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = 'That claim is not yours.';
+      } else if (isWorkforceError(err)) {
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[employee/expenses] failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was changed.';
+      }
+    }
+  }
+}
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE[done] ? DONE[done] : null;
+
+let employment: any = null;
+let claims: any[] = [];
+let linesByClaim = new Map<number, any[]>();
+
+if (configured && identity) {
+  try {
+    employment = await myEmployment(db(), identity.principal);
+    if (employment) {
+      claims = await myClaims(db(), identity.principal);
+      // Lines for the drafts only — a submitted claim's detail is the manager's
+      // to look at, and this page is the claimant's working area.
+      const drafts = claims.filter((c: any) => c.status === 'draft').map((c: any) => c.id);
+      for (const id of drafts) {
+        const rows = await db().select().from(w.expenseClaimLines)
+          .where(eq(w.expenseClaimLines.claimId, id))
+          .orderBy(asc(w.expenseClaimLines.spentOn));
+        linesByClaim.set(id, rows);
+      }
+    }
+  } catch (err) {
+    console.error('[employee/expenses] read failed', err);
+  }
+}
+
+const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Kolkata' }).format(new Date());
+const money = (minor: number) =>
+  `₹${(minor / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const drafts = claims.filter((c: any) => c.status === 'draft');
+const rest = claims.filter((c: any) => c.status !== 'draft');
+---
+
+<EmployeeShell
+  title="Expenses"
+  intro="Claim what you spent on federation business. Your manager approves it; finance pays it."
+>
+  {employment && (
+    <>
+      {doneMessage && <p class="ok" role="status">{doneMessage}</p>}
+      {error && <p class="bad" role="alert">{error}</p>}
+
+      <section class="x-sec">
+        <h2>Start a claim</h2>
+        <form method="post" action={SELF} class="x-inline">
+          <input type="hidden" name="act" value="create" />
+          <input class="input" name="title" placeholder="What it was for — e.g. Nationals travel" maxlength="160" required />
+          <button class="btn btn-primary" type="submit">Start</button>
+        </form>
+      </section>
+
+      {drafts.map((c: any) => (
+        <section class="x-sec x-draft">
+          <h2>{c.title} <span class="x-ref">{c.reference}</span></h2>
+
+          {(linesByClaim.get(c.id) ?? []).length === 0 ? (
+            <p class="x-empty">Nothing added yet.</p>
+          ) : (
+            <table class="x-table">
+              <thead>
+                <tr><th scope="col">Date</th><th scope="col">Category</th><th scope="col">Description</th><th scope="col">Amount</th></tr>
+              </thead>
+              <tbody>
+                {(linesByClaim.get(c.id) ?? []).map((l: any) => (
+                  <tr>
+                    <td>{l.spentOn}</td>
+                    <td>{l.category}</td>
+                    <td>{l.description}</td>
+                    <td class="x-amt">{money(l.amountMinor)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr><td colspan="3">Total</td><td class="x-amt"><strong>{money(c.totalMinor)}</strong></td></tr>
+              </tfoot>
+            </table>
+          )}
+
+          <form method="post" action={SELF} class="x-line">
+            <input type="hidden" name="act" value="line" />
+            <input type="hidden" name="claimId" value={String(c.id)} />
+            <div class="x-f">
+              <label class="input-label" for={`sp-${c.id}`}>Date</label>
+              <input class="input" id={`sp-${c.id}`} name="spentOn" type="date" required max={today} />
+            </div>
+            <div class="x-f">
+              <label class="input-label" for={`cat-${c.id}`}>Category</label>
+              <select class="input" id={`cat-${c.id}`} name="category" required>
+                {EXPENSE_CATEGORIES.map((k) => <option value={k}>{k}</option>)}
+              </select>
+            </div>
+            <div class="x-f x-f-grow">
+              <label class="input-label" for={`d-${c.id}`}>Description</label>
+              <input class="input" id={`d-${c.id}`} name="description" maxlength="200" required />
+            </div>
+            <div class="x-f">
+              <label class="input-label" for={`a-${c.id}`}>Amount (₹)</label>
+              <input class="input" id={`a-${c.id}`} name="amount" type="number" step="0.01" min="0.01" required />
+            </div>
+            <div class="x-f">
+              <label class="input-label" for={`r-${c.id}`}>Receipt reference</label>
+              <input class="input" id={`r-${c.id}`} name="receiptRef" maxlength="120" />
+            </div>
+            <div class="x-f x-f-go"><button class="btn" type="submit">Add</button></div>
+          </form>
+
+          <form method="post" action={SELF} class="x-submit">
+            <input type="hidden" name="act" value="submit" />
+            <input type="hidden" name="claimId" value={String(c.id)} />
+            <button class="btn btn-primary" type="submit">Submit for approval</button>
+            <span class="x-hint">
+              A claim with no lines cannot be submitted, and a submitted claim
+              cannot be edited.
+            </span>
+          </form>
+        </section>
+      ))}
+
+      <section class="x-sec">
+        <h2>Your claims</h2>
+        {rest.length === 0 ? (
+          <p class="x-empty">You have no submitted claims.</p>
+        ) : (
+          <div class="x-scroll">
+            <table class="x-table">
+              <thead>
+                <tr>
+                  <th scope="col">Reference</th><th scope="col">What for</th>
+                  <th scope="col">Total</th><th scope="col">Status</th><th scope="col">Paid</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rest.map((c: any) => (
+                  <tr>
+                    <td class="x-ref">{c.reference}</td>
+                    <td>{c.title}</td>
+                    <td class="x-amt">{money(c.totalMinor)}</td>
+                    <td>
+                      <span class={`x-st x-st-${c.status}`}>{c.status}</span>
+                      {c.decisionNote && <div class="x-note">{c.decisionNote}</div>}
+                    </td>
+                    <td>{c.paidOn ?? <span class="x-unset">—</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p class="x-foot">
+          Approval is your manager's decision. <strong>It does not pay the
+          claim</strong> — finance records the payment separately, and the Paid
+          column is what tells you it has happened.
+        </p>
+      </section>
+    </>
+  )}
+</EmployeeShell>
+
+<style>
+  .ok, .bad {
+    padding: 0.7rem 1rem; border-radius: var(--radius, 6px);
+    border: 1px solid var(--c-border, #ddd); margin-bottom: 1rem; max-width: 70ch;
+  }
+  .bad { border-color: var(--c-bad-border, #c66); }
+
+  .x-sec { margin-bottom: var(--space-8, 2rem); }
+  .x-sec h2 {
+    font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--c-muted, #666);
+    border-bottom: 1px solid var(--c-border, #ddd);
+    padding-bottom: 0.4rem; margin-bottom: 0.8rem;
+  }
+  .x-draft {
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd); border-radius: var(--radius, 6px);
+    background: var(--c-surface-2, #fafafa);
+  }
+  .x-ref { font-family: ui-monospace, monospace; font-size: 0.75rem; color: var(--c-muted, #888); }
+  .x-empty { color: var(--c-muted, #666); }
+
+  .x-inline { display: flex; gap: 0.6rem; flex-wrap: wrap; max-width: 40rem; }
+  .x-inline .input { flex: 1 1 18rem; }
+
+  .x-line {
+    display: grid; gap: 0.7rem; margin-top: 0.8rem;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+    align-items: end;
+  }
+  .x-f { display: flex; flex-direction: column; gap: 0.25rem; }
+  .x-f-grow { grid-column: span 2; }
+  .x-submit { margin-top: 0.9rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+  .x-hint { font-size: 0.8rem; color: var(--c-muted, #666); }
+
+  .x-scroll { overflow-x: auto; }
+  .x-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 0.5rem; }
+  .x-table th, .x-table td {
+    text-align: left; padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--c-border, #eee); vertical-align: top;
+  }
+  .x-table thead th {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-muted, #666);
+  }
+  .x-amt { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .x-st { text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.05em; }
+  .x-st-approved, .x-st-paid { color: var(--c-ok, #1b6b3a); font-weight: 600; }
+  .x-st-rejected { color: var(--c-bad, #a33); }
+  .x-note { font-size: 0.8rem; color: var(--c-muted, #666); margin-top: 0.2rem; }
+  .x-unset { color: var(--c-muted, #999); }
+  .x-foot { margin-top: 0.8rem; font-size: 0.85rem; color: var(--c-muted, #666); max-width: 65ch; }
+</style>

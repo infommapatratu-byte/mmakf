@@ -16,7 +16,19 @@ import crypto from 'node:crypto';
 
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32: no I, L, O, U
 
-export function reference(type: 'E' | 'R' | 'ORD' | 'GRD'): string {
+/**
+ * `JOB`, `OFR`, `LV`, `EXP` and `VAC` were added with the workforce (0058).
+ *
+ * A job application's reference is quoted back by a candidate who has no login,
+ * so it is the only handle on their own application — which is precisely why it
+ * must stay CSPRNG-derived rather than sequential. A sequential candidate
+ * reference would let anybody who applied enumerate every other applicant's
+ * reference by subtracting one, and an application carries a name, an email, a
+ * CV and eventually a panel's opinion.
+ */
+export function reference(
+  type: 'E' | 'R' | 'ORD' | 'GRD' | 'JOB' | 'OFR' | 'LV' | 'EXP' | 'VAC'
+): string {
   const bytes = crypto.randomBytes(8);
   let out = '';
   for (let i = 0; i < 8; i++) out += ALPHABET[bytes[i] % ALPHABET.length];

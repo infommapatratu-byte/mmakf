@@ -1,0 +1,312 @@
+---
+// employee.mmakf.in/team — what is waiting on this manager, and who reports to
+// them.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE QUEUE IS DERIVED, NOT REQUESTED
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `leaveQueue()` and `claimQueue()` take a `Principal` and no filter. They
+// resolve the caller's own person id and return only requests whose
+// `employments.managerPersonId` is them — or, for an HR officer, the whole
+// federation. There is no team id in the URL and none in the form.
+//
+// Both queues also EXCLUDE the caller's own requests, so a manager never sees
+// their own leave sitting in their own approval list. `decideLeave()` would
+// refuse it anyway — nobody decides their own request, and holding `hr:write`
+// does not exempt the person holding it — but offering a control that is
+// guaranteed to fail is a worse experience than not offering it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// A REFUSAL NEEDS A REASON AND THE FORM ENFORCES IT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The module refuses a rejection with no note. The `required` attribute here is
+// the courteous half of that gate; the module's refusal is the half that holds
+// when scripting is off or somebody posts directly.
+
+export const prerender = false;
+
+import EmployeeShell from '@/components/EmployeeShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  myEmployment, myDirectReports, leaveQueue, claimQueue,
+  decideLeave, decideClaim, isWorkforceError,
+} from '@/db/workforce';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'employee';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/employee/team');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+
+const DONE: Record<string, string> = {
+  approved: 'Approved. The person can see the decision on their own leave page.',
+  rejected: 'Refused, with your reason recorded against it.',
+  claim_approved: 'The claim is approved and goes to finance to be paid.',
+  claim_rejected: 'The claim is refused, with your reason recorded against it.',
+};
+
+let error: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const act = get('act');
+  const note = get('note');
+
+  const rl = await rateLimit(Astro.request, 'employee-approve', 60, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many decisions in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: note || null,
+    };
+    const id = Number(get('id'));
+    try {
+      if (!Number.isInteger(id) || id <= 0) {
+        Astro.response.status = 400;
+        error = 'Name the request to decide.';
+      } else if (act === 'leave_approve' || act === 'leave_reject') {
+        await decideLeave(db(), ctx, {
+          requestId: id,
+          decision: act === 'leave_approve' ? 'approved' : 'rejected',
+          note: note || null,
+        });
+        return Astro.redirect(`${SELF}?done=${act === 'leave_approve' ? 'approved' : 'rejected'}`, 303);
+      } else if (act === 'claim_approve' || act === 'claim_reject') {
+        await decideClaim(db(), ctx, {
+          claimId: id,
+          decision: act === 'claim_approve' ? 'approved' : 'rejected',
+          note: note || null,
+        });
+        return Astro.redirect(`${SELF}?done=${act === 'claim_approve' ? 'claim_approved' : 'claim_rejected'}`, 303);
+      } else {
+        Astro.response.status = 400;
+        error = 'Unknown action.';
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = 'That request is not yours to decide. Only the person’s line manager or the HR office can.';
+      } else if (isWorkforceError(err)) {
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[employee/team] decision failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was changed.';
+      }
+    }
+  }
+}
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE[done] ? DONE[done] : null;
+
+let employment: any = null;
+let reports: any[] = [];
+let leaveWaiting: any[] = [];
+let claimsWaiting: any[] = [];
+
+if (configured && identity) {
+  try {
+    employment = await myEmployment(db(), identity.principal);
+    if (employment) {
+      [reports, leaveWaiting, claimsWaiting] = await Promise.all([
+        myDirectReports(db(), identity.principal),
+        leaveQueue(db(), identity.principal),
+        claimQueue(db(), identity.principal),
+      ]);
+    }
+  } catch (err) {
+    console.error('[employee/team] read failed', err);
+  }
+}
+
+const money = (minor: number) =>
+  `₹${(minor / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+---
+
+<EmployeeShell
+  title="My team"
+  intro="Requests waiting on your decision, and the people who report to you."
+>
+  {employment && (
+    <>
+      {doneMessage && <p class="ok" role="status">{doneMessage}</p>}
+      {error && <p class="bad" role="alert">{error}</p>}
+
+      <section class="t-sec">
+        <h2>Leave waiting on you</h2>
+        {leaveWaiting.length === 0 ? (
+          <p class="t-empty">
+            Nothing to decide.
+            {reports.length === 0 && ' Nobody currently reports to you, so this queue stays empty until the HR office records a reporting line.'}
+          </p>
+        ) : (
+          <ul class="t-q">
+            {leaveWaiting.map((r: any) => (
+              <li class="t-item">
+                <div class="t-item-h">
+                  <strong>{r.personName}</strong>
+                  <span class="t-ref">{r.reference}</span>
+                </div>
+                <div class="t-item-b">
+                  {r.typeName} · {r.fromDate} → {r.toDate} · {r.halfDays / 2} days
+                  {r.reason && <div class="t-reason">“{r.reason}”</div>}
+                </div>
+                <div class="t-acts">
+                  <form method="post" action={SELF}>
+                    <input type="hidden" name="act" value="leave_approve" />
+                    <input type="hidden" name="id" value={String(r.id)} />
+                    <button class="btn btn-sm btn-primary" type="submit">Approve</button>
+                  </form>
+                  <form method="post" action={SELF} class="t-reject">
+                    <input type="hidden" name="act" value="leave_reject" />
+                    <input type="hidden" name="id" value={String(r.id)} />
+                    <input class="input input-sm" name="note" placeholder="Reason (required)" maxlength="300" required />
+                    <button class="btn btn-sm" type="submit">Refuse</button>
+                  </form>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section class="t-sec">
+        <h2>Expense claims waiting on you</h2>
+        {claimsWaiting.length === 0 ? (
+          <p class="t-empty">Nothing to decide.</p>
+        ) : (
+          <ul class="t-q">
+            {claimsWaiting.map((c: any) => (
+              <li class="t-item">
+                <div class="t-item-h">
+                  <strong>{c.personName}</strong>
+                  <span class="t-ref">{c.reference}</span>
+                </div>
+                <div class="t-item-b">{c.title} · {money(c.totalMinor)}</div>
+                <div class="t-acts">
+                  <form method="post" action={SELF}>
+                    <input type="hidden" name="act" value="claim_approve" />
+                    <input type="hidden" name="id" value={String(c.id)} />
+                    <button class="btn btn-sm btn-primary" type="submit">Approve</button>
+                  </form>
+                  <form method="post" action={SELF} class="t-reject">
+                    <input type="hidden" name="act" value="claim_reject" />
+                    <input type="hidden" name="id" value={String(c.id)} />
+                    <input class="input input-sm" name="note" placeholder="Reason (required)" maxlength="300" required />
+                    <button class="btn btn-sm" type="submit">Refuse</button>
+                  </form>
+                </div>
+                <p class="t-pay">
+                  {/*
+                    Stated because a manager reasonably assumes approving pays it.
+                    Approval is the manager's act; recording the payment is
+                    finance's, under `finance:write`, and there is no gateway path
+                    for an employee expense — the federation pays it through its
+                    own banking.
+                  */}
+                  Approving does not pay this. Finance records the payment separately.
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section class="t-sec">
+        <h2>Your team</h2>
+        {reports.length === 0 ? (
+          <p class="t-empty">Nobody reports to you.</p>
+        ) : (
+          <ul class="t-list">
+            {reports.map((r: any) => (
+              <li>
+                <span class="t-name">{r.fullName}</span>
+                <span class="t-role">{r.positionTitle ?? 'No position recorded'}</span>
+                <span class="t-tag">{r.status}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p class="t-foot">
+          {/*
+            The manager cannot change their own team here. Reporting lines are
+            the HR office's record — a manager who could reassign their own
+            reports could route an approval to themselves, which is exactly what
+            the four-eyes rule exists to prevent.
+          */}
+          Reporting lines are maintained by the HR office. If somebody is missing
+          or should not be here, ask them to correct it — it is not editable from
+          this surface, deliberately.
+        </p>
+      </section>
+    </>
+  )}
+</EmployeeShell>
+
+<style>
+  .ok, .bad {
+    padding: 0.7rem 1rem; border-radius: var(--radius, 6px);
+    border: 1px solid var(--c-border, #ddd); margin-bottom: 1rem; max-width: 70ch;
+  }
+  .bad { border-color: var(--c-bad-border, #c66); }
+
+  .t-sec { margin-bottom: var(--space-8, 2rem); }
+  .t-sec h2 {
+    font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--c-muted, #666);
+    border-bottom: 1px solid var(--c-border, #ddd);
+    padding-bottom: 0.4rem; margin-bottom: 0.8rem;
+  }
+  .t-empty { color: var(--c-muted, #666); max-width: 65ch; }
+
+  .t-q { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.8rem; }
+  .t-item {
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface, #fff);
+  }
+  .t-item-h { display: flex; gap: 0.75rem; align-items: baseline; flex-wrap: wrap; }
+  .t-ref { font-family: ui-monospace, monospace; font-size: 0.75rem; color: var(--c-muted, #888); }
+  .t-item-b { margin-top: 0.3rem; font-size: 0.9rem; }
+  .t-reason { color: var(--c-muted, #666); font-style: italic; margin-top: 0.2rem; }
+  .t-acts { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.7rem; align-items: center; }
+  .t-reject { display: flex; gap: 0.35rem; align-items: center; flex-wrap: wrap; }
+  .t-pay { font-size: 0.8rem; color: var(--c-muted, #666); margin: 0.5rem 0 0; }
+
+  .t-list { list-style: none; margin: 0; padding: 0; }
+  .t-list li {
+    display: flex; gap: 0.75rem; align-items: baseline; flex-wrap: wrap;
+    padding: 0.45rem 0; border-bottom: 1px solid var(--c-border, #eee);
+  }
+  .t-name { font-weight: 600; min-width: 12rem; }
+  .t-role { color: var(--c-muted, #666); font-size: 0.9rem; }
+  .t-tag { margin-left: auto; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--c-muted, #777); }
+  .t-foot { margin-top: 0.8rem; font-size: 0.85rem; color: var(--c-muted, #666); max-width: 65ch; }
+
+  .input-sm { font-size: 0.8rem; padding: 0.25rem 0.45rem; max-width: 14rem; }
+  .btn-sm { font-size: 0.8rem; padding: 0.25rem 0.7rem; }
+</style>

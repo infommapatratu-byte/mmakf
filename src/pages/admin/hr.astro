@@ -1,0 +1,538 @@
+---
+// /admin/hr — the establishment and the people in it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS IS ON THE ADMIN SURFACE AND NOT THE EMPLOYEE ONE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// employee.mmakf.in is self-service: everything there is the caller's own
+// record, resolved from their session, with no id to substitute. This page
+// reads OTHER PEOPLE'S employment, so it belongs behind an action — `hr:read` —
+// and on the surface where actions gate things.
+//
+// PART X is why that action is not `content:read` or `person:read`. `hr:read`
+// sits deliberately OUTSIDE `NATIONAL_FULL`, so a FEDERATION_ADMIN does not
+// hold it; `HR_OFFICER` is in `RESTRICTED_ROLES` so a federation administrator
+// cannot mint one and read the data through it. Until migration 0058 those
+// controls guarded nothing, because there was no employment record to guard.
+// This page is the first thing they actually protect.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT ENDING AN EMPLOYMENT DOES NOT DO
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// It closes one row. The person's membership, rank, black belt, team
+// appointment and LOGIN are all untouched — a departing employee is very often
+// still a member and still a 4th Dan. Removing access is a `role_bindings` act
+// under `role:grant`, and the control says so where the control is, because an
+// administrator who ends an employment and believes they have revoked a login
+// has been misled by the software.
+
+export const prerender = false;
+
+import AdminShell from '@/components/AdminShell.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  employmentRegister, listPositions, createPosition,
+  createEmployment, activateEmployment, endEmployment, suspendEmployment,
+  changeManager, createLeaveType, listLeaveTypes, setEntitlement,
+  EXIT_REASONS, isWorkforceError,
+} from '@/db/workforce';
+import { listDepartments } from '@/db/team';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'admin';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/hr');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+const mayWrite = Boolean(identity) && canAnywhere(identity!.principal, 'hr:write');
+
+// Employment records, exit reasons, suspensions. Never a shared-cache document.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+const ORG_LEVELS = ['executive', 'director', 'head', 'manager', 'officer', 'coordinator', 'staff', 'volunteer'];
+const EMPLOYMENT_TYPES = ['permanent', 'fixed_term', 'contract', 'consultant', 'intern', 'apprentice', 'volunteer', 'secondment'];
+
+const DONE: Record<string, string> = {
+  position: 'The position is recorded as a draft in the establishment.',
+  hired: 'The employment is recorded. The person keeps every other relationship they had with the federation.',
+  activated: 'The employment is active.',
+  ended: 'The employment is closed. Their membership, rank and login are unchanged — removing access is a separate act.',
+  suspended: 'The employment is suspended, with your reason recorded.',
+  manager: 'The reporting line is changed.',
+  leavetype: 'The leave type is recorded. Set entitlements against it per employee.',
+  entitlement: 'The entitlement is recorded.',
+};
+
+let error: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const num = (k: string) => {
+    const n = Number(get(k));
+    // Number('') is 0 and passes Number.isInteger. Parsed to undefined so an
+    // empty select never becomes a claim about record zero.
+    return get(k) !== '' && Number.isInteger(n) && n > 0 ? n : undefined;
+  };
+  const act = get('act');
+  const reason = get('reason');
+
+  const rl = await rateLimit(Astro.request, 'admin-hr', 40, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment.';
+  } else if (!mayWrite) {
+    // Re-checked on every act. The rendered page is not evidence of authority.
+    Astro.response.status = 403;
+    error = 'Changing the establishment requires hr:write, which this account does not hold in any scope.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: reason || null,
+    };
+    try {
+      if (act === 'position') {
+        await createPosition(db(), ctx, {
+          code: get('code'), title: get('title'),
+          orgLevel: get('orgLevel') || 'staff',
+          departmentId: num('departmentId') ?? null,
+          headcount: num('headcount') ?? 1,
+          payBandCode: get('payBandCode') || null,
+        });
+        return Astro.redirect(`${SELF}?done=position`, 303);
+      } else if (act === 'hire') {
+        const personId = num('personId');
+        if (!personId) {
+          Astro.response.status = 400;
+          error = 'Name the person. An employment attaches to somebody already in the federation register — there is deliberately no way to create a person here, because that is how one human being ends up with two records.';
+        } else {
+          await createEmployment(db(), ctx, {
+            personId,
+            positionId: num('positionId') ?? null,
+            employmentType: get('employmentType') || 'permanent',
+            startedOn: get('startedOn') || undefined,
+            managerPersonId: num('managerPersonId') ?? null,
+            workLocation: get('workLocation') || null,
+            payBandCode: get('payBandCode') || null,
+          });
+          return Astro.redirect(`${SELF}?done=hired`, 303);
+        }
+      } else if (act === 'activate') {
+        await activateEmployment(db(), ctx, num('employmentId')!);
+        return Astro.redirect(`${SELF}?done=activated`, 303);
+      } else if (act === 'suspend') {
+        if (!reason) {
+          Astro.response.status = 400;
+          error = 'A suspension needs a recorded reason.';
+        } else {
+          await suspendEmployment(db(), ctx, num('employmentId')!, reason);
+          return Astro.redirect(`${SELF}?done=suspended`, 303);
+        }
+      } else if (act === 'end') {
+        await endEmployment(db(), ctx, num('employmentId')!, {
+          endedOn: get('endedOn') || undefined,
+          exitReason: get('exitReason') as any,
+          exitNote: get('exitNote') || null,
+        });
+        return Astro.redirect(`${SELF}?done=ended`, 303);
+      } else if (act === 'manager') {
+        await changeManager(db(), ctx, num('employmentId')!, num('managerPersonId') ?? null);
+        return Astro.redirect(`${SELF}?done=manager`, 303);
+      } else if (act === 'leavetype') {
+        await createLeaveType(db(), ctx, {
+          code: get('code'), name: get('name'),
+          paid: form.get('paid') === 'on',
+          allowsNegative: form.get('allowsNegative') === 'on',
+        });
+        return Astro.redirect(`${SELF}?done=leavetype`, 303);
+      } else if (act === 'entitlement') {
+        const days = Number(get('days'));
+        if (!Number.isFinite(days) || days < 0) {
+          Astro.response.status = 400;
+          error = 'Enter the entitlement in days.';
+        } else {
+          await setEntitlement(db(), ctx, {
+            employmentId: num('employmentId')!,
+            leaveTypeId: num('leaveTypeId')!,
+            leaveYear: num('leaveYear')!,
+            // HALF-DAYS is the storage unit; the form asks in days because that
+            // is what an HR officer knows.
+            entitledHalfDays: Math.round(days * 2),
+          });
+          return Astro.redirect(`${SELF}?done=entitlement`, 303);
+        }
+      } else {
+        Astro.response.status = 400;
+        error = 'Unknown action.';
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = 'Your credential does not hold the authority this act requires.';
+      } else if (isWorkforceError(err)) {
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[admin/hr] act failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was changed.';
+      }
+    }
+  }
+}
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE[done] ? DONE[done] : null;
+
+let rows: any[] = [];
+let positions: any[] = [];
+let departments: any[] = [];
+let leaveTypes: any[] = [];
+let readFailed = false;
+
+if (configured && identity && canAnywhere(identity.principal, 'hr:read')) {
+  try {
+    [rows, positions, departments, leaveTypes] = await Promise.all([
+      employmentRegister(db(), identity.principal, { limit: 400 }),
+      listPositions(db(), identity.principal),
+      listDepartments(db(), { includeInactive: true }),
+      listLeaveTypes(db(), { includeInactive: true }),
+    ]);
+  } catch (err) {
+    console.error('[admin/hr] read failed', err);
+    readFailed = true;
+  }
+}
+
+const live = rows.filter((r: any) => r.status !== 'ended');
+const closed = rows.filter((r: any) => r.status === 'ended');
+const year = Number(new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Kolkata' }).format(new Date()).slice(0, 4));
+---
+
+<AdminShell
+  title="Human resources"
+  requires="hr:read"
+  intro="The establishment, who holds each post, and the leave policy behind it. Employment is private and separate from the public team register."
+>
+  {doneMessage && <p class="ok" role="status">{doneMessage}</p>}
+  {error && <p class="bad" role="alert">{error}</p>}
+
+  {!configured ? (
+    <ErrorState
+      title="The federation database is not configured on this deployment."
+      safe="Nothing was read and nothing can be changed here."
+      retryHref={null}
+      secondary={{ label: 'Back to the dashboard', href: h('/admin') }}
+    />
+  ) : readFailed ? (
+    <ErrorState
+      title="The workforce register could not be read."
+      safe="No change has been made. Reading this register writes nothing."
+      retryHref={SELF}
+      secondary={{ label: 'Back to the dashboard', href: h('/admin') }}
+    />
+  ) : (
+    <>
+      <p class="hr-sum">
+        {live.length} live employment{live.length === 1 ? '' : 's'}
+        · {positions.length} position{positions.length === 1 ? '' : 's'}
+        · {leaveTypes.length} leave type{leaveTypes.length === 1 ? '' : 's'}
+        · {closed.length} closed
+      </p>
+
+      <p class="hr-note">
+        <strong>This is not the public team register.</strong> /team says what
+        somebody does in public; this says the federation employs them, and the
+        two are deliberately different tables with no foreign key between them.
+        A volunteer coordinator appears on /team and is not employed; a payroll
+        clerk is employed and never appears on /team.
+      </p>
+
+      {live.length === 0 ? (
+        <EmptyState
+          title="No employment is recorded."
+          body="The workforce register ships empty — MMAKF's establishment is the federation's to state. Record a position, then an employment against a person already in the register."
+          action={{ label: 'The public team register', href: h('/admin/team') }}
+        />
+      ) : (
+        <div class="hr-scroll">
+          <table class="hr-table">
+            <thead>
+              <tr>
+                <th scope="col">Employee</th><th scope="col">Post</th>
+                <th scope="col">Type</th><th scope="col">Since</th>
+                <th scope="col">Status</th><th scope="col">Band</th>
+                <th scope="col">Acts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {live.map((r: any) => (
+                <tr>
+                  <th scope="row">
+                    {r.fullName}
+                    <span class="hr-no">{r.employeeNo}</span>
+                  </th>
+                  <td>
+                    {r.positionTitle ?? <span class="hr-unset">No position</span>}
+                    {r.departmentName && <span class="hr-dept">{r.departmentName}</span>}
+                  </td>
+                  <td>{r.employmentType}</td>
+                  <td>{r.startedOn}</td>
+                  <td><span class={`hr-st hr-st-${r.status}`}>{r.status}</span></td>
+                  <td>{r.payBandCode ?? <span class="hr-unset">—</span>}</td>
+                  <td class="hr-acts">
+                    {mayWrite && r.status === 'onboarding' && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="activate" />
+                        <input type="hidden" name="employmentId" value={String(r.id)} />
+                        <button class="btn btn-sm" type="submit">Confirm</button>
+                      </form>
+                    )}
+                    {mayWrite && r.status === 'suspended' && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="activate" />
+                        <input type="hidden" name="employmentId" value={String(r.id)} />
+                        <button class="btn btn-sm" type="submit">Reinstate</button>
+                      </form>
+                    )}
+                    {mayWrite && r.status !== 'suspended' && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="suspend" />
+                        <input type="hidden" name="employmentId" value={String(r.id)} />
+                        <input class="input input-sm" name="reason" placeholder="Reason (required)" maxlength="300" required />
+                        <button class="btn btn-sm btn-warn" type="submit">Suspend</button>
+                      </form>
+                    )}
+                    {mayWrite && (
+                      <form method="post" action={SELF} class="hr-end">
+                        <input type="hidden" name="act" value="end" />
+                        <input type="hidden" name="employmentId" value={String(r.id)} />
+                        <select class="input input-sm" name="exitReason" required>
+                          <option value="">Exit reason…</option>
+                          {EXIT_REASONS.map((x) => <option value={x}>{x}</option>)}
+                        </select>
+                        <input class="input input-sm" type="date" name="endedOn" aria-label="Last day" />
+                        <button class="btn btn-sm" type="submit">End</button>
+                      </form>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p class="hr-caveat">
+        <strong>Ending an employment removes no access.</strong> It closes one
+        row. Their membership, rank, black belt, team appointment and
+        <em> login</em> are untouched. Removing a login is a role change under
+        <code> role:grant</code> on <a href={h('/admin/queue')}>the role queue</a>.
+        <br />
+        <strong>No pay is calculated anywhere in this system.</strong> A pay band
+        is a reference to a band MMAKF defines elsewhere; approved leave and
+        approved timesheets are the inputs a payroll system consumes.
+      </p>
+
+      {closed.length > 0 && (
+        <details class="hr-closed">
+          <summary>{closed.length} closed employment{closed.length === 1 ? '' : 's'}</summary>
+          <ul>
+            {closed.map((r: any) => (
+              <li>{r.fullName} — {r.positionTitle ?? 'no position'}, to {r.endedOn} ({r.exitReason})</li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {mayWrite && (
+        <div class="hr-forms">
+          <section class="hr-form">
+            <h2>Record a position</h2>
+            <p class="hr-hint">
+              A position is a SLOT, not a person — it exists whether or not
+              anybody holds it, which is what lets the federation carry a
+              vacancy and a reporting line without inventing a placeholder
+              employee. Departments are shared with the public team register.
+            </p>
+            <form method="post" action={SELF}>
+              <input type="hidden" name="act" value="position" />
+              <label class="input-label" for="p-code">Code</label>
+              <input class="input" id="p-code" name="code" maxlength="32" required placeholder="COMP-OPS-MGR" />
+              <label class="input-label" for="p-title">Title</label>
+              <input class="input" id="p-title" name="title" maxlength="120" required />
+              <label class="input-label" for="p-level">Organisational level</label>
+              <select class="input" id="p-level" name="orgLevel">
+                {ORG_LEVELS.map((l) => <option value={l}>{l}</option>)}
+              </select>
+              <label class="input-label" for="p-dept">Department</label>
+              <select class="input" id="p-dept" name="departmentId">
+                <option value="">Unfiled</option>
+                {departments.map((d: any) => <option value={String(d.id)}>{d.name}</option>)}
+              </select>
+              <label class="input-label" for="p-head">Headcount</label>
+              <input class="input" id="p-head" name="headcount" type="number" min="1" value="1" />
+              <label class="input-label" for="p-band">Pay band code</label>
+              <input class="input" id="p-band" name="payBandCode" maxlength="40" />
+              <p class="hr-hint">
+                A REFERENCE, not an amount. This system holds no salary figure —
+                see the note above the register.
+              </p>
+              <button class="btn" type="submit">Record position</button>
+            </form>
+          </section>
+
+          <section class="hr-form">
+            <h2>Record an employment</h2>
+            <form method="post" action={SELF}>
+              <input type="hidden" name="act" value="hire" />
+              <label class="input-label" for="e-person">Person ID in the federation register</label>
+              <input class="input" id="e-person" name="personId" type="number" min="1" required />
+              <p class="hr-hint">
+                The person must already exist. There is deliberately no way to
+                create one here — that is how one human being ends up with two
+                records and a certificate issued against the wrong one.
+              </p>
+              <label class="input-label" for="e-pos">Position</label>
+              <select class="input" id="e-pos" name="positionId">
+                <option value="">None</option>
+                {positions.map((p: any) => <option value={String(p.id)}>{p.title}</option>)}
+              </select>
+              <label class="input-label" for="e-type">Employment type</label>
+              <select class="input" id="e-type" name="employmentType">
+                {EMPLOYMENT_TYPES.map((t) => <option value={t}>{t}</option>)}
+              </select>
+              <label class="input-label" for="e-start">Start date</label>
+              <input class="input" id="e-start" name="startedOn" type="date" />
+              <label class="input-label" for="e-mgr">Line manager (person ID)</label>
+              <input class="input" id="e-mgr" name="managerPersonId" type="number" min="1" />
+              <p class="hr-hint">
+                The manager is a PERSON, not a position — during a vacancy the
+                person who actually approves leave is somebody else entirely.
+              </p>
+              <label class="input-label" for="e-loc">Work location</label>
+              <input class="input" id="e-loc" name="workLocation" maxlength="120" />
+              <button class="btn" type="submit">Record employment</button>
+            </form>
+          </section>
+
+          <section class="hr-form">
+            <h2>Leave policy</h2>
+            <p class="hr-hint">
+              Ships empty. Casual, sick, earned, maternity — their names, their
+              entitlements and their accrual are MMAKF's employment policy, and
+              a plausible seeded row is indistinguishable six months later from
+              one an officer confirmed.
+            </p>
+            <form method="post" action={SELF}>
+              <input type="hidden" name="act" value="leavetype" />
+              <label class="input-label" for="lt-code">Code</label>
+              <input class="input" id="lt-code" name="code" maxlength="16" required placeholder="CL" />
+              <label class="input-label" for="lt-name">Name</label>
+              <input class="input" id="lt-name" name="name" maxlength="80" required placeholder="Casual leave" />
+              <label class="hr-check"><input type="checkbox" name="paid" checked /> Paid</label>
+              <label class="hr-check"><input type="checkbox" name="allowsNegative" /> May be taken beyond the entitlement</label>
+              <button class="btn" type="submit">Add leave type</button>
+            </form>
+
+            {leaveTypes.length > 0 && live.length > 0 && (
+              <form method="post" action={SELF} class="hr-ent">
+                <input type="hidden" name="act" value="entitlement" />
+                <input type="hidden" name="leaveYear" value={String(year)} />
+                <h3>Set an entitlement for {year}</h3>
+                <label class="input-label" for="en-emp">Employee</label>
+                <select class="input" id="en-emp" name="employmentId" required>
+                  {live.map((r: any) => <option value={String(r.id)}>{r.fullName} — {r.employeeNo}</option>)}
+                </select>
+                <label class="input-label" for="en-type">Leave type</label>
+                <select class="input" id="en-type" name="leaveTypeId" required>
+                  {leaveTypes.map((t: any) => <option value={String(t.id)}>{t.name}</option>)}
+                </select>
+                <label class="input-label" for="en-days">Days</label>
+                <input class="input" id="en-days" name="days" type="number" step="0.5" min="0" required />
+                <button class="btn" type="submit">Set entitlement</button>
+              </form>
+            )}
+          </section>
+        </div>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .ok, .bad {
+    padding: 0.75rem 1rem; border-radius: var(--radius, 6px);
+    border: 1px solid var(--c-border, #ddd); margin-bottom: 1rem;
+  }
+  .bad { border-color: var(--c-bad-border, #c66); }
+
+  .hr-sum { color: var(--c-muted, #666); font-size: 0.9rem; }
+  .hr-note {
+    padding: 0.75rem 1rem; margin: 1rem 0;
+    border-left: 3px solid var(--c-accent, #b8860b);
+    background: var(--c-surface-2, #fafafa); font-size: 0.9rem; max-width: 75ch;
+  }
+
+  .hr-scroll { overflow-x: auto; }
+  .hr-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  .hr-table th, .hr-table td {
+    text-align: left; padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--c-border, #eee); vertical-align: top;
+  }
+  .hr-no, .hr-dept {
+    display: block; font-size: 0.72rem; color: var(--c-muted, #888);
+    font-weight: 400; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .hr-unset { color: var(--c-muted, #999); font-style: italic; }
+  .hr-st { text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.05em; }
+  .hr-st-suspended { color: var(--c-bad, #a33); font-weight: 600; }
+  .hr-st-onboarding { color: var(--c-muted, #777); }
+
+  .hr-acts { display: flex; flex-direction: column; gap: 0.4rem; min-width: 14rem; }
+  .hr-acts form { display: flex; gap: 0.3rem; align-items: center; flex-wrap: wrap; }
+  .hr-end { flex-wrap: wrap; }
+  .input-sm { font-size: 0.78rem; padding: 0.2rem 0.4rem; max-width: 9rem; }
+  .btn-sm { font-size: 0.78rem; padding: 0.2rem 0.6rem; }
+  .btn-warn { border-color: var(--c-bad-border, #c66); }
+
+  .hr-caveat {
+    margin-top: 1.5rem; padding: 0.75rem 1rem;
+    border: 1px solid var(--c-border, #ddd); border-radius: var(--radius, 6px);
+    font-size: 0.9rem; max-width: 75ch;
+  }
+  .hr-closed { margin-top: 1.5rem; font-size: 0.9rem; }
+
+  .hr-forms {
+    display: grid; gap: 1.5rem; margin-top: 2rem;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 21rem), 1fr));
+  }
+  .hr-form {
+    padding: 1rem; border: 1px solid var(--c-border, #ddd); border-radius: var(--radius, 6px);
+  }
+  .hr-form h2 { margin-top: 0; font-size: 1rem; }
+  .hr-form h3 { font-size: 0.9rem; margin: 1.2rem 0 0.4rem; }
+  .hr-form .input { width: 100%; margin-bottom: 0.4rem; }
+  .hr-hint { font-size: 0.8rem; color: var(--c-muted, #666); margin: 0 0 0.7rem; }
+  .hr-check { display: block; font-size: 0.85rem; margin: 0.3rem 0; }
+  .hr-ent { border-top: 1px solid var(--c-border, #eee); margin-top: 1rem; padding-top: 0.5rem; }
+</style>

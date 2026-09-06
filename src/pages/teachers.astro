@@ -1,0 +1,297 @@
+---
+// /teachers — THE MMAKF TEACHING FACULTY.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ONE RULE THIS PAGE IS BUILT AROUND
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A GRADE SOMEBODY TYPED ABOUT THEMSELVES IS NOT AN MMAKF CREDENTIAL.
+//
+// `coach_profiles.dan_grade` is free text an applicant entered on a form.
+// `rank_records` is the federation's examination register. Printing the first
+// under the federation's masthead as though it were the second is how a
+// federation publishes credentials it never awarded — the exact failure /verify
+// exists to end.
+//
+// So `publicFaculty()` returns them as two separate fields, and this page:
+//
+//   · shows the VERIFIED grade as a credential, with its provenance;
+//   · shows the STATED grade only when there is no verified one, and labels it
+//     in words as stated by the instructor and not verified by MMAKF;
+//   · never fills an absent verified grade in from the stated one.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHO APPEARS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Active, unsuspended coach profiles belonging to active people. A candidate,
+// somebody in screening, somebody suspended, withdrawn or rejected cannot be
+// returned — `publicFaculty()` accepts no parameter that would widen it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY SAFEGUARDING CLEARANCE IS NOT ON THIS PAGE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// It is the most important thing a parent wants to know, and it is still absent,
+// because publishing "cleared" makes its ABSENCE a public statement that a named
+// instructor is not cleared to work with children — published by omission, with
+// no process behind it and no way to answer it. The real control is enforced
+// where it matters: an uncleared coach is not assignable to work with minors.
+// The standing note below tells a parent to ask, rather than leaving them to
+// infer from a missing badge.
+
+export const prerender = false;
+
+import Base from '@/layouts/Base.astro';
+import PageHero from '@/components/PageHero.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import { isConfigured, db } from '@/db';
+import { publicFaculty, facultyFacets, type FacultyMember } from '@/db/coaches';
+
+const configured = isConfigured();
+const url = Astro.url;
+
+const language = (url.searchParams.get('language') || '').slice(0, 40).trim();
+
+let faculty: FacultyMember[] = [];
+let facets: { states: string[]; languages: string[]; ageBands: string[]; total: number } =
+  { states: [], languages: [], ageBands: [], total: 0 };
+let failed = false;
+
+if (configured) {
+  try {
+    [faculty, facets] = await Promise.all([
+      publicFaculty(db(), { language: language || undefined, limit: 200 }),
+      facultyFacets(db()),
+    ]);
+  } catch {
+    // A read failure is not an empty faculty. The two must never render alike.
+    failed = true;
+  }
+}
+
+const filtered = Boolean(language);
+
+function initials(name: string) {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? '').join('');
+}
+---
+
+<Base
+  title="Teaching faculty — MMAKF"
+  description="The instructors who teach through the Modern Martial Arts Karate-Do Federation of India. Every rank shown as an MMAKF credential is read from the federation's own examination register."
+>
+  <PageHero
+    eyebrow="Teaching"
+    title="Teaching <em>faculty</em>"
+    lead="The instructors who teach through MMAKF. Every rank shown here as an MMAKF credential is read from the federation's examination register — never from what an instructor wrote about themselves."
+  />
+
+  <section class="container tf-wrap">
+    {facets.languages.length > 0 && (
+      <form class="tf-filters" method="get" action="/teachers">
+        <div class="tf-f">
+          <label class="input-label" for="tf-lang">Language of instruction</label>
+          <select class="input" id="tf-lang" name="language">
+            <option value="">Any</option>
+            {facets.languages.map((l) => (
+              <option value={l} selected={language === l}>{l}</option>
+            ))}
+          </select>
+        </div>
+        <div class="tf-f tf-go">
+          <button class="btn" type="submit">Filter</button>
+          {filtered && <a class="tf-clear" href="/teachers">Clear</a>}
+        </div>
+      </form>
+    )}
+
+    {!configured ? (
+      <p class="tf-note">
+        The federation register is not configured on this deployment, so the
+        faculty cannot be read. This is a statement about this server, not about
+        MMAKF's instructors.
+      </p>
+    ) : failed ? (
+      <p class="tf-note tf-bad">
+        The faculty register could not be read just now. Please try again shortly
+        — nothing here should be taken to mean MMAKF has no instructors.
+      </p>
+    ) : faculty.length === 0 ? (
+      <EmptyState
+        title={filtered
+          ? 'No instructor in the register teaches in that language.'
+          : 'MMAKF has not yet published its teaching faculty.'}
+        body="Instructors appear here once their application is approved and their profile is active. To find where you can train now, search the club network."
+        action={{ label: 'Find a club', href: '/clubs' }}
+        secondary={{ label: 'Apply to teach', href: '/learn/coaches' }}
+      />
+    ) : (
+      <ul class="tf-grid">
+        {faculty.map((m) => (
+          <li class="tf-card">
+            <div class="tf-face" aria-hidden="true">
+              {m.photoUrl
+                ? <img src={m.photoUrl} alt="" loading="lazy" width="64" height="64" />
+                : <span class="tf-mono">{initials(m.fullName)}</span>}
+            </div>
+            <div class="tf-body">
+              <h2 class="tf-name">{m.fullName}</h2>
+
+              {m.verifiedGrade ? (
+                <p class="tf-grade tf-grade-ok">
+                  <span class="tf-grade-v">{m.verifiedGrade}</span>
+                  <span class="tf-grade-k">
+                    {m.verifiedExamined
+                      ? 'MMAKF credential — traced to a recorded examination'
+                      : 'MMAKF credential — legacy record, no examination record held'}
+                  </span>
+                </p>
+              ) : m.statedGrade ? (
+                <p class="tf-grade tf-grade-claim">
+                  <span class="tf-grade-v">{m.statedGrade}</span>
+                  <span class="tf-grade-k">
+                    Stated by the instructor. <strong>Not verified by MMAKF</strong> —
+                    the federation holds no Dan record for this person.
+                  </span>
+                </p>
+              ) : (
+                <p class="tf-grade tf-grade-none">
+                  <span class="tf-grade-k">MMAKF holds no Dan grade record for this instructor.</span>
+                </p>
+              )}
+
+              {m.headline && <p class="tf-head">{m.headline}</p>}
+              {m.teachingSince && <p class="tf-since">Teaching since {String(m.teachingSince).slice(0, 4)}</p>}
+
+              <p class="tf-where">
+                {m.dojo
+                  ? (m.dojoSlug ? <a href={`/clubs/${m.dojoSlug}`}>{m.dojo}</a> : <span>{m.dojo}</span>)
+                  : null}
+                {[m.district, m.state].filter(Boolean).join(', ') || m.baseCity || null}
+              </p>
+
+              {m.ageBands.length > 0 && (
+                <p class="tf-tags">Teaches: {m.ageBands.join(', ')}</p>
+              )}
+              {m.languages.length > 0 && (
+                <p class="tf-tags">Languages: {m.languages.join(', ')}</p>
+              )}
+              {m.bio && <p class="tf-bio">{m.bio}</p>}
+
+              {m.federationId && (
+                <p class="tf-verify">
+                  <a href={`/verify?id=${encodeURIComponent(m.federationId)}`}>Verify this credential →</a>
+                </p>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    )}
+
+    <div class="tf-standing">
+      <h2>How to read this page</h2>
+      <dl>
+        <dt>MMAKF credential</dt>
+        <dd>
+          The grade is read from the federation's own examination register. Where
+          it traces to a recorded examination the page says so; where it is a
+          legacy record from before digital records, it says that instead, and the
+          two are never presented alike.
+        </dd>
+        <dt>Stated by the instructor</dt>
+        <dd>
+          A grade the instructor entered on their application, which MMAKF has not
+          matched to a record in its register. It is shown so that the page is not
+          silent about it, and labelled so it cannot be mistaken for a federation
+          credential.
+        </dd>
+        <dt>Working with children</dt>
+        <dd>
+          This page does not publish safeguarding clearance, in either direction.
+          A missing badge would read as an accusation against a named person, and
+          that is not a statement the federation will make by omission. MMAKF
+          enforces clearance where it matters — an instructor without it is not
+          assigned to work with minors. If you are enrolling a child,
+          <a href="/contact"> ask the federation directly</a> and you will be told.
+        </dd>
+      </dl>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .tf-wrap { padding-block: var(--space-8, 2rem) var(--space-12, 3rem); }
+
+  .tf-filters {
+    display: flex; flex-wrap: wrap; gap: var(--space-4, 1rem); align-items: end;
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface-2, #fafafa);
+    margin-bottom: var(--space-6, 1.5rem);
+  }
+  .tf-f { display: flex; flex-direction: column; gap: 0.25rem; min-width: 10rem; }
+  .tf-go { flex-direction: row; align-items: center; gap: 0.75rem; }
+  .tf-clear { font-size: 0.85rem; }
+
+  .tf-note {
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+  }
+  .tf-bad { border-color: var(--c-warn-border, #c99); }
+
+  .tf-grid {
+    list-style: none; margin: 0; padding: 0;
+    display: grid; gap: var(--space-5, 1.25rem);
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+  }
+  .tf-card {
+    display: flex; gap: var(--space-4, 1rem);
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface, #fff);
+  }
+  .tf-face {
+    flex: 0 0 auto; width: 64px; height: 64px; border-radius: 50%;
+    overflow: hidden; background: var(--c-surface-2, #f0f0f0);
+    display: grid; place-items: center;
+  }
+  .tf-face img { width: 100%; height: 100%; object-fit: cover; }
+  .tf-mono { font-weight: 600; color: var(--c-muted, #666); }
+
+  .tf-body { min-width: 0; }
+  .tf-name { margin: 0; font-size: 1.05rem; }
+
+  .tf-grade { margin: 0.4rem 0 0; padding: 0.4rem 0.6rem; border-radius: var(--radius, 6px); }
+  .tf-grade-v { display: block; font-weight: 600; }
+  .tf-grade-k { display: block; font-size: 0.76rem; margin-top: 0.15rem; }
+  .tf-grade-ok { background: var(--c-ok-bg, #f0f7f2); border: 1px solid var(--c-ok, #1b6b3a); }
+  /* Visibly different from a verified credential — never a subtler shade of the
+     same thing, which is how a reader stops noticing the distinction. */
+  .tf-grade-claim { background: var(--c-warn-bg, #fdf6e8); border: 1px dashed var(--c-warn, #8a6d1f); }
+  .tf-grade-none { background: var(--c-surface-2, #f6f6f6); border: 1px solid var(--c-border, #ddd); }
+
+  .tf-head { margin: 0.5rem 0 0; font-weight: 600; }
+  .tf-since, .tf-where, .tf-tags { margin: 0.2rem 0 0; font-size: 0.85rem; color: var(--c-muted, #666); }
+  .tf-where > * + * { margin-left: 0.4rem; }
+  .tf-bio { margin: 0.5rem 0 0; font-size: 0.9rem; }
+  .tf-verify { margin: 0.6rem 0 0; font-size: 0.85rem; }
+
+  .tf-standing {
+    margin-top: var(--space-10, 2.5rem);
+    padding-top: var(--space-5, 1.25rem);
+    border-top: 1px solid var(--c-border, #ddd);
+    font-size: 0.92rem;
+  }
+  .tf-standing h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-muted, #666); }
+  .tf-standing dt { font-weight: 600; margin-top: var(--space-3, 0.75rem); }
+  .tf-standing dd { margin: 0.2rem 0 0; color: var(--c-text-2, #444); }
+
+  @media (max-width: 30rem) {
+    .tf-card { flex-direction: column; }
+  }
+</style>

@@ -1,0 +1,228 @@
+---
+// employee.mmakf.in/timesheet — record working time, and see what has been
+// approved.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THIS IS NOT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// It is NOT the class register. `session_attendance` records which student
+// turned up to which training session, and conflating the two would put a
+// payroll question and a safeguarding question in one table. `work_records` is
+// an employee's own working time and nothing else.
+//
+// It also computes no pay. Approved rows are the INPUT a payroll system
+// consumes; this repository holds no rate, no multiplier and no total, because
+// payroll carries statutory obligations (PF, ESI, TDS) it cannot discharge and
+// a half-built one that produces a figure somebody actually pays is worse than
+// none.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// A DAY CAN BE CORRECTED UNTIL IT IS APPROVED, AND NOT AFTER
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `recordWork()` upserts on (employment, date) with `where: status <> 'approved'`,
+// so re-submitting a day rewrites it while it is still open and is refused once
+// a manager has signed it off. An approved day is an input to payroll and must
+// not move underneath it.
+
+export const prerender = false;
+
+import EmployeeShell from '@/components/EmployeeShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import type { AuditContext } from '@/db/federation';
+import { myEmployment, myWork, recordWork, isWorkforceError } from '@/db/workforce';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'employee';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/employee/timesheet');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+
+let error: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+
+  const rl = await rateLimit(Astro.request, 'employee-time', 60, 60);
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many entries in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was recorded.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+    };
+    // HOURS IN, MINUTES STORED. The form asks for hours because that is what
+    // somebody knows; the column is integer minutes because 7.5 hours is exact
+    // and 7.4999999 is what a float eventually reads.
+    const hours = Number(get('hours'));
+    try {
+      if (!Number.isFinite(hours) || hours <= 0 || hours > 24) {
+        Astro.response.status = 400;
+        error = 'Enter the hours worked, between 0 and 24.';
+      } else {
+        await recordWork(db(), ctx, {
+          workDate: get('workDate'),
+          minutes: Math.round(hours * 60),
+          note: get('note') || null,
+        });
+        return Astro.redirect(`${SELF}?done=1`, 303);
+      }
+    } catch (err: any) {
+      if (isWorkforceError(err)) {
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[employee/timesheet] failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was recorded.';
+      }
+    }
+  }
+}
+
+const done = Astro.url.searchParams.get('done') === '1';
+
+let employment: any = null;
+let records: any[] = [];
+if (configured && identity) {
+  try {
+    employment = await myEmployment(db(), identity.principal);
+    if (employment) records = await myWork(db(), identity.principal);
+  } catch (err) {
+    console.error('[employee/timesheet] read failed', err);
+  }
+}
+
+const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Kolkata' }).format(new Date());
+const totalApproved = records.filter((r: any) => r.status === 'approved')
+  .reduce((n: number, r: any) => n + r.minutes, 0);
+const hrs = (m: number) => (m / 60).toFixed(2).replace(/\.00$/, '');
+---
+
+<EmployeeShell
+  title="Timesheet"
+  intro="Record the time you worked. Your manager approves it; nothing here calculates pay."
+>
+  {employment && (
+    <>
+      {done && <p class="ok" role="status">Recorded. Your manager sees it in their approvals.</p>}
+      {error && <p class="bad" role="alert">{error}</p>}
+
+      <section class="ts-sec">
+        <h2>Record a day</h2>
+        <form method="post" action={SELF} class="ts-form">
+          <div class="ts-f">
+            <label class="input-label" for="ts-date">Date</label>
+            {/* `max` stops the common typo in the browser; recordWork() refuses a
+                future date server-side, which is the half that holds. */}
+            <input class="input" id="ts-date" name="workDate" type="date" required max={today} value={today} />
+          </div>
+          <div class="ts-f">
+            <label class="input-label" for="ts-hours">Hours worked</label>
+            <input class="input" id="ts-hours" name="hours" type="number" step="0.25" min="0.25" max="24" required />
+          </div>
+          <div class="ts-f ts-f-wide">
+            <label class="input-label" for="ts-note">Note (optional)</label>
+            <input class="input" id="ts-note" name="note" maxlength="300" />
+          </div>
+          <div class="ts-f ts-f-go">
+            <button class="btn btn-primary" type="submit">Record</button>
+            <p class="ts-hint">
+              Recording the same date again replaces it, until your manager has
+              approved that day.
+            </p>
+          </div>
+        </form>
+      </section>
+
+      <section class="ts-sec">
+        <h2>Recorded time</h2>
+        {records.length === 0 ? (
+          <p class="ts-empty">You have not recorded any time.</p>
+        ) : (
+          <>
+            <p class="ts-total">{hrs(totalApproved)} hours approved across {records.length} recorded days.</p>
+            <div class="ts-scroll">
+              <table class="ts-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Date</th>
+                    <th scope="col">Hours</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {records.map((r: any) => (
+                    <tr>
+                      <td><time datetime={r.workDate}>{r.workDate}</time></td>
+                      <td>{hrs(r.minutes)}</td>
+                      <td><span class={`ts-st ts-st-${r.status}`}>{r.status}</span></td>
+                      <td>{r.note ?? ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+    </>
+  )}
+</EmployeeShell>
+
+<style>
+  .ok, .bad {
+    padding: 0.7rem 1rem; border-radius: var(--radius, 6px);
+    border: 1px solid var(--c-border, #ddd); margin-bottom: 1rem; max-width: 70ch;
+  }
+  .bad { border-color: var(--c-bad-border, #c66); }
+
+  .ts-sec { margin-bottom: var(--space-8, 2rem); }
+  .ts-sec h2 {
+    font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--c-muted, #666);
+    border-bottom: 1px solid var(--c-border, #ddd);
+    padding-bottom: 0.4rem; margin-bottom: 0.8rem;
+  }
+  .ts-form {
+    display: grid; gap: var(--space-4, 1rem);
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px);
+    background: var(--c-surface-2, #fafafa);
+  }
+  .ts-f { display: flex; flex-direction: column; gap: 0.3rem; }
+  .ts-f-wide, .ts-f-go { grid-column: 1 / -1; }
+  .ts-hint { font-size: 0.8rem; color: var(--c-muted, #666); margin: 0.4rem 0 0; }
+  .ts-empty, .ts-total { color: var(--c-muted, #666); }
+
+  .ts-scroll { overflow-x: auto; }
+  .ts-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  .ts-table th, .ts-table td {
+    text-align: left; padding: 0.45rem 0.6rem;
+    border-bottom: 1px solid var(--c-border, #eee);
+  }
+  .ts-table thead th {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--c-muted, #666);
+  }
+  .ts-st { text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.05em; }
+  .ts-st-approved { color: var(--c-ok, #1b6b3a); font-weight: 600; }
+  .ts-st-rejected { color: var(--c-bad, #a33); }
+</style>

@@ -1,0 +1,518 @@
+---
+// /admin/hiring — vacancies, the people who applied, and the offer.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// GATED ON `hiring:read`, NOT ON `hr:read`, AND THAT IS THE POINT OF THE SPLIT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A hiring manager needs to read a vacancy, see who applied and sit on a panel.
+// They must NOT thereby be able to read the employment record, the leave
+// history or the exit reason of everybody already working for the federation,
+// which is what `hr:read` opens.
+//
+// Inside this page there is a second split. `hiring:write` arranges things —
+// creates a vacancy, moves a candidate through the stages, schedules an
+// interview. `hiring:decide` PUBLISHES a vacancy and ISSUES AN OFFER: the two
+// acts that commit the federation publicly and contractually. A holder of the
+// first is offered neither control, and the page says why rather than leaving a
+// missing button to be reported as a bug.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ACCEPTING AN OFFER IS WHERE A PERSON RECORD IS BORN
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Not at application. An unsuccessful candidate never enters the federation's
+// people register — that register is members, coaches, officials and athletes,
+// and filing every applicant into it would make the national member count a
+// number nobody could defend. `acceptOffer()` creates the person and the
+// employment together, and is idempotent so a retried acceptance returns the
+// first answer rather than a second employment.
+
+export const prerender = false;
+
+import AdminShell from '@/components/AdminShell.astro';
+import EmptyState from '@/components/states/EmptyState.astro';
+import ErrorState from '@/components/states/ErrorState.astro';
+import { isConfigured, db } from '@/db';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import { canAnywhere, ForbiddenError } from '@/lib/rbac';
+import type { AuditContext } from '@/db/federation';
+import {
+  vacancyRegister, createVacancy, openVacancy, publishVacancy, unpublishVacancy,
+  applicationsFor, moveApplication, makeOffer, acceptOffer, declineOffer,
+  scheduleInterview, isWorkforceError,
+} from '@/db/workforce';
+import { listDepartments } from '@/db/team';
+import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
+
+const surface: Surface = (Astro.locals as any)?.surface ?? 'admin';
+const h = (p: string) => surfaceHref(surface, p);
+const SELF = h('/admin/hiring');
+
+const configured = isConfigured();
+const identity = await identify(Astro.request.headers.get('cookie'));
+const mayWrite = Boolean(identity) && canAnywhere(identity!.principal, 'hiring:write');
+const mayDecide = Boolean(identity) && canAnywhere(identity!.principal, 'hiring:decide');
+
+// Candidate names, emails and employment history. Never a shared-cache document.
+Astro.response.headers.set('Cache-Control', 'no-store, max-age=0');
+
+const EMPLOYMENT_TYPES = ['permanent', 'fixed_term', 'contract', 'consultant', 'intern', 'apprentice', 'volunteer', 'secondment'];
+const STAGES = ['screening', 'shortlisted', 'interviewing', 'rejected', 'withdrawn'];
+
+const DONE: Record<string, string> = {
+  created: 'The vacancy is a draft. Open it, then publish it to advertise it.',
+  opened: 'The vacancy is open. It still is not advertised until it is published.',
+  published: 'The vacancy is now on the public careers page.',
+  unpublished: 'The vacancy is withdrawn from the public careers page.',
+  moved: 'The application is moved.',
+  offered: 'The offer is issued.',
+  accepted: 'The offer is accepted. A person record and an employment now exist.',
+  declined: 'The offer is recorded as declined.',
+  interview: 'The interview is scheduled.',
+};
+
+let error: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const num = (k: string) => {
+    const n = Number(get(k));
+    return get(k) !== '' && Number.isInteger(n) && n > 0 ? n : undefined;
+  };
+  const act = get('act');
+
+  const rl = await rateLimit(Astro.request, 'admin-hiring', 40, 60);
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    error = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!identity) {
+    Astro.response.status = 401;
+    error = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!configured) {
+    Astro.response.status = 503;
+    error = 'The federation database is not configured on this deployment.';
+  } else if (!mayWrite) {
+    Astro.response.status = 403;
+    error = 'Recruitment requires hiring:write, which this account does not hold in any scope.';
+  } else {
+    const ctx: AuditContext = {
+      principal: identity.principal,
+      ip: clientIp(Astro.request),
+      authority: identity.shared ? `shared:${identity.via}` : 'user',
+      reason: get('note') || null,
+    };
+    // The two acts that need the second permission, checked here as well as in
+    // the module so the refusal carries a sentence rather than a bare 403.
+    const needsDecide = ['publish', 'unpublish', 'offer', 'accept', 'decline'].includes(act);
+    try {
+      if (needsDecide && !mayDecide) {
+        Astro.response.status = 403;
+        error = 'Publishing a vacancy and issuing an offer both require hiring:decide, which this account does not hold. Arranging a recruitment and committing the federation to employ somebody are separate authorities.';
+      } else if (act === 'create') {
+        await createVacancy(db(), ctx, {
+          title: get('title'),
+          employmentType: get('employmentType') || 'permanent',
+          departmentId: num('departmentId') ?? null,
+          slug: get('slug') || null,
+          summary: get('summary') || null,
+          description: get('description') || null,
+          requirements: get('requirements') || null,
+          location: get('location') || null,
+          openings: num('openings') ?? 1,
+          closesOn: get('closesOn') || null,
+        });
+        return Astro.redirect(`${SELF}?done=created`, 303);
+      } else if (act === 'open') {
+        await openVacancy(db(), ctx, num('vacancyId')!);
+        return Astro.redirect(`${SELF}?done=opened`, 303);
+      } else if (act === 'publish') {
+        await publishVacancy(db(), ctx, num('vacancyId')!);
+        return Astro.redirect(`${SELF}?done=published`, 303);
+      } else if (act === 'unpublish') {
+        await unpublishVacancy(db(), ctx, num('vacancyId')!);
+        return Astro.redirect(`${SELF}?done=unpublished`, 303);
+      } else if (act === 'move') {
+        await moveApplication(db(), ctx, {
+          applicationId: num('applicationId')!,
+          status: get('status'),
+          note: get('note') || null,
+        });
+        return Astro.redirect(`${SELF}?v=${num('vacancyId') ?? ''}&done=moved`, 303);
+      } else if (act === 'interview') {
+        await scheduleInterview(db(), ctx, { applicationId: num('applicationId')! });
+        return Astro.redirect(`${SELF}?v=${num('vacancyId') ?? ''}&done=interview`, 303);
+      } else if (act === 'offer') {
+        await makeOffer(db(), ctx, {
+          applicationId: num('applicationId')!,
+          employmentType: get('employmentType') || 'permanent',
+          proposedStartOn: get('proposedStartOn'),
+          expiresOn: get('expiresOn') || null,
+          payBandCode: get('payBandCode') || null,
+        });
+        return Astro.redirect(`${SELF}?v=${num('vacancyId') ?? ''}&done=offered`, 303);
+      } else if (act === 'accept') {
+        await acceptOffer(db(), ctx, num('offerId')!);
+        return Astro.redirect(`${SELF}?v=${num('vacancyId') ?? ''}&done=accepted`, 303);
+      } else if (act === 'decline') {
+        await declineOffer(db(), ctx, num('offerId')!, get('note') || null);
+        return Astro.redirect(`${SELF}?v=${num('vacancyId') ?? ''}&done=declined`, 303);
+      } else {
+        Astro.response.status = 400;
+        error = 'Unknown action.';
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        error = 'Your credential does not hold the authority this act requires.';
+      } else if (isWorkforceError(err)) {
+        Astro.response.status = 400;
+        error = err.message;
+      } else {
+        console.error('[admin/hiring] act failed', err);
+        Astro.response.status = 500;
+        error = 'Nothing was changed.';
+      }
+    }
+  }
+}
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE[done] ? DONE[done] : null;
+
+// Which vacancy's applicants to show. Parsed defensively: an unparseable value
+// is ignored rather than becoming a query for vacancy zero.
+const rawV = Astro.url.searchParams.get('v');
+const selectedId = rawV && Number.isInteger(Number(rawV)) && Number(rawV) > 0 ? Number(rawV) : null;
+
+let vacancies: any[] = [];
+let departments: any[] = [];
+let applicants: any[] = [];
+let offers: any[] = [];
+let readFailed = false;
+
+if (configured && identity && canAnywhere(identity.principal, 'hiring:read')) {
+  try {
+    [vacancies, departments] = await Promise.all([
+      vacancyRegister(db(), identity.principal),
+      listDepartments(db(), { includeInactive: true }),
+    ]);
+    if (selectedId) {
+      applicants = await applicationsFor(db(), identity.principal, selectedId);
+      if (applicants.length) {
+        const w = await import('@/db/workforce.schema');
+        const { inArray } = await import('drizzle-orm');
+        offers = await db().select().from(w.jobOffers)
+          .where(inArray(w.jobOffers.applicationId, applicants.map((a: any) => a.id)));
+      }
+    }
+  } catch (err) {
+    console.error('[admin/hiring] read failed', err);
+    readFailed = true;
+  }
+}
+
+const selected = vacancies.find((v: any) => v.id === selectedId) ?? null;
+const offerFor = (applicationId: number) =>
+  offers.find((o: any) => o.applicationId === applicationId && ['draft', 'issued', 'accepted'].includes(o.status)) ?? null;
+---
+
+<AdminShell
+  title="Recruitment"
+  requires="hiring:read"
+  intro="Vacancies, the people who applied for them, and the offer. A candidate becomes a person in the federation register when they accept — not before."
+>
+  {doneMessage && <p class="ok" role="status">{doneMessage}</p>}
+  {error && <p class="bad" role="alert">{error}</p>}
+
+  {!configured ? (
+    <ErrorState
+      title="The federation database is not configured on this deployment."
+      safe="Nothing was read and nothing can be changed here."
+      retryHref={null}
+      secondary={{ label: 'Back to the dashboard', href: h('/admin') }}
+    />
+  ) : readFailed ? (
+    <ErrorState
+      title="The recruitment register could not be read."
+      safe="No change has been made. Reading this register writes nothing."
+      retryHref={SELF}
+      secondary={{ label: 'Back to the dashboard', href: h('/admin') }}
+    />
+  ) : (
+    <>
+      {!mayDecide && (
+        <p class="hi-gate">
+          This account holds <code>hiring:write</code> and not
+          <code> hiring:decide</code>, so the publish and offer controls are
+          withheld rather than shown disabled. Arranging a recruitment and
+          committing the federation to employ somebody are separate authorities:
+          publishing puts the federation's name to a public offer of employment,
+          and accepting an offer creates a person record and an employment.
+        </p>
+      )}
+
+      {vacancies.length === 0 ? (
+        <EmptyState
+          title="No vacancy has been created."
+          body="A vacancy is a draft until it is opened, and unadvertised until it is published. The public careers page shows only published, open vacancies."
+          action={{ label: 'The public careers page', href: 'https://www.mmakf.in/careers' }}
+        />
+      ) : (
+        <div class="hi-scroll">
+          <table class="hi-table">
+            <thead>
+              <tr>
+                <th scope="col">Post</th><th scope="col">Reference</th>
+                <th scope="col">Status</th><th scope="col">Public</th>
+                <th scope="col">Applied</th><th scope="col">Closes</th>
+                <th scope="col">Acts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {vacancies.map((v: any) => (
+                <tr class:list={[{ on: v.id === selectedId }]}>
+                  <th scope="row">
+                    <a href={`${SELF}?v=${v.id}`}>{v.title}</a>
+                    {v.departmentName && <span class="hi-dept">{v.departmentName}</span>}
+                  </th>
+                  <td class="hi-ref">{v.reference}</td>
+                  <td><span class={`hi-st hi-st-${v.status}`}>{v.status}</span></td>
+                  <td>{v.published ? 'Advertised' : <span class="hi-unset">Not advertised</span>}</td>
+                  <td>{v.applications}</td>
+                  <td>{v.closesOn ?? <span class="hi-unset">—</span>}</td>
+                  <td class="hi-acts">
+                    {mayWrite && v.status === 'draft' && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="open" />
+                        <input type="hidden" name="vacancyId" value={String(v.id)} />
+                        <button class="btn btn-sm" type="submit">Open</button>
+                      </form>
+                    )}
+                    {mayDecide && v.status === 'open' && !v.published && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="publish" />
+                        <input type="hidden" name="vacancyId" value={String(v.id)} />
+                        <button class="btn btn-sm btn-primary" type="submit">Advertise</button>
+                      </form>
+                    )}
+                    {mayDecide && v.published && (
+                      <form method="post" action={SELF}>
+                        <input type="hidden" name="act" value="unpublish" />
+                        <input type="hidden" name="vacancyId" value={String(v.id)} />
+                        <button class="btn btn-sm" type="submit">Withdraw</button>
+                      </form>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {selected && (
+        <section class="hi-cands">
+          <h2>Applicants for {selected.title}</h2>
+          {applicants.length === 0 ? (
+            <p class="hi-empty">Nobody has applied for this post.</p>
+          ) : (
+            <ul class="hi-list">
+              {applicants.map((a: any) => {
+                const offer = offerFor(a.id);
+                return (
+                  <li class="hi-cand">
+                    <div class="hi-cand-h">
+                      <strong>{a.applicantName}</strong>
+                      <span class="hi-ref">{a.reference}</span>
+                      <span class={`hi-st hi-st-${a.status}`}>{a.status}</span>
+                    </div>
+                    <div class="hi-cand-b">
+                      {a.applicantEmail}
+                      {a.currentEmployer && <> · {a.currentEmployer}</>}
+                      {a.yearsExperience != null && <> · {a.yearsExperience} years</>}
+                    </div>
+
+                    {mayWrite && !['accepted', 'declined'].includes(a.status) && (
+                      <div class="hi-cand-acts">
+                        <form method="post" action={SELF}>
+                          <input type="hidden" name="act" value="move" />
+                          <input type="hidden" name="applicationId" value={String(a.id)} />
+                          <input type="hidden" name="vacancyId" value={String(selected.id)} />
+                          <select class="input input-sm" name="status" required>
+                            <option value="">Move to…</option>
+                            {STAGES.map((x) => <option value={x}>{x}</option>)}
+                          </select>
+                          <input class="input input-sm" name="note" placeholder="Note (required to reject)" maxlength="300" />
+                          <button class="btn btn-sm" type="submit">Move</button>
+                        </form>
+
+                        <form method="post" action={SELF}>
+                          <input type="hidden" name="act" value="interview" />
+                          <input type="hidden" name="applicationId" value={String(a.id)} />
+                          <input type="hidden" name="vacancyId" value={String(selected.id)} />
+                          <button class="btn btn-sm" type="submit">Schedule interview</button>
+                        </form>
+
+                        {mayDecide && !offer && (
+                          <form method="post" action={SELF} class="hi-offer">
+                            <input type="hidden" name="act" value="offer" />
+                            <input type="hidden" name="applicationId" value={String(a.id)} />
+                            <input type="hidden" name="vacancyId" value={String(selected.id)} />
+                            <select class="input input-sm" name="employmentType">
+                              {EMPLOYMENT_TYPES.map((t) => <option value={t}>{t}</option>)}
+                            </select>
+                            <input class="input input-sm" type="date" name="proposedStartOn" required aria-label="Proposed start" />
+                            <input class="input input-sm" type="date" name="expiresOn" aria-label="Offer expires" />
+                            <input class="input input-sm" name="payBandCode" placeholder="Pay band" maxlength="40" />
+                            <button class="btn btn-sm btn-primary" type="submit">Issue offer</button>
+                          </form>
+                        )}
+                      </div>
+                    )}
+
+                    {offer && offer.status === 'issued' && mayDecide && (
+                      <div class="hi-cand-acts">
+                        <span class="hi-offer-n">
+                          Offer {offer.reference} · start {offer.proposedStartOn}
+                          {offer.expiresOn && <> · expires {offer.expiresOn}</>}
+                        </span>
+                        <form method="post" action={SELF}>
+                          <input type="hidden" name="act" value="accept" />
+                          <input type="hidden" name="offerId" value={String(offer.id)} />
+                          <input type="hidden" name="vacancyId" value={String(selected.id)} />
+                          <button class="btn btn-sm btn-primary" type="submit">Record acceptance</button>
+                        </form>
+                        <form method="post" action={SELF}>
+                          <input type="hidden" name="act" value="decline" />
+                          <input type="hidden" name="offerId" value={String(offer.id)} />
+                          <input type="hidden" name="vacancyId" value={String(selected.id)} />
+                          <input class="input input-sm" name="note" placeholder="Reason" maxlength="300" />
+                          <button class="btn btn-sm" type="submit">Record decline</button>
+                        </form>
+                      </div>
+                    )}
+
+                    {offer && offer.status === 'accepted' && (
+                      <p class="hi-hired">
+                        Accepted. A person record and employment #{offer.employmentId} were
+                        created — see <a href={h('/admin/hr')}>Human resources</a>.
+                      </p>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <p class="hi-note">
+            Recording an acceptance creates the person and the employment
+            together, and is idempotent — pressing it twice returns the first
+            employment rather than making a second. Until then no candidate on
+            this page exists in the federation's people register.
+          </p>
+        </section>
+      )}
+
+      {mayWrite && (
+        <section class="hi-form">
+          <h2>Create a vacancy</h2>
+          <form method="post" action={SELF}>
+            <input type="hidden" name="act" value="create" />
+            <label class="input-label" for="v-title">Title</label>
+            <input class="input" id="v-title" name="title" maxlength="120" required />
+            <label class="input-label" for="v-slug">Public address (slug)</label>
+            <input class="input" id="v-slug" name="slug" maxlength="120" placeholder="competition-operations-manager" />
+            <p class="hi-hint">
+              Required before it can be advertised. Not guessed from the title —
+              a public URL that moves when a title is corrected is a link a
+              candidate had already shared.
+            </p>
+            <label class="input-label" for="v-type">Employment type</label>
+            <select class="input" id="v-type" name="employmentType">
+              {EMPLOYMENT_TYPES.map((t) => <option value={t}>{t}</option>)}
+            </select>
+            <label class="input-label" for="v-dept">Department</label>
+            <select class="input" id="v-dept" name="departmentId">
+              <option value="">Unfiled</option>
+              {departments.map((d: any) => <option value={String(d.id)}>{d.name}</option>)}
+            </select>
+            <label class="input-label" for="v-loc">Location</label>
+            <input class="input" id="v-loc" name="location" maxlength="120" />
+            <label class="input-label" for="v-open">Openings</label>
+            <input class="input" id="v-open" name="openings" type="number" min="1" value="1" />
+            <label class="input-label" for="v-closes">Closing date</label>
+            <input class="input" id="v-closes" name="closesOn" type="date" />
+            <label class="input-label" for="v-sum">Summary</label>
+            <input class="input" id="v-sum" name="summary" maxlength="300" />
+            <label class="input-label" for="v-desc">The post</label>
+            <textarea class="input" id="v-desc" name="description" rows="5" maxlength="8000"></textarea>
+            <label class="input-label" for="v-req">What the federation is looking for</label>
+            <textarea class="input" id="v-req" name="requirements" rows="5" maxlength="8000"></textarea>
+            <button class="btn" type="submit">Create as draft</button>
+          </form>
+        </section>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<style>
+  .ok, .bad {
+    padding: 0.75rem 1rem; border-radius: var(--radius, 6px);
+    border: 1px solid var(--c-border, #ddd); margin-bottom: 1rem;
+  }
+  .bad { border-color: var(--c-bad-border, #c66); }
+
+  .hi-gate {
+    padding: 0.75rem 1rem; margin: 1rem 0;
+    border-left: 3px solid var(--c-accent, #b8860b);
+    background: var(--c-surface-2, #fafafa); font-size: 0.9rem; max-width: 75ch;
+  }
+
+  .hi-scroll { overflow-x: auto; }
+  .hi-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  .hi-table th, .hi-table td {
+    text-align: left; padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--c-border, #eee); vertical-align: top;
+  }
+  .hi-table tr.on { background: var(--c-surface-2, #f6f6f6); }
+  .hi-dept { display: block; font-size: 0.72rem; color: var(--c-muted, #888); font-weight: 400; }
+  .hi-ref { font-family: ui-monospace, monospace; font-size: 0.75rem; color: var(--c-muted, #888); }
+  .hi-unset { color: var(--c-muted, #999); font-style: italic; }
+  .hi-st { text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.05em; }
+  .hi-st-open { color: var(--c-ok, #1b6b3a); font-weight: 600; }
+  .hi-st-rejected, .hi-st-withdrawn { color: var(--c-bad, #a33); }
+  .hi-acts { display: flex; flex-direction: column; gap: 0.35rem; }
+
+  .hi-cands { margin-top: 2rem; }
+  .hi-cands h2 { font-size: 1rem; }
+  .hi-empty { color: var(--c-muted, #666); }
+  .hi-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.8rem; }
+  .hi-cand {
+    padding: 0.9rem; border: 1px solid var(--c-border, #ddd);
+    border-radius: var(--radius, 6px); background: var(--c-surface, #fff);
+  }
+  .hi-cand-h { display: flex; gap: 0.75rem; align-items: baseline; flex-wrap: wrap; }
+  .hi-cand-b { font-size: 0.88rem; color: var(--c-muted, #555); margin-top: 0.2rem; }
+  .hi-cand-acts { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.6rem; align-items: center; }
+  .hi-cand-acts form { display: flex; gap: 0.3rem; flex-wrap: wrap; align-items: center; }
+  .hi-offer { flex: 1 1 100%; }
+  .hi-offer-n { font-size: 0.82rem; color: var(--c-muted, #666); }
+  .hi-hired { margin: 0.6rem 0 0; font-size: 0.88rem; }
+  .hi-note { margin-top: 1rem; font-size: 0.85rem; color: var(--c-muted, #666); max-width: 70ch; }
+
+  .hi-form {
+    margin-top: 2rem; padding: 1rem; max-width: 34rem;
+    border: 1px solid var(--c-border, #ddd); border-radius: var(--radius, 6px);
+  }
+  .hi-form h2 { margin-top: 0; font-size: 1rem; }
+  .hi-form .input, .hi-form textarea { width: 100%; margin-bottom: 0.4rem; }
+  .hi-hint { font-size: 0.8rem; color: var(--c-muted, #666); margin: 0 0 0.7rem; }
+
+  .input-sm { font-size: 0.78rem; padding: 0.2rem 0.4rem; max-width: 10rem; }
+  .btn-sm { font-size: 0.78rem; padding: 0.2rem 0.6rem; }
+</style>
