@@ -115,6 +115,7 @@ import {
   formatINR, isFeeError, PPM, type FeeInputs,
 } from '@/db/fees';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -272,7 +273,7 @@ let error: string | null = null;
 let errorAt: 'issue' | 'approval' | null = null;
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   posted = Object.fromEntries([...form.entries()].map(([k, v]) => [k, String(v)]));
   const get = (k: string) => String(form.get(k) ?? '').trim();
   const action = get('action');

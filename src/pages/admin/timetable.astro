@@ -50,6 +50,7 @@ import {
 import { register, takeRegister, missingRegisters, isAttendanceError, type Register } from '@/db/attendance';
 import { and, asc, eq, gte, inArray, isNull, lte } from 'drizzle-orm';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -89,7 +90,7 @@ let done: string | null = null;
 // same-origin before any of this runs.
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   const field = (k: string) => String(form.get(k) ?? '').trim();
   const rl = await rateLimit(Astro.request, 'admin-timetable', 60, 60);
 

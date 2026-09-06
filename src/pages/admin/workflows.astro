@@ -37,13 +37,16 @@ import ErrorState from '@/components/states/ErrorState.astro';
 import Table from '@/components/DataTable/Table.astro';
 import type { Column } from '@/components/DataTable/types';
 import { isConfigured, db } from '@/db';
-import { identify } from '@/lib/session';
+import { identify, clientIp } from '@/lib/session';
 import { canAnywhere, visibleScopes } from '@/lib/rbac';
+import { requeueRun, setDefinitionActive, isWorkflowError } from '@/lib/workflow';
+import type { AuditContext } from '@/db/federation';
 import { ACTIONS, STANDARD_WORKFLOWS, installStandardAutomations } from '@/db/automations';
 import { rateLimit } from '@/lib/ratelimit';
 import * as o from '@/db/operations.schema';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -76,9 +79,15 @@ const mayInstall = Boolean(principal) && canAnywhere(principal, 'workflow:write'
 let installError: string | null = null;
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   const act = String(form.get('action') ?? '');
-  const rl = await rateLimit(Astro.request, 'workflow-install', 5, 300);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  // Installing is rare and heavy; retrying a run and switching an automation
+  // off are ordinary console work. One limit for both would either throttle the
+  // console or leave the install button open to being hammered.
+  const rl = act === 'install-standard'
+    ? await rateLimit(Astro.request, 'workflow-install', 5, 300)
+    : await rateLimit(Astro.request, 'workflow-operate', 40, 60);
 
   if (!rl.ok) {
     Astro.response.status = 429;
@@ -94,23 +103,79 @@ if (Astro.request.method === 'POST') {
     // evidence of authority.
     Astro.response.status = 403;
     installError = 'Installing an automation requires workflow:write at national scope, which this account does not hold.';
-  } else if (act !== 'install-standard') {
-    Astro.response.status = 400;
-    installError = 'That is not something this page does.';
   } else {
+    // ── The two acts this console was missing ──────────────────────────────
+    //
+    // It could see a failed run and not retry it, and see a misbehaving
+    // automation and not switch it off. `sweepRetries()` and the `active`
+    // column both already existed; nothing a human could reach wrote to them.
+    const ctx: AuditContext = {
+      principal: principal!,
+      ip: clientIp(Astro.request),
+      authority: identity!.shared ? `shared:${identity!.via}` : 'user',
+      reason: get('reason') || null,
+    };
     try {
-      // Idempotent by construction: installWorkflow() VERSIONS rather than
-      // edits, so a second run leaves the earlier version on record for any run
-      // that failed under it. Re-pressing the button is therefore safe.
-      const results = await installStandardAutomations(db());
-      return Astro.redirect(`${h('/admin/workflows')}?installed=${results.length}`, 303);
+      if (act === 'install-standard') {
+        // Idempotent by construction: installWorkflow() VERSIONS rather than
+        // edits, so a second run leaves the earlier version on record for any run
+        // that failed under it. Re-pressing the button is therefore safe.
+        const results = await installStandardAutomations(db());
+        return Astro.redirect(`${h('/admin/workflows')}?installed=${results.length}`, 303);
+      } else if (act === 'requeue-run') {
+        const runId = Number(get('runId'));
+        if (!Number.isInteger(runId) || runId <= 0 || runId > 2147483647) {
+          Astro.response.status = 400;
+          installError = 'Name the run to retry.';
+        } else {
+          const out = await requeueRun(db(), ctx, runId);
+          return Astro.redirect(
+            `${h('/admin/workflows')}?run=${runId}&done=${out.definitionInactive ? 'requeued-inactive' : 'requeued'}`,
+            303
+          );
+        }
+      } else if (act === 'set-active') {
+        const definitionId = Number(get('definitionId'));
+        const active = get('active') === 'yes';
+        if (!Number.isInteger(definitionId) || definitionId <= 0 || definitionId > 2147483647) {
+          Astro.response.status = 400;
+          installError = 'Name the automation to switch.';
+        } else {
+          await setDefinitionActive(db(), ctx, { definitionId, active, reason: get('reason') });
+          return Astro.redirect(`${h('/admin/workflows')}?done=${active ? 'activated' : 'deactivated'}`, 303);
+        }
+      } else {
+        Astro.response.status = 400;
+        installError = 'That is not something this page does.';
+      }
     } catch (err: any) {
-      console.error('[admin/workflows] install failed', err);
-      Astro.response.status = 500;
-      installError = 'The automations could not be installed. The fault is in the server log; nothing partial is left behind, because installWorkflow() versions rather than edits.';
+      if (isWorkflowError(err)) {
+        // The module's refusals are written for this reader — a run that
+        // succeeded, a definition that no longer exists, a version that would
+        // change nothing because a higher one is active. Shown as they are.
+        Astro.response.status = 400;
+        installError = err.message;
+      } else if (act === 'install-standard') {
+        console.error('[admin/workflows] install failed', err);
+        Astro.response.status = 500;
+        installError = 'The automations could not be installed. The fault is in the server log; nothing partial is left behind, because installWorkflow() versions rather than edits.';
+      } else {
+        console.error('[admin/workflows] act failed', err);
+        Astro.response.status = 500;
+        installError = 'Nothing was changed.';
+      }
     }
   }
 }
+
+/** What just happened, in the operator's words rather than the schema's. */
+const DONE_MESSAGES: Record<string, string> = {
+  requeued: 'The run is queued for another attempt. It has NOT been re-run — the retry sweep on the daily cron executes it, under the current definition.',
+  'requeued-inactive': 'The run is queued for another attempt, under the current definition. Note that this automation is switched OFF: the sweep retries the run anyway, because switching one off is exactly what an operator does before clearing up after it.',
+  activated: 'The automation is active. It runs on its next trigger.',
+  deactivated: 'The automation is off. Its trigger now starts nothing, and its recorded runs are untouched.',
+};
+const doneMessage = DONE_MESSAGES[Astro.url.searchParams.get('done') ?? ''] ?? null;
 
 const installedCount = Number(Astro.url.searchParams.get('installed') ?? '');
 
@@ -505,6 +570,10 @@ const runColumns: Column[] = [
     <>
       {/* ── The definitions ───────────────────────────────────────────────── */}
       {installError && <p class="note thin" role="alert" style="border-color:var(--red)">{installError}</p>}
+      {doneMessage && !installError && (
+        <p class="done-msg">{doneMessage}</p>
+      )}
+
       {Number.isFinite(installedCount) && installedCount > 0 && (
         <p class="note thin" role="status">
           {installedCount} standard automation{installedCount === 1 ? '' : 's'} installed. Each is a
@@ -585,6 +654,39 @@ const runColumns: Column[] = [
                         nobody can name. */}
                     <Status value={d.active ? 'active' : 'inactive'} domain="automation" />
                   </header>
+
+                  {/* ── Switching it off ─────────────────────────────────────
+                      `active` has been in the schema since the table was
+                      written and nothing in the application had ever written
+                      it: every automation the federation installed was on for
+                      ever, and the only way to stop one was to delete the row —
+                      which takes its failed runs' definition with it and makes
+                      them unretryable.
+
+                      Reactivation is offered only when no HIGHER version is
+                      active, because dispatch() runs the highest active version
+                      of each code and switching an older one on would change
+                      nothing while showing two active versions. The module
+                      refuses it as well; this is the courteous half. */}
+                  {mayInstall && (
+                    d.active || activeVersions.every((v: number) => v <= d.version) ? (
+                      <form method="POST" class="a-act">
+                        <input type="hidden" name="action" value="set-active" />
+                        <input type="hidden" name="definitionId" value={String(d.id)} />
+                        <input type="hidden" name="active" value={d.active ? 'no' : 'yes'} />
+                        <label class="input-label" for={`sw-${d.id}`}>Reason</label>
+                        <input class="input" id={`sw-${d.id}`} name="reason" required maxlength="500" />
+                        <button type="submit" class="btn btn-ghost">
+                          {d.active ? 'Switch off' : 'Switch on'}
+                        </button>
+                      </form>
+                    ) : (
+                      <p class="a-hint muted">
+                        Version {Math.max(...activeVersions)} is active, and only the highest active version runs.
+                        Switch that one off first if this older behaviour is what you want back.
+                      </p>
+                    )
+                  )}
 
                   {d.description && <p class="a-desc">{d.description}</p>}
 
@@ -707,6 +809,38 @@ const runColumns: Column[] = [
 
                 {selectedRun.error && (
                   <p class="r-error"><span class="e-label">Error</span> {selectedRun.error}</p>
+                )}
+
+                {/* ── Retry ────────────────────────────────────────────────
+                    Offered only for a run that actually failed, and only to a
+                    caller holding workflow:write. It does NOT run the workflow
+                    here: requeueRun() makes the run due and the daily sweep
+                    executes it, under the CURRENT definition. The button says
+                    so, because "Retry" that returns instantly and changes
+                    nothing visible reads as a broken button. */}
+                {(selectedRun.status === 'failed' || selectedRun.status === 'partially_failed') && (
+                  mayInstall ? (
+                    <form method="POST" class="r-act">
+                      <input type="hidden" name="action" value="requeue-run" />
+                      <input type="hidden" name="runId" value={String(selectedRun.id)} />
+                      <label class="input-label" for="rq-reason">Reason (recorded in the audit)</label>
+                      <input class="input" id="rq-reason" name="reason" maxlength="500" />
+                      <p class="r-hint">
+                        {selectedRun.attempt >= selectedRun.maxAttempts
+                          ? <>This run has used all {selectedRun.maxAttempts} of its attempts, so the sweep no longer
+                            sees it. Queueing it grants it one more — the count of how hard the system already tried
+                            is kept rather than reset.</>
+                          : <>This run still has attempts left and the sweep will reach it on its own. Queueing it
+                            makes it due now rather than at its scheduled backoff.</>}
+                        {' '}Fix the cause first: the retry runs the automation as it is defined today.
+                      </p>
+                      <button type="submit" class="btn btn-ghost">Queue for another attempt</button>
+                    </form>
+                  ) : (
+                    <p class="r-hint muted">
+                      Retrying a run needs <code>workflow:write</code>, which this account does not hold.
+                    </p>
+                  )
                 )}
               </div>
 
@@ -863,6 +997,14 @@ const runColumns: Column[] = [
 </AdminShell>
 
 <style>
+  /* Added with the two operating acts. Deliberately quiet: these sit inside
+     cards that already carry the state, and a loud control would compete with
+     the status it acts on. */
+  .done-msg { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--ok-bg, #e8f5ed); color: var(--ok-fg, #14532d); font-size: 0.95rem; }
+  .a-act, .r-act { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line, #e3e3e3); display: grid; gap: 6px; justify-items: start; }
+  .a-act .input, .r-act .input { width: 100%; max-width: 32rem; }
+  .a-hint, .r-hint { margin: 8px 0 0; font-size: 0.85rem; color: var(--muted-fg, #666); }
+
   .install-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px; }
   .install-note { font-size: 0.85em; opacity: 0.75; max-width: 46ch; }
 </style>

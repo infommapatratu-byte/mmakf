@@ -55,6 +55,7 @@ import {
 } from '@/db/scheduling';
 import { issueFeed, myFeeds, revokeFeed, isFeedError, type FeedToken } from '@/lib/calendar-feed';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -93,7 +94,7 @@ let done: string | null = null;
 // not same-origin before any of this runs.
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   const field = (k: string) => String(form.get(k) ?? '').trim();
   const action = field('action');
   const rl = await rateLimit(Astro.request, 'my-schedule', 30, 60);

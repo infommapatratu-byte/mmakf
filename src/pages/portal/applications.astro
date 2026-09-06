@@ -43,6 +43,7 @@ import {
   APPLICABLE_ROLES, EVIDENCE_REQUIREMENTS_NOT_SET, REVIEW_TURNAROUND_NOT_SET,
 } from '@/db/onboarding';
 import { readableError, fmtDateTime, scopeNames, scopeLabel, titleCase, field, intField, unitOptions } from './_lib';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -64,7 +65,7 @@ if (Astro.request.method === 'POST') {
   if (!configured || !principal) {
     formError = 'You are not signed in, so nothing was submitted.';
   } else {
-    const form = await Astro.request.formData();
+    const form = await readSubmission(Astro.request);
     const intent = String(form.get('intent') ?? '');
     const ctx = { principal, ip: clientIp(Astro.request) };
 

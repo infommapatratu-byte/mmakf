@@ -69,6 +69,7 @@ import {
 import { submitIndividualRequest } from '@/pages/api/start/individual';
 import { formatINR } from '@/lib/training-fee-state';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -111,7 +112,7 @@ function readCarried(form: FormData): IndividualAnswers {
 }
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   nonce = String(form.get('nonce') || '');
   const submittedKey = String(form.get('stepKey') || '');
   const intent = String(form.get('intent') || 'next');

@@ -65,6 +65,7 @@ import { duplicateQueue, decideDuplicate, isIdentityError } from '@/db/identity'
 import * as s from '@/db/schema';
 import { inArray } from 'drizzle-orm';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
 const h = (p: string) => surfaceHref(surface, p);
@@ -99,7 +100,7 @@ let error: string | null = null;
 let postedReason = '';
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   const get = (k: string) => String(form.get(k) ?? '').trim();
   postedReason = get('reason');
 

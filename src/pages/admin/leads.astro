@@ -61,16 +61,23 @@ import ErrorState from '@/components/states/ErrorState.astro';
 import type { Column, Filter } from '@/components/DataTable/types';
 import { readTableQuery, type TableQuery } from '@/components/DataTable/query';
 import { isConfigured, db } from '@/db';
-import { identify } from '@/lib/session';
+import * as s from '@/db/schema';
+import { eq } from 'drizzle-orm';
+import { identify, clientIp } from '@/lib/session';
+import { rateLimit } from '@/lib/ratelimit';
+import type { AuditContext } from '@/db/federation';
 import { canAnywhere, visibleScopes, ForbiddenError } from '@/lib/rbac';
 import {
   leadPipeline, leadDetail, sourceAttribution, isEngagementError,
+  setLeadStatus, assignLeadOwner, addLeadActivity,
+  LEAD_TRANSITIONS, TERMINAL_LEAD_STATUSES, LEAD_ACTIVITY_KINDS,
   LEAD_SOURCES, AUDIENCES, type Audience,
 } from '@/db/engagement';
 // Whether a fee framework is published is a fact about the database, and
 // /admin/fees can change it. Read it rather than assert it — see below.
 import { activeFramework } from '@/db/fees';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -79,6 +86,11 @@ const h = (p: string) => surfaceHref(surface, p);
 
 const identity = await identify(Astro.request.headers.get('cookie'));
 const principal = identity?.principal ?? null;
+
+// Held in ANY scope. Whether it covers the particular lead is decided by the
+// module against that lead's own placement, which is the only check that stays
+// correct — this one decides whether to draw the controls at all.
+const mayWrite = Boolean(principal) && canAnywhere(principal!, 'engagement:write');
 
 // The nine states, in the order the schema declares them — which is the order a
 // lead travels. Sorting this strip by volume would put the fullest column first
@@ -100,6 +112,129 @@ const audience: Audience | '' =
 const leadParam = Astro.url.searchParams.get('lead') ?? '';
 const leadId = /^[0-9]{1,9}$/.test(leadParam) ? Number(leadParam) : null;
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ACTS — added because this page could read the pipeline and not touch it
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Every enquiry the federation had received sat at the status the capture path
+// gave it. There was no POST handler on this file at all, and src/db/engagement.ts
+// exposed no function that could move a lead: captureLead() sets the status on
+// the way in, identifyLead() nudges `new` to `qualifying` as a side effect, and
+// that was the whole of it. So the nine-column pipeline strip above was, in
+// practice, one column — and a board that shows work and cannot record that the
+// work was done teaches its users to keep the real state in a spreadsheet the
+// federation cannot audit.
+//
+// POSTS TO THIS PAGE, NOT TO /api/. The middleware requires application/json on
+// /api/ paths and a form without JavaScript cannot send one; the same-origin
+// check that answers CSRF applies here identically. This is the same choice
+// /admin/guardianships made, for the same reason.
+//
+// AUTHORITY IS RE-CHECKED ON EVERY ACT, and the scope is re-derived from the
+// stored lead inside setLeadStatus() / assignLeadOwner() / addLeadActivity()
+// rather than from anything in the form. A lead id posted by hand therefore
+// reaches the same refusal that opening it would.
+
+const DONE_MESSAGES: Record<string, string> = {
+  moved: 'The lead has moved, with your reason recorded against it and in the audit.',
+  assigned: 'The lead is assigned. The owner can be changed again at any time.',
+  unassigned: 'The lead has no owner. It stays in the pipeline and stays visible.',
+  noted: 'Recorded against the lead.',
+};
+
+let actError: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await readSubmission(Astro.request);
+  const get = (k: string) => String(form.get(k) ?? '').trim();
+  const act = get('act');
+  const target = Number(get('leadId'));
+
+  // A lead moves at human speed. This is generous enough for an afternoon of
+  // pipeline work and tight enough that a script cannot walk the identifiers.
+  const rl = await rateLimit(Astro.request, 'lead-act', 60, 60);
+  const backTo = (done: string) =>
+    `${h('/admin/leads')}?lead=${target}&done=${done}`;
+
+  if (!rl.ok) {
+    Astro.response.status = 429;
+    actError = `Too many changes in a short time. Nothing was changed. Try again in ${rl.retryAfterSeconds} seconds.`;
+  } else if (!principal) {
+    Astro.response.status = 401;
+    actError = 'Your session has ended. Sign in again — nothing was changed.';
+  } else if (!isConfigured()) {
+    Astro.response.status = 503;
+    actError = 'The federation database is not configured on this deployment, so there is nothing to change.';
+  } else if (!canAnywhere(principal, 'engagement:write')) {
+    // The controls are not rendered without this, and the check is repeated
+    // here because rendered markup is not an authorisation system.
+    Astro.response.status = 403;
+    actError = 'Changing a lead requires engagement:write, which this account does not hold in any scope.';
+  } else if (!Number.isInteger(target) || target <= 0 || target > 2147483647) {
+    Astro.response.status = 400;
+    actError = 'Name the lead to act on.';
+  } else {
+    const ctx: AuditContext = {
+      principal,
+      ip: clientIp(Astro.request),
+      authority: identity!.shared ? `shared:${identity!.via}` : 'user',
+      reason: get('reason') || null,
+    };
+    try {
+      if (act === 'move') {
+        await setLeadStatus(db(), ctx, {
+          leadId: target,
+          status: get('status'),
+          reason: get('reason'),
+        });
+        return Astro.redirect(backTo('moved'), 303);
+      } else if (act === 'assign') {
+        // An empty select is "nobody", which is a legitimate destination — a
+        // lead whose owner has left must be returnable to the unassigned pool
+        // rather than stuck with them.
+        const raw = get('ownerUserId');
+        const ownerUserId = raw === '' ? null : Number(raw);
+        if (ownerUserId !== null && (!Number.isInteger(ownerUserId) || ownerUserId <= 0)) {
+          Astro.response.status = 400;
+          actError = 'That is not an account this federation holds.';
+        } else {
+          await assignLeadOwner(db(), ctx, { leadId: target, ownerUserId, reason: get('reason') || undefined });
+          return Astro.redirect(backTo(ownerUserId === null ? 'unassigned' : 'assigned'), 303);
+        }
+      } else if (act === 'note') {
+        await addLeadActivity(db(), ctx, {
+          leadId: target,
+          kind: get('kind') || 'note',
+          summary: get('summary'),
+        });
+        return Astro.redirect(backTo('noted'), 303);
+      } else {
+        Astro.response.status = 400;
+        actError = 'That is not something this page does.';
+      }
+    } catch (err: any) {
+      if (err instanceof ForbiddenError) {
+        Astro.response.status = 403;
+        actError = 'This lead is outside the scope your credential covers, so it was not changed.';
+      } else if (isEngagementError(err)) {
+        // The module's refusals are sentences written for this reader — the
+        // illegal transition, the terminal status, the disabled account. They
+        // are shown as they are rather than flattened into "invalid".
+        Astro.response.status = 400;
+        actError = err.message;
+      } else {
+        console.error('[admin/leads] act failed', err);
+        Astro.response.status = 500;
+        actError = 'Nothing was changed.';
+      }
+    }
+  }
+}
+
+const done = Astro.url.searchParams.get('done');
+const doneMessage = done && DONE_MESSAGES[done] ? DONE_MESSAGES[done] : null;
+
 const BOARD_LIMIT = 500;   // leadPipeline() caps here anyway
 
 interface Attribution { source: string; total: number; won: number; wonOf: string }
@@ -111,6 +246,7 @@ let attribution: Attribution[] = [];
 let attributionExact = true;
 let detail: any = null;
 let detailProblem: string | null = null;
+let ownerLabel: string | null = null;
 let detailFailure: string | null = null;
 
 // THREE ABSENCES, NOT ONE (CONTENT-ARCHITECTURE §5.4). "There is no database on
@@ -170,6 +306,24 @@ if (principal && canAnywhere(principal, 'engagement:read')) {
       if (leadId != null) {
         try {
           detail = await leadDetail(db(), principal, leadId);
+          // The owner is stored as an account id and shown as a name. Resolved
+          // here rather than joined inside leadDetail(), because the pipeline
+          // list does not need it and the module should not carry a join for
+          // one panel. Failure is not fatal: an unresolvable owner is reported
+          // as the id it is, which is still more than the column alone says.
+          if (detail?.lead?.ownerUserId != null) {
+            try {
+              const [o] = await db()
+                .select({ email: s.users.email, name: s.persons.fullName })
+                .from(s.users)
+                .leftJoin(s.persons, eq(s.persons.id, s.users.personId))
+                .where(eq(s.users.id, detail.lead.ownerUserId))
+                .limit(1);
+              ownerLabel = o?.name ?? o?.email ?? null;
+            } catch {
+              ownerLabel = null;
+            }
+          }
         } catch (err: any) {
           if (isEngagementError(err) || err instanceof ForbiddenError) {
             // ONE message for "no such lead" and for "outside your scope". They
@@ -407,6 +561,18 @@ const pipelineTabs = [
         </Fragment>
       </PageHeader>
 
+      {/* The outcome of an act, told once, at the top, where a reader who has
+          just pressed a button is looking. `actError` carries the module's own
+          refusal sentence — an illegal transition, a terminal status, a disabled
+          account — rather than a flattened "invalid", because the module is the
+          only thing that knows which rule was broken. */}
+      {actError && (
+        <p class="act-msg act-msg-bad" role="alert">{actError}</p>
+      )}
+      {doneMessage && !actError && (
+        <p class="act-msg act-msg-ok">{doneMessage}</p>
+      )}
+
       <p class="legend">
         Counted over {boardTruncated ? `the ${BOARD_LIMIT} most recently changed leads in scope` : 'the leads in scope'},
         which is also the set the table below filters.
@@ -595,6 +761,103 @@ const pipelineTabs = [
                 </ol>
               )}
 
+              {/* ── The acts ────────────────────────────────────────────────
+                  Rendered only for a caller who holds engagement:write
+                  somewhere. Whether it covers THIS lead is decided by the
+                  module against the lead's own placement when the form is
+                  posted, so a reader who can see a lead outside their write
+                  scope is offered the controls and refused by name — which is
+                  the honest order, because the alternative is a page that
+                  silently drops controls with no explanation. */}
+              <h3 class="sec-h3">Act on this lead</h3>
+
+              {!mayWrite ? (
+                <p class="sec-p muted">
+                  Changing a lead needs <code>engagement:write</code>, which this
+                  account does not hold. This page is read-only for you — the
+                  controls are absent rather than disabled, because a button that
+                  refuses is a button somebody presses twice.
+                </p>
+              ) : (
+                <div class="acts-panel">
+                  {TERMINAL_LEAD_STATUSES.includes(detail.lead.status) ? (
+                    <p class="sec-p muted">
+                      This lead is <strong>{label(detail.lead.status)}</strong>, which is
+                      final. It cannot be moved back into the pipeline: reopening
+                      it would lose the fact that it closed, and the first-touch
+                      attribution with it. A returning enquiry is recorded as a
+                      new lead.
+                    </p>
+                  ) : (
+                    <form method="POST" class="act-form">
+                      <input type="hidden" name="act" value="move" />
+                      <input type="hidden" name="leadId" value={String(detail.lead.id)} />
+                      <p class="act-t">Move it along</p>
+                      <label class="input-label" for="mv-status">To</label>
+                      <select class="input" id="mv-status" name="status" required>
+                        {(LEAD_TRANSITIONS[detail.lead.status] ?? []).map((next: string) => (
+                          <option value={next}>{label(next)}</option>
+                        ))}
+                      </select>
+                      <label class="input-label" for="mv-reason">Reason</label>
+                      <input class="input" id="mv-reason" name="reason" required maxlength="500" />
+                      <p class="act-hint">
+                        Required for every move, not only the unhappy ones. It is
+                        written to the activity trail and to the audit, and for a
+                        loss it becomes the lead's recorded reason.
+                      </p>
+                      <button type="submit" class="btn btn-primary">Move</button>
+                    </form>
+                  )}
+
+                  <form method="POST" class="act-form">
+                    <input type="hidden" name="act" value="assign" />
+                    <input type="hidden" name="leadId" value={String(detail.lead.id)} />
+                    <p class="act-t">Owner</p>
+                    <p class="act-now">
+                      {detail.lead.ownerUserId == null
+                        ? <span class="muted">Nobody owns this lead.</span>
+                        : <>Currently {ownerLabel ?? <>account #{detail.lead.ownerUserId}</>}</>}
+                    </p>
+                    <label class="input-label" for="as-user">Assign to account id</label>
+                    <input class="input" id="as-user" name="ownerUserId" inputmode="numeric" pattern="[0-9]*" />
+                    <p class="act-hint">
+                      An account id, not a name picked from a list. There is no
+                      dropdown deliberately: enumerating every account that could
+                      own a lead would hand the federation's staff list to anyone
+                      holding <code>engagement:write</code> in one district. A
+                      wrong id is refused by name, not by a database error.
+                      Leave it empty and press Assign to return the lead to the
+                      unassigned pool.
+                    </p>
+                    <button type="submit" class="btn btn-ghost">Assign</button>
+                  </form>
+
+                  <form method="POST" class="act-form">
+                    <input type="hidden" name="act" value="note" />
+                    <input type="hidden" name="leadId" value={String(detail.lead.id)} />
+                    <p class="act-t">Record a contact</p>
+                    <label class="input-label" for="nt-kind">Kind</label>
+                    <select class="input" id="nt-kind" name="kind">
+                      {LEAD_ACTIVITY_KINDS.map((k: string) => (
+                        <option value={k}>{label(k)}</option>
+                      ))}
+                    </select>
+                    <label class="input-label" for="nt-summary">What happened</label>
+                    <textarea class="input" id="nt-summary" name="summary" rows="3" required maxlength="2000"></textarea>
+                    <p class="act-hint">
+                      Goes to the activity trail above, not to the audit — a note
+                      is correspondence, and burying the acts that matter under
+                      it would make the audit unreadable. A status change cannot
+                      be written here: those rows are written only by the act
+                      that changes the status, so the trail cannot claim a
+                      transition the lead's own column disagrees with.
+                    </p>
+                    <button type="submit" class="btn btn-ghost">Record</button>
+                  </form>
+                </div>
+              )}
+
               <p><a class="btn btn-ghost" href={listHref({})}>Back to the pipeline</a></p>
             </>
           )}
@@ -605,6 +868,21 @@ const pipelineTabs = [
 </AdminShell>
 
 <style>
+  /* The acts panel — added with the write path. Three forms in one column on a
+     phone and side by side once there is room, because a lead is worked on from
+     a phone as often as from a desk. */
+  .act-msg { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 0.95rem; }
+  .act-msg-ok { background: var(--ok-bg, #e8f5ed); color: var(--ok-fg, #14532d); }
+  .act-msg-bad { background: var(--bad-bg, #fdeaea); color: var(--bad-fg, #7f1d1d); }
+  .acts-panel { display: grid; gap: 14px; margin: 10px 0 18px; }
+  @media (min-width: 900px) { .acts-panel { grid-template-columns: repeat(3, 1fr); align-items: start; } }
+  .act-form { border: 1px solid var(--line, #e3e3e3); border-radius: 10px; padding: 12px; }
+  .act-t { margin: 0 0 8px; font-weight: 600; }
+  .act-now { margin: 0 0 8px; font-size: 0.92rem; }
+  .act-hint { margin: 8px 0 10px; font-size: 0.85rem; color: var(--muted-fg, #666); }
+  .act-form .input { width: 100%; }
+  .act-form textarea.input { resize: vertical; }
+
   .note {
     padding: 20px 22px; border-left: 3px solid var(--gold);
     background: var(--card); color: var(--muted); line-height: 1.7; max-width: 66ch;

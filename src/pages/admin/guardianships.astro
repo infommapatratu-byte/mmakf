@@ -64,6 +64,7 @@ import {
 import * as s from '@/db/schema';
 import { inArray } from 'drizzle-orm';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 const surface: Surface = (Astro.locals as any)?.surface ?? 'public';
 const h = (p: string) => surfaceHref(surface, p);
@@ -105,7 +106,7 @@ const DONE_MESSAGES: Record<string, string> = {
 let error: string | null = null;
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   const get = (k: string) => String(form.get(k) ?? '').trim();
 
   const rl = await rateLimit(Astro.request, 'guardianship-decide', 40, 60);

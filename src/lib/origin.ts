@@ -47,6 +47,11 @@ const TRUSTED_HOSTS = new Set([
   'www.mmakf.in',
   'learn.mmakf.in',
   'admin.mmakf.in',
+  // The workforce surface. Added with it — a surface missing from this list has
+  // every form on it refused, which is the bug this whole block documents.
+  'employee.mmakf.in',
+  'employee.localhost',
+  'employee.127.0.0.1.nip.io',
   // Development. Kept here rather than behind an environment check because a
   // production deployment never receives an Origin naming localhost, and a
   // conditional that reads the environment is one more thing to get wrong.
@@ -68,6 +73,41 @@ export function isTrustedHost(host: string | null | undefined): boolean {
   return TRUSTED_HOSTS.has(normaliseHost(host));
 }
 
+/**
+ * @param host  The host this request was received on, WHERE IT IS KNOWN.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THIS PARAMETER IS A FAST PATH, NOT A CONTROL — AND THAT IS A BUG FIX
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * THE SECOND TIME every form on the apex domain was refused, and the first fix
+ * is why the second was so hard to see.
+ *
+ * `eb1004e` added TRUSTED_HOSTS and the `same-site` branch below, and it is
+ * correct. Its unit tests pass `'www.mmakf.in'` as `host` and go green. But the
+ * production caller is `src/middleware.ts`, which passes `url.host` — and that
+ * same file, twenty lines above the call, records that **behind Vercel's proxy
+ * `url.host` is the internal invocation host**, not the name the visitor typed.
+ * It is the reason `publicHost` exists there at all.
+ *
+ * So in production `isTrustedHost(host)` was asking whether an internal Vercel
+ * hostname is one of the federation's public hosts. It never is. The
+ * conjunction could not be satisfied, the `same-site` branch always returned
+ * false, and every POST that crossed the apex-to-www redirect was refused —
+ * for months, with a green test suite, because the test called the function
+ * with a value the caller never supplies.
+ *
+ * THE FIX IS TO STOP ASKING. Whether the request is forged is decided by WHERE
+ * IT CAME FROM, and `Origin` / `Sec-Fetch-Site` are set by the browser and
+ * cannot be forged by script or by a cross-site form. The host it arrived on
+ * adds nothing: a request whose initiator is `www.mmakf.in` is the federation's
+ * own however the edge routed it, and one whose initiator is `evil.example` is
+ * forged however the edge routed it.
+ *
+ * `host` is therefore used only as an exact-match shortcut, which is why it is
+ * still accepted and why passing an internal hostname is now harmless rather
+ * than fatal.
+ */
 export function isSameOrigin(headers: Headers | Record<string, string>, host: string): boolean {
   const get = (name: string): string | null => {
     if (typeof (headers as Headers).get === 'function') return (headers as Headers).get(name);
@@ -75,12 +115,25 @@ export function isSameOrigin(headers: Headers | Record<string, string>, host: st
     return rec[name] ?? rec[name.toLowerCase()] ?? null;
   };
 
-  /** The Origin/Referer host, where the browser sent one. */
+  /**
+   * The Origin/Referer host, where the browser sent one.
+   *
+   * A malformed value CONTINUES to the next header rather than abandoning the
+   * search. It used to `return null` on the first unparseable one, so an
+   * opaque `Origin: null` — which is what some browsers send once a request has
+   * crossed an origin boundary through a redirect — discarded a perfectly good
+   * `Referer` sitting behind it and refused the request.
+   */
   const initiator = (): string | null => {
     for (const header of ['origin', 'referer']) {
       const value = get(header);
       if (!value) continue;
-      try { return normaliseHost(new URL(value).host); } catch { return null; }
+      try {
+        const h = normaliseHost(new URL(value).host);
+        if (h) return h;
+      } catch {
+        continue;
+      }
     }
     return null;
   };
@@ -92,10 +145,13 @@ export function isSameOrigin(headers: Headers | Record<string, string>, host: st
     // widen this by accident.
     if (fetchSite === 'cross-site') return false;
     if (fetchSite === 'same-site') {
-      // The apex-to-www redirect, and nothing else. Both ends must be hosts the
-      // federation serves — which a subdomain an attacker controls is not.
+      // The apex-to-www redirect, and the cross-surface links between
+      // www / learn / admin / employee. The INITIATOR must be a host the
+      // federation serves — which a subdomain an attacker has taken over is
+      // not, and which is the whole of the protection here. See the note on
+      // `host` above for why the receiving host is no longer part of this test.
       const from = initiator();
-      return !!from && isTrustedHost(from) && isTrustedHost(host);
+      return !!from && isTrustedHost(from);
     }
     return false;
   }
@@ -104,7 +160,7 @@ export function isSameOrigin(headers: Headers | Record<string, string>, host: st
   const from = initiator();
   if (!from) return false;
   if (from === normaliseHost(host)) return true;
-  return isTrustedHost(from) && isTrustedHost(host);
+  return isTrustedHost(from);
 }
 
 /**

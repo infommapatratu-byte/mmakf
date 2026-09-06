@@ -58,6 +58,7 @@ import {
 } from '@/db/marketplace';
 import { rateLimit } from '@/lib/ratelimit';
 import type { Role, ScopeType } from '@/lib/rbac';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -115,7 +116,7 @@ if (Astro.request.method === 'POST') {
         : 'Applying requires a signed-in account of your own. Create one, or sign in, and the forms below will appear.',
     };
   } else {
-    const form = await Astro.request.formData().catch(() => null);
+    const form = await readSubmission(Astro.request).catch(() => null);
     const intent = String(form?.get('intent') ?? '');
     const ctx = { principal: principal!, ip: clientIp(Astro.request), requestId: null };
 

@@ -28,6 +28,7 @@
 import Base from '@/layouts/Base.astro';
 import { submitCoachApplication, type CoachOutcome } from '@/pages/api/learn/coach-application';
 import { href as surfaceHref, canonicalFor, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -38,7 +39,7 @@ let outcome: CoachOutcome | null = null;
 let submitted: Record<string, unknown> = {};
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   const get = (k: string) => String(form.get(k) ?? '').trim();
 
   // EVERY VALUE, NOT THE LAST ONE.

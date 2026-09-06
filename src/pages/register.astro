@@ -40,6 +40,7 @@ import { identify } from '@/lib/session';
 import { isConfigured } from '@/db';
 import { submitRegistration, statusFor, type RegistrationOutcome } from './api/auth/register';
 import { APPLICABLE_ROLES } from '@/db/onboarding';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -58,7 +59,7 @@ let typedName = '';
 if (Astro.request.method === 'POST') {
   let form: FormData | null = null;
   try {
-    form = await Astro.request.formData();
+    form = await readSubmission(Astro.request);
   } catch {
     form = null;
   }

@@ -89,6 +89,7 @@ import {
   type BenchmarkPeriod, type BenchmarkSubjectKind,
 } from '@/db/benchmarks';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -153,7 +154,7 @@ let error: string | null = null;
 let postedReason = '';
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   const get = (k: string) => String(form.get(k) ?? '').trim();
   const actName = get('action');
   postedReason = get('reason');

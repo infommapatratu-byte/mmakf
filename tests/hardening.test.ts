@@ -257,10 +257,136 @@ describe('the surface is decided from the host the visitor typed', () => {
     // Deciding "is this same-origin?" from a value the caller supplies would
     // answer the question with the attacker's own input.
     const src = readFileSync('src/middleware.ts', 'utf8');
-    const csrfLine = src.split('\n').find((l) => l.includes('isSameOrigin('));
+    // Matched on the CALL, not on the first mention of the name. This used to
+    // find `.includes('isSameOrigin(')`, which also matches a comment — so
+    // documenting the check above it broke the guard and reported the call as
+    // wrong. A guard that fails when somebody explains the code is a guard
+    // people delete.
+    const csrfLine = src.split('\n').find((l) => l.includes('isSameOrigin(request.headers'));
     expect(csrfLine, 'no isSameOrigin call found — has the check been removed?').toBeTruthy();
     expect(csrfLine, 'the CSRF check is using the forgeable forwarded host')
       .not.toMatch(/publicHost/);
     expect(csrfLine).toMatch(/url\.host/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * THE APEX-DOMAIN REFUSAL, SECOND OCCURRENCE.
+ *
+ * Reported from production: submitting the individual training form at
+ * mmakf.in/start/individual answered "Cross-site POST form submissions are
+ * forbidden". It had been doing so for months.
+ *
+ * `eb1004e` had already fixed this once, correctly, by adding TRUSTED_HOSTS and
+ * the `same-site` branch. The tests above prove that fix works. They prove it
+ * by passing `'www.mmakf.in'` as the host — and the production caller,
+ * src/middleware.ts, passes `url.host`, which behind Vercel's proxy is the
+ * INTERNAL invocation host. The same file says so twenty lines above the call.
+ *
+ * So the branch asked whether an internal Vercel hostname is one of the
+ * federation's public hosts, which it never is, and refused every POST that
+ * crossed the apex-to-www redirect.
+ *
+ * Every test below passes a host of the shape the CALLER ACTUALLY SUPPLIES.
+ * That is the whole point of this block: the previous suite tested the function
+ * with an argument nothing in the application ever gives it.
+ */
+describe('CSRF: the caller passes an internal host, and that must not refuse real traffic', () => {
+  const H = (o: Record<string, string>) => new Headers(o);
+
+  // What `url.host` actually looks like inside a Vercel function.
+  const INTERNAL = 'mmakf-a1b2c3d4.vercel.app';
+
+  it('THE REPORTED BUG: an apex form POST survives the redirect to www', () => {
+    // Chrome, submitting a form on https://mmakf.in that 308-redirects to
+    // https://www.mmakf.in: the initiator is still the apex, and the two are
+    // the same site but not the same origin.
+    expect(isSameOrigin(
+      H({ 'sec-fetch-site': 'same-site', origin: 'https://mmakf.in' }),
+      INTERNAL,
+    )).toBe(true);
+  });
+
+  it('the ordinary same-origin POST is unaffected', () => {
+    expect(isSameOrigin(H({ 'sec-fetch-site': 'same-origin' }), INTERNAL)).toBe(true);
+  });
+
+  it('a cross-surface POST between the federation’s own hosts is allowed', () => {
+    for (const from of ['https://www.mmakf.in', 'https://learn.mmakf.in',
+      'https://admin.mmakf.in', 'https://employee.mmakf.in']) {
+      expect(isSameOrigin(H({ 'sec-fetch-site': 'same-site', origin: from }), INTERNAL), from)
+        .toBe(true);
+    }
+  });
+
+  it('ATTACK: a hijacked sibling subdomain is still refused, internal host or not', () => {
+    // This is the hole the receiving-host check was believed to be closing, and
+    // it is closed by the INITIATOR allowlist instead — which is what actually
+    // closed it all along.
+    expect(isSameOrigin(
+      H({ 'sec-fetch-site': 'same-site', origin: 'https://evil.mmakf.in' }),
+      INTERNAL,
+    )).toBe(false);
+    expect(isSameOrigin(
+      H({ 'sec-fetch-site': 'same-site', origin: 'https://blog.mmakf.in' }),
+      INTERNAL,
+    )).toBe(false);
+  });
+
+  it('ATTACK: cross-site is refused before the same-site branch can be reached', () => {
+    expect(isSameOrigin(
+      H({ 'sec-fetch-site': 'cross-site', origin: 'https://www.mmakf.in' }),
+      INTERNAL,
+    )).toBe(false);
+  });
+
+  it('ATTACK: same-site with no initiator at all is refused', () => {
+    expect(isSameOrigin(H({ 'sec-fetch-site': 'same-site' }), INTERNAL)).toBe(false);
+  });
+
+  it('ATTACK: a lookalike apex is refused', () => {
+    expect(isSameOrigin(
+      H({ 'sec-fetch-site': 'same-site', origin: 'https://mmakf.in.evil.example' }),
+      INTERNAL,
+    )).toBe(false);
+  });
+
+  it('an opaque Origin falls through to Referer instead of abandoning the search', () => {
+    // Some browsers send `Origin: null` once a request has crossed an origin
+    // boundary through a redirect. The old initiator() returned null on the
+    // first unparseable header, discarding a perfectly good Referer behind it.
+    expect(isSameOrigin(
+      H({ 'sec-fetch-site': 'same-site', origin: 'null', referer: 'https://mmakf.in/start/individual' }),
+      INTERNAL,
+    )).toBe(true);
+    // …and an opaque Origin with a hostile Referer is still refused.
+    expect(isSameOrigin(
+      H({ 'sec-fetch-site': 'same-site', origin: 'null', referer: 'https://evil.example/x' }),
+      INTERNAL,
+    )).toBe(false);
+    // …and an opaque Origin with nothing behind it is refused.
+    expect(isSameOrigin(H({ 'sec-fetch-site': 'same-site', origin: 'null' }), INTERNAL)).toBe(false);
+  });
+
+  it('the older-browser path works on an internal host too', () => {
+    // No Sec-Fetch-Site at all. Before the fix this compared the browser's
+    // Origin against the internal hostname and refused every request from every
+    // host, not only the apex.
+    expect(isSameOrigin(H({ origin: 'https://www.mmakf.in' }), INTERNAL)).toBe(true);
+    expect(isSameOrigin(H({ origin: 'https://mmakf.in' }), INTERNAL)).toBe(true);
+    expect(isSameOrigin(H({ origin: 'https://evil.example' }), INTERNAL)).toBe(false);
+    expect(isSameOrigin(H({}), INTERNAL)).toBe(false);
+  });
+
+  it('every host the surface router serves is a host the CSRF check trusts', () => {
+    // The two lists are maintained in different files and drifted once already:
+    // a surface added without its entry here has every form on it refused, with
+    // exactly the error this block exists for.
+    for (const h of ['mmakf.in', 'www.mmakf.in', 'learn.mmakf.in',
+      'admin.mmakf.in', 'employee.mmakf.in']) {
+      expect(isTrustedHost(h), `${h} is not a trusted host`).toBe(true);
+    }
   });
 });

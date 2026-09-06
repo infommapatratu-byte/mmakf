@@ -101,7 +101,7 @@ import { rateLimit } from '@/lib/ratelimit';
 import { canAnywhere, visibleScopes, ForbiddenError } from '@/lib/rbac';
 import { writeAudit, type AuditContext } from '@/db/federation';
 import {
-  activeFramework, createFramework, addRule, publishFramework,
+  activeFramework, createFramework, addRule, updateRule, deleteRule, publishFramework,
   formatINR, isFeeError, PPM,
 } from '@/db/fees';
 import { paymentStatusReport, razorpayCapability } from '@/lib/payments';
@@ -114,6 +114,7 @@ import { paymentStatusReport, razorpayCapability } from '@/lib/payments';
 // it the same way, for the same reason.
 import { rupeesToPaise } from '@/pages/api/marketplace/[...action]';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -360,7 +361,7 @@ const FORM_FOR_ACTION: Record<string, FormName> = {
 };
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   posted = Object.fromEntries([...form.entries()].map(([k, v]) => [k, String(v)]));
   const get = (k: string) => String(form.get(k) ?? '').trim();
   const action = get('action');
@@ -651,61 +652,65 @@ if (Astro.request.method === 'POST') {
         if (!Number.isInteger(ruleId) || ruleId <= 0) throw new InputError('Say which rule is being changed.');
         const { values } = readRuleFields();
 
-        // Same discipline as the draft edit above: the draft-only condition is
-        // part of the statement, correlated against the rule's own framework,
-        // so a rule cannot be edited into a framework that has been published
-        // in the meantime and no pair of ids supplied by the browser can widen
-        // it. One statement, no window.
-        const [updated] = await db().update(s.feeRules)
-          .set({
-            code: values.code,
-            label: values.label,
-            kind: values.kind as any,
-            serviceId: values.serviceId,
-            audience: values.audience as any,
-            conditions: values.conditions,
-            amountMinor: values.amountMinor,
-            factorPpm: values.factorPpm,
-            minQuantity: values.minQuantity,
-            maxQuantity: values.maxQuantity,
-            sortOrder: values.sortOrder,
-            requiresApproval: values.requiresApproval,
-          })
-          .where(and(
-            eq(s.feeRules.id, ruleId),
-            eq(s.feeRules.frameworkId, frameworkId),
-            sql`exists (select 1 from fee_frameworks f where f.id = fee_rules.framework_id and f.status = 'draft')`,
-          ))
-          .returning({ id: s.feeRules.id, code: s.feeRules.code });
-
-        if (!updated) {
-          throw new InputError('Nothing was changed. Either that rule is not in this version, or the version is no longer a draft — a published framework is frozen.');
-        }
-        await writeAudit(db(), ctx, {
-          entityType: 'fee_rule', entityId: ruleId, action: 'update',
-          newValue: { framework: frameworkId, code: updated.code },
+        // ── THROUGH updateRule(), AND THE REASON IS A HOLE THIS PAGE HAD ────
+        //
+        // This branch used to write the row itself with db().update(). The
+        // draft-only condition was correlated into the statement, which was
+        // right and is preserved inside the module — but the edit skipped
+        // classifyFeeRule(), and THAT was the defect.
+        //
+        // addRule() refuses a rule that would charge a student for being a
+        // student, and its own comment says the refusal holds because "a rule
+        // that cannot be created cannot be displayed, exported, cloned, quoted,
+        // invoiced or seeded". The clone path was routed through addRule() for
+        // exactly that reason. The EDIT path was not, so the refusal could be
+        // walked around in two steps: add a legitimate rule, then edit it into
+        // a student charge. Nothing anywhere would have refused the second act.
+        //
+        // updateRule() merges the patch onto the stored row and classifies the
+        // RESULT, so a combination assembled across two requests is refused the
+        // same as one that arrived at once.
+        //
+        // `code` is not sent: the module refuses to change it, because a quote
+        // line records `ruleCode` beside `ruleId` and renaming makes an issued
+        // quotation disagree with itself. The form renders it read-only when
+        // editing.
+        const updated = await updateRule(db(), ctx, ruleId, {
+          label: values.label,
+          kind: values.kind,
+          serviceId: values.serviceId,
+          audience: values.audience,
+          conditions: values.conditions,
+          amountMinor: values.amountMinor,
+          factorPpm: values.factorPpm,
+          minQuantity: values.minQuantity,
+          maxQuantity: values.maxQuantity,
+          sortOrder: values.sortOrder,
+          requiresApproval: values.requiresApproval,
         });
+        if (updated.frameworkId !== frameworkId) {
+          // The rule exists but belongs to a different version than the form
+          // claimed. Refused rather than followed: the redirect below would
+          // otherwise send the author back to a framework they did not edit.
+          throw new InputError('That rule is not in this version of the framework.');
+        }
         return Astro.redirect(`${SELF}?framework=${frameworkId}&done=rule_saved#rules`, 303);
       } else if (action === 'delete_rule') {
         const frameworkId = ruleFrameworkId();
         const ruleId = Number(get('ruleId'));
         if (!Number.isInteger(ruleId) || ruleId <= 0) throw new InputError('Say which rule is being removed.');
 
-        const [removed] = await db().delete(s.feeRules)
-          .where(and(
-            eq(s.feeRules.id, ruleId),
-            eq(s.feeRules.frameworkId, frameworkId),
-            sql`exists (select 1 from fee_frameworks f where f.id = fee_rules.framework_id and f.status = 'draft')`,
-          ))
-          .returning({ id: s.feeRules.id, code: s.feeRules.code });
-
-        if (!removed) {
-          throw new InputError('Nothing was removed. Either that rule is not in this version, or the version is no longer a draft — a published framework is frozen.');
+        // Through the module for the same reason as the edit above: one
+        // enforcement point. deleteRule() keeps the correlated draft-only
+        // condition this branch had, and adds the check this branch lacked —
+        // that no quote line was computed from the rule. That cannot happen
+        // while the framework is a draft, which is an argument about the rest
+        // of the system rather than a constraint; without the check, the day it
+        // is wrong the author gets a driver's foreign-key violation as a 500.
+        const removed = await deleteRule(db(), ctx, ruleId);
+        if (removed.frameworkId !== frameworkId) {
+          throw new InputError('That rule is not in this version of the framework.');
         }
-        await writeAudit(db(), ctx, {
-          entityType: 'fee_rule', entityId: ruleId, action: 'delete',
-          oldValue: { framework: frameworkId, code: removed.code },
-        });
         return Astro.redirect(`${SELF}?framework=${frameworkId}&done=rule_removed#rules`, 303);
       }
 
@@ -1520,8 +1525,26 @@ const rzp = razorpayCapability();
                 <div class="fields">
                   <p class="field field-sm">
                     <label class="input-label" for="r-code">Rule code</label>
-                    <input class="input" id="r-code" name="code" required value={v('code', editingRule?.code ?? '')} />
-                    <span class="help">Unique within the version. Printed on every quotation line this rule produces.</span>
+                    {/* READ-ONLY WHEN EDITING, and the module refuses a change
+                        to it as well. A quote line records `ruleCode` as text
+                        beside `ruleId`, so renaming a code makes any line
+                        already written disagree with the rule it names — and
+                        the code is how a figure on a quotation is traced back
+                        four years later. An editable box whose edits were
+                        silently dropped would be worse than no box. */}
+                    <input
+                      class="input"
+                      id="r-code"
+                      name="code"
+                      required
+                      readonly={editingRule ? true : undefined}
+                      value={v('code', editingRule?.code ?? '')}
+                    />
+                    <span class="help">
+                      {editingRule
+                        ? 'Fixed once the rule exists. Quotation lines record it beside the rule, so renaming it would make an issued quotation disagree with itself. Delete the rule and add it under a different code.'
+                        : 'Unique within the version. Printed on every quotation line this rule produces.'}
+                    </span>
                   </p>
                   <p class="field">
                     <label class="input-label" for="r-label">Label</label>

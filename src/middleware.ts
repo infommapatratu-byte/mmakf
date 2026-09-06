@@ -115,6 +115,25 @@ export const onRequest = defineMiddleware(async (context, next) => {
     return proceed();
   }
 
+  // `url.host` is the INTERNAL invocation host behind Vercel's proxy — the same
+  // fact recorded above, which is why `publicHost` exists for routing.
+  //
+  // It is passed here deliberately and it is no longer load-bearing. The check
+  // decides from `Origin` / `Sec-Fetch-Site`, which the browser sets and script
+  // cannot forge, and tests the INITIATOR against the federation's own host
+  // allowlist. The host below is an exact-match shortcut only.
+  //
+  // That distinction is the fix for a live bug: the previous version required
+  // the RECEIVING host to be on the allowlist too, so behind the proxy the
+  // `same-site` branch could never be satisfied and every POST that crossed the
+  // apex-to-www redirect — every form submitted from mmakf.in rather than
+  // www.mmakf.in — was refused with "Cross-site POST form submissions are
+  // forbidden". It went unnoticed because the unit tests pass a public hostname
+  // that this caller never supplies.
+  //
+  // `x-forwarded-host` is still NOT used here. It is forgeable by anything
+  // speaking directly to the origin, and the allowlist already does the work
+  // that a receiving-host check was pretending to.
   if (!isSameOrigin(request.headers, url.host)) {
     return deny(`cross-origin ${request.method} ${path}`);
   }

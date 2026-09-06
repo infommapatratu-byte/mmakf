@@ -57,6 +57,7 @@
 //   no person record linked — explained, not crashed
 //   ok                      — the inbox itself
 
+import { readSubmission } from '@/lib/form-intake';
 import Base from '@/layouts/Base.astro';
 import EmptyState from '@/components/states/EmptyState.astro';
 import { identify } from '@/lib/session';
@@ -111,7 +112,7 @@ const viewQuery = () => {
 let actionError: string | null = null;
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   const action = String(form.get('action') ?? '');
   const rawId = String(form.get('id') ?? '');
 
@@ -344,6 +345,15 @@ const capped = items.length >= INBOX_LIMIT;
                     <button class="btn btn-ghost" type="submit">Mark all as read</button>
                   </form>
                 )}
+
+                {/* The settings that decide what arrives here at all — which
+                    channels carry each kind of message, quiet hours, and which
+                    devices may be pushed to. Linked from the inbox because that
+                    is where somebody is standing when they decide they are
+                    being told too much, or not enough. */}
+                <p class="nt-settings">
+                  <a class="btn btn-ghost" href={h('/my/devices')}>Notification settings</a>
+                </p>
               </div>
 
               {items.length === 0 ? (

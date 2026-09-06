@@ -37,6 +37,7 @@ import { isConfigured, db } from '@/db';
 import { WIZARD_STEPS, TOTAL_STEPS, validateSubmission, draftPayload, type WizardStep } from '@/db/applications';
 import { submitApplicationRequest, statusFor } from '@/pages/api/learn/application';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -66,7 +67,7 @@ async function loadDraft(r: string, k: string): Promise<Record<string, unknown> 
 }
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   ref = (form.get('ref') as string) || ref;
   accessToken = (form.get('k') as string) || accessToken;
   const submittedStep = Math.min(Math.max(Number(form.get('step')) || 1, 1), TOTAL_STEPS);

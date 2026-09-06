@@ -72,6 +72,7 @@ import {
 } from '@/db/scheduling';
 import { parseWeekForm, assertWeekNotEmpty, WeekFormError } from '@/lib/week-form';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -141,7 +142,7 @@ if (configured && mayWrite) {
 // same-origin before any of this runs.
 
 if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   const field = (k: string) => String(form.get(k) ?? '').trim();
   const action = field('action');
   const rl = await rateLimit(Astro.request, 'admin-schedule-start', 30, 60);

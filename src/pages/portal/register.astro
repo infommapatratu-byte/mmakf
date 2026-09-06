@@ -26,6 +26,7 @@ import { rateLimit } from '@/lib/ratelimit';
 import { registerAccount, isOnboardingError } from '@/db/onboarding';
 import { passwordProblem } from '@/lib/password';
 import { readableError, field } from './_lib';
+import { readSubmission } from '@/lib/form-intake';
 
 export const prerender = false;
 
@@ -44,7 +45,7 @@ if (Astro.request.method === 'POST' && configured) {
   // of this site already takes.
   const limit = await rateLimit(Astro.request, 'portal-register', 5, 3600);
 
-  const form = await Astro.request.formData();
+  const form = await readSubmission(Astro.request);
   submittedEmail = field(form, 'email') ?? '';
   const password = String(form.get('password') ?? '');
   const confirm = String(form.get('confirm') ?? '');
