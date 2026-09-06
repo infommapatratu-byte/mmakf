@@ -35,7 +35,9 @@ import type { APIRoute } from 'astro';
 import { and, eq, isNotNull, isNull, desc } from 'drizzle-orm';
 import { isConfigured, db } from '@/db';
 import { expireStaleOrders, confirmPayment, markWebhookProcessed } from '@/db/orders';
+import { releaseExpiredReservations } from '@/db/inventory';
 import { runDailySweeps } from '@/db/automations';
+import { detectReviewPatterns, computeAllPerformance } from '@/db/marketplace-trust';
 import { consume } from '@/lib/domain-events';
 import { notifyForEvent, deliverQueued } from '@/lib/notifications';
 import { deliverQueuedPush } from '@/lib/push';
@@ -47,6 +49,69 @@ export const prerender = false;
 
 /** Retry at most this many failed events per run, so one run cannot run long. */
 const RETRY_BATCH = 25;
+
+/**
+ * THE STEPS, NAMED, SO THE RESPONSE CAN SAY WHICH ONES DID NOT RUN.
+ *
+ * This route returned `{ok: true}` with HTTP 200 unconditionally — after the
+ * report was assembled, and without ever looking at it. Every step is wrapped
+ * in its own try/catch on purpose, so that one bad night for the push backlog
+ * cannot stop task escalation; the cost of that isolation is that a run in
+ * which EVERY step threw looked, from outside, exactly like a run in which
+ * every step succeeded.
+ *
+ * It was not hypothetical. Between 22 August and 6 September 2026 production
+ * Postgres refused the application's password (28P01) and this job ran nightly,
+ * caught nine exceptions a night, and reported success roughly fifteen times.
+ * Nothing alerted, because there was nothing in the response for an alert to
+ * key on. The outage was eventually found from the sign-in page, not from here.
+ *
+ * The list is written out rather than derived from key names because the keys
+ * do not follow one pattern and cannot safely be inferred:
+ *   · the fulfilment step sets `retryError` on failure but ALSO always sets
+ *     `fulfilmentRetried`/`fulfilmentRecovered`/`stillFailing` outside its
+ *     try, so "has a result key" does not mean "succeeded";
+ *   · the reservation step reports as `marketplaceReservationsReleased` but
+ *     fails as `marketplaceReservationsError`, so stripping the suffix yields
+ *     neither name.
+ * A derived version of this would be wrong in a way nobody would notice until
+ * the next silent fortnight.
+ */
+export const STEPS: ReadonlyArray<{ errorKey: string; name: string }> = [
+  { errorKey: 'ordersExpiredError', name: 'expire-stale-orders' },
+  { errorKey: 'marketplaceReservationsError', name: 'release-reservations' },
+  { errorKey: 'retryError', name: 'retry-fulfilment' },
+  { errorKey: 'notificationsError', name: 'drain-domain-events' },
+  { errorKey: 'notificationsDeliveryError', name: 'deliver-notifications' },
+  { errorKey: 'pushBacklogError', name: 'deliver-push' },
+  { errorKey: 'operationsError', name: 'daily-sweeps' },
+  { errorKey: 'reviewPatternsError', name: 'detect-review-patterns' },
+  { errorKey: 'performanceError', name: 'seller-performance' },
+];
+
+/**
+ * What the run actually achieved, in terms an alert can read.
+ *
+ * `ok` is false the moment ANY step failed — a partial run is not a success,
+ * and calling it one is how fifteen nights went by. The HTTP status is a
+ * coarser signal on purpose: 500 only when every step failed, because that is
+ * the shape of an infrastructure fault (the register is unreachable; nothing
+ * can run) as opposed to one step having a bad night. Vercel's cron dashboard
+ * keys on the status, so a total failure goes red there without a single flaky
+ * push delivery turning the job red every other night and training whoever
+ * watches it to ignore the colour.
+ */
+export function outcome(report: Record<string, unknown>) {
+  const failedSteps = STEPS.filter((s) => s.errorKey in report).map((s) => s.name);
+  return {
+    ok: failedSteps.length === 0,
+    failedSteps,
+    // Reported rather than inferred: a reader should not have to know how many
+    // steps this file has in order to tell "all of them" from "most of them".
+    stepsTotal: STEPS.length,
+    everyStepFailed: failedSteps.length === STEPS.length,
+  };
+}
 
 function json(body: unknown, status: number) {
   return new Response(JSON.stringify(body), {
@@ -75,6 +140,27 @@ export const GET: APIRoute = async ({ request }) => {
     report.ordersExpired = await expireStaleOrders(db());
   } catch (err: any) {
     report.ordersExpiredError = String(err?.message ?? err).slice(0, 300);
+  }
+
+  // ── 1b. And the MARKETPLACE's reservations, which are a different table ───
+  //
+  // expireStaleOrders() above releases the legacy shop's holds on
+  // `product_variants`. A marketplace basket reserves in `stock_reservations`
+  // against `listing_variants`, with an expiry checkout() sets, and NOTHING
+  // released them: releaseExpiredReservations() existed, was tested, and had no
+  // caller anywhere in src/.
+  //
+  // The failure is silent and cumulative. Every abandoned marketplace checkout
+  // held its stock permanently, so a seller's available quantity fell with each
+  // one and never recovered — until the item read out of stock while the goods
+  // sat on the shelf. No error, no queue, nothing to notice.
+  //
+  // Separate try/catch from the block above so that a fault in one sweep does
+  // not stop the other, which is the pattern every step in this file follows.
+  try {
+    report.marketplaceReservationsReleased = await releaseExpiredReservations(db());
+  } catch (err: any) {
+    report.marketplaceReservationsError = String(err?.message ?? err).slice(0, 300);
   }
 
   // ── 2. Re-attempt fulfilment for captured payments that failed to fulfil ──
@@ -229,6 +315,59 @@ export const GET: APIRoute = async ({ request }) => {
     report.operationsError = String(err?.message ?? err).slice(0, 300);
   }
 
-  console.log('[cron/reconcile]', JSON.stringify(report));
-  return json({ ok: true, ...report }, 200);
+  // ── 8. The marketplace trust sweeps ──────────────────────────────────────
+  //
+  // Neither of these had a caller. The console's fraud queue could only ever be
+  // empty, and the performance band shown against every seller was computed by
+  // nothing — a column that had never been written since the day it was added.
+  //
+  // SEPARATELY GUARDED, on the rule the rest of this file follows: a fault in
+  // the detector must not stop the snapshots, and neither must stop the cron
+  // from returning a report saying what did and did not run.
+
+  // Raises SIGNALS for a person to look at, and decides nothing. Window and
+  // thresholds are the module's own — nothing is chosen here.
+  try {
+    report.reviewPatterns = await detectReviewPatterns(db());
+  } catch (err: any) {
+    report.reviewPatternsError = String(err?.message ?? err).slice(0, 300);
+  }
+
+  // A TRAILING 30 DAYS, STATED RATHER THAN IMPLIED. A snapshot must be of some
+  // period; this one drives no enforcement anywhere in the codebase, and a
+  // seller with too few completed orders gets a null score and
+  // PERFORMANCE_NOT_COMPUTED rather than a figure computed from a sample too
+  // small to defend. If performance ever gains consequences, this window stops
+  // being a reporting detail and belongs in configuration.
+  try {
+    const end = new Date();
+    const start = new Date(end.getTime() - 30 * 86_400_000);
+    report.performance = await computeAllPerformance(
+      db(),
+      {
+        principal: legacyAdminPrincipal(),
+        reason: 'Scheduled marketplace performance snapshot.',
+        authority: 'MMAKF cron',
+      },
+      start.toISOString().slice(0, 10),
+      end.toISOString().slice(0, 10),
+    );
+  } catch (err: any) {
+    report.performanceError = String(err?.message ?? err).slice(0, 300);
+  }
+
+  const { ok, failedSteps, stepsTotal, everyStepFailed } = outcome(report);
+
+  // console.error rather than console.log when anything failed, so the run is
+  // findable in Vercel's log search by level alone. Grepping fifteen nights of
+  // identical-looking `[cron/reconcile]` lines for a nested `*Error` key is the
+  // work this line exists to remove.
+  const line = `[cron/reconcile] ${JSON.stringify({ ok, failedSteps, ...report })}`;
+  if (ok) console.log(line);
+  else console.error(line);
+
+  return json(
+    { ok, failedSteps, stepsTotal, ...report },
+    everyStepFailed ? 500 : 200,
+  );
 };

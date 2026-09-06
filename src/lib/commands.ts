@@ -47,9 +47,16 @@
 // navigation links this codebase has already had to remove, one accelerator
 // over.
 //
-// There is also no "Sign out": /api/auth/logout is POST-only and clears the
-// per-person session alone, and a fuzzy match away from an accidental sign-out
-// is not a trade worth making for two saved clicks.
+// There is also no "Sign out": /api/auth/logout is POST-only, and a fuzzy match
+// away from an accidental sign-out is not a trade worth making for two saved
+// clicks.
+//
+// This note used to say the route "clears the per-person session alone", which
+// was the exact inverse of what it did — it cleared the LEGACY session alone
+// and left `mmakf_user` live, so signing out left the console signed in. Both
+// are cleared now; the sentence is corrected here rather than deleted because a
+// comment that confidently states the opposite of the code is how the defect
+// survived a reading.
 
 import type { Action, Principal, Role } from './rbac';
 import { canAnywhere, actionsForRole } from './rbac';
@@ -495,9 +502,15 @@ const BASE_COMMANDS: Command[] = [
   { id: 'go.my.courses', label: 'My courses', section: 'navigation',
     href: '/my/courses',
     keywords: 'academy learning enrolled study' },
+  { id: 'go.my.orders', label: 'My marketplace orders', section: 'navigation',
+    href: '/my/orders',
+    keywords: 'bought purchase basket shop parcel delivery return refund tracking' },
   { id: 'go.my.notifications', label: 'My notifications', section: 'navigation',
     href: '/my/notifications',
     keywords: 'inbox alerts unread messages notices told' },
+  { id: 'go.my.devices', label: 'Notification settings', section: 'navigation',
+    href: '/my/devices',
+    keywords: 'push devices browser subscribe unsubscribe preferences quiet hours email sms channels mute' },
 
   // ── Navigation: competition ───────────────────────────────────────────────
   { id: 'go.competitions', label: 'Competitions', section: 'navigation',

@@ -101,6 +101,42 @@ export const NOTIFIABLE = {
   TRAINING_RENEWED:             { audience: 'subject', essential: true, title: 'Your training has been renewed' },
   TRAINING_ACCESS_ENDED:        { audience: 'subject', essential: true, title: 'Your training entitlement has ended' },
   TRAINING_ENROLMENT_TRANSFERRED: { audience: 'subject', essential: true, title: 'You have been transferred to another club' },
+
+  // ── The marketplace (migration 0029) ──────────────────────────────────────
+  //
+  // BUYER events and SELLER events are separate types, not one event with two
+  // audiences. The two need different facts: a buyer is told their parcel is on
+  // its way, a seller is told they have an order to pack. Publishing once and
+  // choosing the recipient afterwards is how a buyer receives a seller's
+  // dispatch deadline.
+  //
+  // ALL ESSENTIAL, and none a preference anybody may switch off. Each is a
+  // consequence of a transaction the recipient is a party to: a parcel that has
+  // left, money that has moved, goods somebody wants to send back, a decision
+  // on a shop's standing. A preference that let MMAKF stop saying "your order
+  // was dispatched" would turn a delivery into a doorstep surprise, and one
+  // that suppressed "a return is waiting for your decision" would run the
+  // seller's own response clock down for them.
+  //
+  // The judgement call is the review notice, essential for the same reason: a
+  // published review is a public statement about that shop which the seller may
+  // reply to, and a reply window they were never told about is not a right.
+  MARKETPLACE_ORDER_PLACED:    { audience: 'buyer', essential: true, title: 'Your order has been placed' },
+  MARKETPLACE_ORDER_PAID:      { audience: 'buyer', essential: true, title: 'Payment received for your order' },
+  MARKETPLACE_ORDER_SHIPPED:   { audience: 'buyer', essential: true, title: 'Your order has been dispatched' },
+  MARKETPLACE_ORDER_DELIVERED: { audience: 'buyer', essential: true, title: 'Your order has been delivered' },
+  MARKETPLACE_RETURN_DECIDED:  { audience: 'buyer', essential: true, title: 'A decision on your return' },
+  MARKETPLACE_REFUND_ISSUED:   { audience: 'buyer', essential: true, title: 'A refund has been issued to you' },
+
+  MARKETPLACE_SELLER_ORDER_PLACED:         { audience: 'seller', essential: true, title: 'You have a new order' },
+  MARKETPLACE_SELLER_ORDER_PAID:           { audience: 'seller', essential: true, title: 'An order has been paid for' },
+  MARKETPLACE_SELLER_RETURN_REQUESTED:     { audience: 'seller', essential: true, title: 'A buyer has asked to return goods' },
+  MARKETPLACE_SELLER_REFUND_POSTED:        { audience: 'seller', essential: true, title: 'A refund has been posted against your account' },
+  MARKETPLACE_SELLER_REVIEW_PUBLISHED:     { audience: 'seller', essential: true, title: 'A review of your shop has been published' },
+  MARKETPLACE_SELLER_LOW_STOCK:            { audience: 'seller', essential: true, title: 'Stock has fallen to your own low-stock level' },
+  MARKETPLACE_SELLER_VERIFICATION_DECIDED: { audience: 'seller', essential: true, title: 'A verification decision on your seller account' },
+  MARKETPLACE_PAYOUT_PAID:                 { audience: 'seller', essential: true, title: 'A payout to you has been paid' },
+
 } as const;
 
 export type NotifiableEvent = keyof typeof NOTIFIABLE;
@@ -300,10 +336,42 @@ async function sendVia(channel: string, notification: any, db: DB): Promise<void
     ? (await db.select().from(s.persons).where(eq(s.persons.id, notification.personId)).limit(1))[0]
     : null;
 
-  if (!person) throw new NotificationError('no_recipient', 'No person record to resolve an address from.');
+  // THE ADDRESS CAN COME FROM TWO PLACES, AND THIS READ ONLY ONE OF THEM.
+  //
+  // `notifications.recipient_email` was added in migration 0011 for exactly the
+  // case this function used to refuse. Its own comment in
+  // src/db/governance.schema.ts says so: "A school principal who filled in the
+  // application wizard is not a member, has no person record and no user row —
+  // and is exactly who the acknowledgement is for."
+  //
+  // dispatch() in src/db/automations.ts writes that column, and admits a row
+  // when ANY of recipientEmail / userId / personId is present. This function
+  // then threw 'no_recipient' the moment personId was null, so every
+  // automation-created acknowledgement to a non-member failed permanently — and
+  // `failed` is terminal here, with no retry and no dead-letter. The producer
+  // and the consumer disagreed about where the address lives, and the consumer
+  // won silently.
+  //
+  // THE PERSON'S OWN RECORD STILL WINS where there is one. recipient_email is a
+  // point-in-time copy of whatever was typed into a form; a person row is the
+  // register's canonical, correctable, contact-verified address. Preferring the
+  // snapshot would mean a member who corrected a typo in their address kept
+  // receiving mail at the old one forever.
+  const direct = channel === 'email' ? (notification.recipientEmail || null) : null;
+  const onRecord = person ? (channel === 'email' ? person.email : person.phone) : null;
+  const to = onRecord || direct;
 
-  const to = channel === 'email' ? person.email : person.phone;
   if (!to) {
+    // The two codes are kept apart because they need different repairs: nothing
+    // to address at all, versus a known person the federation holds no address
+    // for. Q9-style queue triage reads these, and collapsing them would hide
+    // which rows are fixable by editing a person record.
+    if (!person && !direct) {
+      throw new NotificationError(
+        'no_recipient',
+        `This notification carries no person record and no ${channel === 'email' ? 'recipient email' : 'mobile number'} to send to.`
+      );
+    }
     throw new NotificationError(
       'no_address',
       `That member has no ${channel === 'email' ? 'email address' : 'mobile number'} on record.`
@@ -474,6 +542,77 @@ export async function notifyForEvent(
 /** Who receives this event, resolved from the database. */
 async function resolveRecipients(db: DB, event: any, audience: string): Promise<number[]> {
   switch (audience) {
+    // ── The marketplace's two audiences ────────────────────────────────────
+    //
+    // NEITHER FALLS BACK TO THE ENTITY ID, and that is the whole reason they
+    // exist rather than reusing 'subject'. A marketplace entity is an order, a
+    // seller order or a shop; `Number(entityId)` read as a person id addresses
+    // a notice to whoever holds that number in `persons`, who is a stranger.
+    //
+    // Both resolve through a real query and BOTH RETURN [] WHEN THEY CANNOT.
+    // Publishing nothing is the correct answer for a guest checkout with no
+    // person record — the same rule the MEMBERSHIP_EXPIRING comment in
+    // src/lib/domain-events.ts sets out.
+
+    case 'buyer': {
+      // The person who placed the order. Taken from the payload where the
+      // producer put it, and otherwise read from the order itself — never from
+      // the entity id.
+      const fromPayload = Number(event.payload?.buyerPersonId);
+      if (Number.isFinite(fromPayload) && fromPayload > 0) return [fromPayload];
+
+      const orderId = Number(event.payload?.orderId);
+      if (!Number.isFinite(orderId)) return [];
+      const rows = await db
+        .select({ personId: s.orders.personId })
+        .from(s.orders)
+        .where(eq(s.orders.id, orderId))
+        .limit(1);
+      const personId = rows[0]?.personId;
+      // A guest checkout has no person record. Nobody is notified, rather than
+      // somebody arbitrary being notified.
+      return personId ? [personId] : [];
+    }
+
+    case 'seller': {
+      // The PERSON BEHIND THE SHOP, because a notification is delivered to a
+      // person and a seller is a business.
+      //
+      // TWO HOPS, IN THE SAME ORDER AS sellerRecipient() in
+      // src/db/marketplace-events.ts — the seller's own personId first, then
+      // the person behind the user that holds the account. THE TWO MUST AGREE.
+      // The producer decides whether to publish AT ALL by asking that function,
+      // so an audience resolving fewer sellers than the producer does would
+      // publish an event about a trader and then deliver it to nobody — which
+      // reads on the feed as a notice that was sent.
+      //
+      // A seller with no person record at either hop receives nothing. That is
+      // a gap in the register rather than a licence to guess, and guessing
+      // would send a trader's order flow to a stranger.
+      const sellerId = Number(event.payload?.sellerId);
+      if (!Number.isFinite(sellerId)) return [];
+
+      const rows = await db
+        .select({ personId: s.sellers.personId, userId: s.sellers.userId })
+        .from(s.sellers)
+        .where(eq(s.sellers.id, sellerId))
+        .limit(1);
+      if (!rows.length) return [];
+      if (rows[0].personId != null) return [Number(rows[0].personId)];
+
+      // `sellers.userId` is NOT NULL, but a user need not be a person: a shared
+      // office credential is attributable to nobody, which is exactly why
+      // /portal/seller/_gate.ts carries a 'shared_credential' state of its own.
+      const users = await db
+        .select({ personId: s.users.personId })
+        .from(s.users)
+        .where(eq(s.users.id, rows[0].userId))
+        .limit(1);
+      const personId = users[0]?.personId;
+      return personId ? [Number(personId)] : [];
+    }
+
+
     case 'subject': {
       const id = Number(event.payload?.personId ?? event.entityId);
       return Number.isFinite(id) ? [id] : [];
@@ -674,6 +813,40 @@ function linkFor(event: { eventType: string; payload: any }): string {
       return '/my/schedule';
     case 'PROGRAM_ACCESS_REVOKED':
       return '/my';
+
+    // ── The marketplace ───────────────────────────────────────────────────
+    //
+    // BUYER EVENTS AND SELLER EVENTS GO TO DIFFERENT PAGES, which is the whole
+    // reason they are separate event types. Before /my/orders existed these all
+    // fell to the default below and a buyer told their parcel had been
+    // dispatched was handed a dashboard with no mention of it.
+    case 'MARKETPLACE_ORDER_PLACED':
+    case 'MARKETPLACE_ORDER_PAID':
+    case 'MARKETPLACE_ORDER_SHIPPED':
+    case 'MARKETPLACE_ORDER_DELIVERED':
+    case 'MARKETPLACE_RETURN_DECIDED':
+    case 'MARKETPLACE_REFUND_ISSUED':
+      return '/my/orders';
+
+    case 'MARKETPLACE_SELLER_ORDER_PLACED':
+    case 'MARKETPLACE_SELLER_ORDER_PAID':
+    case 'MARKETPLACE_SELLER_RETURN_REQUESTED':
+      return '/portal/seller/orders';
+
+    case 'MARKETPLACE_SELLER_LOW_STOCK':
+      return '/portal/seller/products';
+
+    case 'MARKETPLACE_SELLER_REFUND_POSTED':
+    case 'MARKETPLACE_PAYOUT_PAID':
+      return '/portal/seller/money';
+
+    // The shop's standing and what it has been asked to accept both live on the
+    // seller's overview, which is also where a published review is answered.
+    case 'MARKETPLACE_SELLER_VERIFICATION_DECIDED':
+    case 'MARKETPLACE_SELLER_REVIEW_PUBLISHED':
+    case 'MARKETPLACE_POLICY_PUBLISHED':
+      return '/portal/seller';
+
     default:
       return '/my';
   }
