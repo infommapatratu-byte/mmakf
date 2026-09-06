@@ -47,7 +47,7 @@
 
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import * as o from '@/db/operations.schema';
-import type { AuditContext } from '@/db/federation';
+import { writeAudit, type AuditContext } from '@/db/federation';
 
 type DB = any; // drizzle client (postgres.js in prod, PGlite in tests)
 
@@ -632,6 +632,205 @@ export async function sweepRetries(
   }
 
   return { attempted: due.length, succeeded, stillFailing };
+}
+
+// ─── Operating the automations ──────────────────────────────────────────────
+//
+// /admin/workflows could see every definition, every run, every step and every
+// failure, and could do exactly one thing: install the standard set. A console
+// that shows a failed run and cannot retry it, and shows a misbehaving
+// automation and cannot switch it off, sends its operator to the database — or,
+// more often, to nobody, because a run that has exhausted its attempts simply
+// stops being anybody's problem while still being wrong.
+//
+// The two acts below are what that console was missing. Neither of them is new
+// machinery: `sweepRetries()` already retries runs, and `active` is already the
+// column `dispatch()` filters on. What was missing was a way to reach them.
+
+/**
+ * Put a failed run back in front of the retry sweep.
+ *
+ * IT DOES NOT RUN THE WORKFLOW. It makes the run eligible again and returns;
+ * the daily cron's `sweepRetries()` is what executes it, under the CURRENT
+ * definition. That is deliberate, and it matters enough to say twice:
+ *
+ *   · An admin page that executed a workflow inline would be a second execution
+ *     path beside the tested one, with its own timeout behaviour, its own
+ *     partial-failure handling and its own idea of what the actor is. Two paths
+ *     that must agree for ever is how the two halves of a system drift.
+ *   · Retrying under the current definition is the whole point. The usual
+ *     reason a step failed is that something was wrong and has since been
+ *     fixed, which is why sweepRetries() re-reads the definition rather than
+ *     trusting the run's stored spec.
+ *
+ * So the honest report to the operator is "this will be attempted again", not
+ * "this has been re-run", and the page says exactly that.
+ *
+ * WHY IT RAISES maxAttempts RATHER THAN RESETTING attempt. The sweep's
+ * condition is `attempt < maxAttempts`, so a run that has used all three is
+ * invisible to it for ever — which is the state an operator is looking at when
+ * they press this. Resetting `attempt` to zero would make the run claim it had
+ * never been tried, destroying the count of how hard the system worked before a
+ * human intervened. Granting one more attempt keeps that history and changes
+ * only what it was asked to change.
+ */
+export async function requeueRun(
+  db: DB,
+  ctx: AuditContext,
+  runId: number,
+  now: Date = new Date()
+): Promise<{ runId: number; attempt: number; maxAttempts: number; definitionInactive: boolean }> {
+  const [run] = await db
+    .select()
+    .from(o.workflowRuns)
+    .where(eq(o.workflowRuns.id, runId))
+    .limit(1);
+
+  if (!run) throw new WorkflowError('unknown_run', 'No such run.');
+
+  if (run.status !== 'failed' && run.status !== 'partially_failed') {
+    throw new WorkflowError(
+      'not_failed',
+      run.status === 'running'
+        ? 'This run is still in progress. Retrying it now would run its steps a second time alongside the first.'
+        : `This run ${run.status === 'succeeded' ? 'succeeded' : `is ${run.status}`}, so there is nothing to retry. `
+          + 'Re-running a workflow that worked would repeat every effect it had.'
+    );
+  }
+
+  // The definition must still exist, and at the run's own version, or the sweep
+  // will pick this up only to fail it again with the message it writes for a
+  // deleted definition. Refusing here says so once, to somebody who can act on
+  // it, instead of once a day into a cron report.
+  const [def] = await db
+    .select({ id: o.workflowDefinitions.id, active: o.workflowDefinitions.active })
+    .from(o.workflowDefinitions)
+    .where(and(
+      eq(o.workflowDefinitions.code, run.workflowCode),
+      eq(o.workflowDefinitions.version, run.workflowVersion)
+    ))
+    .limit(1);
+
+  if (!def) {
+    throw new WorkflowError(
+      'no_definition',
+      `${run.workflowCode} v${run.workflowVersion} no longer exists, so this run cannot be retried in the shape it ran. `
+      + 'Install the automation again if it should still exist.'
+    );
+  }
+
+  // NOT a refusal. sweepRetries() reads the definition directly and never
+  // consults `active`, so an inactive automation's failed run genuinely can be
+  // retried — and often should be, since switching an automation off is exactly
+  // what an operator does before clearing up the damage it did. Recorded so the
+  // page can say it.
+  const definitionInactive = def.active === false;
+
+  const attempt = Number(run.attempt ?? 0);
+  const maxAttempts = Math.max(Number(run.maxAttempts ?? 0), attempt + 1);
+
+  await db.update(o.workflowRuns).set({
+    maxAttempts,
+    // Due now. The sweep orders by nextAttemptAt ascending, so a null would sort
+    // first on some drivers and last on others; a concrete timestamp is the only
+    // version of "as soon as possible" that means the same thing everywhere.
+    nextAttemptAt: now,
+  }).where(eq(o.workflowRuns.id, runId));
+
+  await writeAudit(db, ctx, {
+    entityType: 'workflow_run',
+    entityId: runId,
+    action: 'update',
+    oldValue: { maxAttempts: run.maxAttempts, nextAttemptAt: run.nextAttemptAt ?? null },
+    newValue: { maxAttempts, nextAttemptAt: now.toISOString(), requeued: true },
+  });
+
+  return { runId, attempt, maxAttempts, definitionInactive };
+}
+
+/**
+ * Switch an automation on or off.
+ *
+ * `workflow_definitions.active` has been in the schema since the table was
+ * written, is the column `dispatch()` filters on, and NOTHING IN THE
+ * APPLICATION HAS EVER WRITTEN IT. Every automation the federation installed
+ * was on for ever, and the only way to stop one was to delete the row — which
+ * takes its failed runs' definition with it and makes them unretryable.
+ *
+ * A REASON IS REQUIRED. An automation being off is the kind of fact that is
+ * discovered six months later by somebody asking why no acknowledgement was
+ * ever sent, and "because it was switched off" is only half an answer.
+ *
+ * ACTIVATING AN OLDER VERSION IS REFUSED, and this is the subtle one.
+ * `dispatch()` runs only the HIGHEST active version of each code, so switching
+ * v1 back on while v2 is active changes nothing at all — the operator would see
+ * an active automation, believe they had restored the old behaviour, and be
+ * wrong. Reactivation is therefore offered only when no higher version is
+ * already active, and the refusal names the version that is actually running.
+ */
+export async function setDefinitionActive(
+  db: DB,
+  ctx: AuditContext,
+  input: { definitionId: number; active: boolean; reason: string }
+): Promise<{ definitionId: number; code: string; version: number; active: boolean }> {
+  const reason = String(input.reason ?? '').trim();
+  if (!reason) {
+    throw new WorkflowError(
+      'reason_required',
+      'Switching an automation on or off requires a recorded reason. It is the answer to "why did nothing happen?" months later.'
+    );
+  }
+
+  const [def] = await db
+    .select()
+    .from(o.workflowDefinitions)
+    .where(eq(o.workflowDefinitions.id, input.definitionId))
+    .limit(1);
+
+  if (!def) throw new WorkflowError('unknown_definition', 'No such automation.');
+
+  if (def.active === input.active) {
+    throw new WorkflowError(
+      'no_change',
+      `${def.code} v${def.version} is already ${input.active ? 'active' : 'inactive'}.`
+    );
+  }
+
+  if (input.active) {
+    const higher = await db
+      .select({ version: o.workflowDefinitions.version })
+      .from(o.workflowDefinitions)
+      .where(and(
+        eq(o.workflowDefinitions.code, def.code),
+        eq(o.workflowDefinitions.active, true),
+        sql`${o.workflowDefinitions.version} > ${def.version}`
+      ))
+      .limit(1);
+
+    if (higher.length) {
+      throw new WorkflowError(
+        'superseded',
+        `${def.code} v${higher[0].version} is active, and only the highest active version of an automation runs. `
+        + `Switching v${def.version} on would change nothing while leaving the console showing two active versions. `
+        + `Switch v${higher[0].version} off first if the older behaviour is what you want back.`
+      );
+    }
+  }
+
+  await db.update(o.workflowDefinitions).set({
+    active: input.active,
+    updatedAt: new Date(),
+  }).where(eq(o.workflowDefinitions.id, input.definitionId));
+
+  await writeAudit(db, ctx, {
+    entityType: 'workflow_definition',
+    entityId: input.definitionId,
+    action: input.active ? 'reinstate' : 'suspend',
+    oldValue: { active: def.active },
+    newValue: { active: input.active },
+  });
+
+  return { definitionId: input.definitionId, code: def.code, version: def.version, active: input.active };
 }
 
 // ─── Authoring ──────────────────────────────────────────────────────────────
