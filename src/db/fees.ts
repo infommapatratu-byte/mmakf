@@ -911,6 +911,262 @@ export async function addRule(
   return row;
 }
 
+/**
+ * Correct a rule on a DRAFT framework.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS DID NOT EXIST, AND WHAT THAT COST
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `addRule()` could add and nothing could change or remove. A framework is
+ * authored by adding rules one at a time, so a typed amount — ₹450.5 entered as
+ * 4505 instead of 45000 — was permanent: the only remedy was to abandon the
+ * draft and retype every rule that was already right. Frameworks were therefore
+ * being published with rules their author knew were wrong, because the cost of
+ * starting again was higher than the cost of the error.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE IMMUTABILITY RULE IS UNCHANGED AND IS THE POINT
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * A published framework still cannot be touched, by this or by anything else.
+ * Editing one silently rewrites every quotation ever issued under it — a school
+ * that accepted ₹4,80,000 in March would find its own quote saying something
+ * else in June. This function refuses in exactly the words `addRule()` refuses
+ * in, because they are the same rule and a reader who has met one must not have
+ * to learn the other.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE STUDENT-CHARGE CLASSIFIER RUNS ON THE RESULT, NOT ON THE PATCH
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * This is the trap this function had to avoid. `addRule()` refuses a rule that
+ * would charge a student for being a student, and an EDIT can create exactly
+ * that rule out of one that was legitimate — change the audience, or attach a
+ * service, and a coach membership fee becomes a student one. Classifying the
+ * fields that arrived in the patch would miss it, because the offending
+ * combination is spread across the fields that changed and the fields that did
+ * not. So the stored row and the patch are merged first and the merged rule is
+ * what gets classified: the refusal a student charge earns cannot be walked
+ * around by arriving in two instalments.
+ */
+export async function updateRule(
+  db: DB, ctx: AuditContext, ruleId: number,
+  patch: {
+    label?: string; kind?: string;
+    serviceId?: number | null; audience?: string | null;
+    conditions?: Record<string, unknown>;
+    amountMinor?: number | null; factorPpm?: number | null;
+    minQuantity?: number | null; maxQuantity?: number | null;
+    sortOrder?: number; requiresApproval?: boolean;
+  }
+) {
+  assertCan(ctx.principal, 'feeframework:write', {});
+
+  const [rule] = await db.select().from(s.feeRules)
+    .where(eq(s.feeRules.id, ruleId)).limit(1);
+  if (!rule) throw new FeeError('unknown_rule', 'No such fee rule.');
+
+  const [framework] = await db.select().from(s.feeFrameworks)
+    .where(eq(s.feeFrameworks.id, rule.frameworkId)).limit(1);
+  if (!framework) throw new FeeError('unknown_framework', 'No such fee framework.');
+
+  if (framework.status !== 'draft') {
+    throw new FeeError(
+      'framework_locked',
+      `Framework ${framework.code} is ${framework.status} and cannot be changed. ` +
+      'Publish a NEW version instead — every quotation issued under this one must keep computing to the figure it was issued at.'
+    );
+  }
+
+  // `code` is deliberately NOT patchable. A quote line records `ruleCode` as
+  // free text beside its `ruleId`, so renaming a code makes the two disagree on
+  // any line already written — and the code is how a reader ties a figure on a
+  // quotation back to the rule that produced it. A rule that needs a different
+  // code is a different rule: delete this one and add it.
+  if ('code' in (patch as any)) {
+    throw new FeeError(
+      'code_immutable',
+      'A rule’s code cannot be changed. Quote lines record it beside the rule id, so renaming it makes an issued quotation disagree with itself. Delete the rule and add it under the code you want.'
+    );
+  }
+
+  if (patch.amountMinor != null && !Number.isInteger(patch.amountMinor)) {
+    throw new FeeError('bad_amount', 'Amounts are integer paise. ₹450.50 is 45050, not 450.5.');
+  }
+  if (patch.factorPpm != null && !Number.isInteger(patch.factorPpm)) {
+    throw new FeeError('bad_factor', 'Factors are integer parts-per-million. ×1.25 is 1250000.');
+  }
+
+  // The merged rule — the row as it WOULD be — is what the classifier sees.
+  const pick = <T>(key: keyof typeof patch, current: T): T =>
+    (key in patch ? (patch as any)[key] : current) as T;
+
+  const merged = {
+    code: rule.code as string,
+    label: pick('label', rule.label as string),
+    kind: pick('kind', rule.kind as string),
+    serviceId: pick('serviceId', rule.serviceId as number | null),
+    audience: pick('audience', rule.audience as string | null),
+    conditions: pick('conditions', (rule.conditions ?? {}) as Record<string, unknown>),
+    amountMinor: pick('amountMinor', rule.amountMinor as number | null),
+    factorPpm: pick('factorPpm', rule.factorPpm as number | null),
+    minQuantity: pick('minQuantity', rule.minQuantity as number | null),
+    maxQuantity: pick('maxQuantity', rule.maxQuantity as number | null),
+    sortOrder: pick('sortOrder', rule.sortOrder as number),
+    requiresApproval: pick('requiresApproval', rule.requiresApproval as boolean),
+  };
+
+  const verdict = classifyFeeRule(await withServiceNames(db, {
+    code: merged.code,
+    label: merged.label,
+    kind: merged.kind,
+    audience: merged.audience,
+    conditions: merged.conditions,
+    amountMinor: merged.amountMinor,
+  }, merged.serviceId));
+  if (verdict.studentCharge) {
+    throw new FeeError('student_charge_refused', verdict.refusal as string);
+  }
+
+  // THE DRAFT CONDITION IS IN THE WRITE, not only in the check above.
+  //
+  // The classifier needs the stored row, so this function must read before it
+  // writes — and between the two, /admin/fees may have published the framework
+  // from another tab. A guard that only consulted the row read a moment ago
+  // would let that edit land on a published instrument, which is the one thing
+  // the immutability rule exists to prevent. Correlating the condition into the
+  // UPDATE closes the window: the statement matches nothing if the framework
+  // stopped being a draft, whatever the read said.
+  const [row] = await db.update(s.feeRules).set({
+    label: merged.label,
+    kind: merged.kind as any,
+    serviceId: merged.serviceId,
+    audience: merged.audience as any,
+    conditions: merged.conditions,
+    amountMinor: merged.amountMinor,
+    factorPpm: merged.factorPpm,
+    minQuantity: merged.minQuantity,
+    maxQuantity: merged.maxQuantity,
+    sortOrder: merged.sortOrder,
+    requiresApproval: merged.requiresApproval,
+  }).where(and(
+    eq(s.feeRules.id, ruleId),
+    sql`exists (select 1 from fee_frameworks f where f.id = fee_rules.framework_id and f.status = 'draft')`
+  )).returning();
+
+  if (!row) {
+    throw new FeeError(
+      'framework_locked',
+      `Nothing was changed. Framework ${framework.code} stopped being a draft while this edit was being prepared — ` +
+      'a published framework is frozen, because every quotation issued under it must keep computing to the figure it was issued at.'
+    );
+  }
+
+  await writeAudit(db, ctx, {
+    entityType: 'fee_rule',
+    entityId: ruleId,
+    action: 'update',
+    oldValue: {
+      label: rule.label, kind: rule.kind, audience: rule.audience,
+      amountMinor: rule.amountMinor, factorPpm: rule.factorPpm,
+      minQuantity: rule.minQuantity, maxQuantity: rule.maxQuantity,
+      sortOrder: rule.sortOrder, requiresApproval: rule.requiresApproval,
+      serviceId: rule.serviceId, conditions: rule.conditions ?? {},
+    },
+    newValue: merged,
+  });
+
+  return row;
+}
+
+/**
+ * Remove a rule from a DRAFT framework.
+ *
+ * A hard delete, and that is safe for exactly one reason: a draft framework has
+ * never priced anything. Quotations are computed against the ACTIVE framework,
+ * which is by definition published, so no quote line can point at a draft's
+ * rule.
+ *
+ * IT CHECKS ANYWAY. `quote_lines.rule_id` is a foreign key, and the reasoning
+ * above is an argument about the rest of the system rather than a constraint
+ * this function can see. If the argument is ever wrong — a framework unpublished
+ * by a migration, a quote issued by a path that does not exist yet — the
+ * unchecked version fails with a driver's foreign-key violation rendered as a
+ * 500, which tells the administrator nothing and leaves them pressing the button
+ * again. The check turns that into a sentence naming how many quotations depend
+ * on the rule.
+ */
+export async function deleteRule(db: DB, ctx: AuditContext, ruleId: number) {
+  assertCan(ctx.principal, 'feeframework:write', {});
+
+  const [rule] = await db.select().from(s.feeRules)
+    .where(eq(s.feeRules.id, ruleId)).limit(1);
+  if (!rule) throw new FeeError('unknown_rule', 'No such fee rule.');
+
+  const [framework] = await db.select().from(s.feeFrameworks)
+    .where(eq(s.feeFrameworks.id, rule.frameworkId)).limit(1);
+  if (!framework) throw new FeeError('unknown_framework', 'No such fee framework.');
+
+  if (framework.status !== 'draft') {
+    throw new FeeError(
+      'framework_locked',
+      `Framework ${framework.code} is ${framework.status} and cannot be changed. ` +
+      'Publish a NEW version instead — every quotation issued under this one must keep computing to the figure it was issued at.'
+    );
+  }
+
+  const [used] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(s.quoteLines)
+    .where(eq(s.quoteLines.ruleId, ruleId));
+
+  if ((used?.n ?? 0) > 0) {
+    throw new FeeError(
+      'rule_in_use',
+      `${used.n} quotation line${used.n === 1 ? '' : 's'} was computed from this rule, so it cannot be deleted — ` +
+      'a quotation that cannot say where its figure came from is the one thing this schema exists to prevent. ' +
+      'Set its amount to zero, or supersede the framework.'
+    );
+  }
+
+  // Correlated for the same reason as the update above: the count of quote
+  // lines had to be read first, and the framework could have been published in
+  // between.
+  const [removed] = await db.delete(s.feeRules).where(and(
+    eq(s.feeRules.id, ruleId),
+    sql`exists (select 1 from fee_frameworks f where f.id = fee_rules.framework_id and f.status = 'draft')`
+  )).returning({ id: s.feeRules.id });
+
+  if (!removed) {
+    throw new FeeError(
+      'framework_locked',
+      `Nothing was removed. Framework ${framework.code} stopped being a draft while this was being prepared — ` +
+      'a published framework is frozen.'
+    );
+  }
+
+  // The whole row, because after this there is nowhere else to read it. An
+  // audit entry recording only the id would say a rule was deleted and not
+  // which one.
+  await writeAudit(db, ctx, {
+    entityType: 'fee_rule',
+    entityId: ruleId,
+    action: 'delete',
+    oldValue: {
+      frameworkId: rule.frameworkId, code: rule.code, label: rule.label,
+      kind: rule.kind, serviceId: rule.serviceId, audience: rule.audience,
+      conditions: rule.conditions ?? {}, amountMinor: rule.amountMinor,
+      factorPpm: rule.factorPpm, minQuantity: rule.minQuantity,
+      maxQuantity: rule.maxQuantity, sortOrder: rule.sortOrder,
+      requiresApproval: rule.requiresApproval,
+    },
+    newValue: null,
+  });
+
+  return { ruleId, frameworkId: rule.frameworkId, code: rule.code };
+}
+
 /** Publish a framework. After this it is frozen; a change means a new version. */
 export async function publishFramework(db: DB, ctx: AuditContext, frameworkId: number) {
   // A SEPARATE ACTION FROM WRITING ONE, deliberately. Publishing is
