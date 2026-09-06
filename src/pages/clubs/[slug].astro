@@ -86,6 +86,29 @@ if (failed) {
 
 const club = profile?.club ?? null;
 const where = club ? [club.city, club.district, club.state].filter(Boolean).join(', ') : '';
+
+/**
+ * WHOSE TIMINGS THESE ARE.
+ *
+ * `publishedWeek()` resolves up the chain — club, district, state, national —
+ * and reports which level answered. Three states, and they must never be
+ * rendered as one:
+ *
+ *   OWN         the club published its own week. The strong claim, and the only
+ *               case in which the old unconditional sentence was true.
+ *   INHERITED   the week shown belongs to an ancestor. Saying "this club
+ *               publishes its own timings" here sends a parent to a locked door
+ *               on the state's default hours, which is the single failure the
+ *               scheduling engine exists to prevent.
+ *   NONE        nothing configured. Handled by OpeningHours' own note below,
+ *               which already says it correctly — so the hero stays quiet
+ *               rather than repeating it in weaker words.
+ */
+const scheduleClaim = !profile?.week?.configured
+  ? 'Training timings for this club are not published to the federation.'
+  : profile.week.isOwnSchedule
+    ? 'This club publishes its own training timings, which are not the federation headquarters’.'
+    : `The timings shown follow ${profile.week.inheritedFromLabel || 'the level above this club'} — this club has not published its own.`;
 const mapVenue = profile?.venues.find((v) => v.latitude != null && v.longitude != null) ?? null;
 const bookable = (profile?.classes ?? []).filter((c) => c.requiresBooking).length;
 
@@ -151,7 +174,26 @@ const ACCESS_WORDS: Record<string, string> = {
     image="https://images.unsplash.com/photo-1544367567-0f2fcb009e0b?auto=format&fit=crop&w=1800&q=70"
     eyebrow="MMAKF affiliated club"
     title={club!.name}
-    lead={`${where || 'Location not recorded'} · MMAKF affiliated · This club publishes its own training timings, which are not the federation headquarters'.`}
+    {/*
+      THE HERO USED TO ASSERT THIS UNCONDITIONALLY:
+
+        "This club publishes its own training timings, which are not the
+         federation headquarters'."
+
+      It is true only when it is true. `publishedWeek()` resolves UP AN
+      INHERITANCE CHAIN — club, then district, then state, then national — and
+      returns `isOwnSchedule: false` with an `inheritedFromLabel` when the
+      answer came from an ancestor. Both fields were already on this page,
+      reaching it unread, while the hero told every visitor the opposite.
+
+      A parent reading "this club publishes its own timings" and travelling to a
+      dojo on the strength of the STATE's default hours is exactly the failure
+      the whole scheduling engine was built to prevent — and this sentence
+      reintroduced it at the top of every club page.
+
+      Three states, three sentences. `scheduleClaim` below.
+    */}
+    lead={`${where || 'Location not recorded'} · MMAKF affiliated · ${scheduleClaim}`}
     pills={[
       club!.standing === 'provisional' ? 'Provisionally affiliated' : 'Affiliated',
       club!.disciplines[0] ?? 'Shotokan',
@@ -190,6 +232,20 @@ const ACCESS_WORDS: Record<string, string> = {
         <h2 class="display-2">When <em class="r">this club</em> trains.</h2>
         <div class="rule"></div>
       </div>
+      {/* INHERITANCE, DISCLOSED WHERE THE HOURS ARE.
+          Stated beside the timetable as well as in the hero, because this is
+          the block somebody actually reads before travelling, and a visitor who
+          scrolled past the lead would otherwise take an ancestor's hours for
+          the club's. */}
+      {profile!.week.configured && !profile!.week.isOwnSchedule && (
+        <p class="inherited fade" role="note">
+          <strong>These are not this club’s own timings.</strong> This club has
+          published none, so the federation is showing
+          {' '}{profile!.week.inheritedFromLabel || 'the schedule of the level above it'}.
+          Contact the club before travelling — do not assume it opens at these
+          hours.
+        </p>
+      )}
       <div class="fade">
         <OpeningHours
           week={profile!.week}
@@ -201,7 +257,9 @@ const ACCESS_WORDS: Record<string, string> = {
         <p class="mt-6 text-muted" style="font-size:.8rem">
           Subscribe in your calendar:
           <a href={h(`/clubs/${club!.slug}/schedule.ics`)} class="text-gold">{club!.name} timetable (.ics)</a>.
-          The feed carries what this club has published and nothing private.
+          {profile!.week.isOwnSchedule
+            ? ' The feed carries what this club has published and nothing private.'
+            : ` The feed carries ${profile!.week.inheritedFromLabel || 'the level above this club'}’s published hours, not this club’s own, and nothing private.`}
         </p>
       )}
     </div>
