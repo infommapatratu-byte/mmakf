@@ -17,7 +17,7 @@
 // rather than being silently dropped — a notification that was never delivered
 // and never recorded as undelivered is worse than one that failed loudly.
 
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { writeAudit, type AuditContext } from '@/db/federation';
 import { assertCanAnywhere, type Principal } from '@/lib/rbac';
@@ -185,9 +185,10 @@ export function transportStatus(): TransportStatus[] {
   ];
 }
 
-function channelConfigured(channel: string): boolean {
-  return transportStatus().find((t) => t.channel === channel)?.configured ?? false;
-}
+// channelConfigured() lived here and had exactly one caller: a per-row check
+// inside deliverQueued()'s loop, which is the shape that wedged the queue. The
+// decision is now made once, in the query, so a helper that answers it per row
+// is not just unused — it is the tempting wrong answer to keep within reach.
 
 // ─── Queueing ───────────────────────────────────────────────────────────────
 
@@ -268,10 +269,49 @@ export async function deliverQueued(db: DB, limit = 100): Promise<DeliveryReport
     attempted: 0, delivered: 0, queuedNoTransport: 0, failed: 0, errors: [],
   };
 
+  // THE QUEUE COULD WEDGE PERMANENTLY, AND ON THIS DEPLOYMENT IT WOULD HAVE.
+  //
+  // This selected the oldest `limit` queued rows REGARDLESS of channel, then
+  // skipped any row whose channel had no transport — correctly leaving its
+  // status `queued`, so that configuring a provider later delivers the backlog
+  // rather than losing it. Both halves are right and the combination is not:
+  // a skipped row keeps status `queued` and keeps its id, so it sorts into the
+  // same first hundred tomorrow, and the day after, forever.
+  //
+  // Neither email nor SMS is configured here. Once a hundred email rows
+  // accumulate ahead of everything else, the page is entirely email, every one
+  // is skipped, and NOTHING BEHIND THEM EVER DRAINS — including the in_app rows
+  // that need no transport at all and would deliver immediately. The report
+  // would show attempted: 100, delivered: 0, failed: 0 every night, which reads
+  // like a queue with nothing to do.
+  //
+  // So the filter moves into the query. Rows on an unconfigured channel are not
+  // selected, cannot occupy the page, and keep their status untouched — the
+  // promise that they are parked rather than lost is unchanged, and it is now
+  // kept without holding the rest of the queue behind them.
+  const deliverable = transportStatus().filter((t) => t.configured).map((t) => t.channel);
+
+  // COUNTED OVER THE WHOLE QUEUE, NOT THE PAGE. The old counter incremented
+  // inside the loop, so it could never report more than `limit` however large
+  // the parked backlog grew — and the warning it feeds exists precisely to tell
+  // an operator how much is waiting on a provider nobody has configured. A
+  // number that silently saturates at 100 is the wrong number to act on.
+  const [parked] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(s.notifications)
+    .where(and(
+      eq(s.notifications.status, 'queued'),
+      notInArray(s.notifications.channel, deliverable),
+    ));
+  report.queuedNoTransport = Number(parked?.n ?? 0);
+
   const pending = await db
     .select()
     .from(s.notifications)
-    .where(eq(s.notifications.status, 'queued'))
+    .where(and(
+      eq(s.notifications.status, 'queued'),
+      inArray(s.notifications.channel, deliverable),
+    ))
     .orderBy(asc(s.notifications.id))
     .limit(limit);
 
@@ -287,10 +327,10 @@ export async function deliverQueued(db: DB, limit = 100): Promise<DeliveryReport
       continue;
     }
 
-    if (!channelConfigured(n.channel)) {
-      report.queuedNoTransport++;
-      continue;
-    }
+    // No unconfigured-channel guard here any more: the query above cannot
+    // return one. Re-adding a skip inside this loop would reintroduce the
+    // head-of-line block, because a row skipped here keeps its place in the
+    // ordering that selected it.
 
     try {
       await sendVia(n.channel, n, db);
