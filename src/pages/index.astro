@@ -5,6 +5,11 @@ import EnrollCTA from '@/components/EnrollCTA.astro';
 import { getAll } from '@/lib/storage';
 import { upcomingEvents } from '@/lib/events';
 import { lineageSteps } from '@/lib/people';
+// The federation's four public acts — register, request training, affiliate,
+// verify. Imported rather than repeated so the hero cannot drift from the nav,
+// which is exactly how the hero came to sell training under one instructor
+// while the navigation said the federation's own calls to action.
+import { PUBLIC_ACTIONS } from '@/lib/surface';
 
 export const prerender = false;
 
@@ -60,14 +65,38 @@ const lineage = lineageSteps(data.leadership, fed.founded);
           through <em>discipline</em>,<br />
           <em>lineage</em>, and <em>purpose</em>.
         </h1>
+        {/*
+          THE FEDERATION'S VOICE, NOT A DOJO'S.
+
+          This read "Train under Grandmaster Shihan Pramod Kumar Pathak at our
+          dojo in Patratu" — an invitation to train with one named individual at
+          one location, on the front page of a national federation. The founder
+          is credited on /about and /people, which is where a person belongs.
+
+          The navigation on this same page already said something different:
+          src/lib/surface.ts sets out PUBLIC_ACTIONS with the note "Note what is
+          NOT here: 'Book a free trial', 'Explore programs', 'Train under
+          Shihan'. Those are a dojo's calls to action. A national federation's
+          are register, affiliate, request training, verify." The hero and the
+          nav of one page were saying two different things about what MMAKF is.
+        */}
         <p class="lead fade" style="margin-top:24px">
-          {fed.name} — {fed.shortName}. Train under Grandmaster Shihan Pramod Kumar Pathak
-          at our dojo in {fed.headquarters}, or join the Online Academy from anywhere in the world.
+          {fed.name} — {fed.shortName}. The national body for Modern Martial Arts
+          Karate-Do in India: affiliated clubs, examined grades, a public credential
+          register, and a formal pathway to the World Karate Federation.
         </p>
         <div class="hero-actions fade" style="margin-top:36px">
-          <a href="/programs" class="btn btn-primary">Explore Programs</a>
-          <a href="/training" class="btn btn-gold">Train with MMAKF</a>
-          <a href="/affiliation" class="btn btn-ghost">Affiliate a Dojo</a>
+          {/*
+            Rendered from PUBLIC_ACTIONS rather than hard-coded, so the hero and
+            the navigation cannot drift apart again. The list is the federation's
+            four acts: register, request training, affiliate, verify.
+          */}
+          {PUBLIC_ACTIONS.map((a, i) => (
+            <a
+              href={a.href}
+              class:list={['btn', i === 0 ? 'btn-primary' : i === 1 ? 'btn-gold' : 'btn-ghost']}
+            >{a.label}</a>
+          ))}
         </div>
       </div>
 
@@ -117,7 +146,14 @@ const lineage = lineageSteps(data.leadership, fed.founded);
           <span>Limca Book of Records</span><span class="dot">·</span>
           <span>Guinness Recognized</span><span class="dot">·</span>
           <span>Est. 1983</span><span class="dot">·</span>
-          <span>5,000+ Students</span><span class="dot">·</span>
+          {/*
+            "5,000+ Students" was here. src/data/seed.ts says of that exact
+            figure, alongside two others: "precise, unverifiable, and the
+            register cannot produce any of them." It was removed from the record
+            and survived hard-coded in the marquee. Replaced with a claim the
+            federation's own pages substantiate.
+          */}
+          <span>Verifiable credentials</span><span class="dot">·</span>
         </>
       ))}
     </div>
@@ -235,9 +271,18 @@ const lineage = lineageSteps(data.leadership, fed.founded);
         </p>
         <div class="body-txt fade" style="display:flex;flex-direction:column;gap:18px">
           <p>
-            We are not one dojo. We are an institutional federation — running structured programs
-            across 130+ schools at our peak, with 34 active black belts, a women's empowerment
-            division, an online university, and a formal pathway to the World Karate Federation.
+            {/*
+              "across 130+ schools at our peak, with 34 active black belts" was
+              here. Both figures were deleted from src/data/seed.ts as
+              unverifiable and survived in prose on this page. The Black Belt
+              count is now something the site can actually answer —
+              /black-belts derives it from active Dan records — so the sentence
+              points there instead of asserting a number nobody can check.
+            */}
+            We are not one dojo. We are an institutional federation — structured programmes in
+            schools and workplaces, a women's empowerment division, an online academy, examined
+            grades on a <a href="/black-belts">public register</a>, and a formal pathway to the
+            World Karate Federation.
           </p>
           <p>
             The MMAKF system develops the whole martial artist: technique, character, body, breath
@@ -401,29 +446,42 @@ const lineage = lineageSteps(data.leadership, fed.founded);
           </div>
           <div class="card-body">For enrolment, federation queries, school programs.</div>
         </div>
+        {/*
+          THREE CARDS WERE REMOVED HERE, AND /contact HAD ALREADY REMOVED ALL
+          THREE. The fix landed on one page and not the other, which is how a
+          federation ends up correcting something and still publishing it.
+
+          · "Email — Grandmaster" carried karate.pramod@gmail.com as a LITERAL.
+            The record holds it as `contact.emailSecondary` precisely so it can
+            be emptied; a literal is the one place a value cannot be removed
+            from the data. A personal Gmail address is not a national
+            federation's correspondence route.
+
+          · "Phone" contained an email address. `fed.contact.phone` is empty —
+            the record says so and says why: the number published in fourteen
+            places was Sensei's personal mobile. So the card was a heading for a
+            channel that does not exist, with another channel's value under it.
+            What was real on it was the office hours, and they now sit under a
+            heading that describes them.
+
+          · "UPI / Payments" rendered `fed.upi`, which is empty and documented
+            as empty: "The federation asked twice for this to be removed: it was
+            a personal handle published as the federation's payment route."
+            `federation` is an admin-editable KV key, so leaving the card meant
+            anybody typing a handle into /admin republishes a personal UPI id on
+            the federation's front page. The card is GONE rather than emptied.
+
+          Federation payment goes through the merchant account; /shop reads
+          `paymentStatusReport()` and says so when it is not configured.
+        */}
         <div class="card fade">
-          <div class="card-eyebrow">Email — Grandmaster</div>
+          <div class="card-eyebrow">Office hours</div>
           <div class="card-title" style="font-size:1.05rem">
-            <a href="mailto:karate.pramod@gmail.com" class="text-gold">karate.pramod@gmail.com</a>
+            <span class="text-gold">{fed.contact.hours}</span>
           </div>
-          <div class="card-body">Shihan Pramod Kumar Pathak — direct correspondence.</div>
-        </div>
-        <div class="card fade">
-          <div class="card-eyebrow">Phone</div>
-          <div class="card-title" style="font-size:1.05rem">
-            <a href="mailto:admin@mmakf.in" class="text-gold">admin@mmakf.in</a>
-          </div>
-          <div class="card-body">{fed.contact.hours}</div>
           {fed.contact.hoursSunday && (
-            <div class="card-body" style="margin-top:6px">{fed.contact.hoursSunday}</div>
+            <div class="card-body">{fed.contact.hoursSunday}</div>
           )}
-        </div>
-        <div class="card fade">
-          <div class="card-eyebrow">UPI / Payments</div>
-          <div class="card-title" style="font-size:1.05rem">
-            <span class="text-gold">{fed.upi}</span>
-          </div>
-          <div class="card-body">Fees, grading, equipment orders. Any UPI app.</div>
         </div>
       </div>
     </div>

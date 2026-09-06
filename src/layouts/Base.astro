@@ -12,11 +12,29 @@ import {
   type Surface,
 } from '@/lib/surface';
 import { isPrivatePath, breadcrumbGraph, type Crumb } from '@/lib/seo';
+import { federationChannels } from '@/lib/people';
 
 // Official channels, loaded here so every page footer links to them. The site
 // previously had no outbound links at all, which is why none of the
 // federation's real material ever surfaced alongside it.
-const social = ((await get<any[]>('social')) || []).filter((a: any) => a?.url);
+//
+// FILTERED THROUGH federationChannels(), AND THAT FILTER IS LOAD-BEARING.
+//
+// The `social` record mixes the federation's own accounts with the personal
+// teaching channels of the people who run it, and the one entry flagged
+// `primary: 'Yes'` is Shihan Pathak's own academy channel. Unfiltered, this
+// footer rendered that private channel under the heading "Official channels",
+// appended " — main channel" to it, and — worse — put its URL into the `sameAs`
+// array of the federation's SportsOrganization JSON-LD below.
+//
+// `sameAs` is an assertion to search engines that two identities are the SAME
+// ENTITY. So on every page of the site the federation was formally telling
+// Google that a private academy is the national federation. /people/[slug] had
+// worked out the correct filter and applied it on exactly one route; it now
+// lives in src/lib/people.ts and is applied here too.
+const allChannels = ((await get<any[]>('social')) || []).filter((a: any) => a?.url);
+const leadershipForChannels = (await get<any[]>('leadership')) || [];
+const social = federationChannels(allChannels, leadershipForChannels);
 
 export interface Props {
   title?: string;
@@ -340,8 +358,23 @@ const orgSchema = {
             <div class="ft-col">
               <div class="ft-h">Connect</div>
               <a href="mailto:admin@mmakf.in">admin@mmakf.in</a>
-              <a href="mailto:karate.pramod@gmail.com">karate.pramod@gmail.com</a>
-              <a href={h('/contact')}>Visit the dojo</a>
+              {/*
+                A PERSONAL GMAIL ADDRESS WAS HERE, on every page of the site,
+                as a string literal.
+
+                The record carries it as `contact.emailSecondary` precisely so
+                the federation can empty it; a literal is the one place a value
+                cannot be removed from the data. EnrollCTA.astro states the rule
+                this broke: "never written as a literal: the last contact detail
+                hard-coded into this file was a personal mobile number, and a
+                default parameter is the one place a value cannot be removed."
+
+                admin@mmakf.in is the federation's correspondence route, and it
+                is the only one a site-wide footer should carry. Somebody who
+                needs a named officer finds them on /team and /people.
+              */}
+              <a href={h('/contact')}>Contact the federation</a>
+              <a href={h('/team')}>Federation team</a>
               <a href={h('/unit')}>Unit Portal →</a>
               <a href={h('/admin')}>Admin →</a>
             </div>
@@ -629,6 +662,28 @@ const orgSchema = {
       }
       .ft-bottom .text-muted { color: #A9A296; }
     </style>
+
+    {/*
+      EVERY FORM ON THE SITE, RE-SENT AS JSON.
+
+      Vercel's edge answers 403 "Cross-site POST form submissions are forbidden"
+      to any POST carrying an encoding an HTML form can produce — including a
+      POST to a static file, so it is not this application refusing it. Only
+      `application/json` gets through. The full evidence is in
+      src/lib/form-intake.ts.
+
+      Loaded here rather than per page because it has to cover all of them: the
+      alternative is remembering it on each of the thirty-one pages that handle
+      a submission, and the one that gets forgotten is a form that silently
+      cannot be sent.
+
+      DELETE THIS LINE the day the Vercel setting is changed. `readSubmission()`
+      on the server keeps reading ordinary form posts exactly as before, so
+      nothing else has to be undone.
+    */}
+    <script>
+      import '@/scripts/form-upgrade';
+    </script>
 
     <script>
       // Mobile nav

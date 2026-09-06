@@ -23,7 +23,26 @@ export const SEED = {
     upi: '',
     contact: {
       email: 'admin@mmakf.in',
-      emailSecondary: 'karate.pramod@gmail.com',   // Shihan Pramod Kumar Pathak
+      // EMPTY ON PURPOSE, and for the third time in this record — after `upi`
+      // and `phone`, both emptied because a personal channel was being published
+      // as the federation's.
+      //
+      // This one held karate.pramod@gmail.com under the heading "Email —
+      // Grandmaster". A consumer mailbox is not a national federation's
+      // correspondence route: it cannot be delegated when somebody is away, it
+      // cannot be audited, it does not survive the person leaving the post, and
+      // it invites a parent with a safeguarding concern to write to an
+      // individual rather than to the office that must answer for it.
+      //
+      // /contact and the homepage rendered it as a card, and Base.astro carried
+      // it as a LITERAL in the footer of every page — which is the part that
+      // mattered, because a literal is the one place a value cannot be removed
+      // from the data. The literal is gone; this is now the only place the value
+      // would live, and it is empty, so the cards drop themselves.
+      //
+      // A named officer is reachable through /team, where the office route is
+      // published deliberately and is a desk rather than a person.
+      emailSecondary: '',
       // NO TELEPHONE NUMBER. The number published across fourteen places on this
       // site was Sensei's personal mobile. The federation asked for it to be
       // removed; email is the contact route.
@@ -285,7 +304,19 @@ export const SEED = {
     { icon: 'book',   title: 'Limca Book of Records',     body: "MMAKF's extraordinary mass training achievements have been recognized in the Limca Book of Records.", badge: 'National Record' },
     { icon: 'medal',  title: 'Guinness Recognition',       body: 'Federation records cite Guinness World Records-linked recognition for mass training achievements. Documentation is held at the federation office.', badge: 'Recognition' },
     { icon: 'globe',  title: 'WKF International Pathway',  body: 'MMAKF-trained coaches and athletes are formally registered under WKF SportsID and Sportdata ranking systems.', badge: 'WKF Registered' },
-    { icon: 'school', title: '130+ Schools Reached',       body: 'At its historical peak, MMAKF operated structured martial arts programs across more than 130 schools.', badge: 'Institutional Scale' },
+    // "130+ Schools Reached" was here, forty lines below the comment on `stats`
+    // that names that exact figure as removed for being "precise, unverifiable,
+    // and the register cannot produce any of them".
+    //
+    // The removal landed on `stats` and not on `achievements`, so the homepage
+    // stopped showing the number in its hero and went on showing it as an
+    // achievement card three screens further down. That is the same failure the
+    // homepage's own contact cards had: a correction applied to one of the two
+    // places a value lived.
+    //
+    // The institutional-scale claim is kept and made checkable instead — the
+    // club network is a register the federation can produce on demand.
+    { icon: 'school', title: 'Schools and campus programmes', body: 'MMAKF delivers structured martial arts programmes in schools and on campuses through affiliated instructors under the federation syllabus.', badge: 'Institutional Scale' },
     { icon: 'users',  title: 'Multi-Generational Legacy',  body: 'Since 1983, MMAKF has produced champions, black belts, coaches, instructors and referees.', badge: 'Since 1983' },
     { icon: 'star',   title: 'Athlete Development',        body: 'MMAKF students have represented the federation at district, state and national level, and progressed to WKF-registered competition.', badge: 'Competitive Pathway' },
   ],
@@ -606,8 +637,22 @@ export const SEED = {
    * number on a federation site is a claim that quietly becomes untrue.
    */
   social: [
-    { name: 'YouTube — Pramod Pathak Martial Arts Academy', platform: 'YouTube', url: 'https://www.youtube.com/@PramodPathakMartialArt', primary: 'Yes', note: 'Main teaching channel — daily training videos' },
-    { name: 'YouTube — MMAK India',                          platform: 'YouTube', url: 'https://www.youtube.com/@mmak_india',              primary: 'No',  note: 'Federation channel' },
+    // WHICH OF THESE IS THE FEDERATION'S "MAIN CHANNEL".
+    //
+    // The first entry is Shihan Pathak's own teaching academy, and it carried
+    // `primary: 'Yes'` — so the site-wide footer listed it under "Official
+    // channels" with " — main channel" beside it, and the SportsOrganization
+    // JSON-LD asserted it in `sameAs` as an identity of the federation itself.
+    //
+    // It is a personal channel and it is claimed as one: the leadership record
+    // above lists it in `ownChannels`, which is what `federationChannels()` in
+    // src/lib/people.ts filters on. That filter now runs in Base.astro, so the
+    // channel appears on his profile and nowhere else.
+    //
+    // The flags are corrected here as well, because the filter and the record
+    // should not disagree: MMAKF's main channel is MMAKF's own.
+    { name: 'YouTube — Pramod Pathak Martial Arts Academy', platform: 'YouTube', url: 'https://www.youtube.com/@PramodPathakMartialArt', primary: 'No', note: 'Shihan Pramod Kumar Pathak’s own teaching academy — a personal channel, claimed on his profile, not a federation account' },
+    { name: 'YouTube — MMAK India',                          platform: 'YouTube', url: 'https://www.youtube.com/@mmak_india',              primary: 'Yes', note: 'The federation’s own channel' },
     { name: 'Facebook — Modern Martial Art Karate Training Centre, Rasda/Patratu', platform: 'Facebook', url: 'https://www.facebook.com/people/Modern-Martial-Art-Karate-Training-Centrerasdapatratu/100093639247728/', primary: 'No', note: '' },
     { name: 'X (Twitter)',                                    platform: 'X',       url: 'https://x.com/arts_marti79722',                    primary: 'No',  note: '' },
     { name: 'Instagram — @mmakf_india',                       platform: 'Instagram', url: 'https://www.instagram.com/mmakf_india/',           primary: 'No',  note: 'Confirmed by the federation, 2026-08-12' },

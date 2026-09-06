@@ -420,6 +420,115 @@ describe('what the public pages must never say', () => {
   }
 });
 
+/**
+ * THE SAME RULE, ON THE PAGES THAT ACTUALLY CARRIED THE BREACHES.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS BLOCK EXISTS SEPARATELY FROM THE ONE ABOVE
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The guard above was written to stop personal contact details reaching public
+ * pages, and its PAGES list is the eight training and audience routes. It omits
+ * '/', '/about', '/contact', '/governance' and '/registration' — which is every
+ * page that was actually carrying one.
+ *
+ * At the moment this block was added, the homepage carried a "UPI / Payments"
+ * card and a personal Gmail address, and the SITE-WIDE FOOTER carried the same
+ * Gmail on every page of the site. The narrower guard passed throughout,
+ * because it tested three routes that never had the problem and matched only
+ * one historical mobile number and the literal `@ybl`.
+ *
+ * So this block widens both axes at once — the pages, and the shapes:
+ *
+ *   · any ten-digit Indian mobile, not one remembered number;
+ *   · any UPI handle shape, not one provider suffix;
+ *   · any consumer-mail address, which is what a personal address looks like
+ *     when the federation's own domain is available.
+ *
+ * The shapes are the ones tests/operations.test.ts already applies to
+ * notification templates. They were never applied to pages, which is how the
+ * same class of value survived on the front page while being correctly refused
+ * inside an email.
+ */
+describe('no personal contact detail reaches any public page', () => {
+  // Every page that carried one, plus the surfaces a visitor actually lands on.
+  const PUBLIC_PAGES = [
+    '/', '/about', '/contact', '/governance', '/registration',
+    '/team', '/black-belts', '/teachers', '/people', '/affiliation', '/shop',
+  ];
+
+  for (const path of PUBLIC_PAGES) {
+    it(`${path} publishes no personal mobile, UPI handle or consumer mailbox`, async () => {
+      const { body, status } = await load(path);
+      if (status >= 400) return; // a route that is not configured here is a different test's business
+
+      // A ten-digit Indian mobile, however it is punctuated. The federation
+      // publishes no telephone number at all — `contact.phone` is empty and
+      // documented as empty — so ANY number of this shape is one somebody typed.
+      expect(body.replace(/<[^>]+>/g, ' '), `${path} shows a mobile number`)
+        .not.toMatch(/\b[6-9]\d{4}[\s-]?\d{5}\b/);
+
+      // Any UPI handle, not just @ybl. A handle is `something@provider` with no
+      // dot in the provider part, which is what separates it from an email.
+      expect(body, `${path} shows a UPI handle`)
+        .not.toMatch(/\b[a-z0-9._-]{3,}@(ybl|ok[a-z]+|paytm|upi|apl|axl|ibl|sbi|hdfcbank|icici)\b/i);
+
+      // A personal mailbox. The federation has admin@mmakf.in; a gmail address
+      // on a federation page is somebody's own, and it was in the footer of
+      // every page on this site.
+      expect(body, `${path} shows a consumer email address`)
+        .not.toMatch(/[a-z0-9._%+-]+@(gmail|yahoo|hotmail|outlook|rediffmail)\.com/i);
+    }, 60_000);
+  }
+
+  it('the homepage does not offer a UPI payment route', async () => {
+    const { body } = await load('/');
+    // `fed.upi` is admin-editable, so the card was a standing invitation to
+    // republish a personal handle on the federation's front page. The card is
+    // gone rather than emptied — an empty card is one edit away from a full one.
+    expect(body).not.toMatch(/UPI\s*\/\s*Payments/i);
+  }, 60_000);
+
+  it('the homepage speaks in the federation’s voice, not a dojo’s', async () => {
+    const { body } = await load('/');
+    const text = body.replace(/<[^>]+>/g, ' ');
+    // src/lib/surface.ts states the rule: "'Book a free trial', 'Explore
+    // programs', 'Train under Shihan' … are a dojo's calls to action. A
+    // national federation's are register, affiliate, request training, verify."
+    // The hero said one thing and the navigation on the same page said the other.
+    expect(text, 'the hero sells training under a named individual')
+      .not.toMatch(/Train under\s+(Grandmaster|Shihan|Sensei)/i);
+    expect(text, 'the hero calls the federation “our dojo”').not.toMatch(/at our dojo/i);
+  }, 60_000);
+
+  it('no public page asserts a figure the register cannot produce', async () => {
+    for (const path of ['/', '/about', '/affiliation', '/governance']) {
+      const { body, status } = await load(path);
+      if (status >= 400) continue;
+      const text = body.replace(/<[^>]+>/g, ' ');
+      // The three src/data/seed.ts deleted by name. They were removed from the
+      // record and survived hard-coded in page prose on four routes.
+      expect(text, `${path} claims a student count`).not.toMatch(/5,?000\+?\s*students/i);
+      expect(text, `${path} claims a school count`).not.toMatch(/130\+?\s*schools?/i);
+      expect(text, `${path} claims a black-belt count`).not.toMatch(/34\s*active black belts/i);
+    }
+  }, 60_000);
+
+  it('no public page repeats the lineage claim the federation withdrew', async () => {
+    for (const path of ['/', '/about', '/people', '/governance']) {
+      const { body, status } = await load(path);
+      if (status >= 400) continue;
+      const text = body.replace(/<[^>]+>/g, ' ');
+      // `federation.lineage` was emptied because the site "claimed a 'Tiger Lee
+      // lineage' in nine places". /about carried the same assertion in other
+      // words — "direct inheritor of the Shotokan Karate-Do in India" — which is
+      // a stronger claim than the one that was withdrawn.
+      expect(text, `${path} claims a lineage`).not.toMatch(/direct inheritor/i);
+      expect(text, `${path} claims the Tiger Lee lineage`).not.toMatch(/tiger lee lineage/i);
+    }
+  }, 60_000);
+});
+
 describe('breadcrumbs', () => {
   it('renders a visible trail AND matching markup on a page with a hierarchy', async () => {
     const { body } = await load('/karate-for-schools');
@@ -469,5 +578,181 @@ describe('the admin surface is never indexable', () => {
   it('does not send noindex on a public page', async () => {
     const { body } = await load('/karate-for-schools');
     expect(body).not.toMatch(/name="robots"[^>]*noindex/i);
+  }, 60_000);
+});
+
+/**
+ * THE APEX-DOMAIN FORM REFUSAL, PROVED OVER HTTP.
+ *
+ * Reported from production: every form submitted from mmakf.in rather than
+ * www.mmakf.in answered "Cross-site POST form submissions are forbidden", and
+ * had done for months.
+ *
+ * tests/hardening.test.ts pins the unit-level logic. This block proves the
+ * MIDDLEWARE — the thing that actually refused the request — accepts the shape
+ * a browser really sends after the apex-to-www redirect, and still refuses a
+ * forged one. The previous fix passed its unit tests and failed in production
+ * precisely because nothing exercised the real call.
+ */
+describe('a form POSTed from the apex domain is not refused', () => {
+  /** POST with the headers a browser sets, and report what the server said. */
+  async function post(path: string, headers: Record<string, string>) {
+    const res = await fetch(base + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...headers },
+      body: 'probe=1',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(40_000),
+    });
+    const body = await res.text();
+    return { status: res.status, body, refused: body.includes('Request refused') };
+  }
+
+  it('THE BUG: same-site from the apex is accepted by the middleware', async () => {
+    // Chrome submitting a form on https://mmakf.in that 308s to www: the
+    // initiator stays the apex, so Sec-Fetch-Site is `same-site`, not
+    // `same-origin`. This returned 403 "Request refused" before the fix.
+    const r = await post('/start/individual', {
+      'sec-fetch-site': 'same-site',
+      origin: 'https://mmakf.in',
+    });
+    expect(r.refused, `middleware refused the apex POST: ${r.status}`).toBe(false);
+    expect(r.status).not.toBe(403);
+  }, 60_000);
+
+  it('an ordinary same-origin POST is unaffected', async () => {
+    const r = await post('/start/individual', { 'sec-fetch-site': 'same-origin' });
+    expect(r.refused).toBe(false);
+    expect(r.status).not.toBe(403);
+  }, 60_000);
+
+  it('ATTACK: a genuinely cross-site POST is still refused', async () => {
+    const r = await post('/start/individual', {
+      'sec-fetch-site': 'cross-site',
+      origin: 'https://evil.example',
+    });
+    expect(r.status).toBe(403);
+    expect(r.refused).toBe(true);
+  }, 60_000);
+
+  it('ATTACK: a hijacked sibling subdomain is still refused', async () => {
+    // same-site is what a subdomain takeover produces, and it is the reason the
+    // check cannot simply accept `same-site`.
+    const r = await post('/start/individual', {
+      'sec-fetch-site': 'same-site',
+      origin: 'https://evil.mmakf.in',
+    });
+    expect(r.status).toBe(403);
+    expect(r.refused).toBe(true);
+  }, 60_000);
+
+  it('ATTACK: a POST carrying no origin information at all is refused', async () => {
+    const r = await post('/start/individual', {});
+    expect(r.status).toBe(403);
+    expect(r.refused).toBe(true);
+  }, 60_000);
+});
+
+/**
+ * A SUBMISSION SENT AS JSON IS READ AS A FORM.
+ *
+ * The client half (src/scripts/form-upgrade.ts) re-sends every same-origin form
+ * post as `application/json`, because Vercel's edge refuses the three encodings
+ * an HTML form can produce. This proves the server half actually parses it —
+ * that `readSubmission()` is wired into the page handlers and not merely
+ * written.
+ */
+describe('a form submission sent as JSON reaches the handler', () => {
+  it('a JSON submission reaches the page handler rather than being refused', async () => {
+    const res = await fetch(`${base}/careers/does-not-exist`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: base,
+        'Sec-Fetch-Site': 'same-origin',
+      },
+      body: JSON.stringify({ applicantName: 'Test Person', applicantEmail: 'not-an-email' }),
+      signal: AbortSignal.timeout(40_000),
+    });
+    const body = await res.text();
+
+    // THE CLAIM THIS TEST MAKES, and no more: the middleware did not refuse the
+    // JSON body, and the page handler ran to completion and rendered.
+    expect(res.status, 'the JSON submission was refused before the handler').not.toBe(403);
+    expect(body, 'the handler did not render').toContain('Careers — MMAKF');
+    expect(body).not.toMatch(/Internal server error|Cannot read propert|is not defined/i);
+
+    // NOT asserted here: which branch the page took. This suite runs with no
+    // DATABASE_URL, so /careers/[slug] renders its "not configured" branch —
+    // reading the vacancy is exactly what it cannot do. Asserting a validation
+    // message would be asserting the test environment, not the behaviour.
+    // The parsing itself is covered field-by-field in tests/form-intake.test.ts.
+  }, 60_000);
+
+  it('an /api/ route still refuses a non-JSON body, unchanged', async () => {
+    // The API rule is what makes JSON safe: a cross-site form cannot send
+    // application/json without a preflight this application never answers.
+    // Nothing in the form-intake change may weaken it.
+    const res = await fetch(`${base}/api/queue/decide`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Origin: base,
+        'Sec-Fetch-Site': 'same-origin',
+      },
+      body: 'act=approve',
+      signal: AbortSignal.timeout(40_000),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain('Request refused');
+  }, 60_000);
+});
+
+/**
+ * THE PAGE A REAL USER WAS BLOCKED ON.
+ *
+ * Reported from production with a screen recording: a visitor completing the
+ * individual training enquiry at mmakf.in/start/individual pressed Continue and
+ * got Vercel's plain-text 403. Nobody could register.
+ *
+ * The edge rule is not ours to switch off, so the fix is that the page accepts
+ * the JSON body `src/scripts/form-upgrade.ts` re-sends. This proves the exact
+ * failing route does.
+ */
+describe('the individual enquiry accepts the submission the client re-sends', () => {
+  it('POST /start/individual as JSON reaches the wizard, not a refusal', async () => {
+    const res = await fetch(`${base}/start/individual`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: base,
+        'Sec-Fetch-Site': 'same-origin',
+      },
+      // Step one of the wizard: who the training is for.
+      body: JSON.stringify({ step: '1', learner: 'child' }),
+      signal: AbortSignal.timeout(40_000),
+    });
+    const body = await res.text();
+
+    expect(res.status, 'the enquiry was refused before the handler').not.toBe(403);
+    expect(body).not.toContain('Cross-site POST form submissions are forbidden');
+    expect(body).not.toMatch(/Internal server error|Cannot read propert|is not defined/i);
+    // It rendered the wizard rather than an error page.
+    expect(body).toMatch(/MMAKF/i);
+  }, 60_000);
+
+  it('POST /register as JSON is likewise not refused', async () => {
+    const res = await fetch(`${base}/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: base,
+        'Sec-Fetch-Site': 'same-origin',
+      },
+      body: JSON.stringify({ step: '1' }),
+      signal: AbortSignal.timeout(40_000),
+    });
+    expect(res.status).not.toBe(403);
+    expect(await res.text()).not.toContain('Cross-site POST form submissions are forbidden');
   }, 60_000);
 });

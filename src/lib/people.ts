@@ -108,3 +108,70 @@ export function lineageSteps(leadership: any[] | null | undefined, founded: stri
 
   return steps.map((s, i) => ({ ...s, num: String(i + 1).padStart(2, '0') }));
 }
+
+/**
+ * WHICH CHANNELS ARE THE FEDERATION'S, AND WHICH BELONG TO A PERSON.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS IS A SHARED FUNCTION AND NOT A FILTER ON ONE PAGE
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The `social` record carries a mixture: the federation's own accounts, and the
+ * personal teaching channels of the people who run it. Exactly one entry is
+ * flagged `primary: 'Yes'`, and it is Shihan Pathak's own academy channel.
+ *
+ * `/people/[slug]` worked this out and filtered correctly. Nothing else did —
+ * so `Base.astro` rendered that personal academy channel in the SITE-WIDE
+ * FOOTER under the heading "Official channels", appended " — main channel" to
+ * it, and then put its URL into the `sameAs` array of the federation's
+ * `SportsOrganization` JSON-LD.
+ *
+ * That last part is the serious half. `sameAs` is an ASSERTION TO SEARCH
+ * ENGINES that two identities are the same entity, so the federation was
+ * formally telling Google that a private academy's channel is the national
+ * federation. That is the misattribution `/people/[slug]` already refuses, made
+ * machine-readable and repeated on every page of the site.
+ *
+ * A channel is claimed BY ADDRESS on a person's own `ownChannels` list. A
+ * claimed channel is that person's and appears on their profile; an unclaimed
+ * one is the federation's.
+ *
+ * IT FAILS TOWARDS SILENCE. Given no leadership records — which is what a
+ * caller gets when the content store is unreachable — every channel is treated
+ * as UNCLAIMED and therefore the federation's, so a temporary read failure
+ * cannot make the federation's own accounts disappear from its footer. The
+ * inverse default would be worse in the other direction, and this one is
+ * recoverable: an unclaimed channel that should have been claimed is a channel
+ * listed under the wrong heading for as long as the store is down, whereas the
+ * federation losing its own Instagram from its footer is a visible outage.
+ */
+export interface Channel {
+  platform?: string;
+  name?: string;
+  url?: string;
+  primary?: string;
+  note?: string;
+}
+
+/** Every URL any leadership record claims as personally theirs. */
+export function claimedChannelUrls(leadership: unknown): Set<string> {
+  const list = Array.isArray(leadership) ? leadership : [];
+  return new Set<string>(
+    list.flatMap((p: any) => (Array.isArray(p?.ownChannels) ? p.ownChannels : []))
+  );
+}
+
+/**
+ * The channels the federation may present as its own.
+ *
+ * NOTE what this does NOT do: it does not filter on `primary`. The footer heading
+ * is "Official channels", not "the main one" — every unclaimed account is the
+ * federation's and belongs there.
+ */
+export function federationChannels(social: unknown, leadership: unknown): Channel[] {
+  const claimed = claimedChannelUrls(leadership);
+  const list = Array.isArray(social) ? social : [];
+  return list.filter(
+    (a: any) => a && typeof a.url === 'string' && a.url && !claimed.has(a.url)
+  );
+}

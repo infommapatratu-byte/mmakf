@@ -50,16 +50,43 @@ const dojoKun = [
           <div class="rule"></div>
         </div>
         <div class="body-txt fade" style="display:flex;flex-direction:column;gap:18px">
+          {/*
+            THREE CLAIMS WERE REMOVED FROM THIS PARAGRAPH, AND EACH HAD ALREADY
+            BEEN REMOVED FROM THE RECORD THEY WERE SUPPOSED TO COME FROM.
+
+            · "direct inheritor of the Shotokan Karate-Do in India."
+              src/data/seed.ts emptied `federation.lineage` for exactly this:
+              "This site claimed a 'Tiger Lee lineage' in nine places … Every
+              page saying otherwise stated something the federation never
+              claimed." This sentence is that removed claim in different words —
+              and a stronger one, because "direct inheritor of the Shotokan
+              Karate-Do in India" asserts a national succession, not a lineage.
+              The heading directly below this block was already softened for the
+              same reason; the paragraph was missed.
+
+            · "more than 130 schools, with thousands of students each quarter"
+            · "34 active black belts"
+              Both are named in src/data/seed.ts as deleted: "precise,
+              unverifiable, and the register cannot produce any of them."
+
+            What is left is what the record supports: a founding year, a
+            founder, a place, and a system. The Black Belt figure is now a thing
+            the site can answer rather than assert — /black-belts derives it
+            from active Dan records — so the sentence points there.
+          */}
           <p>
-            MMAKF was founded in {fed.founded} by Shihan Pramod Kumar Pathak, direct inheritor of the
-            Shotokan Karate-Do in India. What began as a single training hall in Patratu
-            grew into an institutional federation — at its peak running structured karate programs
-            across more than 130 schools, with thousands of students each quarter.
+            MMAKF was founded in {fed.founded} by Shihan Pramod Kumar Pathak at Patratu,
+            Jharkhand. What began as a single training hall grew into an institutional
+            federation — chartered state and district units, affiliated clubs, and structured
+            karate programmes in schools and workplaces.
           </p>
           <p>
-            The federation has produced national champions, WKF-registered athletes and coaches,
-            34 active black belts, and record-book recognition — while never departing from its core:
-            authentic Shotokan Karate-Do, transmitted the traditional way, one grading at a time.
+            The federation has produced national champions and WKF-registered athletes and
+            coaches — while never departing from its core: authentic Shotokan Karate-Do,
+            transmitted the traditional way, one grading at a time. Every Dan grade it has
+            awarded and still recognises is on the
+            <a href="/black-belts">public Black Belt register</a>, and any certificate it has
+            issued can be <a href="/verify">checked against its records</a>.
           </p>
           <p>
             Today MMAKF trains students in the hombu dojo, through partner schools, and worldwide
