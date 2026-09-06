@@ -27,6 +27,7 @@ import { registerAccount, isOnboardingError } from '@/db/onboarding';
 import { passwordProblem } from '@/lib/password';
 import { readableError, field } from './_lib';
 import { readSubmission } from '@/lib/form-intake';
+import NoScriptNotice from '@/components/NoScriptNotice.astro';
 
 export const prerender = false;
 
@@ -137,7 +138,8 @@ if (Astro.request.method === 'POST' && configured) {
         )}
 
         {configured && !created && (
-          <form class="card" method="POST" action="/portal/register" style="padding:28px">
+<NoScriptNotice what="your registration" />
+                    <form class="card" method="POST" action="/portal/register" style="padding:28px">
             <div id="regErr" role="alert" style={`color:var(--red-2);font-size:.85rem;margin-bottom:14px;${error ? '' : 'display:none'}`}>
               {error}
             </div>

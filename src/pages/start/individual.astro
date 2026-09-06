@@ -70,6 +70,7 @@ import { submitIndividualRequest } from '@/pages/api/start/individual';
 import { formatINR } from '@/lib/training-fee-state';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 import { readSubmission } from '@/lib/form-intake';
+import NoScriptNotice from '@/components/NoScriptNotice.astro';
 
 export const prerender = false;
 
@@ -358,7 +359,8 @@ function money(currency: string, minor: number): string {
           </p>
         </section>
       ) : (
-        <form method="POST" class="ind-form" novalidate>
+<NoScriptNotice what="your training enquiry" />
+                <form method="POST" class="ind-form" novalidate>
           <input type="hidden" name="stepKey" value={current.key} />
           <input type="hidden" name="nonce" value={nonce} />
           {carried.map((c) => <input type="hidden" name={c.name} value={c.value} />)}

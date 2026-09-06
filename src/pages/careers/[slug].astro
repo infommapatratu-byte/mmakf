@@ -43,6 +43,7 @@ import { isConfigured, db } from '@/db';
 import { rateLimit } from '@/lib/ratelimit';
 import { publicVacancy, applyForVacancy, isWorkforceError } from '@/db/workforce';
 import { readSubmission } from '@/lib/form-intake';
+import NoScriptNotice from '@/components/NoScriptNotice.astro';
 
 const { slug } = Astro.params;
 const configured = isConfigured();
@@ -258,6 +259,7 @@ if (!vacancy && !readFailed && configured) Astro.response.status = 404;
                 <h2>Apply for this post</h2>
                 {error && <p class="v-err" role="alert">{error}</p>}
 
+<NoScriptNotice what="your job application" />
                 <form method="post" action={`/careers/${vacancy.slug}#apply`} class="v-form">
                   <label class="input-label" for="ap-name">Your name</label>
                   <input class="input" id="ap-name" name="applicantName" maxlength="120" required value={sent.applicantName ?? ''} />

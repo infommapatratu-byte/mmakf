@@ -1,0 +1,103 @@
+---
+// What a visitor with JavaScript disabled sees instead of the raw platform
+// error, on every public form.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// THE CONSTRAINT THIS COMPONENT EXISTS BECAUSE OF, STATED IN FULL
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The deployment's edge platform refuses every POST whose body is one of the
+// three encodings an HTML <form> can produce — application/x-www-form-
+// urlencoded, multipart/form-data, or text/plain. This was confirmed against
+// production, exhaustively, before this component was written:
+//
+//   · Correct Origin and Sec-Fetch-Site headers        -> still refused
+//   · The full Sec-Fetch-Mode/-Dest/-User set a real browser sends for a
+//     genuine top-level form navigation                -> still refused
+//   · A cookie obtained from a real prior page visit,
+//     attached to the POST                             -> still refused
+//
+// `application/json` is the one body type that passes through. `src/scripts/
+// form-upgrade.ts` makes every form send that instead, and it works — but it
+// is JAVASCRIPT that rewrites the submission, and there is no HTML attribute,
+// no `enctype`, no header a static form can set that produces a JSON body.
+// This is a hard limit of the web platform, not a gap this repository can
+// close from the browser side. Only the platform setting itself, changed by
+// whoever administers the deployment, removes the block for a script-free
+// visitor.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHY <noscript>, AND WHY THAT IS THE RIGHT MECHANISM HERE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Content inside <noscript> is parsed and shown ONLY when the browser has
+// scripting disabled or unsupported — there is no JS-side condition to keep in
+// sync, and no way for this notice to appear for a visitor the JSON upgrade
+// already serves correctly. A visitor running JavaScript never sees this,
+// today or after any future change to this file.
+//
+// It renders BEFORE any submission is attempted, not after a failure — because
+// a no-JS visitor's submission cannot be distinguished from a JS visitor's
+// server-side (both are the identical HTTP request, since JavaScript is what
+// would have rewritten it). Telling them beforehand is the only point at which
+// this system can tell them at all.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WHAT THIS DELIBERATELY DOES NOT DO
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// IT DOES NOT SWITCH THE FORM TO method="get". A GET carrying a name, an email,
+// a date of birth or a cover letter would put every one of those into the URL —
+// server logs, browser history, and any Referer header the next page sends —
+// and GET requests carry none of the SameSite POST protections this site's CSRF
+// defence relies on: a single image tag on any other site, pointed at the
+// right URL with the right query string, could trigger one. Trading a real
+// vulnerability for a smaller inconvenience is not an improvement.
+//
+// IT DOES NOT PRETEND THE FORM WILL WORK IF THEY TRY. The honest message is
+// "this needs JavaScript, here is another way," not silence followed by a raw
+// platform error the visitor cannot act on.
+
+export interface Props {
+  /**
+   * What the visitor was about to submit, in a few words — "the individual
+   * training enquiry", "your registration", "a coach application". Used only
+   * in the sentence telling them what to put in the subject line.
+   */
+  what: string;
+}
+
+const { what } = Astro.props;
+---
+
+<noscript>
+  <div class="njs-notice" role="alert">
+    <p class="njs-lede"><strong>This form needs JavaScript to submit.</strong></p>
+    <p>
+      A technical restriction on this website currently blocks the plain
+      submission a browser sends with scripting turned off — this is not
+      something wrong with what you typed.
+    </p>
+    <p>
+      If you cannot turn JavaScript on, email
+      <a href="mailto:admin@mmakf.in">admin@mmakf.in</a> with “{what}” in the
+      subject line and everything you wanted to submit in the body. The
+      federation office will enter it for you.
+    </p>
+  </div>
+</noscript>
+
+<style>
+  .njs-notice {
+    margin: 0 0 var(--space-5, 1.25rem);
+    padding: var(--space-4, 1rem);
+    border: 1px solid var(--c-warn-border, #c99);
+    border-left-width: 4px;
+    border-radius: var(--radius, 6px);
+    background: var(--c-warn-bg, #fdf6e8);
+    max-width: 65ch;
+  }
+  .njs-notice p { margin: 0.4rem 0 0; }
+  .njs-notice p:first-child { margin-top: 0; }
+  .njs-lede { font-size: 1.02rem; }
+</style>

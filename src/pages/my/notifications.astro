@@ -65,6 +65,7 @@ import { isConfigured, db } from '@/db';
 import { rateLimit } from '@/lib/ratelimit';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 import { humanise } from '@/lib/status';
+import NoScriptNotice from '@/components/NoScriptNotice.astro';
 import {
   INBOX_LIMIT, inbox, inboxTopics, unreadCount, markRead, markAllRead, ownLink,
   recipientFor, safeLink, type InboxItem,
@@ -286,6 +287,7 @@ const capped = items.length >= INBOX_LIMIT;
 
       {gate === 'ok' && (
         <>
+          <NoScriptNotice what="marking a notice as read" />
           <div class="nt-head">
             <div class="eyebrow">Notifications</div>
             <h1 class="display-2" style="margin-top:14px">

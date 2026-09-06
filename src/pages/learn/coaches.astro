@@ -29,6 +29,7 @@ import Base from '@/layouts/Base.astro';
 import { submitCoachApplication, type CoachOutcome } from '@/pages/api/learn/coach-application';
 import { href as surfaceHref, canonicalFor, type Surface } from '@/lib/surface';
 import { readSubmission } from '@/lib/form-intake';
+import NoScriptNotice from '@/components/NoScriptNotice.astro';
 
 export const prerender = false;
 
@@ -197,7 +198,8 @@ const schema = {
       )}
 
       {!done && (
-        <form method="POST" class="ch-form" novalidate>
+<NoScriptNotice what="your coach application" />
+                <form method="POST" class="ch-form" novalidate>
           <fieldset>
             <legend>You</legend>
             <div class="f2">

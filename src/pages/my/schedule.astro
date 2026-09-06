@@ -56,6 +56,7 @@ import {
 import { issueFeed, myFeeds, revokeFeed, isFeedError, type FeedToken } from '@/lib/calendar-feed';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 import { readSubmission } from '@/lib/form-intake';
+import NoScriptNotice from '@/components/NoScriptNotice.astro';
 
 export const prerender = false;
 
@@ -242,6 +243,7 @@ const DAY_FMT = (iso: string) =>
         <ErrorState title="We couldn’t read your week" safe="Nothing has been changed." />
       ) : (
         <>
+          <NoScriptNotice what="booking or changing a class" />
           {/* ═══════ WHAT I HAVE ON ═══════ */}
           <h2 class="sec-h">The next four weeks</h2>
           {mine.length === 0 ? (

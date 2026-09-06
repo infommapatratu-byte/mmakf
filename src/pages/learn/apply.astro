@@ -38,6 +38,7 @@ import { WIZARD_STEPS, TOTAL_STEPS, validateSubmission, draftPayload, type Wizar
 import { submitApplicationRequest, statusFor } from '@/pages/api/learn/application';
 import { href as surfaceHref, type Surface } from '@/lib/surface';
 import { readSubmission } from '@/lib/form-intake';
+import NoScriptNotice from '@/components/NoScriptNotice.astro';
 
 export const prerender = false;
 
@@ -239,7 +240,8 @@ function displayValue(name: string): string {
         </div>
       )}
 
-      <form method="POST" class="wiz-form" novalidate>
+<NoScriptNotice what="your institutional training application" />
+            <form method="POST" class="wiz-form" novalidate>
         <input type="hidden" name="step" value={step} />
         {ref && <input type="hidden" name="ref" value={ref} />}
         {accessToken && <input type="hidden" name="k" value={accessToken} />}

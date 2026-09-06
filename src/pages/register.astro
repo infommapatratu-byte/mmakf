@@ -41,6 +41,7 @@ import { isConfigured } from '@/db';
 import { submitRegistration, statusFor, type RegistrationOutcome } from './api/auth/register';
 import { APPLICABLE_ROLES } from '@/db/onboarding';
 import { readSubmission } from '@/lib/form-intake';
+import NoScriptNotice from '@/components/NoScriptNotice.astro';
 
 export const prerender = false;
 
@@ -141,7 +142,8 @@ const applicable = APPLICABLE_ROLES.join(', ');
         )}
 
         {!accepted && (
-          <form method="post" action="/register" class="card acc-form" novalidate>
+<NoScriptNotice what="your registration" />
+                    <form method="post" action="/register" class="card acc-form" novalidate>
             <div class="card-eyebrow">New account</div>
             <h2 class="blk-h">Your details</h2>
 

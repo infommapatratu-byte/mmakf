@@ -44,6 +44,7 @@ import {
 } from '@/db/onboarding';
 import { readableError, fmtDateTime, scopeNames, scopeLabel, titleCase, field, intField, unitOptions } from './_lib';
 import { readSubmission } from '@/lib/form-intake';
+import NoScriptNotice from '@/components/NoScriptNotice.astro';
 
 export const prerender = false;
 
@@ -285,7 +286,8 @@ const flash =
               <p style="margin-top:10px" class="text-muted">{REVIEW_TURNAROUND_NOT_SET}</p>
             </div>
 
-            <form method="POST" action="/portal/applications" class="p-form">
+<NoScriptNotice what="your role application" />
+                        <form method="POST" action="/portal/applications" class="p-form">
               <input type="hidden" name="intent" value="apply" />
 
               <label class="input-label" for="ap-role">Role applied for</label>

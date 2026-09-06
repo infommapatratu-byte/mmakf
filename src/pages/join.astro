@@ -59,6 +59,7 @@ import {
 import { rateLimit } from '@/lib/ratelimit';
 import type { Role, ScopeType } from '@/lib/rbac';
 import { readSubmission } from '@/lib/form-intake';
+import NoScriptNotice from '@/components/NoScriptNotice.astro';
 
 export const prerender = false;
 
@@ -469,7 +470,8 @@ const conferred = new Map<Role, string[]>(
       ) : (
         <div class="join-cols">
           {/* ── Role application ─────────────────────────────────────────── */}
-          <form method="post" action="/join" class="card join-form">
+<NoScriptNotice what="your role application" />
+                    <form method="post" action="/join" class="card join-form">
             <input type="hidden" name="intent" value="role" />
             <div class="card-eyebrow">Role application</div>
             <h3 class="blk-h">What are you applying to be?</h3>
@@ -553,7 +555,8 @@ const conferred = new Map<Role, string[]>(
               ) : (
                 <details class="join-details">
                   <summary class="join-summary">Apply to sell</summary>
-                  <form method="post" action="/join" class="join-form" style="padding:0;margin-top:18px">
+<NoScriptNotice what="your seller application" />
+                                    <form method="post" action="/join" class="join-form" style="padding:0;margin-top:18px">
                     <input type="hidden" name="intent" value="seller" />
 
                     <div class="join-field">
