@@ -33,6 +33,7 @@ import * as s from '@/db/schema';
 import { writeAudit, allocateFederationId, resolvePlacement, type AuditContext } from '@/db/federation';
 import { assertCan, canAnywhere, type Principal } from '@/lib/rbac';
 import { MarketplaceError } from '@/db/marketplace';
+import { publishVerificationDecided } from '@/db/marketplace-events';
 
 type DB = any;
 
@@ -338,6 +339,11 @@ export async function decideVerification(
     oldValue: { check: input.check, status: existing?.status ?? 'not_started' },
     newValue: { check: input.check, status: input.status },
   });
+
+  // THE CHECK AND THE OUTCOME, NEVER THE EVIDENCE. The producer carries only
+  // the seller id on the feed; what was inspected stays on the record, for
+  // somebody with the authority to open it.
+  await publishVerificationDecided(db, { sellerId: input.sellerId, check: input.check }, ctx.principal);
 
   return { sellerId: input.sellerId, check: input.check, status: input.status };
 }

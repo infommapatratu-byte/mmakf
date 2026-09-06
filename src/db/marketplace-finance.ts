@@ -39,6 +39,10 @@ import * as s from '@/db/schema';
 import { writeAudit, allocateFederationId, type AuditContext } from '@/db/federation';
 import { assertCan, type Principal } from '@/lib/rbac';
 import { MarketplaceError } from '@/db/marketplace';
+import {
+  publishPayoutInitiated, publishPayoutPaid, publishSettlementBlocked,
+} from '@/db/marketplace-events';
+import type { PayoutProvider } from '@/lib/payouts/provider';
 
 type DB = any;
 
@@ -735,6 +739,11 @@ export async function closeSettlement(db: DB, ctx: AuditContext, settlementId: n
     .where(eq(s.sellerSettlements.id, settlementId)).limit(1))[0];
 
   if (fresh.hasUnresolvedCommission) {
+    // PUBLISHED BEFORE THE THROW, deliberately. A settlement nobody can close
+    // is money a seller is not being paid, and if the only trace is an error
+    // message returned to whichever operator happened to press the button, it
+    // is invisible the moment they close the tab.
+    await publishSettlementBlocked(db, { settlementId, reason: 'commission_unresolved' }, ctx.principal);
     throw new MarketplaceError(
       'unresolved_commission',
       'This period contains a sale whose commission MMAKF has not set. Publish a rule ' +
@@ -849,6 +858,15 @@ export async function createPayout(db: DB, ctx: AuditContext, settlementId: numb
       entityType: 'seller_payout', entityId: row.id, action: 'create',
       newValue: { ref, settlementId, amountMinor: st.netPayableMinor },
     });
+    // AN INSTRUCTION, NOT A TRANSFER. Carries the amount, which is why the
+    // catalogue puts it at 'confidential' and why no consumer delivers it —
+    // that is exactly what lets MARKETPLACE_PAYOUT_PAID reach the seller.
+    //
+    // Inside the success branch deliberately: the idempotency catch below
+    // returns a payout that already existed, and announcing that one again
+    // would tell the office a second instruction had been raised.
+    await publishPayoutInitiated(db, row.id, ctx.principal);
+
     return { payoutId: row.id, ref, amountMinor: st.netPayableMinor };
   } catch (err: any) {
     if (String(err?.message ?? '').includes('seller_payouts_idempotency_uk')) {
@@ -886,6 +904,11 @@ export async function markPayoutPaid(
     entityType: 'seller_payout', entityId: payoutId, action: 'update',
     oldValue: { status: p.status }, newValue: { status: 'paid', utr: detail.utr ?? null },
   });
+  // The seller is told MONEY HAS LANDED. This function is the only writer of
+  // 'paid' in this module, so it is the only correct place for this event —
+  // and it is below the early return above, so a repeat call announces nothing.
+  await publishPayoutPaid(db, payoutId, ctx.principal);
+
   return { payoutId, alreadyPaid: false };
 }
 
@@ -1041,5 +1064,201 @@ export async function myAccount(db: DB, principal: Principal) {
     /** Sales the federation has not yet told the system how to charge for. */
     heldForCommission: held[0]?.n ?? 0,
     heldNote: (held[0]?.n ?? 0) > 0 ? COMMISSION_NOT_CONFIGURED : null,
+  };
+}
+
+// ─── The automatic rail ─────────────────────────────────────────────────────
+//
+// `markPayoutPaid()` above records a transfer A PERSON MADE, at a bank, and
+// then told the system about. These two drive a provider instead. They are
+// separate functions from each other because they fail differently: sending is
+// irreversible and refreshing is a read.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// A SEND NEVER WRITES 'paid'
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The obvious implementation calls sendPayout(), sees it return without
+// throwing, and marks the payout paid. That records a transfer that has not
+// happened: an accepted instruction is a promise to try, and NEFT/IMPS
+// settlement fails afterwards for reasons the accepting call cannot know — a
+// closed account, a name mismatch, a bank holiday, the provider's own float.
+//
+// A seller told "you have been paid" when nothing arrived will go to their
+// bank, then to their branch, and then to the federation — and MMAKF's own
+// record will agree with the wrong answer the whole way. So the only writer of
+// 'paid' in this module is markPayoutPaid(), and it is called from here ONLY
+// when the provider's own answer says paid, never on a send having been
+// accepted.
+
+/** The payout, its verified account, and nothing else. */
+async function payoutForRail(db: DB, payoutId: number) {
+  const p = (await db.select().from(s.sellerPayouts)
+    .where(eq(s.sellerPayouts.id, payoutId)).limit(1))[0];
+  if (!p) throw new MarketplaceError('unknown_payout', 'No such payout.');
+
+  const account = p.payoutAccountId == null ? null : ((await db.select({
+    id: s.payoutAccounts.id,
+    provider: s.payoutAccounts.provider,
+    providerAccountId: s.payoutAccounts.providerAccountId,
+    status: s.payoutAccounts.status,
+  }).from(s.payoutAccounts).where(eq(s.payoutAccounts.id, p.payoutAccountId)).limit(1))[0] ?? null);
+
+  return { p, account };
+}
+
+/**
+ * Instruct the provider to send a payout.
+ *
+ * THE STATUS WRITTEN IS THE PROVIDER'S OWN. `sendPayout()` returns a mapped
+ * `PayoutStatus`, and whatever it says is what lands in the column — including
+ * 'failed', which is a legitimate answer to a send and not an exception. The
+ * one value this function will not write on its own authority is 'paid': where
+ * a provider settles synchronously and says so, the write goes through
+ * markPayoutPaid() so that the settlement transition and the audit row happen
+ * in the one place that has always done them.
+ *
+ * IDEMPOTENT AT THE PROVIDER. The key is the payout's own, allocated when the
+ * row was created, so a retried request reaches the provider as the same
+ * instruction rather than as a second transfer.
+ */
+export async function sendPayoutThroughProvider(
+  db: DB, ctx: AuditContext, payoutId: number, provider: PayoutProvider
+) {
+  assertCan(ctx.principal, 'marketplace:settle', {});
+  const { p, account } = await payoutForRail(db, payoutId);
+
+  if (p.status === 'paid') {
+    return { payoutId, status: 'paid' as const, alreadyPaid: true, sent: false };
+  }
+  if (p.status === 'processing' || p.status === 'queued') {
+    // Already with the provider. Asking again is refreshPayoutFromProvider's
+    // job; sending again is how one settlement becomes two transfers.
+    return { payoutId, status: p.status, alreadySent: true, sent: false };
+  }
+  if (p.status === 'cancelled' || p.status === 'reversed') {
+    throw new MarketplaceError('payout_closed', `That payout is ${p.status} and cannot be sent.`);
+  }
+  if (!account || account.status !== 'verified') {
+    throw new MarketplaceError(
+      'no_verified_account',
+      'That payout has no verified account behind it. Money is not sent to an account nobody has checked.'
+    );
+  }
+  if (account.provider !== provider.id) {
+    throw new MarketplaceError(
+      'provider_mismatch',
+      `That account was opened with ${account.provider} and the active rail is ${provider.id}. ` +
+      'A beneficiary registered with one provider is not reachable through another.'
+    );
+  }
+
+  const result = await provider.sendPayout({
+    idempotencyKey: p.idempotencyKey,
+    amountMinor: p.amountMinor,
+    currency: p.currency,
+    providerAccountId: account.providerAccountId,
+    ref: p.ref,
+  });
+
+  // 'paid' goes through the one function that also closes the settlement.
+  if (result.status === 'paid') {
+    await db.update(s.sellerPayouts).set({
+      provider: provider.id,
+      providerPayoutId: result.providerPayoutId ?? p.providerPayoutId,
+      updatedAt: new Date(),
+    }).where(eq(s.sellerPayouts.id, payoutId));
+    await markPayoutPaid(db, ctx, payoutId, {
+      providerPayoutId: result.providerPayoutId ?? null,
+      utr: result.utr ?? null,
+    });
+    return {
+      payoutId, status: 'paid' as const, sent: true,
+      providerPayoutId: result.providerPayoutId ?? null,
+    };
+  }
+
+  await db.update(s.sellerPayouts).set({
+    status: result.status,
+    provider: provider.id,
+    providerPayoutId: result.providerPayoutId ?? p.providerPayoutId,
+    utr: result.utr ?? p.utr,
+    failureReason: result.failureReason ?? null,
+    updatedAt: new Date(),
+  }).where(eq(s.sellerPayouts.id, payoutId));
+
+  await writeAudit(db, ctx, {
+    entityType: 'seller_payout', entityId: payoutId, action: 'update',
+    oldValue: { status: p.status },
+    // NO AMOUNT AND NO ACCOUNT. The figure is on the payout row and the account
+    // is four digits in a table with its own permission; an audit row is read
+    // far more widely than either.
+    newValue: { status: result.status, provider: provider.id, sent: true },
+  });
+
+  return {
+    payoutId, status: result.status, sent: true,
+    providerPayoutId: result.providerPayoutId ?? null,
+    failureReason: result.failureReason ?? null,
+  };
+}
+
+/**
+ * Ask the provider what actually happened, and write down the answer.
+ *
+ * A READ THAT MAY WRITE. This is the function that turns an instruction into a
+ * recorded payment, and it is the reason a send does not: the provider is the
+ * only party that knows whether the money moved.
+ *
+ * REFUSES A PAYOUT THE PROVIDER HAS NEVER SEEN rather than reporting it as
+ * pending, because "we never sent it" and "the provider says it is pending" are
+ * different facts and only one of them means somebody should wait.
+ */
+export async function refreshPayoutFromProvider(
+  db: DB, ctx: AuditContext, payoutId: number, provider: PayoutProvider
+) {
+  assertCan(ctx.principal, 'marketplace:settle', {});
+  const { p } = await payoutForRail(db, payoutId);
+
+  if (!p.providerPayoutId) {
+    throw new MarketplaceError(
+      'not_with_provider',
+      'That payout has never been sent, so there is nothing at the provider to ask about.'
+    );
+  }
+
+  const status = await provider.fetchPayoutStatus(p.providerPayoutId);
+
+  if (status.status === 'paid') {
+    if (p.status !== 'paid') {
+      await db.update(s.sellerPayouts).set({ utr: status.utr ?? p.utr, updatedAt: new Date() })
+        .where(eq(s.sellerPayouts.id, payoutId));
+      await markPayoutPaid(db, ctx, payoutId, {
+        providerPayoutId: status.providerPayoutId,
+        utr: status.utr ?? null,
+      });
+    }
+    return { payoutId, status: 'paid' as const, changed: p.status !== 'paid' };
+  }
+
+  const changed = status.status !== p.status;
+  if (changed) {
+    await db.update(s.sellerPayouts).set({
+      status: status.status,
+      utr: status.utr ?? p.utr,
+      failureReason: status.failureReason ?? null,
+      updatedAt: new Date(),
+    }).where(eq(s.sellerPayouts.id, payoutId));
+
+    await writeAudit(db, ctx, {
+      entityType: 'seller_payout', entityId: payoutId, action: 'update',
+      oldValue: { status: p.status },
+      newValue: { status: status.status, source: 'provider' },
+    });
+  }
+
+  return {
+    payoutId, status: status.status, changed,
+    failureReason: status.failureReason ?? null,
   };
 }

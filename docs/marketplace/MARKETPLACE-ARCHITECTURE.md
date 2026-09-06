@@ -161,6 +161,81 @@ decisions awaiting the federation.
 
 ---
 
+## The event feed, and the floor that decides whether anybody hears
+
+Twenty-one `MARKETPLACE_*` event types. Producers live in
+`src/db/marketplace-events.ts`; the catalogue they must appear in is
+`EVENT_TYPES` in `src/lib/domain-events.ts`; the notice each one becomes is
+`NOTIFIABLE` in `src/lib/notifications.ts`.
+
+**The catalogue is an allow-list.** `publish()` validates the type at runtime and
+refuses an unknown one outright. The producers were written before the catalogue
+entries existed, so every one of them threw the first time a real order was
+placed — and nothing in the type system said so, because the module casts past
+the union deliberately in order to be written first. `marketplaceCatalogueGaps()`
+and `marketplaceNotificationGaps()` are exported from the producer module so a
+test can fail on the drift; `tests/marketplace-events.test.ts` asserts both
+return nothing.
+
+### Why every notifiable marketplace event sits at `member`
+
+Not because a stranger's purchase is public. Because the drain is capped there.
+`src/pages/api/cron/reconcile.ts` consumes this feed with
+
+```js
+consume(db, 'notifications', handler, { maxClassification: 'member' })
+```
+
+and `consume()` **steps over anything above the cap without erroring.**
+
+The careful-looking choice — a seller's order flow is commercial information, so
+`official`; a verification outcome is `confidential` — deletes the notice. The
+event is written, the feed row looks exactly like one that was delivered, and
+nobody is ever told. Eight seller notices were in that state before the test
+below existed.
+
+So sensitivity is held **by the payload instead**, which is the honest place for
+it. No marketplace event has a public field, and the payloads omit the buyer's
+address, phone and email, the seller's bank details, the amount of a payout, the
+evidence behind a fraud signal, and the storage key of any document. A tracking
+number travels as `trackingRecorded: true` — a boolean, because the number would
+let anybody reading the feed follow a stranger's parcel across a carrier's site.
+
+Where a figure genuinely must travel it goes on a **separate, higher-classified
+event with no notifications consumer**: `MARKETPLACE_PAYOUT_INITIATED` carries
+the amount at `confidential` precisely so that `MARKETPLACE_PAYOUT_PAID` can
+reach the seller at all. A producer may still be *more* careful than its floor —
+`publishFraudSignal()` asks for `restricted` when the subject is a named
+individual rather than a shop. `publish()` permits that and refuses the reverse.
+
+### Two audiences, and why neither reuses `subject`
+
+`resolveRecipients()` gained `buyer` and `seller`. The existing `subject`
+audience ends in `Number(payload?.personId ?? entityId)`, which is right for a
+grading — there the entity *is* the person. Every marketplace entity is an
+order, a shop or a parcel, so that fallback would address a federation notice to
+whoever happens to hold that number in `persons`. The producer module exports
+`ENTITY_ID_FALLBACK_AUDIENCES` so a test can assert no marketplace notice uses
+one.
+
+Both resolve through a real query and **both return `[]` when they cannot**:
+
+- `buyer` — the payload's `buyerPersonId`, else the order row. A guest checkout
+  has no person record, so nothing is published at all and the outcome carries
+  `NO_BUYER_PERSON_RECORD` as its reason.
+- `seller` — `sellers.personId`, then the person behind the account's user. The
+  **two hops must match `sellerRecipient()` in the producer**, because the
+  producer decides whether to publish by asking that function: an audience
+  resolving fewer sellers would publish an event about a trader and deliver it
+  to nobody.
+
+A deliberate silence is distinguishable from a fault by construction. A withheld
+event returns `published: false` with a stated `withheldReason`; an id nothing
+wrote **throws** `unknown_entity`, because folding a programming fault into the
+same channel as the silences would make the silences untrustworthy.
+
+---
+
 ## Related
 
 - [SELLER-ONBOARDING.md](SELLER-ONBOARDING.md) — apply → verify → approve → store

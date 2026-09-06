@@ -38,6 +38,11 @@ import * as s from '@/db/schema';
 import { writeAudit, allocateFederationId, type AuditContext } from '@/db/federation';
 import { assertCan, type Principal } from '@/lib/rbac';
 import { MarketplaceError } from '@/db/marketplace';
+import {
+  publishSellerReturnRequested, publishReturnDecided,
+  publishRefundIssued, publishSellerRefundPosted,
+  publishProductReported,
+} from '@/db/marketplace-events';
 import { restockReturn } from '@/db/inventory';
 import { accrueRefund } from '@/db/marketplace-finance';
 import { slaFor, ownSellerRecord } from '@/db/seller-orders';
@@ -339,6 +344,10 @@ export async function requestReturn(
     newValue: { ref, sellerOrderId: so.id, reason: input.reason },
   });
 
+  // THE SELLER'S EVENT ONLY. The buyer just made this request and does not
+  // need telling; the seller has a decision to make and a clock running on it.
+  await publishSellerReturnRequested(db, req.id, ctx.principal);
+
   return { returnRequestId: req.id, ref, policy };
 }
 
@@ -373,6 +382,10 @@ export async function decideReturn(
       entityType: 'return_request', entityId: returnRequestId, action: 'reject',
       newValue: { status: 'rejected' },
     });
+    // A REFUSAL IS PUBLISHED TOO. The outcome is read from the row inside the
+    // producer, so the event cannot say 'authorised' about a rejected return.
+    await publishReturnDecided(db, returnRequestId, ctx.principal);
+
     return { returnRequestId, status: 'rejected' as const };
   }
 
@@ -393,6 +406,8 @@ export async function decideReturn(
     entityType: 'return_request', entityId: returnRequestId, action: 'approve',
     newValue: { status: 'authorised', rma },
   });
+  await publishReturnDecided(db, returnRequestId, ctx.principal);
+
   return { returnRequestId, status: 'authorised' as const, rmaNumber: rma };
 }
 
@@ -586,6 +601,12 @@ export async function refundReturn(
     entityType: 'return_request', entityId: returnRequestId, action: 'update',
     newValue: { status: 'refunded', amountMinor: amount, fundedBy: input.fundedBy },
   });
+  // TWO EVENTS, NOT ONE ADDRESSED TWICE. A single event would have to carry
+  // both the buyer's person id and the seller's, and the buyer's identity has
+  // no business travelling in order to make a seller's notice work.
+  await publishRefundIssued(db, returnRequestId, ctx.principal);
+  await publishSellerRefundPosted(db, returnRequestId, ctx.principal);
+
   return { returnRequestId, refundedMinor: amount };
 }
 
@@ -807,6 +828,11 @@ export async function reportProblem(
     detail: input.detail,
     evidence: input.evidence ?? null,
   }).returning({ id: s.buyerReports.id });
+
+  // INCLUDING A COUNTERFEIT ALLEGATION, which names a real trader and which
+  // nobody has decided. The producer keeps the detail and the evidence off the
+  // feed for exactly that reason.
+  await publishProductReported(db, row.id, ctx.principal);
 
   return { reportId: row.id, ref };
 }

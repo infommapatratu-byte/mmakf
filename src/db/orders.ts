@@ -679,6 +679,25 @@ export async function confirmPayment(
         oldValue: { expected: order.totalPaise }, newValue: { received: verified.amountPaise, flagged: true },
       });
     }
+    // PUBLISHED BEFORE THE THROW, and from the authoritative comparison rather
+    // than the pre-fulfilment one in assertGatewayAmount(): a mismatch that
+    // only ever became an exception is a fault nobody counts, and the pattern
+    // across many orders is the part that distinguishes a broken integration
+    // from somebody probing the checkout.
+    //
+    // SAFE ON EVERY ORDER. This function takes fees, memberships and entries as
+    // well as baskets; the producer looks for seller orders and withholds with
+    // NOT_A_MARKETPLACE_ORDER when there are none, so a membership payment
+    // never raises a marketplace event.
+    const { publishPaymentMismatch } = await import('@/db/marketplace-events');
+    await publishPaymentMismatch(db, {
+      orderId: order.id,
+      paymentId: payment.id,
+      expectedMinor: order.totalPaise,
+      receivedMinor: verified.amountPaise,
+      currency: String(verified.currency ?? order.currency ?? 'INR'),
+    }, ctx?.principal ?? null);
+
     throw new OrderError('amount_mismatch', 'Captured amount does not match the order total');
   }
 
@@ -758,8 +777,51 @@ export async function confirmPayment(
   // entitlements.activationBacklog(), retried by the replay path above, and
   // never a payment this system has forgotten.
   await activate(db, ctx, order.id);
+  await fulfilMarketplace(db, order.id, payment.id);
 
   return { orderId: order.id, alreadyProcessed };
+}
+
+/**
+ * Move a paid marketplace basket into fulfilment.
+ *
+ * ═════════════════════════════════════════════════════════════════════════════
+ * THIS CALL DID NOT EXIST, AND ITS ABSENCE HAD NO SYMPTOM
+ * ═════════════════════════════════════════════════════════════════════════════
+ *
+ * `onOrderPaid()` in src/db/seller-orders.ts was reachable from the test suite
+ * and from nowhere else. The transaction above marks the ORDER paid and commits
+ * `product_variants` stock — the legacy shop's columns. A marketplace basket
+ * holds none of those: its stock is in `listing_variants` and its work is in
+ * `seller_orders`, and neither was touched by a real payment.
+ *
+ * So a cleared marketplace payment left: every seller order stuck at
+ * `payment_pending` for ever, the buyer's reservation never committed and never
+ * released, no dispatch clock started, no seller told they had anything to
+ * pack, and no accrual — therefore no commission, no settlement and no payout.
+ * The money was taken and the marketplace did not move.
+ *
+ * Nothing failed. The order said `paid`, the receipt was issued, the ledger
+ * balanced, and `tests/marketplace-platform.test.ts` passed because it calls
+ * `onOrderPaid()` itself. It is the same shape as the marketplace event
+ * producers that nothing invoked: a module that works, tests that pass, and no
+ * caller — which is why the comment on activate() below already tells this
+ * story once, about training lines.
+ *
+ * AFTER THE COMMIT, for the reason activate() gives: seller-orders.ts opens its
+ * own transactions, and nesting them here would make a failure while committing
+ * stock roll back the record that the money was taken — the more dangerous of
+ * the two half-states. A failure here is re-thrown, so the webhook records it
+ * and the reconcile cron retries it.
+ *
+ * IDEMPOTENT AND SELF-GUARDING. `onOrderPaid()` filters on seller orders still
+ * awaiting payment, so a replayed confirmation updates nothing, and an order
+ * with no seller orders at all — a fee, a membership, an entry — returns
+ * `{ updated: 0 }` without touching anything.
+ */
+async function fulfilMarketplace(db: DB, orderId: number, paymentId: number): Promise<void> {
+  const { onOrderPaid } = await import('./seller-orders');
+  await onOrderPaid(db, orderId, paymentId);
 }
 
 /**

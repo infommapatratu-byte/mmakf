@@ -446,6 +446,15 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
             <a class="btn btn-gold" href="/my/passport">Open my athlete passport</a>
             <a class="btn btn-ghost" href="/my/courses" style="margin-left:10px">My courses</a>
             <a class="btn btn-ghost" href="/my/notifications" style="margin-left:10px">My notifications</a>
+            {/*
+              SHOWN UNCONDITIONALLY, not gated on the buyer having ordered
+              something. Gating it would need a query on every load of this page
+              to hide a link that costs nothing — and a buyer looking for an
+              order they are not sure they placed is exactly the person who
+              needs to find the page.
+            */}
+            <a class="btn btn-ghost" href="/my/orders" style="margin-left:10px">My orders</a>
+            <a class="btn btn-ghost" href="/my/devices" style="margin-left:10px">Notification settings</a>
             {(dependants > 0 || pendingClaims > 0) && (
               <a class="btn btn-ghost" href="/my/family" style="margin-left:10px">
                 {dependants > 0 ? `My family (${dependants})` : 'My family — claim pending'}

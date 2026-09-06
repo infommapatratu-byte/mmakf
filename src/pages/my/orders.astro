@@ -1,0 +1,409 @@
+---
+// /my/orders — what a buyer bought on the marketplace, and what they can do next.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// WHY THIS PAGE EXISTS
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The marketplace could take a buyer's money, split their basket across sellers,
+// accept a return, record a report and raise a dispute — `return/request`,
+// `report/create` and `dispute/raise` are all buyer actions on the API, all
+// tested — and THE BUYER HAD NOWHERE TO STAND. `orderForBuyer()` had no caller
+// anywhere in src/. There was no page under /my for an order at all.
+//
+// So a buyer could be sold goods and then could not see the order, could not
+// tell whether it had been dispatched, and could not ask to return it. The
+// remedy existed in the engine and was unreachable by the only person entitled
+// to use it.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// THREE RULES THIS PAGE KEEPS
+// ═════════════════════════════════════════════════════════════════════════════
+//
+//   · NO IDENTIFIER IS TAKEN FROM THE URL. The buyer is resolved from the
+//     session, and every order shown is matched on the person behind the
+//     signed-in account. There is no ?orderId= to change.
+//
+//   · TRACKING IS NOT FAKED. A consignment shows a carrier and a number only
+//     where a seller actually recorded one. Where they dispatched without
+//     tracking it says so, because "dispatched" and "dispatched, here is where
+//     it is" are different promises.
+//
+//   · THE RETURN WINDOW IS NOT INVENTED. Whether a return can be asked for is
+//     the engine's decision, made against the policy frozen onto the order.
+//     This page offers the request and lets requestReturn() refuse it with its
+//     own words, rather than computing an eligibility rule of its own that
+//     would immediately disagree with the one that matters.
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import * as s from '@/db/schema';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+
+let personId: number | null = null;
+let orders: any[] = [];
+let loadError: string | null = null;
+
+if (configured && principal?.userId != null) {
+  try {
+    const user = (await db().select({ personId: s.users.personId })
+      .from(s.users).where(eq(s.users.id, principal.userId)).limit(1))[0];
+    personId = user?.personId ?? null;
+
+    if (personId != null) {
+      // ORDERS THAT ARE MARKETPLACE BASKETS. An order with no seller orders is
+      // a fee, a membership or an entry, and belongs on a different page.
+      const rows = await db().select({
+        order: s.orders,
+        sellerOrderCount: sql<number>`count(${s.sellerOrders.id})::int`,
+      }).from(s.orders)
+        .innerJoin(s.sellerOrders, eq(s.sellerOrders.orderId, s.orders.id))
+        .where(eq(s.orders.personId, personId))
+        .groupBy(s.orders.id)
+        .orderBy(desc(s.orders.createdAt))
+        .limit(50);
+
+      const orderIds = rows.map((r: any) => r.order.id);
+      if (orderIds.length) {
+        const sellerOrders = await db().select({
+          so: s.sellerOrders,
+          sellerName: s.sellers.tradingName,
+          storeSlug: s.sellers.storeSlug,
+        }).from(s.sellerOrders)
+          .innerJoin(s.sellers, eq(s.sellerOrders.sellerId, s.sellers.id))
+          .where(inArray(s.sellerOrders.orderId, orderIds));
+
+        const soIds = sellerOrders.map((x: any) => x.so.id);
+        const lines = await db().select().from(s.orderLines)
+          .where(inArray(s.orderLines.orderId, orderIds));
+        const shipments = soIds.length
+          ? await db().select().from(s.shipments).where(inArray(s.shipments.sellerOrderId, soIds))
+          : [];
+        const returns = soIds.length
+          ? await db().select().from(s.returnRequests).where(inArray(s.returnRequests.sellerOrderId, soIds))
+          : [];
+
+        orders = rows.map((r: any) => ({
+          ...r.order,
+          sellerOrders: sellerOrders
+            .filter((x: any) => x.so.orderId === r.order.id)
+            .map((x: any) => ({
+              ...x.so,
+              sellerName: x.sellerName,
+              storeSlug: x.storeSlug,
+              lines: lines.filter((l: any) => l.sellerOrderId === x.so.id),
+              shipments: shipments.filter((sh: any) => sh.sellerOrderId === x.so.id),
+              returns: returns.filter((rr: any) => rr.sellerOrderId === x.so.id),
+            })),
+        }));
+      }
+    }
+  } catch (err: any) {
+    console.error('[my/orders]', err);
+    loadError = 'Your orders could not be read. The fault has been logged; nothing has been changed.';
+  }
+}
+
+const money = (m: number | null | undefined) =>
+  m == null ? '—' : `₹${Math.floor(m / 100).toLocaleString('en-IN')}.${String(m % 100).padStart(2, '0')}`;
+const when = (d: unknown) => (d ? new Date(d as string).toLocaleDateString('en-IN') : '—');
+const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+/**
+ * What is happening to one seller's parcel, in a buyer's words.
+ *
+ * Deliberately says nothing about WHEN. A dispatch deadline is the seller's
+ * commitment to MMAKF, not a promise to the buyer, and repeating it here as
+ * "arriving by" would turn an internal service level into a delivery date this
+ * federation cannot keep.
+ */
+function progress(so: any): string {
+  switch (so.status) {
+    case 'order_created':
+    case 'payment_pending': return 'Waiting for payment to clear.';
+    case 'paid':            return 'Paid. The shop has not accepted it yet.';
+    case 'seller_accepted': return 'The shop has accepted your order.';
+    case 'processing':      return 'Being prepared.';
+    case 'packed':          return 'Packed, waiting to be collected.';
+    case 'shipped':
+    case 'in_transit':      return 'On its way.';
+    case 'out_for_delivery':return 'Out for delivery.';
+    case 'delivered':       return 'Delivered.';
+    case 'cancelled':       return 'Cancelled.';
+    case 'refunded':        return 'Refunded.';
+    default:                return titleCase(so.status);
+  }
+}
+
+/** Returns may only be asked for once goods have arrived. */
+const canReturn = (so: any) =>
+  so.status === 'delivered' && !so.returns.some((r: any) =>
+    ['requested', 'seller_reviewing', 'authorised', 'in_transit', 'received'].includes(r.status));
+---
+
+<Base
+  title="Your orders — MMAKF marketplace"
+  description="Marketplace orders placed on your MMAKF account: what you bought, from which shop, and where it is."
+>
+  <section>
+    <div class="container">
+      <div class="eyebrow">MMAKF marketplace</div>
+      <h1 class="display-1" style="margin-top:14px">Your orders</h1>
+
+      {!configured && (
+        <div class="card"><p>The federation database is not configured here, so nothing can be read.</p></div>
+      )}
+
+      {configured && !principal && (
+        <div class="card">
+          <h2 class="h3">Sign in to see your orders.</h2>
+          <p>An order belongs to the account that placed it. <a href="/join">Create an account</a> or sign in.</p>
+        </div>
+      )}
+
+      {configured && principal && personId == null && (
+        <div class="card">
+          <h2 class="h3">This account is not attached to a person record.</h2>
+          <p>
+            Orders are held against a person on the federation register. A shared office credential is
+            attributable to nobody, so it holds no orders of its own.
+          </p>
+        </div>
+      )}
+
+      {loadError && <div class="card" role="alert"><p>{loadError}</p></div>}
+      <div class="card" id="page-error" role="alert" hidden></div>
+
+      {configured && personId != null && !loadError && orders.length === 0 && (
+        <div class="card">
+          <h2 class="h3">Nothing yet.</h2>
+          <p>You have not bought anything on the marketplace. <a href="/shop">Have a look at the shop</a>.</p>
+        </div>
+      )}
+
+      {orders.map((o: any) => (
+        <div class="card">
+          <div class="eyebrow">Order {o.orderNo} · {when(o.createdAt)}</div>
+          <h2 class="h3">{money(o.totalPaise)}</h2>
+          <p class="muted">
+            {o.sellerOrders.length === 1
+              ? 'From one shop.'
+              : `Split across ${o.sellerOrders.length} shops — each packs and dispatches separately, so they may arrive on different days.`}
+          </p>
+
+          {o.sellerOrders.map((so: any) => (
+            <div class="seller-order">
+              <h3 class="h4">
+                {so.storeSlug
+                  ? <a href={`/shop/seller/${so.storeSlug}`}>{so.sellerName}</a>
+                  : so.sellerName}
+              </h3>
+              <p><strong>{progress(so)}</strong> <span class="muted">· {money(so.totalMinor)}</span></p>
+
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Item</th><th scope="col">Qty</th><th scope="col">Price</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {so.lines.map((l: any) => (
+                    <tr>
+                      <td>{l.description}</td>
+                      <td>{l.quantity}</td>
+                      <td>{money(l.totalPaise)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {so.shipments.map((sh: any) => (
+                <p class="muted">
+                  {/* NO FAKE TRACKING. A number appears only where the seller
+                      recorded one; otherwise the honest sentence. */}
+                  {sh.trackingNumber
+                    ? <>Dispatched {when(sh.dispatchedAt)}{sh.carrier ? ` by ${sh.carrier}` : ''} — tracking <code>{sh.trackingNumber}</code>.</>
+                    : <>Dispatched {when(sh.dispatchedAt)} without a tracking number, so there is nothing to follow.</>}
+                  {sh.deliveredAt && <> Delivered {when(sh.deliveredAt)}.</>}
+                </p>
+              ))}
+
+              {so.returns.map((r: any) => (
+                <p>
+                  <strong>Return {r.ref}:</strong> {titleCase(r.status)}.
+                  {r.decisionReason && <> {r.decisionReason}</>}
+                </p>
+              ))}
+
+              <div class="row">
+                {canReturn(so) && (
+                  <button class="btn btn-small open-return" data-so={so.id}>Ask to return</button>
+                )}
+                <button class="btn btn-small open-report" data-so={so.id}>Report a problem</button>
+              </div>
+
+              {canReturn(so) && (
+                <form class="return-form" data-so={so.id} hidden>
+                  <h4 class="h5">Ask to return</h4>
+                  <p class="muted">
+                    The shop decides. MMAKF records the request, the decision and the reason for it —
+                    whether a return is allowed at all is set by the policy that was in force when you
+                    ordered, not by anything this page works out.
+                  </p>
+                  {so.lines.map((l: any) => (
+                    <label class="line">
+                      <input type="checkbox" name="line" value={l.id} data-max={l.quantity} />
+                      {l.description}
+                      <input type="number" name={`qty-${l.id}`} min="1" max={l.quantity}
+                        value={l.quantity} aria-label={`Quantity to return of ${l.description}`} />
+                      <span class="muted">of {l.quantity}</span>
+                    </label>
+                  ))}
+                  <label>
+                    Why are you returning it?
+                    <input type="text" name="reason" required
+                      placeholder="Damaged in transit, wrong size, not as described…" />
+                  </label>
+                  <label>
+                    Anything else the shop should know
+                    <textarea name="reasonDetail" rows="3"></textarea>
+                  </label>
+                  <label>
+                    What would you like?
+                    <select name="remedySought">
+                      <option value="refund">A refund</option>
+                      <option value="exchange">An exchange</option>
+                    </select>
+                  </label>
+                  <button class="btn" type="submit">Send the request</button>
+                  <span class="form-error" role="alert" hidden></span>
+                </form>
+              )}
+
+              <form class="report-form" data-so={so.id} hidden>
+                <h4 class="h5">Report a problem</h4>
+                <p class="muted">
+                  This goes to MMAKF, not only to the shop. Use it for a counterfeit item, something
+                  unsafe, or an order that has gone wrong in a way a return does not cover.
+                </p>
+                <label>
+                  What kind of problem?
+                  <select name="kind">
+                    <option value="not_received">It never arrived</option>
+                    <option value="not_as_described">Not what was described</option>
+                    <option value="damaged">Damaged</option>
+                    <option value="counterfeit">I believe it is counterfeit</option>
+                    <option value="unsafe">It is unsafe</option>
+                    <option value="other">Something else</option>
+                  </select>
+                </label>
+                <label>
+                  What happened?
+                  <textarea name="detail" rows="4" required></textarea>
+                </label>
+                <button class="btn" type="submit">Send the report</button>
+                <span class="form-error" role="alert" hidden></span>
+              </form>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  </section>
+</Base>
+
+<script>
+  const pageError = document.getElementById('page-error');
+  const say = (m: string) => {
+    if (!pageError) { window.alert(m); return; }
+    pageError.textContent = m; pageError.hidden = false;
+    pageError.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  async function post(action: string, body: Record<string, unknown>) {
+    const r = await fetch(`/api/marketplace/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    return { ok: r.ok, body: await r.json().catch(() => ({})) };
+  }
+
+  const toggle = (cls: string, formCls: string) => {
+    document.querySelectorAll(cls).forEach((b) => {
+      b.addEventListener('click', () => {
+        const so = (b as HTMLElement).dataset.so;
+        const form = document.querySelector(`${formCls}[data-so="${so}"]`) as HTMLElement | null;
+        if (form) form.hidden = !form.hidden;
+      });
+    });
+  };
+  toggle('.open-return', '.return-form');
+  toggle('.open-report', '.report-form');
+
+  document.querySelectorAll('.return-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = form as HTMLFormElement;
+      const err = f.querySelector('.form-error') as HTMLElement;
+      err.hidden = true;
+
+      const items = Array.from(f.querySelectorAll('input[name="line"]:checked')).map((c) => {
+        const id = Number((c as HTMLInputElement).value);
+        const qty = f.querySelector(`input[name="qty-${id}"]`) as HTMLInputElement | null;
+        return { orderLineId: id, quantity: Number(qty?.value ?? 1) };
+      });
+      if (!items.length) {
+        err.textContent = 'Choose at least one item to return.'; err.hidden = false; return;
+      }
+
+      const data = new FormData(f);
+      const res = await post('return/request', {
+        sellerOrderId: Number((f as HTMLElement).dataset.so),
+        reason: data.get('reason'),
+        reasonDetail: data.get('reasonDetail') || null,
+        remedySought: data.get('remedySought') || 'refund',
+        items,
+      });
+      if (res.ok && res.body.ok) { window.location.reload(); return; }
+      // The engine's own words — it knows the policy frozen onto this order.
+      err.textContent = res.body.error || 'The request could not be sent.'; err.hidden = false;
+    });
+  });
+
+  document.querySelectorAll('.report-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = form as HTMLFormElement;
+      const err = f.querySelector('.form-error') as HTMLElement;
+      err.hidden = true;
+      const data = new FormData(f);
+      const res = await post('report/create', {
+        sellerOrderId: Number((f as HTMLElement).dataset.so),
+        kind: data.get('kind'),
+        detail: data.get('detail'),
+      });
+      if (res.ok && res.body.ok) {
+        say('Your report has been sent to MMAKF.');
+        f.hidden = true;
+        return;
+      }
+      err.textContent = res.body.error || 'The report could not be sent.'; err.hidden = false;
+    });
+  });
+</script>
+
+<style>
+  .seller-order { border-top: 1px solid rgba(128,128,128,0.3); margin-top: 16px; padding-top: 12px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  .line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .line input[type="number"] { width: 5rem; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px; border-bottom: 1px solid rgba(128,128,128,0.25); }
+  .form-error { color: #b00020; font-weight: 600; display: block; margin-top: 8px; }
+  .muted { opacity: 0.8; }
+</style>

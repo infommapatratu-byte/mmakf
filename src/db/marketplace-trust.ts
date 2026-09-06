@@ -31,6 +31,7 @@ import * as s from '@/db/schema';
 import { writeAudit, type AuditContext } from '@/db/federation';
 import { assertCan, type Principal } from '@/lib/rbac';
 import { MarketplaceError } from '@/db/marketplace';
+import { publishSellerReviewPublished, publishFraudSignal } from '@/db/marketplace-events';
 
 type DB = any;
 
@@ -210,6 +211,13 @@ export async function moderateReview(
     action: input.status === 'published' ? 'approve' : 'reject',
     oldValue: { status: row.status }, newValue: { status: input.status },
   });
+  // ONLY A PUBLICATION. A rejected review never became a public statement
+  // about that shop, so there is no reply window for the seller to be told of
+  // and nothing to notify them about.
+  if (input.status === 'published') {
+    await publishSellerReviewPublished(db, { kind: input.kind, reviewId: input.reviewId }, ctx.principal);
+  }
+
   return { reviewId: input.reviewId, status: input.status };
 }
 
@@ -499,6 +507,16 @@ export async function raiseFraudSignal(
     detector: input.detector,
     evidence: input.evidence ?? null,
   }).onConflictDoNothing().returning({ id: s.fraudSignals.id });
+  // A SUSPICION, NOT A FINDING — and only when the insert actually wrote one.
+  // onConflictDoNothing() returns nothing for a signal the detector has already
+  // raised, and re-announcing it would put a second undecided accusation about
+  // the same trader on the feed.
+  //
+  // NO ACTOR, because there is no person. This function takes no AuditContext:
+  // a detector raised this, and naming whichever principal happened to trigger
+  // the sweep would attribute an accusation to somebody who did not make it.
+  if (row?.id) await publishFraudSignal(db, row.id, null);
+
   return { signalId: row?.id ?? null, deduplicated: !row };
 }
 

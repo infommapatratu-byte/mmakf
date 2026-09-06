@@ -22,6 +22,7 @@ import * as s from '@/db/schema';
 import { COMMISSION_NOT_SET } from '@/db/marketplace';
 import { COMMISSION_NOT_CONFIGURED, SLA_NOT_SET, myAccount } from '@/db/marketplace-finance';
 import { effectiveReturnPolicy } from '@/db/returns';
+import { policiesForSeller, NO_MANDATORY_POLICIES } from '@/db/marketplace-policy';
 import { slaFor } from '@/db/seller-orders';
 import {
   sellerContext, readableError, money, fmtDate, titleCase,
@@ -36,6 +37,7 @@ let counts = { listings: 0, live: 0, inReview: 0, openOrders: 0, openReturns: 0,
 let account: any = null;
 let sla: any = null;
 let returnPolicy: any = null;
+let policies: any[] = [];
 let pageError: string | null = ctx.loadError;
 
 if (ctx.gate === 'seller' && ctx.seller && !pageError) {
@@ -70,6 +72,7 @@ if (ctx.gate === 'seller' && ctx.seller && !pageError) {
     account = await myAccount(db(), ctx.identity!.principal);
     sla = await slaFor(db(), sellerId);
     returnPolicy = await effectiveReturnPolicy(db(), sellerId);
+    policies = await policiesForSeller(db(), ctx.identity!.principal);
   } catch (err: any) {
     pageError = readableError(err, 'Your seller overview');
   }
@@ -273,6 +276,76 @@ const verifications = (ctx.profile?.verifications ?? [])
               </p>
             )}
           </div>
+
+          {/*
+            THE DOCUMENTS THIS SELLER IS ASKED TO ACCEPT.
+            Until this section existed, policiesForSeller() had no caller: MMAKF
+            could mark a seller agreement mandatory and publish it, and the
+            seller had no way to find out that anything was being asked of them,
+            let alone accept it. An obligation nobody can see is not an
+            obligation — it is a trap.
+          */}
+          <div class="card">
+            <div class="eyebrow">Marketplace documents</div>
+            <h2 class="h3">What you have been asked to accept</h2>
+
+            {policies.length === 0 && (
+              <p class="muted">
+                MMAKF has registered no marketplace documents. Nothing is being asked of you.
+              </p>
+            )}
+
+            {policies.length > 0 && !policies.some((p: any) => p.mandatory) && (
+              <p class="muted">{NO_MANDATORY_POLICIES}</p>
+            )}
+
+            {policies.length > 0 && (
+              <dl>
+                {policies.map((p: any) => (
+                  <>
+                    <dt>{p.title}{p.mandatory ? ' — required' : ''}</dt>
+                    <dd>
+                      {/* THREE DISTINCT STATES, none of them collapsed into
+                          "not accepted": no text published at all, published
+                          and outstanding, and accepted. A seller reading
+                          "outstanding" about a document with no text would go
+                          looking for something that does not exist. */}
+                      {!p.version && <span class="muted">{p.note}</span>}
+
+                      {p.version && !p.accepted && (
+                        <>
+                          Version {p.version.version}, effective {p.version.effectiveFrom} —
+                          <strong> not yet accepted</strong>.
+                          <details>
+                            <summary>Read it</summary>
+                            <pre class="policy-body">{p.version.body}</pre>
+                          </details>
+                          <button
+                            class="btn btn-small accept-policy"
+                            data-version={p.version.id}
+                            data-title={p.title}
+                          >Accept this version</button>
+                        </>
+                      )}
+
+                      {p.version && p.accepted && (
+                        <>
+                          Accepted {fmtDate(p.accepted.acceptedAt)}, version {p.version.version}.
+                          {p.acceptanceStillValid === false && (
+                            <div class="warn">
+                              <strong>The published text has changed since you accepted it.</strong>
+                              Raise this with MMAKF: what you agreed to and what is published are no
+                              longer the same document.
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </dd>
+                  </>
+                ))}
+              </dl>
+            )}
+          </div>
         </>
       )}
 
@@ -322,6 +395,34 @@ const verifications = (ctx.profile?.verifications ?? [])
       });
     });
   }
+
+  // ── Accepting a marketplace document ──────────────────────────────────────
+  //
+  // Its own listener rather than reusing the store form’s helper, which is
+  // scoped inside `if (form)` and does not exist on a page whose store panel is
+  // hidden — which is exactly the page a seller awaiting approval sees.
+  //
+  // SENDS A VERSION ID, NEVER A POLICY CODE. Accepting “the seller agreement”
+  // records nothing: the acceptance has to name the text that was on the screen.
+  function acceptPolicyHandler() {
+    document.querySelectorAll(".accept-policy").forEach((b) => {
+      b.addEventListener("click", async () => {
+        const el = b as HTMLElement;
+        const title = el.dataset.title || "this document";
+        if (!window.confirm(`Accept the published version of ${title}? This is recorded against your seller account with the date and the exact text.`)) return;
+
+        const r = await fetch("/api/marketplace/policy/accept", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ policyVersionId: Number(el.dataset.version) }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (r.ok && body.ok) { window.location.reload(); return; }
+        window.alert(body.error || "It could not be recorded. Nothing has been accepted.");
+      });
+    });
+  }
+  acceptPolicyHandler();
 </script>
 
 <style>

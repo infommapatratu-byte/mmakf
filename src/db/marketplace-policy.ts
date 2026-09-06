@@ -39,6 +39,7 @@ import * as s from '@/db/schema';
 import { writeAudit, type AuditContext } from '@/db/federation';
 import { assertCan, type Principal } from '@/lib/rbac';
 import { MarketplaceError } from '@/db/marketplace';
+import { publishPolicyPublished } from '@/db/marketplace-events';
 import { ownSellerRecord } from '@/db/seller-orders';
 
 type DB = any;
@@ -213,6 +214,12 @@ export async function publishPolicyVersion(db: DB, ctx: AuditContext, versionId:
     entityType: 'policy_version', entityId: versionId, action: 'approve',
     newValue: { published: true, effectiveFrom: version.effectiveFrom, bodyHash: version.bodyHash },
   });
+  // Sellers who must accept this document are outstanding again from here.
+  // WHETHER THAT WRITES TO EVERY SELLER is a decision MMAKF has not made —
+  // POLICY_BROADCAST_NOT_DECIDED in src/db/marketplace-events.ts states it. The
+  // fact goes on the feed; a circular is an act with its own approval path.
+  await publishPolicyPublished(db, versionId, ctx.principal);
+
   return { versionId, published: true };
 }
 

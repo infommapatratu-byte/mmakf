@@ -1,0 +1,312 @@
+---
+// The marketplace policy register.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// WHY THIS PAGE EXISTS, AND WHY IT SHIPS EMPTY
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// src/db/marketplace-policy.ts could create the eight documents, draft a
+// version, publish it, mark it mandatory and record a seller's acceptance —
+// through five API actions, with 25 tests behind them — and NOTHING COULD SHOW
+// ANY OF IT. `policyRegister()`, `policiesForSeller()` and
+// `acceptanceRegister()` had no caller anywhere in src/. A federation officer
+// could publish a seller agreement and then had no way to see that they had.
+//
+// THIS PAGE CONTAINS NO POLICY TEXT and neither does the module behind it. Not
+// a seller agreement, not marketplace terms, not a prohibited-products list.
+// MMAKF writes those. A plausible-looking seeded agreement is the single worst
+// thing this codebase could produce — it would be quoted back at a real trader,
+// in a dispute, by staff who assumed somebody had approved it.
+//
+// So the register begins with eight NAMES and no bodies, `POLICY_NOT_PUBLISHED`
+// is displayed as a fact rather than hidden, and nothing here is mandatory
+// until an officer says so with a reason.
+import AdminShell from '@/components/AdminShell.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { canAnywhere } from '@/lib/rbac';
+import {
+  policyRegister, acceptanceRegister,
+  POLICY_REGISTER, POLICY_NOT_PUBLISHED, NO_MANDATORY_POLICIES,
+} from '@/db/marketplace-policy';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+const mayRead = principal ? canAnywhere(principal, 'marketplace:read') : false;
+const mayWrite = principal ? canAnywhere(principal, 'marketplace:review') : false;
+
+let policies: any[] = [];
+let acceptancesBy = new Map<number, any[]>();
+let loadError: string | null = null;
+
+if (configured && principal && mayRead) {
+  try {
+    policies = await policyRegister(db(), principal);
+
+    // Who has accepted what. Read per policy because acceptanceRegister() is
+    // scoped that way — it is a register of a document's signatories, not a
+    // dump of every acceptance on the platform.
+    for (const p of policies) {
+      try {
+        acceptancesBy.set(p.id, await acceptanceRegister(db(), principal, p.id, 200));
+      } catch {
+        // A policy nobody has accepted yet is not an error worth a banner.
+        acceptancesBy.set(p.id, []);
+      }
+    }
+  } catch (err: any) {
+    console.error('[admin/marketplace/policies]', err);
+    loadError = 'The policy register could not be read. The fault has been logged; nothing has been changed.';
+  }
+}
+
+const registered = policies.length;
+const missing = POLICY_REGISTER.length - registered;
+const published = policies.filter((p) => p.published).length;
+const mandatory = policies.filter((p) => p.mandatoryForSellers).length;
+
+const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+const when = (d: unknown) => (d ? new Date(d as string).toLocaleDateString('en-IN') : '—');
+
+/** The current version of a policy, in words, without inventing a status. */
+function standing(p: any): string {
+  if (!p.versions?.length) return 'No version has been drafted.';
+  if (!p.published) return `${p.versions.length} draft${p.versions.length === 1 ? '' : 's'}, none published.`;
+  return `Version ${p.current.version}, effective ${p.current.effectiveFrom}.`;
+}
+---
+
+<AdminShell title="Marketplace policy" requires="marketplace:read">
+  <section>
+    <div class="container">
+      <p><a href="/admin/marketplace">← Marketplace console</a></p>
+
+      {loadError && <div class="card" role="alert"><p>{loadError}</p></div>}
+      <div class="card" id="page-error" role="alert" hidden></div>
+
+      <div class="card">
+        <div class="eyebrow">What this register is</div>
+        <p>
+          Eight documents the marketplace refers to. <strong>MMAKF writes the text</strong> — this system
+          creates the names, keeps every version, records which version a seller accepted, and refuses to
+          invent a word of it.
+        </p>
+        <p class="muted">
+          A version is <strong>drafted</strong>, then <strong>published</strong> as a separate act. A
+          published body is never edited: its hash is stored on the version and again on every acceptance,
+          so a version altered after the fact stops matching what the seller signed.
+        </p>
+      </div>
+
+      {registered === 0 && (
+        <div class="card">
+          <div class="eyebrow">Nothing registered</div>
+          <p>
+            The eight policy records have not been created yet. Creating them adds <strong>names only</strong>
+            — no text, and nothing mandatory.
+          </p>
+          {mayWrite
+            ? <button id="register-btn" class="btn">Create the eight policy records</button>
+            : <p class="muted">Creating them needs <code>marketplace:review</code>.</p>}
+        </div>
+      )}
+
+      {registered > 0 && (
+        <div class="card">
+          <div class="eyebrow">Position</div>
+          <p>
+            <strong>{registered}</strong> of {POLICY_REGISTER.length} documents registered ·
+            <strong> {published}</strong> with a published version ·
+            <strong> {mandatory}</strong> mandatory for sellers.
+          </p>
+          {missing > 0 && mayWrite && (
+            <p>
+              {missing} of the eight are missing.
+              <button id="register-btn" class="btn btn-small">Create the rest</button>
+            </p>
+          )}
+          {mandatory === 0 && <p class="muted">{NO_MANDATORY_POLICIES}</p>}
+        </div>
+      )}
+
+      {policies.map((p) => (
+        <div class="card">
+          <div class="eyebrow">{titleCase(p.kind)}</div>
+          <h3>{p.title}</h3>
+          <p class="muted"><code>{p.code}</code></p>
+
+          <p>{standing(p)}</p>
+          {p.note && <p class="muted">{p.note}</p>}
+
+          <p>
+            Mandatory for sellers: <strong>{p.mandatoryForSellers ? 'yes' : 'no'}</strong>
+            {mayWrite && (
+              <button
+                class="btn btn-small mandatory-btn"
+                data-policy={p.id}
+                data-next={p.mandatoryForSellers ? 'false' : 'true'}
+              >{p.mandatoryForSellers ? 'Stop requiring it' : 'Require it'}</button>
+            )}
+          </p>
+          {!p.published && p.mandatoryForSellers && (
+            <p class="muted" role="alert">
+              This document is required of sellers and has no published text. Nobody can accept it.
+            </p>
+          )}
+
+          {(p.versions ?? []).length > 0 && (
+            <table>
+              <thead>
+                <tr><th scope="col">Version</th><th scope="col">Effective from</th><th scope="col">Published</th><th scope="col">Hash</th><th scope="col"><span class="sr-only">Actions</span></th></tr>
+              </thead>
+              <tbody>
+                {p.versions.map((v: any) => (
+                  <tr>
+                    <td>{v.version}</td>
+                    <td>{v.effectiveFrom}</td>
+                    <td>{v.publishedAt ? when(v.publishedAt) : <em>draft</em>}</td>
+                    <td><code>{v.bodyHash}</code></td>
+                    <td>
+                      {!v.publishedAt && mayWrite && (
+                        <button class="btn btn-small publish-btn" data-version={v.id}>Publish</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {mayWrite && (
+            <details>
+              <summary>Draft a new version</summary>
+              <form class="draft-form" data-policy={p.id}>
+                <label>
+                  Effective from
+                  <input type="date" name="effectiveFrom" required />
+                </label>
+                <label>
+                  The text, as MMAKF has approved it
+                  <textarea name="body" rows="10" required
+                    placeholder="Paste the approved text. Nothing is generated here."></textarea>
+                </label>
+                <p class="muted">
+                  Drafting does not publish. An empty body is refused — a document that looks like a
+                  document and says nothing is worse than a stated absence, because somebody will quote it.
+                </p>
+                <button class="btn" type="submit">Save as a draft</button>
+                <span class="draft-error" role="alert" hidden></span>
+              </form>
+            </details>
+          )}
+
+          {(acceptancesBy.get(p.id) ?? []).length > 0 && (
+            <details>
+              <summary>{(acceptancesBy.get(p.id) ?? []).length} acceptance(s)</summary>
+              <table>
+                <thead><tr><th scope="col">Seller</th><th scope="col">Version</th><th scope="col">When</th><th scope="col">Intact</th></tr></thead>
+                <tbody>
+                  {(acceptancesBy.get(p.id) ?? []).map((a: any) => (
+                    <tr>
+                      <td>{a.tradingName ?? a.sellerRef}</td>
+                      <td>{a.version ?? '—'}</td>
+                      <td>{when(a.acceptance?.acceptedAt)}</td>
+                      <td>
+                        {/* THE HASH IS STORED TWICE ON PURPOSE — once on the
+                            version, once on the acceptance. If a published body
+                            were ever altered in place the two stop agreeing, and
+                            the acceptance is no longer evidence of what was
+                            signed. Compared here rather than trusted. */}
+                        {a.acceptance?.bodyHash && a.versionHash && a.acceptance.bodyHash !== a.versionHash
+                          ? <strong>NO — the published text has changed since this was signed</strong>
+                          : 'yes'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
+        </div>
+      ))}
+
+      {registered > 0 && published === 0 && (
+        <div class="card">
+          <p class="muted">{POLICY_NOT_PUBLISHED}</p>
+        </div>
+      )}
+    </div>
+  </section>
+</AdminShell>
+
+<script>
+  const pageError = document.getElementById('page-error');
+  const say = (m: string) => {
+    if (!pageError) { window.alert(m); return; }
+    pageError.textContent = m; pageError.hidden = false;
+    pageError.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  async function post(action: string, body: Record<string, unknown> = {}) {
+    const r = await fetch(`/api/marketplace/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const b = await r.json().catch(() => ({}));
+    return { ok: r.ok && b.ok, body: b };
+  }
+  const reloadOr = (res: any, fallback: string) => {
+    if (res.ok) { window.location.reload(); return; }
+    say(res.body.error || fallback);
+  };
+
+  document.getElementById('register-btn')?.addEventListener('click', async () => {
+    reloadOr(await post('policy/register'), 'The policy records could not be created.');
+  });
+
+  document.querySelectorAll('.publish-btn').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const versionId = Number((b as HTMLElement).dataset.version);
+      if (!window.confirm(
+        'Publishing seals this version: the text can never be edited afterwards, and sellers who ' +
+        'accepted an earlier version become outstanding again. Continue?'
+      )) return;
+      reloadOr(await post('policy/publish', { versionId }), 'The version could not be published.');
+    });
+  });
+
+  document.querySelectorAll('.mandatory-btn').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const el = b as HTMLElement;
+      const mandatory = el.dataset.next === 'true';
+      const reason = window.prompt(
+        mandatory
+          ? 'Requiring this of every seller is a federation decision. What is the authority for it?'
+          : 'Why is this no longer required of sellers?'
+      );
+      if (!reason || !reason.trim()) return;
+      reloadOr(
+        await post('policy/mandatory', { policyId: Number(el.dataset.policy), mandatory, reason }),
+        'The requirement could not be changed.'
+      );
+    });
+  });
+
+  document.querySelectorAll('.draft-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(form as HTMLFormElement);
+      const res = await post('policy/draft', {
+        policyId: Number((form as HTMLElement).dataset.policy),
+        body: f.get('body'),
+        effectiveFrom: f.get('effectiveFrom'),
+      });
+      if (res.ok) { window.location.reload(); return; }
+      const el = form.querySelector('.draft-error') as HTMLElement;
+      el.textContent = res.body.error || 'The draft could not be saved.';
+      el.hidden = false;
+    });
+  });
+</script>

@@ -57,6 +57,8 @@ import * as trust from '@/db/marketplace-trust';
 import * as ship from '@/db/shipping';
 import * as docs from '@/db/seller-documents';
 import * as policy from '@/db/marketplace-policy';
+import * as imp from '@/db/product-import';
+import { activePayoutProvider } from '@/lib/payouts';
 import * as schema from '@/db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -942,6 +944,69 @@ const HANDLERS: Record<string, Handler> = {
   'policy/accept': (ctx, b) =>
     policy.acceptPolicy(db(), ctx, reqInt(b, 'policyVersionId'), ctx.ip ?? null),
 
+  // ── Bulk product import ───────────────────────────────────────────────────
+  //
+  // "NEVER DIRECTLY IMPORT INTO PRODUCTION CATALOGUE." The pipeline is FOUR
+  // ACTS and not one, and the separation is the control: rows land in a staging
+  // table, are validated and deduplicated THERE, and only 'import/submit'
+  // creates listings — as DRAFTS, into the same moderation queue a hand-typed
+  // item goes through.
+  //
+  // The obvious shortcut — write the listings and mark them pending — puts
+  // hundreds of unreviewed rows into the table the public query reads from, and
+  // leaves the marketplace one forgotten predicate away from publishing them.
+  //
+  // CSV IS PARSED IN THE BROWSER. The server takes rows, not a file: its job is
+  // to validate MEANING (does this category exist, may this seller list this
+  // brand, is that a price) and not FORMAT.
+
+  'import/start': (ctx, b) => imp.startImport(db(), ctx, {
+    filename: optStr(b, 'filename'),
+    rows: Array.isArray(b.rows) ? (b.rows as any[]) : [],
+  }),
+
+  'import/validate': (ctx, b) => imp.validateImport(db(), ctx, reqInt(b, 'importId')),
+
+  // Creates DRAFTS ONLY. It cannot approve or publish, and rows that failed
+  // validation are recorded as skipped rather than silently dropped.
+  'import/submit': (ctx, b) => imp.submitImport(db(), ctx, reqInt(b, 'importId')),
+
+  'import/cancel': (ctx, b) =>
+    imp.cancelImport(db(), ctx, reqInt(b, 'importId'), str(b, 'reason')),
+
+  // ── Payout rails ──────────────────────────────────────────────────────────
+  //
+  // 'payout/paid' above records a transfer a PERSON made. These two are the
+  // automatic rail, and they are separate acts because they fail differently:
+  // sending is irreversible, refreshing is a read.
+  //
+  // THE ADAPTER IS ASKED, NOT ASSUMED. `activePayoutProvider()` returns null
+  // when no rail can send money end to end — which is the state of this
+  // deployment — and the handler reports that rather than pretending a transfer
+  // is under way. See src/lib/payouts/razorpayx.ts for why an unverified
+  // adapter answers false even with correct credentials.
+
+  'payout/send': async (ctx, b) => {
+    const payoutId = reqInt(b, 'payoutId');
+    const provider = activePayoutProvider();
+    if (!provider) {
+      throw new InputError(
+        'No payout rail on this deployment can send money end to end, so nothing was attempted. ' +
+        'Record the transfer with payout/paid once the federation office has made it.'
+      );
+    }
+    return fin.sendPayoutThroughProvider(db(), ctx, payoutId, provider);
+  },
+
+  'payout/refresh': async (ctx, b) => {
+    const payoutId = reqInt(b, 'payoutId');
+    const provider = activePayoutProvider();
+    if (!provider) {
+      throw new InputError('No payout rail is configured, so there is no provider to ask.');
+    }
+    return fin.refreshPayoutFromProvider(db(), ctx, payoutId, provider);
+  },
+
   // ── Reviews and performance ───────────────────────────────────────────────
   //
   // A REVIEW NAMES A PURCHASE, and the purchase is what proves the reviewer
@@ -1025,7 +1090,7 @@ const NOT_FOUND = new Set([
   'unknown_seller_order', 'unknown_return', 'unknown_dispute', 'unknown_item',
   'unknown_authorisation', 'no_stock_record', 'unknown_review', 'unknown_line',
   'not_your_purchase', 'not_your_review', 'not_your_zone', 'not_your_method',
-  'unknown_document', 'unknown_policy',
+  'unknown_document', 'unknown_policy', 'unknown_import',
   // THE ISOLATION ERRORS. 404 and not 403, deliberately — see above. A seller
   // asking about another seller's order gets the same answer as one asking
   // about an order that does not exist, because distinguishing them tells an
@@ -1045,7 +1110,7 @@ const CONFLICT = new Set([
   // Money the federation has not been told how to handle. Also a conflict with
   // the world rather than a bad request.
   'unresolved_commission', 'no_verified_account', 'not_closed', 'not_approved',
-  'nothing_to_accept', 'not_published',
+  'nothing_to_accept', 'not_published', 'import_not_validated', 'import_closed',
   'not_open', 'nothing_payable', 'window_closed', 'non_returnable',
 ]);
 

@@ -246,6 +246,15 @@ export async function applyToSell(
     newValue: { ref, tradingName, status: 'applied', ...placement },
   });
 
+  // A DYNAMIC IMPORT, AND THE ONLY ONE OF THESE THAT NEEDS TO BE.
+  // src/db/marketplace-events.ts imports MarketplaceError from THIS module, so
+  // a top-level import here closes the cycle. The other four modules wired in
+  // this pass take a plain import, because the events module does not import
+  // them — using `await import()` everywhere "to be safe" would hide the one
+  // real constraint behind a habit.
+  const { publishSellerApplied } = await import('@/db/marketplace-events');
+  await publishSellerApplied(db, row.id, ctx.principal);
+
   return {
     sellerId: row.id,
     ref,

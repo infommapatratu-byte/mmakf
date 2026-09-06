@@ -52,6 +52,10 @@ import { publicListingPredicate } from '@/db/onboarding.schema';
 import { writeAudit, allocateFederationId, type AuditContext } from '@/db/federation';
 import { assertCan, type Principal } from '@/lib/rbac';
 import { MarketplaceError } from '@/db/marketplace';
+import {
+  publishOrderPlaced, publishOrderPaid, publishOrderShipped, publishOrderDelivered,
+  publishSellerOrderPlaced, publishSellerOrderPaid,
+} from '@/db/marketplace-events';
 import { applyFactor } from '@/db/fees';
 import { reserveForLine, commitReservations, releaseReservations, dispatchReservations } from '@/db/inventory';
 import { freezeCommissionForLine, refreshSellerOrderCommission, accrueSellerOrder, SLA_NOT_SET } from '@/db/marketplace-finance';
@@ -549,6 +553,21 @@ export async function checkout(db: DB, ctx: AuditContext | null, input: Checkout
     });
   }
 
+  // ── The feed ─────────────────────────────────────────────────────────────
+  //
+  // ONE BUYER EVENT AND ONE PER SELLER, because they are different facts to
+  // different people: the buyer placed a basket, and each seller acquired a
+  // parcel to pack. Publishing once and choosing recipients later is how a
+  // buyer ends up reading a seller's dispatch deadline.
+  //
+  // Published AFTER the seller orders are written, so publishOrderPlaced()
+  // counts rows rather than intentions — and it withholds, rather than throws,
+  // for a guest checkout with no person record behind it.
+  await publishOrderPlaced(db, order.id, ctx?.principal ?? null);
+  for (const g of summaries) {
+    await publishSellerOrderPlaced(db, g.sellerOrderId, ctx?.principal ?? null);
+  }
+
   return {
     orderId: order.id,
     orderNo,
@@ -634,6 +653,18 @@ export async function onOrderPaid(db: DB, orderId: number, paymentId?: number | 
         sellerOrderId: so.id, paymentId, allocatedMinor: so.totalMinor,
       }).onConflictDoNothing();
     }
+  }
+
+  // The buyer is told once about the basket; each seller once about their own
+  // order, whose dispatch clock has just started where one is configured.
+  //
+  // IDEMPOTENT WITH THE FUNCTION AROUND IT. This runs only for seller orders
+  // that were still awaiting payment — a second webhook finds none and returns
+  // above without reaching here — and the correlation ids would dedupe it even
+  // if it did.
+  await publishOrderPaid(db, orderId, null);
+  for (const so of sellerOrders) {
+    await publishSellerOrderPaid(db, so.id, null);
   }
 
   return { updated: sellerOrders.length };
@@ -794,6 +825,10 @@ export async function shipSellerOrder(db: DB, ctx: AuditContext, sellerOrderId: 
   // Committed stock leaves on-hand for good at dispatch — not at payment.
   await dispatchReservations(db, so.id, lines.map((l: any) => l.id));
 
+  // A BOOLEAN, NEVER THE NUMBER. The tracking number would let anybody reading
+  // the feed follow a stranger's parcel across a carrier's website.
+  await publishOrderShipped(db, so.id, { trackingRecorded: !!input.trackingNumber }, ctx.principal);
+
   return {
     ...(await transition(db, ctx, so, 'shipped', 'seller',
       input.trackingNumber ? `Dispatched, tracking ${input.trackingNumber}.` : 'Dispatched without tracking.',
@@ -824,6 +859,12 @@ export async function markDelivered(
 
   // Accrual, which reports rather than throws when the commission is unset.
   const accrual = await accrueSellerOrder(db, so.id);
+
+  // THE BUYER'S EVENT ONLY. There is no seller notice for dispatch or delivery:
+  // the seller performed both acts with their own hand, and telling somebody
+  // what they have just done is the noise NOTIFIABLE exists to keep out.
+  await publishOrderDelivered(db, so.id, ctx.principal);
+
   return { ...result, accrual };
 }
 
