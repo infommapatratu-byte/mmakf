@@ -34,6 +34,8 @@ import Base from '@/layouts/Base.astro';
 import { db } from '@/db';
 import { uploadCapability } from '@/lib/uploads';
 import { documentPositions, missingDocuments, DOCUMENT_KINDS } from '@/db/seller-documents';
+import { asc, eq, inArray } from 'drizzle-orm';
+import * as s from '@/db/schema';
 import { sellerContext, readableError, fmtDate, titleCase, SELLER_TABS } from './_gate';
 
 export const prerender = false;
@@ -46,11 +48,37 @@ const uploads = uploadCapability();
 
 let positions: any[] = [];
 let missing: any = null;
+// ── The brand register, and what this seller has claimed against it ─────────
+//
+// claimBrandAuthorisation() was reachable over HTTP and by no control anywhere,
+// so "authorised distributor" — the marketplace's whole answer to counterfeit
+// goods — was a status only a curl command could ask for. A seller lawfully
+// stocking branded goods had no way to say so, and MMAKF had nothing to verify.
+//
+// THE BRAND LIST IS THE REGISTER, NOT A FREE-TEXT FIELD. `brands` exists so
+// that one manufacturer is one row rather than eleven spellings across eleven
+// sellers; letting a seller type a name here would undo exactly that. Nothing
+// in this codebase creates a brand — there is no createBrand() anywhere — so
+// where the register is empty this page says so rather than offering a control
+// with nothing behind it.
+let brands: any[] = [];
+let claims: any[] = [];
 let pageError: string | null = ctx.loadError;
 
 if (ctx.gate === 'seller' && ctx.approved && !pageError) {
   try {
     positions = await documentPositions(db(), ctx.identity!.principal);
+
+    brands = await db().select().from(s.brands)
+      .where(eq(s.brands.status, 'active'))
+      .orderBy(asc(s.brands.name));
+    // This seller's own claims. Scoped by seller id in the WHERE, so another
+    // seller's authorisations are not fetched and dropped — they are not fetched.
+    claims = await db().select({ auth: s.brandAuthorisations, brandName: s.brands.name })
+      .from(s.brandAuthorisations)
+      .innerJoin(s.brands, eq(s.brandAuthorisations.brandId, s.brands.id))
+      .where(eq(s.brandAuthorisations.sellerId, ctx.seller.id))
+      .orderBy(asc(s.brandAuthorisations.id));
     missing = await missingDocuments(db(), ctx.identity!.principal);
   } catch (err: any) {
     pageError = readableError(err, 'Your documents');
@@ -184,6 +212,94 @@ const requested = positions.filter((p: any) => p.requestedReason);
                 </p>
               )}
 
+              {/* ── Brand authorisations ────────────────────────────────
+                   A CLAIM, NEVER A VERIFICATION. claimBrandAuthorisation()
+                   writes 'claimed' and takes no status, so there is no request
+                   shape in which a seller asserts their own authorisation —
+                   MMAKF decides, and only then does a badge appear. */}
+              <h2 class="h3">Brand authorisations</h2>
+              <p class="hint">
+                If you are a manufacturer, distributor, reseller or licensee for a brand, record it
+                here and MMAKF will look at the paperwork. Until somebody at the federation has,
+                it stands as a claim you have made and nothing more — it produces no badge and
+                changes nothing on your storefront.
+              </p>
+
+              {claims.length > 0 && (
+                <table>
+                  <caption class="sr-only">Your brand authorisations</caption>
+                  <thead><tr>
+                    <th scope="col">Brand</th><th scope="col">Relationship</th>
+                    <th scope="col">Valid to</th><th scope="col">Status</th>
+                  </tr></thead>
+                  <tbody>
+                    {claims.map((c: any) => (
+                      <tr>
+                        <th scope="row">{c.brandName}</th>
+                        <td>{titleCase(c.auth.relationship)}</td>
+                        <td>{c.auth.validTo ? fmtDate(c.auth.validTo) : '—'}</td>
+                        <td>
+                          {titleCase(c.auth.status)}
+                          {c.auth.decisionReason && <div class="hint">{c.auth.decisionReason}</div>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              {brands.length === 0 ? (
+                <p class="muted">
+                  MMAKF has not recorded any brand in the marketplace register yet, so there is nothing
+                  to claim a relationship with. Ask the federation office to add the brand you supply.
+                </p>
+              ) : (
+                <form id="brand-claim-form">
+                  <label for="bc-brand">Brand</label>
+                  <select id="bc-brand" name="brandId" required>
+                    <option value="">Choose a brand…</option>
+                    {brands.map((b: any) => <option value={b.id}>{b.name}</option>)}
+                  </select>
+
+                  <label for="bc-rel">Your relationship to it</label>
+                  <select id="bc-rel" name="relationship" required>
+                    <option value="manufacturer">I manufacture it</option>
+                    <option value="distributor">I am a distributor</option>
+                    <option value="reseller">I am a reseller</option>
+                    <option value="licensee">I am a licensee</option>
+                  </select>
+
+                  <label for="bc-scope">Scope (optional) — which products or which territory</label>
+                  <input id="bc-scope" name="scope" type="text" maxlength="200" />
+
+                  <label for="bc-issuer">Who issued the authorisation (optional)</label>
+                  <input id="bc-issuer" name="issuer" type="text" maxlength="200" />
+
+                  <label for="bc-contact">How MMAKF can reach them (optional)</label>
+                  <input id="bc-contact" name="issuerContact" type="text" maxlength="200" />
+
+                  <label for="bc-ref">Its reference number (optional)</label>
+                  <input id="bc-ref" name="referenceNumber" type="text" maxlength="120" />
+
+                  <div class="row">
+                    <span class="field">
+                      <label for="bc-from">Valid from (optional)</label>
+                      <input id="bc-from" name="validFrom" type="date" />
+                    </span>
+                    <span class="field">
+                      <label for="bc-to">Valid to (optional)</label>
+                      <input id="bc-to" name="validTo" type="date" />
+                    </span>
+                  </div>
+                  <p class="hint">
+                    An expiry date is honoured: a badge granted on this authorisation stops working on
+                    its own the day the letter runs out, without anybody having to remember.
+                  </p>
+
+                  <button class="btn btn-primary btn-small" type="submit">Record the claim</button>
+                </form>
+              )}
+
               <p id="page-error" class="error" role="alert" hidden></p>
               <p id="page-ok" class="ok" role="status" hidden></p>
             </>
@@ -247,9 +363,43 @@ const requested = positions.filter((p: any) => p.requestedReason);
       say(err, b.error || 'The document could not be recorded.');
     });
   });
+
+  // ── Claiming a brand authorisation ────────────────────────────────────────
+  //
+  // OPTIONAL FIELDS ARE OMITTED WHEN BLANK rather than sent as empty strings.
+  // An empty issuer stored as '' is indistinguishable, on the reviewer's screen,
+  // from an issuer whose name is a space — and the reviewer is the person who
+  // has to decide whether the paperwork is real.
+  const claimForm = document.getElementById('brand-claim-form') as HTMLFormElement | null;
+  if (claimForm) {
+    claimForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(claimForm);
+      const body: Record<string, unknown> = {
+        brandId: Number(f.get('brandId')),
+        relationship: f.get('relationship'),
+      };
+      for (const k of ['scope', 'issuer', 'issuerContact', 'referenceNumber', 'validFrom', 'validTo']) {
+        const v = String(f.get(k) ?? '').trim();
+        if (v) body[k] = v;
+      }
+      const r = await fetch('/api/marketplace/brand/claim', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const b = await r.json().catch(() => ({}));
+      if (r.ok && b.ok) { window.location.reload(); return; }
+      say(err, b.error || 'The claim could not be recorded.');
+    });
+  }
 </script>
 
 <style>
+  .field { display: grid; gap: 4px; }
+  #brand-claim-form label { display: block; margin-top: 10px; font-size: 0.9em; }
+  #brand-claim-form input, #brand-claim-form select { width: 100%; max-width: 520px; }
+  #brand-claim-form .field label { margin-top: 0; }
+
   .tabs { display: flex; gap: 16px; margin: 18px 0; flex-wrap: wrap; }
   .tabs a { padding: 6px 0; border-bottom: 2px solid transparent; text-decoration: none; }
   .tabs a[aria-current='page'] { border-bottom-color: currentColor; font-weight: 600; }

@@ -31,6 +31,7 @@ import { isConfigured, db } from '@/db';
 import { canAnywhere, ForbiddenError } from '@/lib/rbac';
 import { sellerDossier, ALL_CHECKS } from '@/db/seller-registry';
 import { missingCommercialDetails, COMMISSION_NOT_SET } from '@/db/marketplace';
+import { PERFORMANCE_NOT_COMPUTED } from '@/db/marketplace-trust';
 
 export const prerender = false;
 
@@ -239,7 +240,17 @@ const refunded = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.re
             {dossier.badges.length === 0
               ? <p class="muted">None. Nothing this seller writes in their profile can produce one.</p>
               : <ul class="badges">{dossier.badges.map((b: any) => (
-                  <li><strong>{b.label}</strong><br /><span class="muted">{b.basis}</span></li>
+                  <li>
+                    <strong>{b.label}</strong><br /><span class="muted">{b.basis}</span>
+                    {/* ONLY A GRANTED BADGE CAN BE REVOKED, and only a granted
+                        one carries a grant id. A derived badge — Verified
+                        Seller, Verified Brand — lapses on its own the instant
+                        the evidence behind it does, so a revoke control on one
+                        would be a control that cannot work. */}
+                    {may('marketplace:review') && b.grantId && (
+                      <> <button class="btn btn-small" data-revoke={b.grantId}>Revoke</button></>
+                    )}
+                  </li>
                 ))}</ul>}
             {may('marketplace:review') && (
               <form id="badge-form" class="row">
@@ -364,6 +375,49 @@ const refunded = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.re
                 ))}
               </tbody>
             </table>
+
+            {/* ── Raising a flag ─────────────────────────────────────────
+                 RAISING IS NOT QUARANTINING. A flag records a concern for the
+                 queue to work through; quarantine takes the item off sale
+                 immediately. raiseListingFlag() had no control anywhere, so the
+                 flag queue on the console could only ever be filled from
+                 outside the application.
+
+                 THE KINDS ARE THE ENUM'S, IN A SELECT. A typed kind that is not
+                 one of the twelve is refused after the officer has written the
+                 detail, which is the wrong moment to discover it. */}
+            {may('marketplace:review') && dossier.listings.length > 0 && (
+              <form id="flag-form">
+                <label for="flag-listing">Raise a concern about an item</label>
+                <select id="flag-listing" name="listingId" required>
+                  <option value="">Choose an item…</option>
+                  {dossier.listings.map((l: any) => (
+                    <option value={l.id}>{l.title} — {l.ref}</option>
+                  ))}
+                </select>
+
+                <label for="flag-kind">What kind of concern</label>
+                <select id="flag-kind" name="kind" required>
+                  <option value="duplicate">Duplicate of another item</option>
+                  <option value="wrong_image">Wrong image</option>
+                  <option value="wrong_category">Filed in the wrong category</option>
+                  <option value="misleading_claim">Misleading claim</option>
+                  <option value="incorrect_brand">Incorrect brand</option>
+                  <option value="unsupported_affiliation">Unsupported affiliation</option>
+                  <option value="false_certification">False certification</option>
+                  <option value="false_official_claim">False claim of MMAKF endorsement</option>
+                  <option value="prohibited_item">Prohibited item</option>
+                  <option value="unsafe_item">Unsafe item</option>
+                  <option value="price_manipulation">Price manipulation</option>
+                  <option value="other">Something else</option>
+                </select>
+
+                <label for="flag-detail">What exactly is the concern — this is what the queue reads</label>
+                <textarea id="flag-detail" name="detail" rows="2" required maxlength="4000"></textarea>
+
+                <button class="btn btn-small" type="submit">Raise the flag</button>
+              </form>
+            )}
           </details>
 
           <details class="card">
@@ -390,6 +444,106 @@ const refunded = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.re
               ))}
             </ul>
           </details>
+
+          {/* ── Measuring, and the two remedies that had no control ──────
+               computeSellerPerformance() files EVIDENCE and suspends nobody;
+               openAuthenticityCase() starts an investigation; adjustPayable()
+               is the function through which a person's income is reduced, and
+               it takes a reason for exactly that reason. All three were
+               reachable over HTTP and by nothing anybody could press. */}
+          <div class="card">
+            <div class="eyebrow">Measure and act</div>
+            <h2 class="h3">Performance, authenticity, adjustment</h2>
+
+            <details>
+              <summary>Compute performance for a period</summary>
+              <p class="hint">
+                Computed from this seller's own orders over the dates you give. It files evidence and
+                takes no action: every enforcement in this marketplace is a person's decision against a
+                record. {PERFORMANCE_NOT_COMPUTED}
+              </p>
+              <form id="perf-form" class="row" data-id={seller.id}>
+                <span class="field">
+                  <label for="perf-from">From</label>
+                  <input id="perf-from" name="periodStart" type="date" required />
+                </span>
+                <span class="field">
+                  <label for="perf-to">To</label>
+                  <input id="perf-to" name="periodEnd" type="date" required />
+                </span>
+                <button class="btn btn-small" type="submit">Compute</button>
+              </form>
+            </details>
+
+            <details>
+              <summary>Open an authenticity case</summary>
+              <p class="hint">
+                For a counterfeit or authenticity complaint against this seller. Quarantining the item at
+                the same moment is a PRECAUTION, not a finding — and withholding it until a finding
+                exists would leave a suspected counterfeit on sale for the length of the investigation.
+              </p>
+              <form id="auth-form" data-id={seller.id}>
+                <label for="auth-kind">Who is complaining?</label>
+                <select id="auth-kind" name="complainantKind" required>
+                  <option value="brand_owner">The brand owner</option>
+                  <option value="buyer">A buyer</option>
+                  <option value="federation">MMAKF itself</option>
+                  <option value="seller">Another seller</option>
+                  <option value="automated">An automated check</option>
+                </select>
+
+                <label for="auth-name">Their name (optional)</label>
+                <input id="auth-name" name="complainantName" type="text" maxlength="200" />
+
+                <label for="auth-contact">How to reach them (optional)</label>
+                <input id="auth-contact" name="complainantContact" type="text" maxlength="200" />
+
+                <label for="auth-listing">Which item? (optional — leave blank for the whole shop)</label>
+                <select id="auth-listing" name="listingId">
+                  <option value="">The seller generally</option>
+                  {dossier.listings.map((l: any) => (
+                    <option value={l.id}>{l.title} — {l.ref}</option>
+                  ))}
+                </select>
+
+                <label for="auth-alleg">The allegation</label>
+                <textarea id="auth-alleg" name="allegation" rows="3" required maxlength="4000"></textarea>
+
+                <span class="check">
+                  <input id="auth-quar" name="quarantineListing" type="checkbox" value="1" />
+                  <label for="auth-quar">Quarantine that item now, as a precaution</label>
+                </span>
+
+                <button class="btn btn-small" type="submit">Open the case</button>
+              </form>
+            </details>
+
+            <details>
+              <summary>Adjust what this seller is owed</summary>
+              <p class="hint warn">
+                This changes a person's income. A NEGATIVE amount reduces what MMAKF owes them and a
+                positive one increases it; the reason is compulsory and is what the seller reads on
+                their statement. It is not a refund — a refund belongs to an order and posts itself.
+              </p>
+              <form id="adjust-form" data-id={seller.id}>
+                <label for="adj-kind">Kind</label>
+                <input id="adj-kind" name="kind" type="text" required maxlength="60"
+                  placeholder="penalty, correction, goodwill…" />
+
+                <label for="adj-amount">Amount in rupees, negative to reduce</label>
+                <input id="adj-amount" name="amountRupees" type="text" inputmode="decimal" required
+                  placeholder="-250.00" />
+
+                <label for="adj-reason">Reason — the seller reads this</label>
+                <input id="adj-reason" name="reason" type="text" required maxlength="500" />
+
+                <label for="adj-auth">Under whose authority (optional)</label>
+                <input id="adj-auth" name="authority" type="text" maxlength="200" />
+
+                <button class="btn btn-small" type="submit">Post the adjustment</button>
+              </form>
+            </details>
+          </div>
 
           <p><a href={`/admin/audit?entityType=seller&entityId=${seller.id}`}>Every decision recorded against this seller →</a></p>
 
@@ -475,6 +629,110 @@ const refunded = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.re
     }), 'Could not grant the badge.');
   });
 
+  // ── Performance ───────────────────────────────────────────────────────────
+  //
+  // NO PERIOD IS DEFAULTED. "The last thirty days" chosen by a page is a window
+  // nobody decided on, and the resulting evidence carries a period the officer
+  // who ran it cannot account for.
+  const perfForm = document.getElementById('perf-form') as HTMLFormElement | null;
+  if (perfForm) {
+    perfForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(perfForm);
+      const res = await post('performance/compute', {
+        sellerId: Number(perfForm.dataset.id),
+        periodStart: f.get('periodStart'),
+        periodEnd: f.get('periodEnd'),
+      });
+      if (res.ok) {
+        window.alert('Computed and filed. It changes nothing about this seller by itself.');
+        window.location.reload();
+        return;
+      }
+      say(res.body.error || 'Could not compute the performance.');
+    });
+  }
+
+  const authForm = document.getElementById('auth-form') as HTMLFormElement | null;
+  if (authForm) {
+    authForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(authForm);
+      const listingId = String(f.get('listingId') ?? '').trim();
+      const quarantine = (authForm.querySelector('input[name="quarantineListing"]') as HTMLInputElement | null)?.checked ?? false;
+      if (quarantine && !listingId) {
+        say('Quarantine acts on one item, so choose which item before asking for it.');
+        return;
+      }
+      const opt = (k: string) => {
+        const v = String(f.get(k) ?? '').trim();
+        return v === '' ? null : v;
+      };
+      reloadOr(await post('authenticity/open', {
+        sellerId: Number(authForm.dataset.id),
+        listingId: listingId ? Number(listingId) : null,
+        complainantKind: f.get('complainantKind'),
+        complainantName: opt('complainantName'),
+        complainantContact: opt('complainantContact'),
+        allegation: f.get('allegation'),
+        quarantineListing: quarantine,
+      }), 'Could not open the case.');
+    });
+  }
+
+  // ── Adjusting a payable ───────────────────────────────────────────────────
+  //
+  // CONFIRMED IN WORDS, and the words name the direction. This is the control
+  // that reduces somebody's income, and "are you sure?" is not enough context
+  // to catch a misplaced minus sign.
+  const adjustForm = document.getElementById('adjust-form') as HTMLFormElement | null;
+  if (adjustForm) {
+    adjustForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(adjustForm);
+      const raw = String(f.get('amountRupees') ?? '').trim();
+      const negative = raw.startsWith('-');
+      const shown = negative ? raw.slice(1) : raw;
+      const ok = window.confirm(
+        negative
+          ? `This REDUCES what MMAKF owes this seller by \u20b9${shown}. Post it?`
+          : `This INCREASES what MMAKF owes this seller by \u20b9${shown}. Post it?`
+      );
+      if (!ok) return;
+      const authority = String(f.get('authority') ?? '').trim();
+      reloadOr(await post('payout/adjust', {
+        sellerId: Number(adjustForm.dataset.id),
+        kind: f.get('kind'),
+        amountRupees: raw,
+        reason: f.get('reason'),
+        authority: authority || null,
+      }), 'Could not post the adjustment.');
+    });
+  }
+
+  document.querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => {
+    const reason = window.prompt(
+      'Revoking this endorsement. It stops appearing on the storefront and on every item. Why?'
+    );
+    if (!reason) return;
+    reloadOr(await post('badge/revoke', {
+      grantId: Number((b as HTMLElement).dataset.revoke), reason,
+    }), 'Could not revoke the badge.');
+  }));
+
+  const flagForm = document.getElementById('flag-form') as HTMLFormElement | null;
+  if (flagForm) {
+    flagForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(flagForm);
+      reloadOr(await post('flag/raise', {
+        listingId: Number(f.get('listingId')),
+        kind: f.get('kind'),
+        detail: f.get('detail'),
+      }), 'Could not raise the flag.');
+    });
+  }
+
   document.querySelectorAll('[data-brand]').forEach((b) => b.addEventListener('click', async () => {
     const el = b as HTMLElement;
     const reason = window.prompt(`Reason for marking this authorisation ${el.dataset.brand}:`);
@@ -503,5 +761,11 @@ const refunded = (dossier?.orders ?? []).reduce((n: number, o: any) => n + (o.re
   th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); vertical-align: top; }
   tr.expired { opacity: 0.85; }
   .btn-small { padding: 4px 10px; font-size: 0.9em; }
+  .field { display: grid; gap: 4px; }
+  .check { display: inline-flex; align-items: center; gap: 8px; margin: 10px 0; }
+  .check label { display: inline; margin: 0; }
+  details form label { display: block; margin-top: 10px; font-size: 0.9em; }
+  details form input, details form select, details form textarea { width: 100%; max-width: 520px; }
+  details summary { cursor: pointer; margin-top: 10px; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

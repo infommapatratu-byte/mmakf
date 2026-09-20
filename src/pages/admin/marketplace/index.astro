@@ -27,7 +27,7 @@ import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { canAnywhere } from '@/lib/rbac';
 import { sellerQueue, listingQueue, COMMISSION_NOT_SET } from '@/db/marketplace';
-import { heldForCommission } from '@/db/marketplace-finance';
+import { heldForCommission, commerceSnapshot, topSellingItems } from '@/db/marketplace-finance';
 import { disputeQueue } from '@/db/returns';
 import { openFlags } from '@/db/catalogue';
 import { expiringVerifications } from '@/db/seller-registry';
@@ -48,6 +48,10 @@ let flags: any[] = [];
 let expiring: any[] = [];
 let taxonomyAdopted = 0;
 let commissionPublished = 0;
+// WHAT THE MARKETPLACE HAS ACTUALLY DONE, as opposed to what is waiting. The
+// console showed six queues and could not answer "did anything sell today?".
+let trade: any = null;
+let topItems: any[] = [];
 let loadError: string | null = null;
 
 /**
@@ -71,6 +75,8 @@ if (configured && principal) {
     flags = await safely('flags', () => openFlags(db(), principal, 50), []);
     expiring = await safely('verifications', () => expiringVerifications(db(), principal, 45), []);
     gaps = await safely('commission gaps', () => heldForCommission(db(), principal, 50), []);
+    trade = await safely('trade', () => commerceSnapshot(db(), principal), null);
+    topItems = await safely('top items', () => topSellingItems(db(), principal, 8), []);
 
     taxonomyAdopted = await safely('taxonomy', async () =>
       (await db().select({ n: sql<number>`count(*)::int` }).from(s.marketplaceCategories))[0]?.n ?? 0, 0);
@@ -118,6 +124,71 @@ const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^.
         </div>
       )}
 
+      {/* ── What has actually happened ───────────────────────────────────
+             EVERY FIGURE IS A COUNT OF ROWS. Nothing here is extrapolated,
+             annualised, or shown against a target — a fabricated number on a
+             dashboard is believed for years. Where the federation has decided
+             nothing, the tile says so rather than showing a zero: an unset
+             low-stock threshold is not "nothing is low", it is "nobody has
+             said what low means". */}
+      {trade && (
+        <>
+          <h2 class="h3">Trading</h2>
+          <p class="muted">
+            Today is {trade.on}, in the federation's own day rather than the server's clock.
+          </p>
+          <div class="grid">
+            <div class="card queue"><div class="n">{trade.todayPaidOrders}</div><div class="k">Paid orders today</div></div>
+            <div class="card queue"><div class="n">{money(trade.todayGrossMinor)}</div><div class="k">Taken today</div></div>
+            <div class="card queue"><div class="n">{trade.awaitingDispatch}</div><div class="k">Awaiting dispatch</div></div>
+            <div class="card queue"><div class="n">{trade.inTransit}</div><div class="k">In transit</div></div>
+            <div class="card queue"><div class="n">{trade.openReturns}</div><div class="k">Returns in flight</div></div>
+            <div class="card queue"><div class="n">{trade.paymentsFailed}</div><div class="k">Failed payments</div></div>
+          </div>
+          <div class="grid">
+            <div class="card queue"><div class="n">{money(trade.commissionMinor)}</div><div class="k">Commission on paid sales</div></div>
+            <div class="card queue"><div class="n">{money(trade.refundsMinor)}</div><div class="k">Refunded ({trade.refundCount})</div></div>
+            <div class="card queue"><div class="n">{trade.settlementsAwaitingPayout}</div><div class="k">Settlements to pay</div></div>
+            <div class="card queue"><div class="n">{trade.outOfStock}</div><div class="k">Variants out of stock</div></div>
+            <div class="card queue">
+              <div class="n">{trade.lowStock == null ? '—' : trade.lowStock}</div>
+              <div class="k">
+                {trade.lowStock == null ? 'Low stock — no threshold set by any seller' : 'Variants at or below their threshold'}
+              </div>
+            </div>
+            <div class="card queue"><div class="n">{trade.paymentsPending}</div><div class="k">Payments begun, not captured</div></div>
+          </div>
+
+          {topItems.length > 0 && (
+            <details class="card">
+              <summary><strong>What has sold most</strong></summary>
+              <p class="hint">
+                By UNITS on paid seller orders. Ranked by units rather than by value, because ranking
+                by value puts one expensive item above fifty ordinary ones and answers a question
+                nobody asked. An unpaid basket counts for nothing.
+              </p>
+              <table>
+                <caption class="sr-only">Best selling items</caption>
+                <thead><tr>
+                  <th scope="col">Item</th><th scope="col">Seller</th>
+                  <th scope="col">Units</th><th scope="col">Gross</th>
+                </tr></thead>
+                <tbody>
+                  {topItems.map((t: any) => (
+                    <tr>
+                      <th scope="row">{t.title}<div class="muted">{t.ref}</div></th>
+                      <td>{t.sellerName}</td>
+                      <td>{t.units}</td>
+                      <td>{money(t.grossMinor ?? 0)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
+        </>
+      )}
+
       {/* ── The queues ──────────────────────────────────────────────────── */}
       <div class="grid">
         <a class="card queue" href="#sellers"><div class="n">{sellers.length}</div><div class="k">Seller applications</div></a>
@@ -132,6 +203,10 @@ const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^.
         <a class="btn" href="/admin/marketplace/commissions">Commission</a>
         <a class="btn" href="/admin/marketplace/settlements">Settlements</a>
         <a class="btn" href="/admin/marketplace/policies">Policy</a>
+        <a class="btn" href="/admin/marketplace/orders">Orders</a>
+        <a class="btn" href="/admin/marketplace/categories">Categories</a>
+        <a class="btn" href="/admin/marketplace/returns">Returns and disputes</a>
+        <a class="btn" href="/admin/marketplace/trust">Trust and moderation</a>
         <a class="btn" href="/admin/listings">Listing review</a>
       </p>
 

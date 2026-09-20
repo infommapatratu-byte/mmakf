@@ -1,0 +1,258 @@
+---
+// /my/invoice/[no] — the receipt for something you paid for.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// AN IMMUTABLE RECEIPT THAT NOBODY COULD READ
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// issueInvoice() runs inside the payment confirmation transaction and freezes a
+// complete snapshot — every line, its unit price, its tax, the carriage, the
+// total and the address it was going to — precisely so that a later catalogue
+// edit or address correction cannot alter a receipt that has been issued. It
+// even mints a `verify_token` for a public authenticity check.
+//
+// AND NOTHING READ ANY OF IT. No page, no route, no export. A buyer was
+// charged, an immutable receipt was written for them, and there was no address
+// at which they could see it. This is that address.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// WHAT IS RENDERED IS THE SNAPSHOT, NOT THE ORDER
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Every figure below comes from `invoices.snapshot`, which was written once and
+// is never updated. Reading the live order instead would produce a receipt that
+// quietly changed when somebody corrected a product name — and the whole point
+// of freezing it is that a receipt is a statement about a moment.
+//
+// The ORDER is read as well, and used for one thing only: the status line that
+// says where the order has got to since. That is deliberately kept visually
+// apart from the invoice itself, because it is the one part of this page that
+// can change after issue.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// WHO MAY SEE IT
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// invoiceForBuyer() matches the order on the caller's PERSON record, and where
+// the order carries none, on the address the account is registered with. An
+// invoice number is a sequence: without that test, counting upwards would walk
+// the federation's billing history, and every snapshot carries a name, a
+// telephone number and a delivery address.
+//
+// A STRANGER'S INVOICE AND A NON-EXISTENT ONE ANSWER IDENTICALLY — 404, the
+// same words. Distinguishing them would make this page an oracle for which
+// invoice numbers exist.
+
+import Base from '@/layouts/Base.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { invoiceForBuyer, formatINR } from '@/db/orders';
+
+export const prerender = false;
+
+// A receipt is one person's own document. Never indexed, whatever else happens
+// on this response.
+Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+const invoiceNo = String(Astro.params.no ?? '').trim();
+
+let found: any = null;
+let loadError = false;
+
+if (configured && principal) {
+  try {
+    found = await invoiceForBuyer(db(), principal, invoiceNo);
+  } catch (err) {
+    console.error('[my/invoice]', err);
+    loadError = true;
+  }
+}
+
+if (configured && principal && !loadError && !found) {
+  Astro.response.status = 404;
+}
+
+const snap: any = found?.invoice?.snapshot ?? null;
+const lines: any[] = Array.isArray(snap?.lines) ? snap.lines : [];
+
+const money = (m: number | null | undefined) => (m == null ? '—' : formatINR(m));
+const when = (d: unknown) => (d ? new Date(d as string).toLocaleDateString('en-IN', {
+  day: '2-digit', month: 'short', year: 'numeric',
+}) : '—');
+const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+/** The delivery address as it was frozen, however the order recorded it. */
+function shipToLines(shipTo: unknown): string[] {
+  if (!shipTo || typeof shipTo !== 'object') return [];
+  const a = shipTo as Record<string, unknown>;
+  return [a.name, a.line1, a.line2, a.city, a.district, a.state, a.postcode, a.country]
+    .map((v) => String(v ?? '').trim())
+    .filter(Boolean);
+}
+
+const captured = (found?.payments ?? []).find((p: any) => p.status === 'captured') ?? null;
+---
+
+<Base
+  title={found ? `Invoice ${found.invoice.invoiceNo} — MMAKF` : 'Invoice not found — MMAKF'}
+  description="A receipt issued by the Modern Martial Arts Karate-Do Federation of India."
+>
+  <section>
+    <div class="container">
+      <p class="muted"><a href="/my/orders">← Your orders</a></p>
+
+      {!configured && (
+        <div class="card"><p>The federation database is not configured here, so nothing can be read.</p></div>
+      )}
+
+      {configured && !principal && (
+        <div class="card">
+          <h1 class="display-2">Sign in to see this receipt.</h1>
+          <p>An invoice belongs to the account that was charged.</p>
+        </div>
+      )}
+
+      {configured && principal && loadError && (
+        <div class="card" role="alert">
+          <h1 class="display-2">This receipt could not be read.</h1>
+          <p>The fault has been logged for the federation office. Please try again shortly.</p>
+        </div>
+      )}
+
+      {configured && principal && !loadError && !found && (
+        <div class="card">
+          <h1 class="display-2">No such receipt on this account.</h1>
+          <p>
+            Either there is no invoice with that number, or it was not issued to you. If you were
+            charged and cannot find the receipt, the federation office can look it up.
+          </p>
+        </div>
+      )}
+
+      {found && (
+        <>
+          <article class="card invoice">
+            <header class="inv-head">
+              <div>
+                <div class="eyebrow">Tax invoice</div>
+                <h1 class="display-2" style="margin:8px 0">{found.invoice.invoiceNo}</h1>
+                <p class="muted">
+                  Issued {when(found.invoice.issuedAt)} · Order {snap?.orderNo ?? found.order.orderNo}
+                </p>
+              </div>
+              <div class="inv-total">
+                <div class="muted">Total paid</div>
+                <div class="amount">{money(snap?.totalPaise)}</div>
+                <div class="muted">{snap?.currency ?? found.order.currency}</div>
+              </div>
+            </header>
+
+            <div class="inv-parties">
+              <div>
+                <h2 class="h5">Billed to</h2>
+                <p>
+                  {snap?.buyerName ?? '—'}<br />
+                  {snap?.email && <>{snap.email}<br /></>}
+                  {snap?.phone && <>{snap.phone}</>}
+                </p>
+              </div>
+              {shipToLines(snap?.shipTo).length > 0 && (
+                <div>
+                  <h2 class="h5">Delivered to</h2>
+                  <p>{shipToLines(snap.shipTo).map((l: string) => <>{l}<br /></>)}</p>
+                </div>
+              )}
+              {found.invoice.gstin && (
+                <div>
+                  <h2 class="h5">GSTIN</h2>
+                  <p><code>{found.invoice.gstin}</code></p>
+                  {found.invoice.placeOfSupply && <p class="muted">Place of supply: {found.invoice.placeOfSupply}</p>}
+                </div>
+              )}
+            </div>
+
+            <table>
+              <caption class="sr-only">Items on invoice {found.invoice.invoiceNo}</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Item</th>
+                  <th scope="col" class="num">Qty</th>
+                  <th scope="col" class="num">Unit price</th>
+                  <th scope="col" class="num">Tax</th>
+                  <th scope="col" class="num">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((l: any) => (
+                  <tr>
+                    <td>{l.description}</td>
+                    <td class="num">{l.quantity}</td>
+                    <td class="num">{money(l.unitPricePaise)}</td>
+                    <td class="num">{money(l.taxPaise)}</td>
+                    <td class="num">{money(l.totalPaise)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr><th scope="row" colspan="4">Subtotal</th><td class="num">{money(snap?.subtotalPaise)}</td></tr>
+                <tr><th scope="row" colspan="4">Tax</th><td class="num">{money(snap?.taxPaise)}</td></tr>
+                {snap?.shippingPaise ? (
+                  <tr><th scope="row" colspan="4">Delivery</th><td class="num">{money(snap.shippingPaise)}</td></tr>
+                ) : null}
+                <tr class="grand"><th scope="row" colspan="4">Total</th><td class="num">{money(snap?.totalPaise)}</td></tr>
+              </tfoot>
+            </table>
+
+            <p class="muted small">
+              This receipt was frozen when it was issued and is not changed afterwards. Where a refund
+              or a cancellation follows, it is recorded separately against the order — the invoice
+              itself stays as it was.
+            </p>
+          </article>
+
+          {/* Kept apart from the invoice above, because this is the one part of
+              the page that can change after issue. */}
+          <div class="card">
+            <h2 class="h4">Since this receipt was issued</h2>
+            <p>
+              The order is <strong>{titleCase(found.order.status)}</strong>.
+              {captured && <> Payment was captured on {when(captured.capturedAt ?? captured.updatedAt)}
+                {captured.provider ? ` through ${captured.provider}` : ''}.</>}
+            </p>
+            {!captured && (
+              <p class="muted">
+                No captured payment is recorded against this order. If you have been charged, tell the
+                federation office and quote this invoice number — nothing is resolved by paying again.
+              </p>
+            )}
+            <p class="muted"><a href="/my/orders">All your orders</a></p>
+          </div>
+        </>
+      )}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .invoice { padding: 24px; }
+  .inv-head { display: flex; gap: 20px; justify-content: space-between; flex-wrap: wrap; align-items: flex-start; }
+  .inv-total { text-align: right; }
+  .inv-total .amount { font-size: 1.8rem; font-weight: 700; }
+  .inv-parties { display: grid; gap: 18px; grid-template-columns: 1fr; margin: 22px 0; }
+  @media (min-width: 720px) { .inv-parties { grid-template-columns: repeat(3, 1fr); } }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); vertical-align: top; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  tfoot th { text-align: right; font-weight: 400; }
+  tfoot .grand th, tfoot .grand td { font-weight: 700; }
+  .muted { opacity: 0.78; }
+  .small { font-size: 0.9em; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  @media print {
+    .invoice { border: none; }
+    a[href]::after { content: ''; }
+  }
+</style>

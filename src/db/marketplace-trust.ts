@@ -581,3 +581,171 @@ export async function detectReviewPatterns(db: DB, windowDays = 14) {
   }
   return { examined: suspicious.length, raised };
 }
+
+/**
+ * Open fraud signals across the whole marketplace, worst first.
+ *
+ * ─── WHY THIS WAS MISSING AND WHY THAT MATTERED ─────────────────────────────
+ *
+ * `raiseFraudSignal()` had no caller at all and `reviewFraudSignal()` could
+ * only be reached over HTTP. The one place a signal was VISIBLE was
+ * sellerDossier(), which shows the signals belonging to ONE seller — so a
+ * signal could be found by an officer who already suspected that seller and by
+ * nobody else. detectReviewPatterns() writes signals on a schedule into a table
+ * nothing read.
+ *
+ * ORDERED BY SEVERITY THEN AGE, which is the order a queue is worked in and not
+ * the order rows were written. `reviewing` is included alongside `open` because
+ * a signal somebody started looking at and did not finish is still outstanding
+ * — dropping it from the queue is how it gets forgotten by the person who
+ * picked it up.
+ *
+ * THE SEVERITY IS THE DETECTOR'S OPINION. It is shown as a number and this
+ * function attaches no threshold, no colour and no recommendation: a signal
+ * MMAKF has not looked at is not an accusation, and presenting one as though
+ * the system had already decided is how an automated check becomes a verdict.
+ */
+export async function fraudQueue(db: DB, principal: Principal, limit = 200) {
+  assertCan(principal, 'marketplace:read', {});
+  return db.select({
+    signal: s.fraudSignals,
+    sellerName: s.sellers.tradingName,
+    sellerRef: s.sellers.ref,
+  })
+    .from(s.fraudSignals)
+    .leftJoin(s.sellers, eq(s.fraudSignals.sellerId, s.sellers.id))
+    .where(inArray(s.fraudSignals.status, ['open', 'reviewing']))
+    .orderBy(desc(s.fraudSignals.severity), asc(s.fraudSignals.raisedAt))
+    .limit(Math.min(limit, 500));
+}
+
+/**
+ * The reviews on one item that MMAKF has actually published.
+ *
+ * ─── THE HALF OF MODERATION NOBODY COULD SEE ────────────────────────────────
+ *
+ * Moderation only means something if a published review is then visible. Until
+ * this function there was no public read of either review table at all: a buyer
+ * could write one (once the form existed), an officer could publish it, and it
+ * went nowhere. The gate worked and there was nothing on the other side of it.
+ *
+ * `status = 'published'` IS THE WHOLE FILTER AND IT IS IN THE WHERE. Fetching
+ * and filtering afterwards would put a pending review one forgotten line away
+ * from the product page — and a pending review is, by construction, one nobody
+ * has looked at yet.
+ *
+ * THE AUTHOR IS NOT NAMED. A review carries a person id and this query does not
+ * join it. Publishing "Anita Sharma, Ranchi" beside a complaint about a seller
+ * is publishing a customer's identity to settle a dispute about a gi, and many
+ * of this federation's members are children. Every review is a verified
+ * purchase by construction — the order line is NOT NULL — so the buyer's name
+ * adds nothing the reader needs.
+ */
+export async function publishedProductReviews(db: DB, listingId: number, limit = 20) {
+  if (!Number.isInteger(listingId) || listingId <= 0) return { rows: [], count: 0, averageBps: null as number | null };
+
+  const rows = await db.select({
+    id: s.productReviews.id,
+    rating: s.productReviews.rating,
+    title: s.productReviews.title,
+    body: s.productReviews.body,
+    createdAt: s.productReviews.createdAt,
+    sellerReply: s.productReviews.sellerReply,
+    sellerRepliedAt: s.productReviews.sellerRepliedAt,
+    helpfulCount: s.productReviews.helpfulCount,
+  })
+    .from(s.productReviews)
+    .where(and(
+      eq(s.productReviews.listingId, listingId),
+      eq(s.productReviews.status, 'published'),
+    ))
+    .orderBy(desc(s.productReviews.createdAt))
+    .limit(Math.min(limit, 100));
+
+  // THE AVERAGE IS OVER EVERY PUBLISHED REVIEW, not over the page of them shown.
+  // An average of the most recent twenty is a different number from the item's
+  // rating, and displaying it under the word "rating" would be a figure the
+  // federation cannot defend.
+  const agg = (await db.select({
+    n: sql<number>`count(*)::int`,
+    avg: sql<number | null>`avg(${s.productReviews.rating})`,
+  })
+    .from(s.productReviews)
+    .where(and(
+      eq(s.productReviews.listingId, listingId),
+      eq(s.productReviews.status, 'published'),
+    )))[0];
+
+  const count = agg?.n ?? 0;
+  return {
+    rows,
+    count,
+    // Basis points, as `sellers.rating_avg_bps` stores it, so the two are the
+    // same unit wherever they meet.
+    averageBps: count > 0 && agg?.avg != null ? Math.round(Number(agg.avg) * 10000) : null,
+  };
+}
+
+/** The published service reviews on one seller, for their storefront. */
+export async function publishedSellerReviews(db: DB, sellerId: number, limit = 20) {
+  if (!Number.isInteger(sellerId) || sellerId <= 0) return [];
+  return db.select({
+    id: s.sellerReviews.id,
+    ratingOverall: s.sellerReviews.ratingOverall,
+    ratingDelivery: s.sellerReviews.ratingDelivery,
+    ratingCommunication: s.sellerReviews.ratingCommunication,
+    ratingPackaging: s.sellerReviews.ratingPackaging,
+    ratingAccuracy: s.sellerReviews.ratingAccuracy,
+    body: s.sellerReviews.body,
+    createdAt: s.sellerReviews.createdAt,
+    sellerReply: s.sellerReviews.sellerReply,
+    sellerRepliedAt: s.sellerReviews.sellerRepliedAt,
+  })
+    .from(s.sellerReviews)
+    .where(and(
+      eq(s.sellerReviews.sellerId, sellerId),
+      eq(s.sellerReviews.status, 'published'),
+    ))
+    .orderBy(desc(s.sellerReviews.createdAt))
+    .limit(Math.min(limit, 100));
+}
+
+/**
+ * A seller's own published reviews, for the portal — so they can reply.
+ *
+ * replyToReview() existed and had no control anywhere, which meant a seller
+ * could be publicly criticised on the federation's own domain and had no way to
+ * answer. A marketplace that publishes a complaint and withholds the reply is
+ * not being neutral.
+ *
+ * PUBLISHED ONLY. A seller must not see a pending review: they would be reading
+ * it before MMAKF has decided whether it may be published at all, and a seller
+ * who knows what a buyer wrote before moderation can act on it.
+ */
+export async function myPublishedReviews(db: DB, sellerId: number, limit = 100) {
+  if (!Number.isInteger(sellerId) || sellerId <= 0) return { product: [], seller: [] };
+
+  const product = await db.select({
+    review: s.productReviews,
+    listingTitle: s.listings.title,
+    listingRef: s.listings.ref,
+  })
+    .from(s.productReviews)
+    .innerJoin(s.listings, eq(s.productReviews.listingId, s.listings.id))
+    .where(and(
+      eq(s.productReviews.sellerId, sellerId),
+      eq(s.productReviews.status, 'published'),
+    ))
+    .orderBy(desc(s.productReviews.createdAt))
+    .limit(Math.min(limit, 200));
+
+  const seller = await db.select().from(s.sellerReviews)
+    .where(and(
+      eq(s.sellerReviews.sellerId, sellerId),
+      eq(s.sellerReviews.status, 'published'),
+    ))
+    .orderBy(desc(s.sellerReviews.createdAt))
+    .limit(Math.min(limit, 200));
+
+  return { product, seller };
+}

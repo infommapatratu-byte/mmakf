@@ -23,8 +23,11 @@
 import Base from '@/layouts/Base.astro';
 import { db } from '@/db';
 import { mySellerOrders, slaFor } from '@/db/seller-orders';
-import { myReturns, myDisputes } from '@/db/returns';
+import { myReturns, myDisputes, myReturnItems } from '@/db/returns';
 import { myLocations } from '@/db/inventory';
+// Which couriers this deployment can turn a consignment number into a link for.
+// Named on the form so a seller knows when to paste their own URL.
+import { knownCarriers } from '@/lib/carriers';
 import { SLA_NOT_SET } from '@/db/marketplace-finance';
 import { sellerContext, readableError, money, fmtDateTime, fmtDate, titleCase, SELLER_TABS } from './_gate';
 
@@ -37,6 +40,7 @@ let returns: any[] = [];
 let disputes: any[] = [];
 let locations: any[] = [];
 let sla: any = null;
+let returnItems = new Map<number, any[]>();
 let pageError: string | null = ctx.loadError;
 
 if (ctx.gate === 'seller' && ctx.approved && !pageError) {
@@ -46,9 +50,28 @@ if (ctx.gate === 'seller' && ctx.approved && !pageError) {
     disputes = await myDisputes(db(), ctx.identity!.principal, 50);
     locations = await myLocations(db(), ctx.identity!.principal);
     sla = await slaFor(db(), ctx.seller.id);
+    // ONE query for every return on the page, and its authorisation is the
+    // `seller_id = mine` inside its own join — not a filter applied here.
+    returnItems = await myReturnItems(db(), ctx.identity!.principal, returns.map((r: any) => r.id));
   } catch (err: any) {
     pageError = readableError(err, 'Your orders');
   }
+}
+
+/**
+ * What the inspection assessed as refundable on a return, for the hint on the
+ * refund form.
+ *
+ * SUMMED FROM THE ITEM ROWS the engine wrote, never recomputed from prices. A
+ * second arithmetic here would disagree with refundReturn()'s ceiling the first
+ * time an item came back partly damaged, and the seller would be told a figure
+ * the server then refuses.
+ */
+function assessedFor(returnRequestId: number): number | null {
+  const items = returnItems.get(returnRequestId);
+  if (!items || items.length === 0) return null;
+  const assessed = items.reduce((n: number, i: any) => n + (i.approvedRefundMinor ?? 0), 0);
+  return assessed > 0 ? assessed : null;
 }
 
 /** What the seller is expected to do next, from the status alone. */
@@ -185,6 +208,12 @@ const overdue = (o: any) => o.dispatchBy && !o.dispatchedAt && new Date(o.dispat
                               no tracking is shown to the buyer as one — a link that fails at the carrier is
                               worse than none, because they believe it.
                             </p>
+                            <p class="hint">
+                              Leave the tracking link blank and MMAKF will build one for you if it knows that
+                              courier: {knownCarriers().join(', ')}. Any other courier keeps the number as
+                              plain text, because a guessed link is one the buyer follows to a page that does
+                              not exist.
+                            </p>
                             <button class="btn btn-primary btn-small" type="submit">Confirm dispatch</button>
                           </form>
                         </details>
@@ -220,11 +249,138 @@ const overdue = (o: any) => o.dispatchBy && !o.dispatchedAt && new Date(o.dispat
                       <button class="btn btn-small" data-return-reject={r.id}>Refuse</button>
                     </div>
                   )}
-                  {['authorised', 'in_transit', 'received'].includes(r.status) && locations.length > 0 && (
-                    <p class="hint">
-                      When the goods arrive, inspect them and record what came back. Sellable units return to
-                      stock; damaged units go to the damaged bucket — and what neither accounts for is the
-                      remainder somebody has to explain.
+                  {/* ── The inspection ──────────────────────────────────────
+                       This form is what closes the loop. Until it existed, a
+                       return could be authorised and then nothing: the goods
+                       came back, the stock never returned, and the money never
+                       did either. inspectReturn() and refundReturn() were both
+                       reachable over HTTP and by no control a human could press.
+
+                       ARITHMETIC IS THE ENGINE'S. Sellable plus damaged may not
+                       exceed received, and received may not exceed what the
+                       buyer asked to return; the module refuses both in its own
+                       words rather than this page computing a rule that would
+                       immediately disagree with the one that matters. */}
+                  {['authorised', 'in_transit', 'received'].includes(r.status) && (
+                    <>
+                      {locations.length === 0 && (
+                        <p class="hint">
+                          You have no stock location yet, so there is nowhere for returned goods to go back to.
+                          Add one on your <a href="/portal/seller/products">products page</a> before inspecting
+                          this return — restocking into a location that does not exist is how stock silently
+                          stops adding up.
+                        </p>
+                      )}
+                      {locations.length > 0 && (returnItems.get(r.id) ?? []).length === 0 && (
+                        <p class="hint">
+                          This return carries no item lines, so there is nothing to inspect against. Contact the
+                          federation office — a return with no lines cannot be refunded either, and that is a
+                          fault rather than a decision.
+                        </p>
+                      )}
+                      {locations.length > 0 && (returnItems.get(r.id) ?? []).length > 0 && (
+                        <details class="card">
+                          <summary>Record what came back</summary>
+                          <form class="inspect-form" data-id={r.id}>
+                            <p class="hint">
+                              Sellable units go back on sale; damaged units go to the damaged bucket. What
+                              neither accounts for is the remainder somebody has to explain — an empty box is
+                              received and refundable for nothing.
+                            </p>
+
+                            <label for={`loc-${r.id}`}>Received into</label>
+                            <select id={`loc-${r.id}`} name="locationId" required>
+                              {locations.map((l: any) => (
+                                <option value={l.id}>{l.name} ({l.code})</option>
+                              ))}
+                            </select>
+
+                            {(returnItems.get(r.id) ?? []).map((it: any) => (
+                              <fieldset class="insp-item" data-item={it.id}>
+                                <legend>
+                                  Line {it.orderLineId} — {it.requestedQty} asked to return
+                                  {it.refundableMinor != null ? ` · ${money(it.refundableMinor)} attributable` : ''}
+                                </legend>
+                                <div class="insp-grid">
+                                  <span class="field">
+                                    <label for={`rec-${it.id}`}>Received</label>
+                                    <input id={`rec-${it.id}`} name="receivedQty" type="number"
+                                      min="0" max={it.requestedQty} value={it.requestedQty} required />
+                                  </span>
+                                  <span class="field">
+                                    <label for={`sell-${it.id}`}>Sellable</label>
+                                    <input id={`sell-${it.id}`} name="sellableQty" type="number"
+                                      min="0" max={it.requestedQty} value="0" required />
+                                  </span>
+                                  <span class="field">
+                                    <label for={`dam-${it.id}`}>Damaged</label>
+                                    <input id={`dam-${it.id}`} name="damagedQty" type="number"
+                                      min="0" max={it.requestedQty} value="0" required />
+                                  </span>
+                                  <span class="field">
+                                    <label for={`res-${it.id}`}>Finding</label>
+                                    <select id={`res-${it.id}`} name="result" required>
+                                      <option value="sellable">Sellable — back on sale</option>
+                                      <option value="damaged">Damaged</option>
+                                      <option value="counterfeit">Counterfeit</option>
+                                      <option value="not_the_item">Not the item that was sold</option>
+                                      <option value="not_received">Never arrived</option>
+                                      <option value="rejected">Rejected — outside the policy</option>
+                                    </select>
+                                  </span>
+                                </div>
+                                <label for={`note-${it.id}`}>Notes (optional)</label>
+                                <input id={`note-${it.id}`} name="notes" type="text" maxlength="500" />
+                              </fieldset>
+                            ))}
+
+                            <button class="btn btn-primary btn-small" type="submit">Record the inspection</button>
+                          </form>
+                        </details>
+                      )}
+                    </>
+                  )}
+
+                  {/* ── The refund ──────────────────────────────────────────
+                       Offered only once an inspection has assessed something,
+                       because refundReturn() refuses an amount above what was
+                       assessed and refuses zero outright. The default is the
+                       assessed figure and the field is optional: a seller
+                       refunding LESS states why, and cannot refund more. */}
+                  {['inspected', 'received', 'refund_pending'].includes(r.status) && (
+                    <details class="card">
+                      <summary>Refund this return</summary>
+                      <form class="refund-form" data-id={r.id}>
+                        <p class="hint">
+                          Leave the amount blank to refund exactly what the inspection assessed
+                          {assessedFor(r.id) != null ? ` — ${money(assessedFor(r.id)!)}` : ''}.
+                          A larger figure is refused: an over-refund posted as a refund cannot be told
+                          from an error afterwards.
+                        </p>
+                        <label for={`amt-${r.id}`}>Amount in rupees (optional)</label>
+                        <input id={`amt-${r.id}`} name="amountRupees" type="number" min="0" step="0.01" />
+
+                        <label for={`fund-${r.id}`}>Funded by</label>
+                        <select id={`fund-${r.id}`} name="fundedBy">
+                          <option value="seller">Me, the seller</option>
+                        </select>
+                        <p class="hint">
+                          A platform-funded refund is a federation decision and is posted by the MMAKF
+                          office, not from here.
+                        </p>
+
+                        <label for={`rr-${r.id}`}>Reason</label>
+                        <input id={`rr-${r.id}`} name="reason" type="text" required maxlength="500" />
+
+                        <button class="btn btn-primary btn-small" type="submit">Post the refund</button>
+                      </form>
+                    </details>
+                  )}
+
+                  {r.status === 'refunded' && (
+                    <p class="muted">
+                      Refunded {r.refundedMinor != null ? money(r.refundedMinor) : ''}
+                      {r.refundFundedBy ? `, funded by ${r.refundFundedBy === 'platform' ? 'MMAKF' : 'you'}` : ''}.
                     </p>
                   )}
                 </article>
@@ -361,6 +517,67 @@ const overdue = (o: any) => o.dispatchBy && !o.dispatchedAt && new Date(o.dispat
       }), 'Could not send the response.');
     });
   });
+
+  // ── The inspection ────────────────────────────────────────────────────────
+  //
+  // One fieldset per return line, read by walking the fieldsets rather than by
+  // FormData: three fields on this form share a name across lines, and FormData
+  // would flatten them into one list with no way to say which quantity belonged
+  // to which item.
+  //
+  // NO ARITHMETIC IS DONE HERE beyond reading the boxes. inspectReturn()
+  // refuses sellable+damaged above received and received above requested, in
+  // its own words; a check copied into this script would be a second rule that
+  // drifts from the one the server actually applies.
+  document.querySelectorAll('.inspect-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const el = form as HTMLFormElement;
+      const num = (sel: string, within: Element) => {
+        const input = within.querySelector(sel) as HTMLInputElement | null;
+        return input ? Number(input.value) : 0;
+      };
+      const items = [...el.querySelectorAll('.insp-item')].map((fs) => {
+        const notes = fs.querySelector('input[name="notes"]') as HTMLInputElement | null;
+        const result = fs.querySelector('select[name="result"]') as HTMLSelectElement | null;
+        return {
+          returnItemId: Number((fs as HTMLElement).dataset.item),
+          receivedQty: num('input[name="receivedQty"]', fs),
+          sellableQty: num('input[name="sellableQty"]', fs),
+          damagedQty: num('input[name="damagedQty"]', fs),
+          result: result ? result.value : 'pending',
+          notes: notes && notes.value.trim() ? notes.value.trim() : null,
+        };
+      });
+      const loc = el.querySelector('select[name="locationId"]') as HTMLSelectElement | null;
+      reloadOr(await post('return/inspect', {
+        returnRequestId: Number((form as HTMLElement).dataset.id),
+        locationId: loc ? Number(loc.value) : null,
+        items,
+      }), 'Could not record the inspection.');
+    });
+  });
+
+  // ── The refund ────────────────────────────────────────────────────────────
+  //
+  // The amount is OPTIONAL and omitted entirely when blank, so the engine
+  // refunds exactly what its own inspection assessed. Sending 0 instead would
+  // be refused as `nothing_to_refund`, which is a confusing answer to "refund
+  // the assessed amount".
+  document.querySelectorAll('.refund-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(form as HTMLFormElement);
+      const raw = String(f.get('amountRupees') ?? '').trim();
+      const body: Record<string, unknown> = {
+        returnRequestId: Number((form as HTMLElement).dataset.id),
+        fundedBy: f.get('fundedBy') || 'seller',
+        reason: f.get('reason'),
+      };
+      if (raw !== '') body.amountRupees = Number(raw);
+      reloadOr(await post('return/refund', body), 'Could not post the refund.');
+    });
+  });
 </script>
 
 <style>
@@ -379,5 +596,11 @@ const overdue = (o: any) => o.dispatchBy && !o.dispatchedAt && new Date(o.dispat
   th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); }
   .btn-small { padding: 4px 10px; font-size: 0.9em; }
   .ship summary { display: inline-block; cursor: pointer; list-style: none; }
+  .insp-item { border: 1px solid rgba(128,128,128,0.3); border-radius: 8px; padding: 10px 12px; margin: 12px 0; }
+  .insp-item legend { font-size: 0.9em; opacity: 0.85; padding: 0 6px; }
+  .insp-grid { display: grid; gap: 10px; grid-template-columns: 1fr; }
+  @media (min-width: 640px) { .insp-grid { grid-template-columns: repeat(4, 1fr); } }
+  .field { display: grid; gap: 4px; }
+  .field input, .field select { width: 100%; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

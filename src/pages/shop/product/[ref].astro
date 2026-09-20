@@ -23,6 +23,12 @@ import * as s from '@/db/schema';
 import { publicListingPredicate } from '@/db/onboarding.schema';
 import { badgesFor } from '@/db/seller-registry';
 import { effectiveReturnPolicy } from '@/db/returns';
+import { publishedProductReviews } from '@/db/marketplace-trust';
+// PRODUCT MARKUP — the thing that puts a price and an availability beside this
+// item in a search result. It is also the one graph on this site where being
+// wrong has an immediate victim, so every field is read from the rows this page
+// already renders and anything not on record is omitted. See productGraph().
+import { productGraph } from '@/lib/seo';
 
 export const prerender = false;
 
@@ -35,14 +41,25 @@ let media: any[] = [];
 let badges: any[] = [];
 let returnPolicy: any = null;
 let reviews: any[] = [];
+/** Every published review, not the page of them — see the query below. */
+let reviewCount = 0;
+let reviewAverageBps: number | null = null;
 let loadError = false;
 
 if (configured && ref) {
   try {
-    const found = await db().select({ listing: s.listings, seller: s.sellers, brand: s.brands })
+    // THE CATEGORY JOIN IS LEFT, like the brand's. Nothing in the schema makes
+    // listings.category_id NOT NULL, and an inner join would 404 an approved
+    // item that is on public sale merely because nobody filed it under a node.
+    // It is joined at all so this page can offer the way back UP the taxonomy —
+    // without it the only route onward from an item was its seller's shop.
+    const found = await db().select({
+      listing: s.listings, seller: s.sellers, brand: s.brands, category: s.marketplaceCategories,
+    })
       .from(s.listings)
       .innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
       .leftJoin(s.brands, eq(s.listings.brandId, s.brands.id))
+      .leftJoin(s.marketplaceCategories, eq(s.listings.categoryId, s.marketplaceCategories.id))
       // THE PUBLIC PREDICATE. Five conditions, in the query.
       .where(and(eq(s.listings.ref, ref), publicListingPredicate()))
       .limit(1);
@@ -67,19 +84,19 @@ if (configured && ref) {
       // Published reviews only, and every one is anchored to a purchase by a
       // unique NOT NULL order_line_id — there is no row shape for an
       // unverified review.
-      reviews = await db().select({
-        rating: s.productReviews.rating,
-        title: s.productReviews.title,
-        body: s.productReviews.body,
-        createdAt: s.productReviews.createdAt,
-        sellerReply: s.productReviews.sellerReply,
-      }).from(s.productReviews)
-        .where(and(
-          eq(s.productReviews.listingId, row.listing.id),
-          eq(s.productReviews.status, 'published'),
-        ))
-        .orderBy(sql`${s.productReviews.createdAt} desc`)
-        .limit(20);
+      //
+      // THROUGH THE MODULE, AND THAT FIXED A REAL FIGURE. This page used to run
+      // its own SELECT and average the twenty rows it got back. An item with
+      // twenty-five published reviews therefore advertised the mean of its most
+      // recent twenty — a number that moved every time a review was added and
+      // matched nothing anybody could recompute. publishedProductReviews()
+      // counts and averages over EVERY published review in SQL and returns the
+      // page separately, so the rating is the item's rating and the list is
+      // just the list.
+      const published = await publishedProductReviews(db(), row.listing.id, 20);
+      reviews = published.rows;
+      reviewCount = published.count;
+      reviewAverageBps = published.averageBps;
     }
   } catch (err: any) {
     console.error('[shop/product]', err);
@@ -115,8 +132,40 @@ function stockNote(v: { availableQty: number }): string {
 const listing = row?.listing ?? null;
 const seller = row?.seller ?? null;
 const inStock = variants.filter((v: any) => v.availableQty > 0);
-const avgRating = reviews.length
-  ? Math.round((reviews.reduce((n: number, r: any) => n + r.rating, 0) / reviews.length) * 10) / 10
+// From the aggregate over every published review, not over the page of them.
+const avgRating = reviewAverageBps == null ? null : Math.round(reviewAverageBps / 1000) / 10;
+
+// ── The Product graph ───────────────────────────────────────────────────────
+//
+// THE PRICE IS THE LOWEST LIVE VARIANT'S, which is the figure the card and the
+// heading both show, and it is read from `variants` rather than from
+// `listings.price_minor` — that column is a roll-up cache maintained on write,
+// and a graph built from a cache eventually advertises a price the buy control
+// refuses.
+//
+// AVAILABILITY IS `inStock.length > 0` — the same condition the buy control
+// resolves through, so the two cannot disagree. Nothing here says "limited";
+// the "3 left" note on the page is a display threshold, not a stock state.
+const liveVariants = variants.filter((v: any) => v.status !== 'discontinued');
+const lowestMinor = liveVariants.length
+  ? liveVariants.reduce((lo: number, v: any) => Math.min(lo, v.priceMinor), liveVariants[0].priceMinor)
+  : (listing?.priceMinor ?? 0);
+
+const graph = listing
+  ? productGraph({
+      name: listing.title,
+      description: listing.description,
+      url: `/shop/product/${listing.ref}`,
+      images: media.map((m: any) => m.url),
+      priceMinor: lowestMinor,
+      currency: listing.currency,
+      inStock: inStock.length > 0,
+      brandName: row?.brand?.name ?? null,
+      sellerName: seller?.tradingName ?? null,
+      categoryName: row?.category?.name ?? null,
+      reviewCount,
+      ratingAverageBps: reviewAverageBps,
+    })
   : null;
 ---
 
@@ -125,6 +174,11 @@ const avgRating = reviews.length
   description={listing ? (listing.description ?? `${listing.title}, sold through the MMAKF marketplace.`) : 'This item is not available.'}
   breadcrumbs={listing ? [
     { name: 'Shop', url: '/shop' },
+    // The CATEGORY where there is one, because that is the hierarchy a reader
+    // and a crawler both climb; the shop otherwise.
+    ...(row?.category
+      ? [{ name: row.category.name, url: `/shop/category/${row.category.path}` }]
+      : []),
     { name: seller.tradingName, url: `/shop/seller/${seller.storeSlug}` },
     { name: listing.title, url: `/shop/product/${listing.ref}` },
   ] : undefined}
@@ -144,6 +198,9 @@ const avgRating = reviews.length
 
       {loadError && <div class="card" role="alert"><h1 class="display-2">This item could not be loaded.</h1></div>}
 
+      {/* Emitted only for an item that resolved — a 404 carries no product. */}
+      {graph && <script type="application/ld+json" set:html={JSON.stringify(graph)} />}
+
       {listing && (
         <>
           <div class="product">
@@ -156,12 +213,13 @@ const avgRating = reviews.length
             <div class="detail">
               <div class="eyebrow">
                 <a href={`/shop/seller/${seller.storeSlug}`}>{seller.tradingName}</a>
-                {row.brand ? ` · ${row.brand.name}` : ''}
+                {row.brand && <> · <a href={`/shop/brand/${row.brand.slug}`}>{row.brand.name}</a></>}
+                {row.category && <> · <a href={`/shop/category/${row.category.path}`}>{row.category.name}</a></>}
               </div>
               <h1 class="display-2" style="margin-top:8px">{listing.title}</h1>
 
               {avgRating != null && (
-                <p class="muted">{avgRating} out of 5, from {reviews.length} verified purchase{reviews.length === 1 ? '' : 's'}</p>
+                <p class="muted">{avgRating} out of 5, from {reviewCount} verified purchase{reviewCount === 1 ? '' : 's'}</p>
               )}
 
               {badges.length > 0 && (

@@ -132,6 +132,12 @@ import * as s from '@/db/schema';
 import { publicListingPredicate } from '@/db/onboarding.schema';
 import { MarketplaceError } from '@/db/marketplace';
 import { categoryAncestry, verifiedBrandAuthorisation } from '@/db/catalogue';
+// Relevance is not re-invented here. src/lib/search.ts owns the six tiers and
+// the rule that ranking happens in SQL; searchListings() below is its second
+// reuser after src/lib/global-search.ts. Only the primitives are taken —
+// scopeFilter() is deliberately not, because the shop is public and its
+// visibility rule is publicListingPredicate().
+import { matchPredicate, rankExpression, explainMatch, type MatchField } from '@/lib/search';
 
 type DB = any;
 
@@ -1206,4 +1212,305 @@ export async function publishableBrandSlugs(
 
   const values = rows.map((r: any) => String(r.slug)).filter(Boolean);
   return { values: values.slice(0, limit), truncated: values.length > limit };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// THE WHOLE SHOP, AND FINDING SOMETHING IN IT
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Everything above this line needs a NAME before it will answer: a category
+// path, or a brand slug. That is the right shape for the two pages it was
+// written for, and it is the wrong shape for the two questions a buyer actually
+// arrives with —
+//
+//     "what is there?"        (nothing named — the shop front)
+//     "have you got a gi?"    (words, not a slug — the search box)
+//
+// Neither could be answered. `/shop` rendered the FEDERATION's own product
+// table and never touched a listing, so an approved seller item was reachable
+// only by typing its reference into the address bar or by arriving from Google
+// on a sitemap URL. The federation was moderating a catalogue its own visitors
+// could not open. These two functions are the missing doorways, and they are
+// here rather than in a new module because they must share `browseWhere()`,
+// `orderFor()` and `ITEM_COLUMNS` with the pages that already work — a second
+// copy of the public predicate is the one defect this file exists to prevent.
+
+/**
+ * Everything on public sale, with no category or brand narrowing it.
+ *
+ * SCOPE IS THE EMPTY LIST, and that is the entire difference from
+ * browseCategory(). The filters, the paging, the ordering, the count and the
+ * unstated-age tally are the same code paths, so the shop front cannot drift
+ * from a category page in what it considers public.
+ *
+ * THE CATEGORY JOIN IS LEFT, not inner. browseCategory() may use an inner join
+ * because it has already resolved a category node and every row it can reach
+ * hangs beneath it. Here, an inner join would silently hide any approved item
+ * whose `category_id` is null — and since nothing in the schema makes that
+ * column NOT NULL, the shop front would be quietly missing stock that the
+ * seller, the reviewer and the product page all agree is on sale.
+ */
+export async function browseAll(
+  db: DB,
+  opts: { filters?: BrowseFilters | null; limit?: number | null; offset?: number | null } = {}
+): Promise<BrowsePage> {
+  const filters = normaliseFilters(opts.filters);
+  const { limit, offset, limitCapped } = normalisePaging(opts.limit, opts.offset);
+
+  const scope: SQL[] = [];
+  const where = browseWhere(scope, filters);
+
+  const rowsQuery = (w: SQL) => db.select({
+    ...ITEM_COLUMNS,
+    brandName: s.brands.name,
+    brandSlug: s.brands.slug,
+    categoryName: s.marketplaceCategories.name,
+    categoryPath: s.marketplaceCategories.path,
+  })
+    .from(s.listings)
+    .innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
+    .leftJoin(s.marketplaceCategories, eq(s.listings.categoryId, s.marketplaceCategories.id))
+    .leftJoin(s.brands, eq(s.listings.brandId, s.brands.id))
+    .where(w);
+
+  const countQuery = (w: SQL) => db.select({ n: sql<number>`count(*)::int` })
+    .from(s.listings)
+    .innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
+    .where(w);
+
+  const rows = await rowsQuery(where).orderBy(...orderFor(filters.sort)).limit(limit).offset(offset);
+  const counted = await countQuery(where);
+
+  return {
+    items: rows.map((r: any) => shapeItem(r)),
+    total: counted[0]?.n ?? 0,
+    limit, offset, limitCapped, filters,
+    excludedForUnstatedAge: filters.age == null
+      ? null
+      : await countUnstatedAge(db, countQuery, scope, filters),
+  };
+}
+
+// ─── Search ─────────────────────────────────────────────────────────────────
+
+/**
+ * Why a shop search is not `items.filter()` in the browser, and not a second
+ * search engine either.
+ *
+ * THE BRIEF FORBIDS THE FIRST. Filtering a fetched array means fetching the
+ * catalogue to the browser, which is wrong at fifty items and impossible at
+ * five thousand, and it means the TOTAL is the size of whatever page was
+ * fetched rather than the size of the answer.
+ *
+ * AND THE REPOSITORY FORBIDS THE SECOND. src/lib/search.ts already owns
+ * relevance in this codebase — six tiers, exact identifier before exact name
+ * before prefix before substring, ranked in SQL because ranking after a LIMIT
+ * ranks the wrong rows. `matchPredicate()`, `rankExpression()` and
+ * `explainMatch()` are exported from it precisely so a second caller can reuse
+ * the rules rather than restate them; global-search.ts is the first such caller
+ * and this is the second.
+ *
+ * WHAT IS DELIBERATELY NOT REUSED is `scopeFilter()`. That builds the RBAC
+ * scope predicate for federation records, and the shop is PUBLIC: the visibility
+ * rule here is publicListingPredicate(), the same five conditions as every other
+ * query in this file, and there is no session to scope by.
+ *
+ * ─── WHICH COLUMNS MAY BE MATCHED ───────────────────────────────────────────
+ *
+ * The reference is an IDENTIFIER: `MMAKF-LST-2026-000123` typed in full is the
+ * one thing that must come first, ahead of every item whose description happens
+ * to contain the digits.
+ *
+ * Title, seller trading name and brand name are NAMES. A buyer who types
+ * "tokaido" means the brand, and a buyer who types "shureido gi" means neither
+ * one alone — matching both fields is what makes the second query work at all.
+ *
+ * The description is TEXT: substring only, ranked last. It is included because
+ * the size, weave and weight a buyer searches for ("12 oz", "cotton canvas")
+ * live nowhere else on a listing.
+ *
+ * THE CATEGORY NAME IS NOT A MATCH FIELD, on the rule global-search.ts states
+ * and for the same reason: a category label is a classification, so matching it
+ * turns "uniform" into "every uniform in the shop, ranked by nothing" — a
+ * category page with a search box in front of it. Categories are browsed; that
+ * is what the taxonomy is for, and the search results page links to the matching
+ * category rather than dissolving into it.
+ */
+export interface ListingSearchOptions {
+  q: string;
+  filters?: BrowseFilters | null;
+  limit?: number | null;
+  offset?: number | null;
+}
+
+export interface ListingSearchItem extends BrowseItem {
+  /**
+   * WHICH field matched and HOW, re-derived in JS from the same rules the SQL
+   * used. Null is impossible for a returned row — a row whose match cannot be
+   * explained is DROPPED rather than shown, on search.ts's rule: a hit nobody
+   * can account for is a hit the federation cannot stand behind.
+   */
+  matchedOn: { field: string; how: 'exact' | 'prefix' | 'substring'; value: string };
+}
+
+export interface ListingSearchResult {
+  q: string;
+  items: ListingSearchItem[];
+  /** The REAL number of matching public items, from a count sharing the WHERE. */
+  total: number;
+  limit: number;
+  offset: number;
+  limitCapped: boolean;
+  filters: AppliedFilters;
+  /** Rows the query matched but whose match could not be explained, so were dropped. */
+  unexplained: number;
+}
+
+/** Below this a query matches most of the catalogue and means nothing. */
+export const MIN_SEARCH_LENGTH = 2;
+export const MAX_SEARCH_LENGTH = 128;
+
+export const SEARCH_IS_NOT_CATEGORY_BROWSE =
+  'Searching matches an item’s reference, title, seller, brand and description. ' +
+  'It deliberately does not match the category it is filed under — browse the ' +
+  'category for that.';
+
+export async function searchListings(db: DB, opts: ListingSearchOptions): Promise<ListingSearchResult> {
+  const raw = String(opts.q ?? '').trim();
+  const filters = normaliseFilters(opts.filters);
+  const { limit, offset, limitCapped } = normalisePaging(opts.limit, opts.offset);
+
+  const blank: ListingSearchResult = {
+    q: raw, items: [], total: 0, limit, offset, limitCapped, filters, unexplained: 0,
+  };
+
+  // A one-character query is refused rather than answered. It would ILIKE
+  // '%a%' the whole catalogue and present the result as a search result.
+  if (raw.length < MIN_SEARCH_LENGTH) return blank;
+  const q = raw.slice(0, MAX_SEARCH_LENGTH);
+
+  const fields: MatchField[] = [
+    { field: 'ref', column: s.listings.ref, role: 'identifier' },
+    { field: 'title', column: s.listings.title, role: 'name' },
+    { field: 'seller', column: s.sellers.tradingName, role: 'name' },
+    { field: 'brand', column: s.brands.name, role: 'name' },
+    { field: 'description', column: s.listings.description, role: 'text' },
+  ];
+
+  const where = and(browseWhere([], filters), matchPredicate(q, fields)) as SQL;
+
+  const rows = await db.select({
+    ...ITEM_COLUMNS,
+    brandName: s.brands.name,
+    brandSlug: s.brands.slug,
+    categoryName: s.marketplaceCategories.name,
+    categoryPath: s.marketplaceCategories.path,
+  })
+    .from(s.listings)
+    .innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
+    .leftJoin(s.marketplaceCategories, eq(s.listings.categoryId, s.marketplaceCategories.id))
+    .leftJoin(s.brands, eq(s.listings.brandId, s.brands.id))
+    .where(where)
+    // RELEVANCE FIRST, then the buyer's chosen order as the tie-break. A price
+    // sort that ignored relevance would put the cheapest badge in the shop above
+    // the gi somebody searched for by name.
+    .orderBy(rankExpression(q, fields), ...orderFor(filters.sort))
+    .limit(limit)
+    .offset(offset);
+
+  const counted = await db.select({ n: sql<number>`count(*)::int` })
+    .from(s.listings)
+    .innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
+    .leftJoin(s.brands, eq(s.listings.brandId, s.brands.id))
+    .where(where);
+
+  let unexplained = 0;
+  const items: ListingSearchItem[] = [];
+  for (const r of rows as any[]) {
+    const explained = explainMatch(q, [
+      { field: 'ref', role: 'identifier', value: r.ref },
+      { field: 'title', role: 'name', value: r.title },
+      { field: 'seller', role: 'name', value: r.sellerTradingName },
+      { field: 'brand', role: 'name', value: r.brandName },
+      { field: 'description', role: 'text', value: r.description },
+    ]);
+    if (!explained) { unexplained += 1; continue; }
+    items.push({ ...shapeItem(r), matchedOn: explained });
+  }
+
+  return {
+    ...blank,
+    items,
+    // THE COUNT IS THE DATABASE'S, NOT `items.length`. Dropping an unexplained
+    // row shortens the page; it does not change how many items match, and a
+    // total that shrank because of a case-folding disagreement would make the
+    // pager skip a page.
+    total: counted[0]?.n ?? 0,
+    unexplained,
+  };
+}
+
+/**
+ * The shop front's category tiles, with a real count on each.
+ *
+ * ONE QUERY FOR ALL OF THEM, grouped by the top-level segment of the path,
+ * rather than childCategories() plus one count per tile. At twenty-six
+ * categories that is the difference between one round trip and twenty-seven on
+ * every render of the busiest public page in the shop.
+ *
+ * A CATEGORY WITH NOTHING IN IT IS NOT A TILE. An empty tile is a promise the
+ * next click breaks, and the buyer has no way to tell it apart from a full one
+ * until they have spent the click.
+ */
+export interface ShopFrontCategory {
+  slug: string;
+  name: string;
+  path: string;
+  description: string | null;
+  /** Public items in this category AND everything beneath it. */
+  count: number;
+}
+
+export async function shopFrontCategories(db: DB, limit = 24): Promise<ShopFrontCategory[]> {
+  // split_part(path, '/', 1) is the top-level ancestor of every row, so one
+  // grouped count attributes a deeply-filed item to the tile a buyer would
+  // click. The join back onto the category table names that ancestor.
+  const rows = await db.select({
+    path: sql<string>`split_part(${s.marketplaceCategories.path}, '/', 1)`,
+    count: sql<number>`count(*)::int`,
+  })
+    .from(s.listings)
+    .innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
+    .innerJoin(s.marketplaceCategories, eq(s.listings.categoryId, s.marketplaceCategories.id))
+    .where(publicListingPredicate() as SQL)
+    .groupBy(sql`split_part(${s.marketplaceCategories.path}, '/', 1)`);
+
+  const counts = new Map<string, number>();
+  for (const r of rows as any[]) counts.set(String(r.path), Number(r.count) || 0);
+  if (counts.size === 0) return [];
+
+  const tops = await db.select({
+    slug: s.marketplaceCategories.slug,
+    name: s.marketplaceCategories.name,
+    path: s.marketplaceCategories.path,
+    description: s.marketplaceCategories.description,
+  })
+    .from(s.marketplaceCategories)
+    .where(and(
+      eq(s.marketplaceCategories.active, true),
+      eq(s.marketplaceCategories.depth, 0),
+    ))
+    .orderBy(asc(s.marketplaceCategories.name));
+
+  return (tops as any[])
+    .map((c) => ({
+      slug: String(c.slug),
+      name: String(c.name),
+      path: String(c.path),
+      description: c.description ?? null,
+      count: counts.get(String(c.path)) ?? 0,
+    }))
+    .filter((c) => c.count > 0)
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, Math.max(1, limit));
 }

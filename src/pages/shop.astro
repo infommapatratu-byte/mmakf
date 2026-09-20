@@ -25,6 +25,22 @@ import { isConfigured, db, schema as s } from '@/db';
 import { formatINR, paise } from '@/db/orders';
 import { paymentStatusReport } from '@/lib/payments';
 import { asc, eq, inArray } from 'drizzle-orm';
+// ─── THE MARKETPLACE HALF OF THIS PAGE ──────────────────────────────────────
+//
+// This page read `products` and `product_variants` — the FEDERATION's own
+// catalogue — and nothing else. The marketplace was a separate shop living at
+// /shop/category, /shop/product, /shop/brand and /shop/seller, and NOTHING ON
+// THE SITE LINKED TO ANY OF THEM. Every one of those pages says "Browse the
+// marketplace" and points here; arriving, a buyer met the federation's own gis
+// and no route onward. Sellers were being approved, items reviewed and
+// published, and the whole result was reachable only by typing a reference into
+// the address bar or by arriving from Google on a sitemap URL.
+//
+// So the shop front now carries both catalogues, and says which is which. They
+// stay two order spines — two id spaces, two baskets, two checkouts, and
+// merging them would charge somebody for the wrong item — but they are one
+// SHOP, because that is what a buyer came for.
+import { browseAll, shopFrontCategories } from '@/db/marketplace-browse';
 
 export const prerender = false;
 
@@ -167,6 +183,46 @@ const BLOCK_TEXT: Record<string, string> = {
     'Online payment is not yet available — no payment method is configured for the federation. Items can be ordered at the dojo desk or by contacting the federation office.',
 };
 
+// ─── The marketplace, on the same page ──────────────────────────────────────
+//
+// READ THROUGH publicListingPredicate(), like every other public marketplace
+// query — so an unapproved, quarantined or edited-since-approval item, or one
+// whose seller is suspended or whose shop is closed, is absent here for exactly
+// the reason it is absent from the category page. Nothing is filtered after the
+// fetch and no second definition of "on sale" is written on this page.
+//
+// A FAILURE HERE MUST NOT BLANK THE FEDERATION CATALOGUE, and vice versa. The
+// two loads are independent and each states its own outcome, because the older
+// half of this page has worked for months and a new query is not entitled to
+// take it down.
+let marketCats: any[] = [];
+let marketNew: any[] = [];
+let marketTotal = 0;
+let marketFailed = false;
+
+if (dbReady) {
+  try {
+    marketCats = await shopFrontCategories(db(), 12);
+    // Eight is the strip, not the shop. The full catalogue is one click away at
+    // /shop/search and one more at /shop/category; loading it all here would be
+    // the "entire catalogue in the browser" the brief rules out.
+    const latest = await browseAll(db(), { filters: { sort: 'newest' }, limit: 8 });
+    marketNew = latest.items;
+    marketTotal = latest.total;
+  } catch (err) {
+    marketFailed = true;
+    console.error('[shop] marketplace read failed', err);
+  }
+}
+
+const marketMoney = (m: number, currency = 'INR') =>
+  `${currency === 'INR' ? '₹' : `${currency} `}${Math.floor(m / 100).toLocaleString('en-IN')}.${String(m % 100).padStart(2, '0')}`;
+
+function marketPrice(it: any): string {
+  const amount = marketMoney(it.priceMinor, it.currency);
+  return it.variantCount > 1 ? `from ${amount}` : amount;
+}
+
 const cats = [...new Set(items.map((i) => i.cat))];
 const email = String(fed?.contact?.email || '');
 const phone = String(fed?.contact?.phone || '');
@@ -187,8 +243,128 @@ const heroPills = orderable
     pills={heroPills}
   />
 
+  {/* ── The marketplace ──────────────────────────────────────────────────
+       First, because it is the larger catalogue and the one a buyer arriving
+       from a seller's page, a brand page or a search result came for. The
+       federation's own gear follows below under its own heading, so nobody has
+       to guess who they are buying from. */}
   <section>
     <div class="container">
+      <form class="mk-search" method="get" action="/shop/search" role="search">
+        <label class="input-label" for="shopq">Search the marketplace</label>
+        <div class="mk-searchrow">
+          <input
+            class="input" id="shopq" name="q" type="search"
+            placeholder="Gi, belt, mitts, a seller or a brand" autocomplete="off" maxlength="128"
+          />
+          <button class="btn btn-primary" type="submit">Search</button>
+        </div>
+      </form>
+
+      {marketFailed && (
+        <div class="shop-notice" role="status">
+          <div class="shop-notice-h">The marketplace</div>
+          <p>
+            The seller marketplace could not be loaded just now, so the items below are the
+            federation's own catalogue only. The fault has been logged for the federation office.
+            <a href="/shop/category"> Browsing by category</a> may still work.
+          </p>
+        </div>
+      )}
+
+      {!marketFailed && dbReady && marketTotal === 0 && (
+        <div class="shop-notice" role="status">
+          <div class="shop-notice-h">The marketplace</div>
+          <p>
+            No seller has an item on public sale yet. When MMAKF approves a seller and their
+            items, they appear here. The federation's own catalogue is below.
+          </p>
+        </div>
+      )}
+
+      {marketTotal > 0 && (
+        <div class="mk">
+          <div class="mk-head">
+            <h2 class="h3" style="margin:0">The marketplace</h2>
+            <p class="mk-sub">
+              {marketTotal} item{marketTotal === 1 ? '' : 's'} on sale from MMAKF-approved sellers.
+              {' '}<a href="/shop/search">See everything</a> ·
+              {' '}<a href="/shop/category">Browse by category</a>
+            </p>
+            {/* ── The marketplace basket ────────────────────────────────
+                 A SECOND BASKET, AND SAID TO BE ONE. The two catalogues are
+                 two id spaces with two order spines, and merging them would
+                 charge somebody for the wrong item — so this bar names which
+                 basket it is rather than leaving a buyer to discover at
+                 checkout that their gi and their belt are in different ones.
+
+                 HIDDEN UNTIL THERE IS SOMETHING IN IT, because a permanent
+                 "0 items" is furniture. It is filled by the script at the
+                 foot of this page from the same localStorage key the product
+                 page writes and /shop/checkout reads. */}
+            <p class="mk-basket" id="mkBasket" hidden>
+              <span id="mkBasketCount"></span>
+              {' '}<a class="btn btn-small" href="/shop/checkout">Go to the marketplace basket</a>
+            </p>
+          </div>
+
+          {marketCats.length > 0 && (
+            <nav class="mk-cats" aria-label="Marketplace categories">
+              {marketCats.map((c: any) => (
+                <a class="mk-cat" href={`/shop/category/${c.path}`}>
+                  <span class="mk-cat-n">{c.name}</span>
+                  <span class="mk-cat-c">{c.count}</span>
+                </a>
+              ))}
+            </nav>
+          )}
+
+          {marketNew.length > 0 && (
+            <>
+              <h3 class="h4">New in</h3>
+              <div class="grid grid-4">
+                {marketNew.map((it: any) => (
+                  <article class="prod">
+                    <div class="prod-thumb">
+                      {it.image
+                        ? <img class="prod-photo" src={it.image} alt={it.imageAlt ?? ''} loading="lazy" />
+                        : <Icon name="karate-gi" size={56} color="var(--gold)" />}
+                    </div>
+                    <div class="prod-cat">{it.categoryName ?? 'Marketplace'}</div>
+                    <div class="prod-name"><a href={`/shop/product/${it.ref}`}>{it.title}</a></div>
+                    <div class="prod-foot">
+                      <div class="prod-prices">
+                        <span class="prod-price">{marketPrice(it)}</span>
+                      </div>
+                      <p class="mk-seller">
+                        {it.sellerStoreSlug
+                          ? <a href={`/shop/seller/${it.sellerStoreSlug}`}>{it.sellerTradingName}</a>
+                          : it.sellerTradingName}
+                        {!it.inStock && <span class="mk-oos"> · out of stock</span>}
+                      </p>
+                      <a class="btn btn-gold prod-btn" href={`/shop/product/${it.ref}`}>View item</a>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      {marketTotal > 0 && (
+        <div class="mk-head">
+          <h2 class="h3" style="margin:0">The federation's own gear</h2>
+          <p class="mk-sub">
+            Sold by MMAKF itself rather than by a seller, and paid for through its own checkout.
+          </p>
+        </div>
+      )}
+
       {blocked && (
         <div class="shop-notice fade" role="status">
           <div class="shop-notice-h">Ordering on this site</div>
@@ -330,6 +506,39 @@ const heroPills = orderable
 </Base>
 
 <style>
+  /* ── The marketplace half ───────────────────────────────────────────── */
+  .mk-search { margin-bottom: 26px; }
+  .mk-searchrow { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+  .mk-searchrow .input { flex: 1 1 260px; min-width: 0; }
+  .mk-head { margin-bottom: 18px; }
+  .mk-sub { color: var(--muted); font-size: 0.9rem; margin-top: 6px; }
+  .mk-sub a { color: var(--gold-2); }
+  .mk { margin-bottom: 8px; }
+  .mk-cats { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 28px; }
+  .mk-cat {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    /* 44px minimum touch target, as the federation filter pills above. */
+    min-height: 44px;
+    padding: 8px 16px;
+    background: var(--card);
+    border: 1px solid var(--border-2);
+    border-radius: 100px;
+    color: var(--off-white);
+    font-size: 0.86rem;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .mk-cat:hover { border-color: var(--gold); color: var(--gold); }
+  .mk-cat-c { color: var(--muted); font-size: 0.78rem; }
+  .mk-basket { margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .btn-small { padding: 6px 14px; font-size: 0.82rem; }
+  .mk-seller { color: var(--muted); font-size: 0.82rem; margin: 6px 0 10px; }
+  .mk-seller a { color: var(--gold-2); }
+  .mk-oos { color: var(--muted); }
+  .prod-name a { color: inherit; }
+  .prod-name a:hover { color: var(--gold); }
+
   .sfilter {
     background: var(--card);
     border: 1px solid var(--border-2);
@@ -521,6 +730,34 @@ const heroPills = orderable
 </style>
 
 <script>
+  // ── The marketplace basket bar ────────────────────────────────────────────
+  //
+  // READS THE MARKETPLACE KEY, which is NOT the federation one. The two
+  // catalogues are two id spaces: `mmakf.basket.v1` holds product_variants ids
+  // and `mmakf.market.basket.v1` holds listing_variants ids. Reading the wrong
+  // one here would count a federation basket and send the buyer to a
+  // marketplace checkout that then priced somebody else's items.
+  //
+  // COUNTS AND NOTHING ELSE. No price is read, because none is stored: a basket
+  // that carries prices is a basket an attacker edits, and every figure the
+  // buyer sees comes from /api/shop/price on the checkout page.
+  (() => {
+    const MARKET_KEY = 'mmakf.market.basket.v1';
+    const bar = document.getElementById('mkBasket');
+    const label = document.getElementById('mkBasketCount');
+    if (!bar || !label) return;
+    let lines: Array<{ v: number; q: number }> = [];
+    try {
+      const raw = JSON.parse(window.localStorage.getItem(MARKET_KEY) || '[]');
+      if (Array.isArray(raw)) lines = raw;
+    } catch { /* storage disabled, or a value somebody else wrote */ }
+
+    const count = lines.reduce((n, l) => n + (Number(l?.q) > 0 ? Number(l.q) : 0), 0);
+    if (count <= 0) return;
+    label.textContent = `${count} item${count === 1 ? '' : 's'} in your marketplace basket.`;
+    bar.hidden = false;
+  })();
+
   // ── Category filter ──
   const filters = document.querySelectorAll<HTMLElement>('.sfilter');
   const prods = document.querySelectorAll<HTMLElement>('.prod');

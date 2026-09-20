@@ -93,6 +93,17 @@ export const EXCLUSIONS: Record<string, string> = {
     'PUBLIC_SECTIONS, because the section\'s two other routes are dynamic and already ' +
     'carry their own expansion policies — leaving it undeclared keeps the next static ' +
     'page added under /shop an error until somebody classifies it on purpose.',
+  '/shop/search':
+    'The marketplace search box and, with no term typed, the whole catalogue on one paginated ' +
+    'surface. A RESULTS PAGE IS NAVIGATION, NOT CONTENT — the same judgement /shop/category ' +
+    'already makes when it noindexes its own filtered and paginated variants — and here there is ' +
+    'no unfiltered form worth advertising: a search URL is minted by whoever typed into the box, ' +
+    'so listing it offers a crawler an unbounded set of near-identical pages built from arbitrary ' +
+    'strings, and anyone at all could mint mmakf.in/shop/search?q=<their own slogan> and have the ' +
+    'federation host it under its own domain. The page sets X-Robots-Tag: noindex on every ' +
+    'response, including the error ones, so a sitemap entry would contradict the page. What SHOULD ' +
+    'meet a searcher is the category page and the item page, which carry the same items, are ' +
+    'expanded in the sitemap under their own policies, and are linked from every result here.',
   '/unit': 'The Unit Portal sign-in. Same class of surface as /admin — an access-code gate, not a page for readers.',
   '/calendar.ics': 'A subscription feed, not a page. It is linked from /calendar, which is what a reader should find.',
   '/sitemap.xml': 'The sitemap does not list itself; robots.txt is how a crawler is told where it is.',
@@ -555,4 +566,126 @@ export function metaDescription(
     .replace(/[ ,;:–—-]+$/, '');
   // A cut that happens to land on a full stop already reads as finished.
   return /[.!?…]$/.test(cut) ? cut : cut + '…';
+}
+
+/**
+ * A Product, or null.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WHY A SHOP NEEDS THIS AND WHY IT IS DANGEROUS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Product markup is what puts a PRICE and an AVAILABILITY beside a result in
+ * Google. It is also the one graph on this site where being wrong has an
+ * immediate victim: a searcher who was shown "₹1,799 · In stock" and arrives to
+ * find neither. Every field below is therefore read from the same rows the page
+ * itself renders, and every one that is not on record is OMITTED rather than
+ * guessed.
+ *
+ * WHAT IS DELIBERATELY NOT EMITTED:
+ *
+ *   · NO `aggregateRating` WITHOUT PUBLISHED REVIEWS. Google will show stars
+ *     for it, and stars derived from nothing are a fabrication with a star
+ *     rating on it. A count of zero omits the block entirely — it does not
+ *     emit `ratingValue: 0`, which reads as one star.
+ *
+ *   · NO `sku` OR `gtin`. A listing carries a seller's own SKU on its VARIANTS
+ *     and this graph describes the item; publishing one variant's SKU as the
+ *     product's identifier would be wrong the moment a second variant exists.
+ *
+ *   · NO `priceValidUntil`. Nothing in the catalogue records one, and the
+ *     plausible guess — a year out — is a commitment MMAKF never made.
+ *
+ *   · NO SELLER ADDRESS. The offer names the seller's trading name because a
+ *     marketplace buyer is buying from them and is entitled to know; their
+ *     address is not published on the product page and does not become public
+ *     by travelling through a graph.
+ *
+ * AVAILABILITY IS THE REAL THING. `InStock` only when a live variant actually
+ * carries stock — the same condition the page's own buy control resolves
+ * through — and `OutOfStock` otherwise. There is no `PreOrder` because nothing
+ * in this catalogue records one, and no `LimitedAvailability` because the "3
+ * left" note on the page is a DISPLAY threshold rather than a stock state.
+ */
+export interface ProductGraphInput {
+  name: string;
+  description?: string | null;
+  /** The canonical path of the item's own page, e.g. `/shop/product/MMAKF-LST-…`. */
+  url: string;
+  images?: (string | null | undefined)[];
+  /** The LOWEST live variant price, in integer minor units. */
+  priceMinor: number;
+  currency?: string | null;
+  inStock: boolean;
+  brandName?: string | null;
+  sellerName?: string | null;
+  categoryName?: string | null;
+  /** Published reviews only. Zero omits the rating block entirely. */
+  reviewCount?: number;
+  /** The mean over EVERY published review, in basis points (4.25 → 42500). */
+  ratingAverageBps?: number | null;
+}
+
+export function productGraph(input: ProductGraphInput, origin: string = SITE_ORIGIN): Graph | null {
+  const name = String(input?.name ?? '').trim();
+  if (!name) return null;
+  if (!Number.isInteger(input.priceMinor) || input.priceMinor < 0) return null;
+
+  const currency = String(input.currency ?? 'INR').trim() || 'INR';
+  const images = (input.images ?? [])
+    .map((u) => String(u ?? '').trim())
+    .filter(Boolean)
+    .map((u) => abs(u, origin));
+
+  const graph: Graph = {
+    '@context': 'https://schema.org',
+    '@type': 'Product',
+    name,
+    url: abs(input.url, origin),
+    offers: {
+      '@type': 'Offer',
+      url: abs(input.url, origin),
+      priceCurrency: currency,
+      // MINOR UNITS TO A DECIMAL STRING, by string surgery rather than by
+      // dividing. `179900 / 100` is 1799 and `10 / 100` is 0.1, which schema.org
+      // consumers read as ten paise short of nothing; and a float division is
+      // the one arithmetic on money this codebase refuses everywhere else.
+      price: `${Math.floor(input.priceMinor / 100)}.${String(input.priceMinor % 100).padStart(2, '0')}`,
+      availability: input.inStock
+        ? 'https://schema.org/InStock'
+        : 'https://schema.org/OutOfStock',
+    },
+  };
+
+  const description = String(input.description ?? '').trim();
+  if (description) graph.description = description;
+  if (images.length) graph.image = images;
+
+  const brand = String(input.brandName ?? '').trim();
+  if (brand) graph.brand = { '@type': 'Brand', name: brand };
+
+  const category = String(input.categoryName ?? '').trim();
+  if (category) graph.category = category;
+
+  const sellerName = String(input.sellerName ?? '').trim();
+  if (sellerName) {
+    (graph.offers as Record<string, unknown>).seller = {
+      '@type': 'Organization',
+      name: sellerName,
+    };
+  }
+
+  // Only where reviews exist AND an average was computed over all of them.
+  const count = Number(input.reviewCount ?? 0);
+  if (count > 0 && input.ratingAverageBps != null) {
+    graph.aggregateRating = {
+      '@type': 'AggregateRating',
+      ratingValue: (input.ratingAverageBps / 10000).toFixed(2),
+      reviewCount: count,
+      bestRating: '5',
+      worstRating: '1',
+    };
+  }
+
+  return graph;
 }

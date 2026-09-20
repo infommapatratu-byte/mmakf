@@ -209,7 +209,8 @@ function invisibilityReason(l: any): string | null {
                       <caption class="sr-only">Variants of {l.title}</caption>
                       <thead><tr>
                         <th scope="col">Variant</th><th scope="col">SKU</th><th scope="col">Price</th>
-                        <th scope="col">Available</th><th scope="col">Held</th><th scope="col">Add stock</th>
+                        <th scope="col">Available</th><th scope="col">Held</th>
+                        <th scope="col">Stock</th><th scope="col">Edit</th>
                       </tr></thead>
                       <tbody>
                         {vs.map((v: any) => {
@@ -223,17 +224,96 @@ function invisibilityReason(l: any): string | null {
                               <td>{v.availableQty}</td>
                               <td>{held || '—'}</td>
                               <td>
+                                {/* ── RECEIVE, CORRECT, COUNT ────────────────
+                                     Receiving was the only stock write a seller
+                                     could make. adjustStock() and
+                                     recordStockCount() existed, were tested, and
+                                     had no control anywhere — so from this page
+                                     stock could only ever go UP. A shop that can
+                                     add stock and never write any off drifts from
+                                     the shelf within a month, and the first
+                                     person to notice is a buyer who is sold
+                                     something that is not there.
+
+                                     THE THREE ARE DIFFERENT ACTS and are kept
+                                     apart. Receiving is a delivery; an adjustment
+                                     is a correction and REQUIRES a reason; a
+                                     count is what was physically on the shelf and
+                                     the engine works out the difference itself.
+                                     One combined number field would make every
+                                     loss look like a delivery. */}
                                 {locations.length > 0 && (
-                                  <form class="stock-form row" data-variant={v.id}>
-                                    <label class="sr-only" for={`qty-${v.id}`}>Quantity to add for {v.label}</label>
-                                    <input id={`qty-${v.id}`} name="qty" type="number" min="1" max="100000" placeholder="0" style="width:6em" />
-                                    <label class="sr-only" for={`loc-${v.id}`}>Location</label>
-                                    <select id={`loc-${v.id}`} name="locationId">
-                                      {locations.map((loc: any) => <option value={loc.id}>{loc.code}</option>)}
-                                    </select>
-                                    <button class="btn btn-small" type="submit">Receive</button>
-                                  </form>
+                                  <details>
+                                    <summary>Stock</summary>
+                                    <form class="stock-form row" data-variant={v.id}>
+                                      <label class="sr-only" for={`qty-${v.id}`}>Quantity to add for {v.label}</label>
+                                      <input id={`qty-${v.id}`} name="qty" type="number" min="1" max="100000" placeholder="0" style="width:6em" />
+                                      <label class="sr-only" for={`loc-${v.id}`}>Location for the delivery of {v.label}</label>
+                                      <select id={`loc-${v.id}`} name="locationId">
+                                        {locations.map((loc: any) => <option value={loc.id}>{loc.code}</option>)}
+                                      </select>
+                                      <button class="btn btn-small" type="submit">Receive</button>
+                                    </form>
+
+                                    <form class="adjust-form row" data-variant={v.id}>
+                                      <label class="sr-only" for={`adj-${v.id}`}>Correction for {v.label}, positive or negative</label>
+                                      <input id={`adj-${v.id}`} name="delta" type="number" placeholder="-1" style="width:6em" required />
+                                      <label class="sr-only" for={`adjloc-${v.id}`}>Location for the correction to {v.label}</label>
+                                      <select id={`adjloc-${v.id}`} name="locationId">
+                                        {locations.map((loc: any) => <option value={loc.id}>{loc.code}</option>)}
+                                      </select>
+                                      <button class="btn btn-small" type="submit">Correct</button>
+                                    </form>
+
+                                    <form class="count-form row" data-variant={v.id}>
+                                      <label class="sr-only" for={`cnt-${v.id}`}>Counted on the shelf for {v.label}</label>
+                                      <input id={`cnt-${v.id}`} name="countedQty" type="number" min="0" placeholder="Counted" style="width:6em" required />
+                                      <label class="sr-only" for={`cntloc-${v.id}`}>Location counted for {v.label}</label>
+                                      <select id={`cntloc-${v.id}`} name="locationId">
+                                        {locations.map((loc: any) => <option value={loc.id}>{loc.code}</option>)}
+                                      </select>
+                                      <button class="btn btn-small" type="submit">Record a count</button>
+                                    </form>
+
+                                    <form class="lowrule-form row" data-variant={v.id}>
+                                      <label class="sr-only" for={`low-${v.id}`}>Warn below this many for {v.label}</label>
+                                      <input id={`low-${v.id}`} name="threshold" type="number" min="0" placeholder="Warn below" style="width:8em" required />
+                                      <button class="btn btn-small" type="submit">Set low-stock warning</button>
+                                    </form>
+
+                                    <p class="hint">
+                                      A correction needs a reason: unexplained stock movement cannot be told
+                                      apart from a loss nobody reported.
+                                    </p>
+                                  </details>
                                 )}
+                              </td>
+                              <td>
+                                {/* Editing a variant is an edit to what MMAKF
+                                    approved and returns the item to review.
+                                    Discontinuing DOES NOT DELETE: an order line
+                                    points at this row for as long as the order
+                                    exists. */}
+                                {v.status === 'active' && (
+                                  <details>
+                                    <summary>Edit</summary>
+                                    <form class="variant-edit" data-variant={v.id}>
+                                      <label class="sr-only" for={`vl-${v.id}`}>Label for {v.label}</label>
+                                      <input id={`vl-${v.id}`} name="label" value={v.label} maxlength="120" />
+                                      <label class="sr-only" for={`vp-${v.id}`}>New price in rupees for {v.label}</label>
+                                      <input id={`vp-${v.id}`} name="priceRupees" inputmode="decimal" placeholder="1799.00" />
+                                      <label class="sr-only" for={`vs-${v.id}`}>Your SKU for {v.label}</label>
+                                      <input id={`vs-${v.id}`} name="sellerSku" value={v.sellerSku ?? ''} maxlength="60" />
+                                      <button class="btn btn-small" type="submit">Save</button>
+                                    </form>
+                                    <button class="btn btn-small" data-discontinue={v.id}>Discontinue</button>
+                                    <p class="hint warn">
+                                      Changing a label or a price sends this item back to review, and it
+                                      leaves the shop until MMAKF looks at it again.
+                                    </p>
+                                  </details>
+                                )}
+                                {v.status !== 'active' && <span class="muted">{titleCase(v.status)}</span>}
                               </td>
                             </tr>
                           );
@@ -357,6 +437,108 @@ function invisibilityReason(l: any): string | null {
     if (reason === null) return;
     reloadOr(await post('listing/withdraw', { listingId: Number((b as HTMLElement).dataset.withdraw), reason }),
       'Could not withdraw the item.');
+  }));
+
+  // ── Correcting stock ──────────────────────────────────────────────────────
+  //
+  // A REASON IS COMPULSORY and is asked for before anything is sent.
+  // adjustStock() refuses a reasonless correction anyway; asking here means the
+  // seller meets the requirement as a question rather than as an error after
+  // they have typed a number.
+  document.querySelectorAll('.adjust-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(form as HTMLFormElement);
+      const reason = window.prompt(
+        'Why is this stock figure changing? Breakage, a miscount, a sample given away — an ' +
+        'unexplained movement cannot be told apart from a loss nobody reported.'
+      );
+      if (!reason) return;
+      reloadOr(await post('stock/adjust', {
+        variantId: Number((form as HTMLElement).dataset.variant),
+        locationId: Number(f.get('locationId')),
+        delta: Number(f.get('delta')),
+        reason,
+      }), 'Could not correct the stock.');
+    });
+  });
+
+  // ── A physical count ──────────────────────────────────────────────────────
+  //
+  // The COUNTED figure is sent, never a difference. The engine works out the
+  // movement from what it believed it had; a page that subtracted first would
+  // be computing the variance against a number that may have moved between the
+  // render and the submit.
+  document.querySelectorAll('.count-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(form as HTMLFormElement);
+      const note = window.prompt('Anything to note about this count? (optional)') ?? null;
+      reloadOr(await post('stock/count', {
+        variantId: Number((form as HTMLElement).dataset.variant),
+        locationId: Number(f.get('locationId')),
+        countedQty: Number(f.get('countedQty')),
+        note,
+      }), 'Could not record the count.');
+    });
+  });
+
+  document.querySelectorAll('.lowrule-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(form as HTMLFormElement);
+      reloadOr(await post('stock/lowrule', {
+        variantId: Number((form as HTMLElement).dataset.variant),
+        threshold: Number(f.get('threshold')),
+      }), 'Could not set the warning.');
+    });
+  });
+
+  // ── Editing a variant ─────────────────────────────────────────────────────
+  //
+  // ONLY THE FIELDS THAT WERE TOUCHED ARE SENT. The API treats an absent key as
+  // "leave it alone" and a present one as a change, so posting every field
+  // every time would reprice an item — and return it to review — because
+  // somebody corrected a spelling in its SKU.
+  document.querySelectorAll('.variant-edit').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const el = form as HTMLFormElement;
+      const f = new FormData(el);
+      const body: Record<string, unknown> = { variantId: Number((form as HTMLElement).dataset.variant) };
+
+      const label = String(f.get('label') ?? '').trim();
+      const original = (el.querySelector('input[name="label"]') as HTMLInputElement | null)?.defaultValue ?? '';
+      if (label && label !== original) body.label = label;
+
+      const price = String(f.get('priceRupees') ?? '').trim();
+      if (price !== '') body.priceRupees = price;
+
+      const sku = String(f.get('sellerSku') ?? '').trim();
+      const originalSku = (el.querySelector('input[name="sellerSku"]') as HTMLInputElement | null)?.defaultValue ?? '';
+      if (sku !== originalSku) body.sellerSku = sku || null;
+
+      if (Object.keys(body).length === 1) {
+        say('Nothing was changed, so nothing was sent.');
+        return;
+      }
+      const res = await post('variant/update', body);
+      if (res.ok && res.body.result?.returnedToReview) {
+        window.alert('Saved. This item has gone back to review and is off the shop until MMAKF looks at it again.');
+      }
+      reloadOr(res, 'Could not save the variant.');
+    });
+  });
+
+  document.querySelectorAll('[data-discontinue]').forEach((b) => b.addEventListener('click', async () => {
+    const reason = window.prompt(
+      'Discontinuing this variant takes it off sale. It is not deleted — orders that already ' +
+      'contain it keep pointing at it. Why?'
+    );
+    if (!reason) return;
+    reloadOr(await post('variant/discontinue', {
+      variantId: Number((b as HTMLElement).dataset.discontinue), reason,
+    }), 'Could not discontinue the variant.');
   }));
 </script>
 

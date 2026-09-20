@@ -135,6 +135,17 @@ const isRoot = !rawPath;
 const notFound = configured && !loadError && !refusal && !isRoot && !node;
 if (notFound) Astro.response.status = 404;
 
+// A REFUSED PATH IS NOT A PAGE. assertBrowsablePath() throws for anything
+// outside the slug grammar — a LIKE wildcard, a traversal, punctuation — and
+// this used to answer 200 with the refusal printed on it. That is an address
+// anybody can mint, answering successfully, with no noindex on it: exactly the
+// shape a crawler indexes and then keeps. 400 says what happened, and the
+// header stops the refusal itself becoming a search result.
+if (refusal) {
+  Astro.response.status = 400;
+  Astro.response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+}
+
 // ── Display helpers ────────────────────────────────────────────────────────
 //
 // NAMED FUNCTIONS IN THE FRONTMATTER, NOT TERNARIES IN THE MARKUP. esbuild

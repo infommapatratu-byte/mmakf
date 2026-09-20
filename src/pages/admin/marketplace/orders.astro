@@ -1,0 +1,567 @@
+---
+// /admin/marketplace/orders — one order, and every record it touched.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// THE QUESTION THIS PAGE ANSWERS
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// "I paid and nothing came." Answering it meant opening a database client: the
+// records were all present, in eleven tables joined by four different keys, and
+// no surface walked them. `sellerOrdersForAdmin()` had no caller. `listOrders()`
+// had no caller. /admin/reconciliation works from the money end and cannot
+// start from an order number, which is the only thing a buyer has.
+//
+// So the federation could see the payment, OR the seller order, OR the stock
+// movement — one query at a time — and could not put them beside each other.
+// The fault in these cases is always in the join.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// WHAT IS SHOWN, AND WHAT IS DELIBERATELY NOT
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// NO WEBHOOK PAYLOAD. `payment_events.payload` is the gateway's raw body, and a
+// raw body rendered into an admin page is how a card fingerprint or a token
+// reaches a browser cache and then a screenshot. The ENVELOPE is what diagnoses
+// a webhook: which provider, which event, did the signature verify, when did it
+// arrive, was it processed, and what went wrong if not.
+//
+// NO VERDICT. This page does not compute whether the order "looks right". A
+// judgement rendered as a green tick is one an operator stops checking, and the
+// cases that reach this page are exactly the ones where the obvious reading is
+// wrong. It lays the rows out in the order they happened.
+//
+// AND IT WRITES NOTHING. Every remedy — refunding, cancelling, releasing stock —
+// lives on the page that owns it, with its own authorisation and its own reason
+// field. A console that both diagnoses and acts is one where somebody acts
+// before finishing the diagnosis.
+
+import AdminShell from '@/components/AdminShell.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { canAnywhere } from '@/lib/rbac';
+import { orderChainForAdmin, recentOrdersForAdmin, formatINR } from '@/db/orders';
+// THE FULFILMENT BACKLOG. sellerOrdersForAdmin() had no caller anywhere — the
+// federation could count how many parcels were waiting (the console's Trading
+// band does) and could not see WHICH, or whose. A number nobody can open is a
+// number nobody acts on.
+import { sellerOrdersForAdmin } from '@/db/seller-orders';
+import { canAnywhere as can } from '@/lib/rbac';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+
+// Cancelling a seller order takes marketplace authority over that seller, which
+// cancelSellerOrder() re-checks per row. This only decides whether to draw it.
+const mayCancel = principal ? can(principal, 'marketplace:read') : false;
+
+const q = (Astro.url.searchParams.get('q') ?? '').trim();
+// The order to open in full. Taken from the query string, and safe there
+// because orderChainForAdmin() asserts `finance:read` before it reads anything
+// — the identifier selects a record, it does not grant access to one.
+const openNo = (Astro.url.searchParams.get('order') ?? '').trim();
+
+let rows: any[] = [];
+let chain: any = null;
+let backlog: any[] = [];
+let loadError: string | null = null;
+
+if (configured && principal && canAnywhere(principal, 'finance:read')) {
+  try {
+    if (openNo) chain = await orderChainForAdmin(db(), principal, openNo);
+    rows = await recentOrdersForAdmin(db(), principal, { q: q || null, limit: 100 });
+
+    // A SECOND AUTHORITY, ASKED SEPARATELY. This page is gated on
+    // `finance:read`; the seller-order backlog is marketplace data and
+    // sellerOrdersForAdmin() asserts `marketplace:read` for itself. A treasurer
+    // who holds one and not the other sees the money and not the parcels,
+    // which is the correct outcome rather than an error.
+    if (can(principal, 'marketplace:read')) {
+      backlog = await sellerOrdersForAdmin(db(), principal, {
+        status: ['paid', 'seller_accepted', 'processing', 'packed'],
+        limit: 100,
+      });
+    }
+  } catch (err: any) {
+    console.error('[admin/marketplace/orders]', err);
+    loadError = 'The orders could not be read. The fault has been logged; nothing has been changed.';
+  }
+}
+
+const money = (m: number | null | undefined) => (m == null ? '—' : formatINR(m));
+const when = (v: unknown) => (v ? new Date(String(v)).toLocaleString('en-IN', {
+  day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+}) : '—');
+const date = (v: unknown) => (v ? new Date(String(v)).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
+const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+/**
+ * The stock story in one sentence per line, because the interesting failure is
+ * an asymmetry: a reservation with no commitment is stock held for a payment
+ * that never completed, and a commitment with no reservation would mean stock
+ * left the shelf without ever having been held for this buyer.
+ */
+function stockSummary(): string {
+  if (!chain) return '';
+  const res = chain.reservations.length;
+  const mov = chain.movements.length;
+  if (res === 0 && mov === 0) return 'No stock was reserved and none moved. This order never touched inventory.';
+  if (res > 0 && mov === 0) return `${res} reservation${res === 1 ? '' : 's'} and no movement — stock is held, nothing has left the shelf.`;
+  if (res === 0 && mov > 0) return `${mov} movement${mov === 1 ? '' : 's'} and no reservation on record. Worth understanding.`;
+  return `${res} reservation${res === 1 ? '' : 's'} and ${mov} movement${mov === 1 ? '' : 's'}.`;
+}
+---
+
+<AdminShell title="Orders" requires="finance:read">
+  <section>
+    <div class="container">
+      <p><a href="/admin/marketplace">← Marketplace console</a></p>
+
+      {loadError && <p class="error" role="alert">{loadError}</p>}
+
+      <form class="card" method="get" action="/admin/marketplace/orders" role="search">
+        <label for="q">Find an order</label>
+        <div class="row">
+          <input id="q" name="q" type="search" value={q}
+            placeholder="Order number, email or buyer name" autocomplete="off" />
+          <button class="btn btn-primary" type="submit">Search</button>
+          {q && <a class="btn" href="/admin/marketplace/orders">Clear</a>}
+        </div>
+        <p class="hint">
+          An order number and an email address are matched exactly; a name is matched anywhere
+          within it. This searches the federation's own orders and marketplace baskets alike.
+        </p>
+      </form>
+
+      {/* ── The chain ──────────────────────────────────────────────────── */}
+      {openNo && !chain && !loadError && (
+        <div class="card"><p class="muted">No order numbered <code>{openNo}</code>.</p></div>
+      )}
+
+      {chain && (
+        <article class="card chain">
+          <header class="row between">
+            <div>
+              <h2 class="h3" style="margin:0">{chain.order.orderNo}</h2>
+              <p class="muted" style="margin:4px 0">
+                {when(chain.order.createdAt)} · {titleCase(chain.order.status)} ·
+                {' '}{money(chain.order.totalPaise)} {chain.order.currency}
+              </p>
+            </div>
+            <a class="btn btn-small" href={`/admin/marketplace/orders${q ? `?q=${encodeURIComponent(q)}` : ''}`}>Close</a>
+          </header>
+
+          {/* CUSTOMER */}
+          <h3 class="h4">Customer</h3>
+          <p>
+            {chain.order.buyerName ?? '—'}
+            {chain.person && <> · <code>{chain.person.federationId}</code></>}
+            {chain.order.email && <> · {chain.order.email}</>}
+            {chain.order.phone && <> · {chain.order.phone}</>}
+          </p>
+          {chain.person == null && (
+            <p class="hint">
+              No person record on this order, so it is identified by the email address it was placed
+              under. That is the ordinary shape for a guest purchase.
+            </p>
+          )}
+
+          {/* BASKET */}
+          <h3 class="h4">What was bought ({chain.lines.length})</h3>
+          <table>
+            <caption class="sr-only">Order lines</caption>
+            <thead><tr>
+              <th scope="col">Item</th><th scope="col" class="num">Qty</th>
+              <th scope="col" class="num">Unit</th><th scope="col" class="num">Tax</th>
+              <th scope="col" class="num">Total</th>
+            </tr></thead>
+            <tbody>
+              {chain.lines.map((l: any) => (
+                <tr>
+                  <td>{l.description}</td>
+                  <td class="num">{l.quantity}</td>
+                  <td class="num">{money(l.unitPricePaise)}</td>
+                  <td class="num">{money(l.taxPaise)}</td>
+                  <td class="num">{money(l.totalPaise)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr><th scope="row" colspan="4">Subtotal</th><td class="num">{money(chain.order.subtotalPaise)}</td></tr>
+              <tr><th scope="row" colspan="4">Tax</th><td class="num">{money(chain.order.taxPaise)}</td></tr>
+              <tr><th scope="row" colspan="4">Delivery</th><td class="num">{money(chain.order.shippingPaise)}</td></tr>
+              <tr class="grand"><th scope="row" colspan="4">Total</th><td class="num">{money(chain.order.totalPaise)}</td></tr>
+            </tfoot>
+          </table>
+
+          {/* PAYMENT */}
+          <h3 class="h4">Payments ({chain.payments.length})</h3>
+          {chain.payments.length === 0 && (
+            <p class="muted">No payment was ever begun against this order.</p>
+          )}
+          {chain.payments.length > 0 && (
+            <table>
+              <caption class="sr-only">Payments</caption>
+              <thead><tr>
+                <th scope="col">Provider</th><th scope="col">Status</th>
+                <th scope="col" class="num">Amount</th><th scope="col">Provider order</th>
+                <th scope="col">Provider payment</th><th scope="col">Failure</th>
+              </tr></thead>
+              <tbody>
+                {chain.payments.map((p: any) => (
+                  <tr>
+                    <td>{p.provider}</td>
+                    <td>{titleCase(p.status)}</td>
+                    <td class="num">{money(p.amountPaise)}</td>
+                    <td><code>{p.providerOrderId ?? '—'}</code></td>
+                    <td><code>{p.providerPaymentId ?? '—'}</code></td>
+                    <td>{p.failureReason ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {/* WEBHOOK */}
+          <h3 class="h4">Gateway callbacks ({chain.webhooks.length})</h3>
+          <p class="hint">
+            The envelope only. The raw body is not rendered here — it carries gateway detail that has
+            no business in a browser cache or a screenshot.
+          </p>
+          {chain.webhooks.length === 0 && (
+            <p class="muted">
+              No callback has been received for this order. Where a payment shows as captured with no
+              callback, it was confirmed by the reconciliation run rather than by the gateway calling.
+            </p>
+          )}
+          {chain.webhooks.length > 0 && (
+            <table>
+              <caption class="sr-only">Gateway callbacks</caption>
+              <thead><tr>
+                <th scope="col">Received</th><th scope="col">Event</th><th scope="col">Type</th>
+                <th scope="col">Signature</th><th scope="col">Processed</th><th scope="col">Error</th>
+              </tr></thead>
+              <tbody>
+                {chain.webhooks.map((w: any) => (
+                  <tr>
+                    <td>{when(w.receivedAt)}</td>
+                    <td><code>{w.eventId}</code></td>
+                    <td>{w.eventType}</td>
+                    <td>{w.signatureValid ? 'Verified' : 'REJECTED'}</td>
+                    <td>{w.processedAt ? when(w.processedAt) : 'Not processed'}</td>
+                    <td>{w.processingError ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {/* INVOICE */}
+          <h3 class="h4">Invoice</h3>
+          {chain.invoice
+            ? <p>
+                <code>{chain.invoice.invoiceNo}</code> issued {when(chain.invoice.issuedAt)}.
+                {chain.invoice.gstin && <> GSTIN {chain.invoice.gstin}.</>}
+                {chain.invoice.placeOfSupply && <> Place of supply {chain.invoice.placeOfSupply}.</>}
+              </p>
+            : <p class="muted">
+                No invoice has been issued. One is written inside the payment confirmation, so an order
+                that is paid and uninvoiced is a confirmation that did not finish.
+              </p>}
+
+          {/* INVENTORY */}
+          <h3 class="h4">Inventory</h3>
+          <p>{stockSummary()}</p>
+          {chain.reservations.length > 0 && (
+            <table>
+              <caption class="sr-only">Stock reservations</caption>
+              <thead><tr>
+                <th scope="col">Variant</th><th scope="col">Location</th>
+                <th scope="col" class="num">Qty</th><th scope="col">State</th><th scope="col">Expires</th>
+              </tr></thead>
+              <tbody>
+                {chain.reservations.map((r: any) => (
+                  <tr>
+                    <td>{r.variantId}</td>
+                    <td>{r.locationId}</td>
+                    <td class="num">{r.qty}</td>
+                    <td>{titleCase(r.status)}</td>
+                    <td>{when(r.expiresAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {chain.movements.length > 0 && (
+            <table>
+              <caption class="sr-only">Stock movements</caption>
+              {/* THE DELTAS, NOT A SINGLE QUANTITY. A movement is a change to
+                  five buckets at once — on hand, reserved, committed, damaged,
+                  in transit — and the whole point of a commitment is that it
+                  moves TWO of them in opposite directions. Collapsing that to
+                  one number would hide exactly what an operator came to see. */}
+              <thead><tr>
+                <th scope="col">When</th><th scope="col">Variant</th><th scope="col">Kind</th>
+                <th scope="col" class="num">On hand</th><th scope="col" class="num">Reserved</th>
+                <th scope="col" class="num">Committed</th><th scope="col" class="num">Damaged</th>
+                <th scope="col" class="num">After</th><th scope="col">Reason</th>
+              </tr></thead>
+              <tbody>
+                {chain.movements.map((m: any) => (
+                  <tr>
+                    <td>{when(m.at)}</td>
+                    <td>{m.variantId}</td>
+                    <td>{titleCase(m.kind)}</td>
+                    <td class="num">{m.onHandDelta}</td>
+                    <td class="num">{m.reservedDelta}</td>
+                    <td class="num">{m.committedDelta}</td>
+                    <td class="num">{m.damagedDelta}</td>
+                    <td class="num">{m.onHandAfter}</td>
+                    <td>{m.reason ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {/* SELLERS, SHIPMENTS */}
+          <h3 class="h4">Sellers and consignments ({chain.sellerOrders.length})</h3>
+          {chain.sellerOrders.length === 0 && (
+            <p class="muted">
+              No seller orders. This is one of the federation's own orders — a fee, a membership, an
+              entry, or something from the federation's half of the shop.
+            </p>
+          )}
+          {chain.sellerOrders.map((r: any) => (
+            <div class="so">
+              <p>
+                <strong>{r.so.sellerOrderNo}</strong> · {r.sellerName} ({r.sellerRef}) ·
+                {' '}{titleCase(r.so.status)} · {money(r.so.totalMinor)}
+                {r.storeSlug && <> · <a href={`/shop/seller/${r.storeSlug}`}>storefront</a></>}
+                {' '}· <a href={`/admin/marketplace/${r.so.sellerId}`}>dossier</a>
+              </p>
+              {chain.shipments.filter((sh: any) => sh.sellerOrderId === r.so.id).map((sh: any) => (
+                <p class="muted">
+                  Dispatched {date(sh.dispatchedAt)}
+                  {sh.carrier ? ` by ${sh.carrier}` : ''}
+                  {sh.trackingNumber ? ` — ${sh.trackingNumber}` : ' — no tracking recorded'}
+                  {sh.deliveredAt ? `. Delivered ${date(sh.deliveredAt)}.` : '.'}
+                </p>
+              ))}
+              {chain.returns.filter((rr: any) => rr.sellerOrderId === r.so.id).map((rr: any) => (
+                <p class="muted">
+                  Return <strong>{rr.ref}</strong> — {titleCase(rr.status)}
+                  {rr.refundedMinor ? `, refunded ${money(rr.refundedMinor)}` : ''}.
+                  {' '}<a href="/admin/marketplace/returns">Returns queue</a>
+                </p>
+              ))}
+              {chain.events.filter((e: any) => e.sellerOrderId === r.so.id).map((e: any) => (
+                <p class="hint">
+                  {when(e.createdAt)} · {titleCase(e.fromStatus)} → {titleCase(e.toStatus)} · by {e.byActor}
+                  {e.note ? ` — ${e.note}` : ''}
+                </p>
+              ))}
+            </div>
+          ))}
+
+          {/* REFUNDS */}
+          <h3 class="h4">Refunds ({chain.refunds.length})</h3>
+          {chain.refunds.length === 0 && <p class="muted">Nothing has been refunded.</p>}
+          {chain.refunds.length > 0 && (
+            <table>
+              <caption class="sr-only">Refunds</caption>
+              <thead><tr>
+                <th scope="col">Raised</th><th scope="col" class="num">Amount</th>
+                <th scope="col">Status</th><th scope="col">Provider ref</th><th scope="col">Reason</th>
+              </tr></thead>
+              <tbody>
+                {chain.refunds.map((rf: any) => (
+                  <tr>
+                    <td>{when(rf.createdAt)}</td>
+                    <td class="num">{money(rf.amountPaise)}</td>
+                    <td>{titleCase(rf.status)}</td>
+                    <td><code>{rf.providerRefundId ?? '—'}</code></td>
+                    <td>{rf.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {/* AUDIT */}
+          <h3 class="h4">Audit trail ({chain.audit.length})</h3>
+          <p class="hint">
+            Every recorded act against this order, its payments, its refunds, its seller orders and
+            its returns — in the order they happened.
+          </p>
+          {chain.audit.length === 0 && <p class="muted">Nothing is recorded.</p>}
+          {chain.audit.length > 0 && (
+            <table>
+              <caption class="sr-only">Audit events</caption>
+              <thead><tr>
+                <th scope="col">When</th><th scope="col">Entity</th>
+                <th scope="col">Action</th><th scope="col">Actor</th><th scope="col">Reason</th>
+              </tr></thead>
+              <tbody>
+                {chain.audit.map((a: any) => (
+                  <tr>
+                    <td>{when(a.createdAt)}</td>
+                    <td>{titleCase(a.entityType)} {a.entityId}</td>
+                    <td>{titleCase(a.action)}</td>
+                    <td>{a.actorUserId ?? a.authority ?? '—'}</td>
+                    <td>{a.reason ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </article>
+      )}
+
+      {/* ── The fulfilment backlog ───────────────────────────────────────
+             Paid and not yet dispatched. Ordered newest first by the query;
+             a dispatch DEADLINE is shown only where MMAKF has published an
+             SLA, because a countdown against an invented window is a threat
+             the federation cannot stand behind. */}
+      {backlog.length > 0 && (
+        <>
+          <h2 class="h3">Paid and awaiting dispatch ({backlog.length})</h2>
+          <table class="card">
+            <caption class="sr-only">Seller orders awaiting dispatch</caption>
+            <thead><tr>
+              <th scope="col">Seller order</th><th scope="col">Seller</th>
+              <th scope="col">Order</th><th scope="col">Status</th>
+              <th scope="col" class="num">Total</th><th scope="col">Dispatch by</th>
+              <th scope="col">Cancel</th>
+            </tr></thead>
+            <tbody>
+              {backlog.map((r: any) => (
+                <tr>
+                  <th scope="row">{r.so.sellerOrderNo}</th>
+                  <td><a href={`/admin/marketplace/${r.so.sellerId}`}>{r.sellerName}</a></td>
+                  <td>
+                    <a href={`/admin/marketplace/orders?order=${encodeURIComponent(r.orderNo)}`}>{r.orderNo}</a>
+                  </td>
+                  <td>{titleCase(r.so.status)}</td>
+                  <td class="num">{money(r.so.totalMinor)}</td>
+                  <td>
+                    {r.so.dispatchBy
+                      ? <>{date(r.so.dispatchBy)}{new Date(r.so.dispatchBy) < new Date() ? ' — overdue' : ''}</>
+                      : <span class="muted">No deadline set</span>}
+                  </td>
+                  <td>
+                    {/* ── CANCELLING ON THE BUYER'S BEHALF ─────────────────
+                         cancelSellerOrder() accepts `by: 'buyer'` and requires
+                         FEDERATION authority to use it — a buyer cannot cancel
+                         their own seller order, deliberately, because the goods
+                         may already be packed. So a buyer who rings the office
+                         is the only route, and the office had no control at
+                         all: `order/cancel` existed and only a seller could
+                         reach it.
+
+                         WHO CANCELLED IS RECORDED SEPARATELY from who pressed
+                         the button, because the seller's cancellation rate is a
+                         performance measure and must count only the ones they
+                         caused. That is why this asks. */}
+                    {mayCancel
+                      ? <button class="btn btn-small" data-cancel={r.so.id}>Cancel</button>
+                      : <span class="muted">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      {/* ── The list ───────────────────────────────────────────────────── */}
+      <h2 class="h3">{q ? `Matching orders (${rows.length})` : `Recent orders (${rows.length})`}</h2>
+      {rows.length === 0 && (
+        <div class="card"><p class="muted">{q ? 'Nothing matched.' : 'No orders yet.'}</p></div>
+      )}
+      {rows.length > 0 && (
+        <table class="card">
+          <caption class="sr-only">Orders</caption>
+          <thead><tr>
+            <th scope="col">Order</th><th scope="col">Placed</th><th scope="col">Buyer</th>
+            <th scope="col">Status</th><th scope="col" class="num">Total</th>
+            <th scope="col">Kind</th><th scope="col">Paid</th><th scope="col">Invoice</th>
+          </tr></thead>
+          <tbody>
+            {rows.map((r: any) => (
+              <tr>
+                <th scope="row">
+                  <a href={`/admin/marketplace/orders?order=${encodeURIComponent(r.order.orderNo)}${q ? `&q=${encodeURIComponent(q)}` : ''}`}>
+                    {r.order.orderNo}
+                  </a>
+                </th>
+                <td>{date(r.order.createdAt)}</td>
+                <td>{r.order.buyerName ?? r.order.email ?? '—'}</td>
+                <td>{titleCase(r.order.status)}</td>
+                <td class="num">{money(r.order.totalPaise)}</td>
+                <td>{r.sellerOrderCount > 0 ? `Marketplace (${r.sellerOrderCount})` : 'Federation'}</td>
+                <td>{r.capturedCount > 0 ? 'Yes' : 'No'}</td>
+                <td>{r.invoiceNo ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <p id="page-error" class="error" role="alert" hidden></p>
+    </div>
+  </section>
+</AdminShell>
+
+<script>
+  const pageError = document.getElementById('page-error');
+  const say = (m: string) => {
+    if (!pageError) { window.alert(m); return; }
+    pageError.textContent = m; pageError.hidden = false;
+    pageError.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  document.querySelectorAll('[data-cancel]').forEach((b) => b.addEventListener('click', async () => {
+    const who = window.prompt(
+      'Who is cancelling? Type "buyer" if the buyer asked, or "federation" if MMAKF decided. ' +
+      'This is recorded separately from who pressed the button, because a seller\u2019s ' +
+      'cancellation rate must count only the ones they caused.'
+    );
+    if (!who) return;
+    const by = who.trim().toLowerCase();
+    if (by !== 'buyer' && by !== 'federation') {
+      say('Answer "buyer" or "federation". Nothing has been cancelled.');
+      return;
+    }
+    const reason = window.prompt('Why is it being cancelled? The buyer and the seller both read this.');
+    if (!reason) return;
+
+    const r = await fetch('/api/marketplace/order/cancel', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sellerOrderId: Number((b as HTMLElement).dataset.cancel), reason, by }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (r.ok && body.ok) { window.location.reload(); return; }
+    say(body.error || 'Could not cancel the order. Nothing has been changed.');
+  }));
+</script>
+
+<style>
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .row.between { justify-content: space-between; align-items: flex-start; }
+  .row input { flex: 1 1 240px; min-width: 0; }
+  .chain h3 { margin-top: 22px; }
+  .so { border-top: 1px solid rgba(128,128,128,0.3); padding: 10px 0; }
+  .muted { opacity: 0.75; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
+  .error { color: #b00020; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); vertical-align: top; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  tfoot th { text-align: right; font-weight: 400; }
+  tfoot .grand th, tfoot .grand td { font-weight: 700; }
+  .btn-small { padding: 4px 10px; font-size: 0.9em; }
+  label { display: block; margin-bottom: 6px; font-size: 0.9em; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style>

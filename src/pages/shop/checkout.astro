@@ -225,6 +225,88 @@ Astro.response.headers.set('Cache-Control', 'no-store, private');
       errBox.hidden = false;
     }
 
+    function loadScript(src: string): Promise<boolean> {
+      return new Promise((resolve) => {
+        const el = document.createElement('script');
+        el.src = src;
+        el.onload = () => resolve(true);
+        el.onerror = () => resolve(false);
+        document.head.appendChild(el);
+      });
+    }
+
+    /**
+     * Open the provider's own payment window.
+     *
+     * ─── THE GAP THIS CLOSES ───────────────────────────────────────────────
+     *
+     * /api/shop/pay already asked the provider for a payment and returned its
+     * PUBLIC checkout parameters, and this page printed a sentence: "a payment
+     * has been opened with razorpay… the federation office can confirm receipt
+     * against that reference." There was no window, no card form and no way to
+     * pay. A marketplace order could be placed, its stock reserved and its
+     * commission frozen, and the buyer could not hand over any money — the
+     * chain ran the whole way to the gateway and stopped one step short.
+     *
+     * /checkout — the FEDERATION's own shop — has opened this window for
+     * months. This is the same handler, on the same terms.
+     *
+     * ─── WHAT THIS FUNCTION DOES NOT DO ────────────────────────────────────
+     *
+     * IT DOES NOT MARK ANYTHING PAID. The `handler` callback fires when the
+     * provider's widget says the payment was submitted, and that is a claim
+     * made in the buyer's browser. confirmPayment() in src/db/orders.ts marks
+     * an order paid, from a signature-verified webhook or the reconcile cron,
+     * and nothing else does. So the wording here says the payment was
+     * SUBMITTED and that the federation confirms it — which is what happened.
+     *
+     * AND IT CARRIES NO SECRET. `payd.checkout` is the public parameter set:
+     * a key id, an order id, an amount and the buyer's own details. The secret
+     * never leaves the server; see src/lib/payments/razorpay.ts.
+     */
+    async function openProviderWindow(payd: any, orderNo: string): Promise<string> {
+      const amount = inr(Number(payd.amountPaise) || 0);
+
+      const loaded =
+        (window as any).Razorpay || (await loadScript('https://checkout.razorpay.com/v1/checkout.js'));
+      if (!(window as any).Razorpay || !loaded) {
+        // STATED, NOT SWALLOWED. The order exists and the stock is held; what
+        // failed is this browser's ability to open the window.
+        return '<p>The payment window could not be loaded in this browser. Your order is recorded ' +
+          'as awaiting payment and <strong>nothing has been charged</strong>. Contact the federation ' +
+          'office quoting order <strong>' + esc(orderNo) + '</strong>.</p>';
+      }
+
+      const rzp = new (window as any).Razorpay({
+        ...payd.checkout,
+        handler: () => {
+          const box = document.getElementById('mkPayState');
+          if (box) {
+            box.innerHTML =
+              '<p>The payment of ' + esc(amount) + ' has been submitted. MMAKF confirms it against ' +
+              'the payment provider’s own record before the order is marked paid and your receipt ' +
+              'is issued — a confirmation on this page is not proof of payment.</p>' +
+              '<p><a class="btn btn-gold" href="/my/orders">See it in your orders</a></p>';
+          }
+        },
+        modal: {
+          ondismiss: () => {
+            const box = document.getElementById('mkPayState');
+            if (box) {
+              box.innerHTML =
+                '<p>The payment window was closed before payment completed, so ' +
+                '<strong>nothing has been charged</strong>. Your order is held with its stock ' +
+                'reserved until the deadline above. ' +
+                '<a href="/my/orders">Open it from your orders</a> to try again.</p>';
+            }
+          },
+        },
+      });
+      rzp.open();
+
+      return '<div id="mkPayState"><p>Opening the payment window for ' + esc(amount) + '…</p></div>';
+    }
+
     async function paint() {
       errBox.hidden = true;
       const lines = read();
@@ -361,6 +443,10 @@ Astro.response.headers.set('Cache-Control', 'no-store, private');
         const payd = await paid.json().catch(() => null);
 
         const held = (order.sellerOrders || []).filter((s: any) => s.commissionHeld).length;
+        // Set when the provider returned a window to open. Opened AFTER the
+        // result panel is in the document, because the widget's own callbacks
+        // write into an element inside it.
+        let needsWindow: any = null;
         let out = '<div class="card"><h2 class="card-title">Order ' + esc(order.orderNo) + ' placed</h2>';
         out += '<div class="mk-tot"><span class="muted">Total</span><span>' + inr(order.totalMinor) + '</span></div>';
         out += '<div class="mk-tot"><span class="muted">Sellers</span><span>' +
@@ -384,12 +470,18 @@ Astro.response.headers.set('Cache-Control', 'no-store, private');
             out += '<p>Pay ' + inr(payd.amountPaise) + ' by UPI and quote <strong>' +
               esc(payd.orderNo) + '</strong> as the reference.</p>';
             out += '<p><a class="btn btn-gold" href="' + esc(payd.checkout.upiUri) + '">Open your UPI app</a></p>';
+            // A upi:// link does nothing in a desktop browser, so the other
+            // route is given in the same breath rather than left as a dead
+            // button — the same allowance /checkout makes.
+            out += '<p class="muted">That button opens a UPI app on a phone. On a computer, pay the ' +
+              'UPI ID from your own app keeping the reference exactly as shown.</p>';
+            out += '<p class="muted">This order is not paid yet. It is marked paid, and your receipt ' +
+              'issued, once the federation office has confirmed the money against its statement.</p>';
           } else {
-            // A provider flow this page does not render. The order is real and
-            // the reference is real, so both are stated rather than dressed up.
-            out += '<p>A payment has been opened with ' + esc(payd.provider) +
-              ' for ' + inr(payd.amountPaise) + ', under reference <strong>' + esc(payd.orderNo) +
-              '</strong>. The federation office can confirm receipt against that reference.</p>';
+            // THE PROVIDER'S OWN WINDOW. Rendered after this block is placed in
+            // the document, because the widget's callbacks write into #mkPayState.
+            needsWindow = payd;
+            out += '<div id="mkPayState"><p>Opening the payment window…</p></div>';
           }
         } else {
           out += '<h3 style="margin-top:18px">Payment could not be started</h3>';
@@ -403,6 +495,14 @@ Astro.response.headers.set('Cache-Control', 'no-store, private');
         resultBox.hidden = false;
         form.hidden = true;
         basketBox.hidden = true;
+
+        if (needsWindow) {
+          const state = document.getElementById('mkPayState');
+          const html = await openProviderWindow(needsWindow, order.orderNo);
+          // openProviderWindow() returns markup only when it could NOT open the
+          // window; when it did, it manages #mkPayState through its callbacks.
+          if (state && html.indexOf('mkPayState') === -1) state.innerHTML = html;
+        }
       } catch {
         fail('The connection failed. If you did not see a confirmation, nothing was charged.');
       } finally {

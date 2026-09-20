@@ -895,3 +895,111 @@ async function assertBuyerOf(db: DB, principal: Principal, sellerOrder: any) {
     throw new MarketplaceError('not_your_order', 'That order does not belong to this account.');
   }
 }
+
+/**
+ * The lines on a set of returns, for the seller who owns them.
+ *
+ * ─── WHY THIS EXISTS ────────────────────────────────────────────────────────
+ *
+ * inspectReturn() takes one row per RETURN ITEM — received, sellable, damaged
+ * and a result for each — and `myReturns()` returns the request rows only. So
+ * the seller portal could show that a return existed and could not draw the
+ * form that closes it: the inspection, the restock and the refund were
+ * reachable over HTTP and by nothing a human could press. A return could be
+ * asked for and authorised, and then the money stopped there.
+ *
+ * ─── AUTHORISATION IS IN THE SQL, NOT AFTER IT ──────────────────────────────
+ *
+ * The join onto `return_requests` carries `seller_id = <the caller's own>`, so
+ * a request belonging to another seller contributes no rows rather than being
+ * fetched and dropped. Ids arriving from the page are therefore harmless: the
+ * worst a tampered list achieves is an empty answer.
+ *
+ * ONE QUERY FOR THE WHOLE PAGE. The portal lists up to fifty returns, and a
+ * per-return fetch would be fifty round trips on a page that already makes
+ * several.
+ */
+export async function myReturnItems(
+  db: DB, principal: Principal, returnRequestIds: number[]
+): Promise<Map<number, any[]>> {
+  const out = new Map<number, any[]>();
+  const ids = [...new Set((returnRequestIds ?? []).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!ids.length) return out;
+
+  const seller = await ownSellerRecord(db, principal);
+
+  const rows = await db.select({
+    item: s.returnItems,
+    returnRequestId: s.returnRequests.id,
+  })
+    .from(s.returnItems)
+    .innerJoin(s.returnRequests, eq(s.returnItems.returnRequestId, s.returnRequests.id))
+    .where(and(
+      inArray(s.returnItems.returnRequestId, ids),
+      eq(s.returnRequests.sellerId, seller.id),
+    ))
+    .orderBy(asc(s.returnItems.id));
+
+  for (const r of rows as any[]) {
+    const list = out.get(r.returnRequestId) ?? [];
+    list.push(r.item);
+    out.set(r.returnRequestId, list);
+  }
+  return out;
+}
+
+/**
+ * Returns awaiting the federation, with the seller and buyer order named.
+ *
+ * The seller works their own returns from the portal. THIS IS THE OTHER HALF:
+ * a return whose seller has gone quiet, one a buyer has escalated, and — the
+ * case that matters most — a refund the federation itself has to post, which
+ * refundReturn() already permits under `marketplace:dispute` and which nothing
+ * in the admin surface could reach.
+ *
+ * SCOPED BY THE ACTION, not by a filter on the page. `marketplace:read` is
+ * asserted here, and the rows are the federation's own queue rather than any
+ * one seller's.
+ */
+export async function returnQueue(db: DB, principal: Principal, limit = 200) {
+  assertCan(principal, 'marketplace:read', {});
+  return db.select({
+    request: s.returnRequests,
+    sellerName: s.sellers.tradingName,
+    sellerRef: s.sellers.ref,
+    sellerOrderNo: s.sellerOrders.sellerOrderNo,
+    orderNo: s.orders.orderNo,
+  })
+    .from(s.returnRequests)
+    .innerJoin(s.sellers, eq(s.returnRequests.sellerId, s.sellers.id))
+    .innerJoin(s.sellerOrders, eq(s.returnRequests.sellerOrderId, s.sellerOrders.id))
+    .innerJoin(s.orders, eq(s.sellerOrders.orderId, s.orders.id))
+    // CLOSED STATES ARE ABSENT. A queue that lists everything ever returned is
+    // a report, and nobody works a report.
+    .where(inArray(s.returnRequests.status, [
+      'requested', 'authorised', 'in_transit', 'received', 'inspected', 'rejected',
+    ]))
+    .orderBy(asc(s.returnRequests.requestedAt))
+    .limit(Math.min(limit, 500));
+}
+
+/** The lines on one return, for a federation officer working the queue. */
+export async function returnItemsForAdmin(
+  db: DB, principal: Principal, returnRequestIds: number[]
+): Promise<Map<number, any[]>> {
+  assertCan(principal, 'marketplace:read', {});
+  const out = new Map<number, any[]>();
+  const ids = [...new Set((returnRequestIds ?? []).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!ids.length) return out;
+
+  const rows = await db.select().from(s.returnItems)
+    .where(inArray(s.returnItems.returnRequestId, ids))
+    .orderBy(asc(s.returnItems.id));
+
+  for (const r of rows as any[]) {
+    const list = out.get(r.returnRequestId) ?? [];
+    list.push(r);
+    out.set(r.returnRequestId, list);
+  }
+  return out;
+}

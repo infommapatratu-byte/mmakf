@@ -749,6 +749,44 @@ const HANDLERS: Record<string, Handler> = {
   // ── Catalogue governance ──────────────────────────────────────────────────
   'taxonomy/adopt': (ctx) => cat.adoptProposedTaxonomy(db(), ctx),
 
+  // ── Managing the taxonomy after adoption ──────────────────────────────────
+  //
+  // THERE IS NO `slug` ON category/update AND NO parent MOVE, and the absence is
+  // the point: `marketplace_categories.path` is materialised ancestry, so a
+  // renamed slug breaks every published URL and orphans the path of every
+  // descendant. See the note above createCategory() in src/db/catalogue.ts.
+  'category/create': (ctx, b) => cat.createCategory(db(), ctx, {
+    slug: str(b, 'slug'),
+    name: str(b, 'name'),
+    parentSlug: optStr(b, 'parentSlug'),
+    description: optStr(b, 'description'),
+    policy: (optStr(b, 'policy') ?? undefined) as any,
+    policyReason: optStr(b, 'policyReason'),
+    requiresSafetyClassification: Boolean(b.requiresSafetyClassification),
+    requiresAgeStatement: Boolean(b.requiresAgeStatement),
+    requiresCertification: Boolean(b.requiresCertification),
+    requiresFederationApproval: Boolean(b.requiresFederationApproval),
+  }),
+
+  'category/update': (ctx, b) => cat.updateCategory(db(), ctx, str(b, 'slug'), {
+    ...(b.name === undefined ? {} : { name: str(b, 'name') }),
+    ...(b.description === undefined ? {} : { description: optStr(b, 'description') }),
+    ...(b.policy === undefined ? {} : { policy: str(b, 'policy') as any }),
+    ...(b.policyReason === undefined ? {} : { policyReason: optStr(b, 'policyReason') }),
+    ...(b.requiresSafetyClassification === undefined ? {} : { requiresSafetyClassification: Boolean(b.requiresSafetyClassification) }),
+    ...(b.requiresAgeStatement === undefined ? {} : { requiresAgeStatement: Boolean(b.requiresAgeStatement) }),
+    ...(b.requiresCertification === undefined ? {} : { requiresCertification: Boolean(b.requiresCertification) }),
+    ...(b.requiresFederationApproval === undefined ? {} : { requiresFederationApproval: Boolean(b.requiresFederationApproval) }),
+  }),
+
+  // RETIRES, NEVER DELETES — and retiring a category withdraws NOTHING from
+  // sale. Items filed under it stay on sale and stay browsable under its
+  // ancestors; withdrawing goods is a decision about goods.
+  'category/retire': (ctx, b) =>
+    cat.setCategoryActive(db(), ctx, str(b, 'slug'), false, str(b, 'reason')),
+  'category/restore': (ctx, b) =>
+    cat.setCategoryActive(db(), ctx, str(b, 'slug'), true, str(b, 'reason')),
+
   // Quarantine: ONE column, and the item leaves every public surface at once
   // while its orders, reviews and revisions survive.
   'listing/quarantine': (ctx, b) =>

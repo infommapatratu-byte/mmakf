@@ -21,6 +21,11 @@ import { eq, sql } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { COMMISSION_NOT_SET } from '@/db/marketplace';
 import { COMMISSION_NOT_CONFIGURED, SLA_NOT_SET, myAccount } from '@/db/marketplace-finance';
+// A seller could be publicly criticised on the federation's own domain and had
+// no way to answer: replyToReview() existed and no control anywhere called it.
+// A marketplace that publishes the complaint and withholds the reply is not
+// being neutral.
+import { myPublishedReviews } from '@/db/marketplace-trust';
 import { effectiveReturnPolicy } from '@/db/returns';
 import { policiesForSeller, NO_MANDATORY_POLICIES } from '@/db/marketplace-policy';
 import { slaFor } from '@/db/seller-orders';
@@ -35,6 +40,7 @@ const ctx = await sellerContext(Astro.request.headers.get('cookie'));
 
 let counts = { listings: 0, live: 0, inReview: 0, openOrders: 0, openReturns: 0, disputes: 0 };
 let account: any = null;
+let reviews: any = { product: [], seller: [] };
 let sla: any = null;
 let returnPolicy: any = null;
 let policies: any[] = [];
@@ -68,6 +74,11 @@ if (ctx.gate === 'seller' && ctx.seller && !pageError) {
     counts.disputes = await one(db().select({ n: sql<number>`count(*)::int` })
       .from(s.marketplaceDisputes).where(sql`${s.marketplaceDisputes.sellerId} = ${sellerId}
         and ${s.marketplaceDisputes.status} in ('open','seller_responding','under_review','escalated')`));
+
+    // Published reviews only. A seller must not read a PENDING one: it has not
+    // been moderated yet, and a seller who knows what a buyer wrote before
+    // MMAKF has decided whether to publish it can act on it.
+    reviews = await myPublishedReviews(db(), sellerId, 50);
 
     account = await myAccount(db(), ctx.identity!.principal);
     sla = await slaFor(db(), sellerId);
@@ -249,6 +260,58 @@ const verifications = (ctx.profile?.verifications ?? [])
             </form>
           )}
 
+          {/* ── Reviews, and the right of reply ──────────────────────────
+               PUBLISHED ONLY, so nothing here is a review MMAKF is still
+               deciding about. A reply is public and permanent in the same way
+               the review is, which is why it is written in a form with the
+               review visible above it rather than from a notification. */}
+          {ctx.approved && (reviews.product.length > 0 || reviews.seller.length > 0) && (
+            <div class="card">
+              <div class="eyebrow">Reviews</div>
+              <h2 class="h3">What buyers have said</h2>
+              <p class="hint">
+                These are already public. You may reply once to each; the reply appears beneath the
+                review on the shop. MMAKF does not remove a published review because a seller
+                disagrees with it — the reply is the remedy.
+              </p>
+
+              {reviews.seller.map((r: any) => (
+                <article class="review">
+                  <p><strong>{r.ratingOverall} out of 5</strong> — your shop</p>
+                  {r.body && <p>{r.body}</p>}
+                  {r.sellerReply
+                    ? <p class="muted"><strong>You replied:</strong> {r.sellerReply}</p>
+                    : (
+                      <form class="reply-form" data-kind="seller" data-id={r.id}>
+                        <label class="sr-only" for={`sr-${r.id}`}>Your reply</label>
+                        <textarea id={`sr-${r.id}`} name="reply" rows="2" required maxlength="4000"></textarea>
+                        <button class="btn btn-small" type="submit">Reply publicly</button>
+                      </form>
+                    )}
+                </article>
+              ))}
+
+              {reviews.product.map((r: any) => (
+                <article class="review">
+                  <p>
+                    <strong>{r.review.rating} out of 5</strong> — {r.listingTitle}
+                    {r.review.title ? ` — ${r.review.title}` : ''}
+                  </p>
+                  {r.review.body && <p>{r.review.body}</p>}
+                  {r.review.sellerReply
+                    ? <p class="muted"><strong>You replied:</strong> {r.review.sellerReply}</p>
+                    : (
+                      <form class="reply-form" data-kind="product" data-id={r.review.id}>
+                        <label class="sr-only" for={`pr-${r.review.id}`}>Your reply</label>
+                        <textarea id={`pr-${r.review.id}`} name="reply" rows="2" required maxlength="4000"></textarea>
+                        <button class="btn btn-small" type="submit">Reply publicly</button>
+                      </form>
+                    )}
+                </article>
+              ))}
+            </div>
+          )}
+
           {/* ── What the federation has not decided ────────────────────── */}
           <div class="card">
             <div class="eyebrow">Terms</div>
@@ -423,9 +486,44 @@ const verifications = (ctx.profile?.verifications ?? [])
     });
   }
   acceptPolicyHandler();
+
+  // ── Replying to a review ──────────────────────────────────────────────────
+  //
+  // Its own listener rather than reusing the store form's helper, which is
+  // scoped inside `if (form)` and does not exist on a page whose store panel is
+  // hidden — the same reasoning as the policy handler above.
+  //
+  // CONFIRMED BEFORE SENDING, because replyToReview() allows one reply and the
+  // reply is public. A seller who typed in anger and pressed the button has no
+  // second attempt, and finding that out afterwards is the wrong moment.
+  document.querySelectorAll('.reply-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const el = form as HTMLFormElement;
+      const text = (el.querySelector('textarea[name="reply"]') as HTMLTextAreaElement | null)?.value ?? '';
+      if (!text.trim()) return;
+      if (!window.confirm('This reply is published beneath the review and cannot be changed. Send it?')) return;
+
+      const r = await fetch('/api/marketplace/review/reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: (form as HTMLElement).dataset.kind,
+          reviewId: Number((form as HTMLElement).dataset.id),
+          reply: text.trim(),
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (r.ok && body.ok) { window.location.reload(); return; }
+      window.alert(body.error || 'The reply could not be sent. Nothing has been published.');
+    });
+  });
 </script>
 
 <style>
+  .review { border-top: 1px solid rgba(128,128,128,0.3); padding: 12px 0; }
+  .reply-form textarea { width: 100%; max-width: 640px; }
+
   .tabs { display: flex; gap: 16px; margin: 18px 0; flex-wrap: wrap; }
   .tabs a { padding: 6px 0; border-bottom: 2px solid transparent; text-decoration: none; }
   .tabs a[aria-current='page'] { border-bottom-color: currentColor; font-weight: 600; }

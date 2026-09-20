@@ -6,7 +6,7 @@
 // from a payment page, not when the browser says so, not when someone reports
 // it on WhatsApp.
 
-import { and, eq, gte, isNull, lte, or, sql, desc } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, lte, or, sql, desc } from 'drizzle-orm';
 import crypto from 'node:crypto';
 import * as s from './schema';
 import { writeAudit, type AuditContext } from './federation';
@@ -1258,4 +1258,305 @@ export async function completeRefund(
 
   const after = (await db.select().from(s.refunds).where(eq(s.refunds.id, refund.id)).limit(1))[0];
   return { refund: after, alreadyCompleted: false, fullyRefunded: full, revocation, trainingRevocation };
+}
+
+/**
+ * The orders one signed-in person placed with the FEDERATION itself.
+ *
+ * ─── WHY THIS IS NOT listOrders() ───────────────────────────────────────────
+ *
+ * listOrders() asserts `finance:read` and returns every order in the system: it
+ * is the treasurer's list, and it had no caller either. A buyer holds no
+ * finance action and must not — so a buyer's own orders need a query whose
+ * authorisation is the PERSON, and that is this one.
+ *
+ * ─── AND WHY IT EXCLUDES MARKETPLACE BASKETS ────────────────────────────────
+ *
+ * An order carrying seller orders is a marketplace purchase and is shown with
+ * its parcels, its consignments and its returns. An order with none is the
+ * federation's own — a membership, a course fee, an event entry, or something
+ * bought from /shop — and those have no parcel to track and no seller to chase.
+ * Listing both in one undifferentiated table would put "awaiting dispatch"
+ * beside a membership renewal.
+ *
+ * THE INVOICE IS A LEFT JOIN. An order with no invoice is the ordinary state of
+ * anything not yet paid, and an inner join would drop exactly the rows somebody
+ * came here to pay.
+ */
+export async function myFederationOrders(db: DB, personId: number, limit = 50) {
+  if (!Number.isInteger(personId) || personId <= 0) return [];
+  return db.select({
+    order: s.orders,
+    invoiceNo: s.invoices.invoiceNo,
+    invoiceIssuedAt: s.invoices.issuedAt,
+  })
+    .from(s.orders)
+    .leftJoin(s.invoices, eq(s.invoices.orderId, s.orders.id))
+    .where(and(
+      eq(s.orders.personId, personId),
+      // NOT EXISTS rather than a left join and a null test: the marketplace
+      // half of this page already fetches those orders in full, and a join here
+      // would multiply an order by its seller orders before the filter ran.
+      sql`not exists (select 1 from seller_orders so where so.order_id = ${s.orders.id})`,
+    ))
+    .orderBy(desc(s.orders.createdAt))
+    .limit(Math.min(limit, 200));
+}
+
+/**
+ * One invoice, for the person it was issued to.
+ *
+ * ─── THE RECEIPT HAD NO DOOR ────────────────────────────────────────────────
+ *
+ * issueInvoice() runs inside the payment confirmation and freezes a complete
+ * snapshot — lines, unit prices, tax, carriage, total, the address it shipped
+ * to — precisely so that a later catalogue edit cannot alter an issued receipt.
+ * Nothing then read it. `invoices.verify_token` is minted on every issue and no
+ * code path anywhere resolves one. A buyer was charged, an immutable receipt
+ * was written, and there was no page on which they could see it.
+ *
+ * ─── OWNERSHIP, FROM THE SESSION AND NOTHING ELSE ───────────────────────────
+ *
+ * An invoice number is a SEQUENCE. Without an ownership test, counting upwards
+ * would walk the federation's entire billing history — with names, telephone
+ * numbers and delivery addresses in every snapshot. So the order is matched on
+ * the caller's PERSON record, and where the order carries none, on the address
+ * the account is registered with — the same two tests /api/shop/pay applies,
+ * for the same reason.
+ *
+ * A STRANGER'S INVOICE AND A NON-EXISTENT ONE BOTH RETURN NULL. Telling them
+ * apart would make this an oracle for which invoice numbers exist.
+ */
+export async function invoiceForBuyer(db: DB, principal: Principal, invoiceNo: string) {
+  const ref = String(invoiceNo ?? '').trim();
+  if (!ref) return null;
+  const userId = principal?.userId ?? null;
+  if (userId == null) return null;
+
+  const row = (await db.select({ invoice: s.invoices, order: s.orders })
+    .from(s.invoices)
+    .innerJoin(s.orders, eq(s.invoices.orderId, s.orders.id))
+    .where(eq(s.invoices.invoiceNo, ref))
+    .limit(1))[0];
+  if (!row) return null;
+
+  const account = (await db.select({ personId: s.users.personId, email: s.users.email })
+    .from(s.users).where(eq(s.users.id, userId)).limit(1))[0];
+
+  let mine = false;
+  if (account?.personId != null && row.order.personId === account.personId) {
+    mine = true;
+  } else if (row.order.personId == null && account?.email && row.order.email) {
+    mine = String(account.email).trim().toLowerCase() === String(row.order.email).trim().toLowerCase();
+  }
+  if (!mine) return null;
+
+  const payments = await db.select().from(s.payments)
+    .where(eq(s.payments.orderId, row.order.id))
+    .orderBy(desc(s.payments.id));
+
+  return { invoice: row.invoice, order: row.order, payments };
+}
+
+/**
+ * ONE ORDER, AND EVERY RECORD IT TOUCHED.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WHY THIS FUNCTION EXISTS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * A support desk is asked one question — "what happened to my order?" — and
+ * answering it meant opening a database client. The records were all there and
+ * they were in eleven tables, joined by four different keys, with no surface
+ * that walked them: `sellerOrdersForAdmin()` had no caller, `listOrders()` had
+ * no caller, and the reconciliation console works from the money end and cannot
+ * start from an order number.
+ *
+ * So when a buyer says they were charged and got nothing, the federation could
+ * see the payment OR the seller order OR the stock movement, one query at a
+ * time, and could not put them beside each other. That is precisely the moment
+ * an operator needs the whole chain, because the fault is always in the join.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WHAT IT DELIBERATELY DOES NOT DO
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * IT WRITES NOTHING and it decides nothing. It does not compute whether the
+ * order "looks right", because a judgement rendered as a green tick is one an
+ * operator stops checking. It puts the rows on one page, in the order they
+ * happened, and leaves the reading to the person paid to do it.
+ *
+ * NO WEBHOOK PAYLOAD IS RETURNED. `payment_events.payload` is the gateway's raw
+ * body, and a raw body rendered into an admin page is how a card fingerprint, a
+ * contact number, or a token ends up in a browser cache and a screenshot. What
+ * comes back is the envelope — provider, event id, type, whether the signature
+ * verified, when it arrived, whether it was processed and any processing error
+ * — which is the whole of what diagnosing a webhook needs.
+ *
+ * ONE AUTHORISATION, ASSERTED ONCE, AT THE TOP. Everything below hangs off a
+ * single order the caller has already been allowed to read; re-asserting per
+ * table would be theatre, and forgetting to assert at all would be the bug.
+ */
+export async function orderChainForAdmin(db: DB, principal: Principal, orderNo: string) {
+  assertCanAnywhere(principal, 'finance:read');
+
+  const order = (await db.select().from(s.orders)
+    .where(eq(s.orders.orderNo, String(orderNo ?? '').trim())).limit(1))[0];
+  if (!order) return null;
+
+  const lines = await db.select().from(s.orderLines)
+    .where(eq(s.orderLines.orderId, order.id)).orderBy(s.orderLines.id);
+
+  const payments = await db.select().from(s.payments)
+    .where(eq(s.payments.orderId, order.id)).orderBy(s.payments.id);
+
+  // The ENVELOPE only — never `payload`. See the note above.
+  const webhooks = await db.select({
+    id: s.paymentEvents.id,
+    provider: s.paymentEvents.provider,
+    eventId: s.paymentEvents.eventId,
+    eventType: s.paymentEvents.eventType,
+    signatureValid: s.paymentEvents.signatureValid,
+    receivedAt: s.paymentEvents.receivedAt,
+    processedAt: s.paymentEvents.processedAt,
+    processingError: s.paymentEvents.processingError,
+  }).from(s.paymentEvents)
+    .where(eq(s.paymentEvents.orderId, order.id))
+    .orderBy(s.paymentEvents.receivedAt);
+
+  const invoice = (await db.select().from(s.invoices)
+    .where(eq(s.invoices.orderId, order.id)).limit(1))[0] ?? null;
+
+  const refundRows = await db.select().from(s.refunds)
+    .where(eq(s.refunds.orderId, order.id)).orderBy(s.refunds.id);
+
+  const sellerOrders = await db.select({
+    so: s.sellerOrders,
+    sellerName: s.sellers.tradingName,
+    sellerRef: s.sellers.ref,
+    storeSlug: s.sellers.storeSlug,
+  }).from(s.sellerOrders)
+    .innerJoin(s.sellers, eq(s.sellerOrders.sellerId, s.sellers.id))
+    .where(eq(s.sellerOrders.orderId, order.id))
+    .orderBy(s.sellerOrders.id);
+
+  const soIds = sellerOrders.map((r: any) => r.so.id);
+
+  const shipments = soIds.length
+    ? await db.select().from(s.shipments)
+      .where(inArray(s.shipments.sellerOrderId, soIds)).orderBy(s.shipments.id)
+    : [];
+
+  const returns = soIds.length
+    ? await db.select().from(s.returnRequests)
+      .where(inArray(s.returnRequests.sellerOrderId, soIds)).orderBy(s.returnRequests.id)
+    : [];
+
+  const events = soIds.length
+    ? await db.select().from(s.sellerOrderEvents)
+      .where(inArray(s.sellerOrderEvents.sellerOrderId, soIds)).orderBy(s.sellerOrderEvents.id)
+    : [];
+
+  // ── The stock this order actually moved ───────────────────────────────────
+  //
+  // Reservations are keyed on the ORDER; movements are keyed on the order LINE.
+  // Both are read, because the interesting failure is exactly when one exists
+  // and the other does not: a reservation with no commitment is stock held for
+  // a payment that never completed, and a commitment with no reservation would
+  // mean stock left the shelf without ever having been held for this buyer.
+  const reservations = await db.select().from(s.stockReservations)
+    .where(eq(s.stockReservations.orderId, order.id)).orderBy(s.stockReservations.id);
+
+  const lineIds = lines.map((l: any) => l.id);
+  const movements = lineIds.length
+    ? await db.select().from(s.stockMovements)
+      .where(inArray(s.stockMovements.orderLineId, lineIds)).orderBy(s.stockMovements.id)
+    : [];
+
+  // ── The audit trail ───────────────────────────────────────────────────────
+  //
+  // Audit rows are (entityType, entityId) and this order is several entities at
+  // once: the order, its payments, its refunds, its seller orders and its
+  // returns. Collected with one IN per type rather than a join, because
+  // audit_events has no foreign key to any of them — deliberately, so that a
+  // deleted subject cannot take its own audit trail with it.
+  const auditPairs: Array<{ type: string; ids: number[] }> = [
+    { type: 'order', ids: [order.id] },
+    { type: 'payment', ids: payments.map((p: any) => p.id) },
+    { type: 'refund', ids: refundRows.map((r: any) => r.id) },
+    { type: 'seller_order', ids: soIds },
+    { type: 'return_request', ids: returns.map((r: any) => r.id) },
+  ];
+
+  let audit: any[] = [];
+  for (const pair of auditPairs) {
+    if (!pair.ids.length) continue;
+    const rows = await db.select().from(s.auditEvents)
+      .where(and(
+        eq(s.auditEvents.entityType, pair.type),
+        // entity_id is TEXT — the audit table records the id of anything at all,
+        // and not every entity in this system is keyed by an integer. The cast
+        // happens here rather than in SQL so the index on (entity_type,
+        // entity_id) is still usable.
+        inArray(s.auditEvents.entityId, pair.ids.map((n) => String(n))),
+      ))
+      .orderBy(s.auditEvents.id);
+    audit = audit.concat(rows);
+  }
+  audit.sort((a: any, b: any) =>
+    new Date(a.createdAt as string).getTime() - new Date(b.createdAt as string).getTime());
+
+  const person = order.personId != null
+    ? (await db.select({
+        id: s.persons.id, fullName: s.persons.fullName, federationId: s.persons.federationId,
+      }).from(s.persons).where(eq(s.persons.id, order.personId)).limit(1))[0] ?? null
+    : null;
+
+  return {
+    order, person, lines, payments, webhooks, invoice,
+    refunds: refundRows, sellerOrders, shipments, returns, events,
+    reservations, movements, audit,
+  };
+}
+
+/**
+ * Recent orders, for the console that leads to the chain above.
+ *
+ * SEPARATE FROM listOrders(), which returns bare order rows and nothing to
+ * distinguish a membership renewal from a five-seller basket. The two counts
+ * here are what make the list usable: an operator looking for a marketplace
+ * problem needs to see at a glance which rows are marketplace orders.
+ */
+export async function recentOrdersForAdmin(
+  db: DB, principal: Principal, opts: { q?: string | null; limit?: number } = {}
+) {
+  assertCanAnywhere(principal, 'finance:read');
+  const q = String(opts.q ?? '').trim();
+
+  const where = q
+    // An order number, an email or a buyer name. Matched case-insensitively on
+    // all three because a support desk is reading them off a telephone call.
+    ? or(
+        sql`lower(${s.orders.orderNo}) = lower(${q})`,
+        sql`lower(${s.orders.email}) = lower(${q})`,
+        sql`${s.orders.buyerName} ilike ${'%' + q.replace(/[%_\\]/g, (c) => '\\' + c) + '%'}`,
+      )
+    : sql`true`;
+
+  return db.select({
+    order: s.orders,
+    invoiceNo: s.invoices.invoiceNo,
+    sellerOrderCount: sql<number>`(
+      select count(*)::int from seller_orders so where so.order_id = ${s.orders.id}
+    )`,
+    capturedCount: sql<number>`(
+      select count(*)::int from payments p
+       where p.order_id = ${s.orders.id} and p.status = 'captured'
+    )`,
+  })
+    .from(s.orders)
+    .leftJoin(s.invoices, eq(s.invoices.orderId, s.orders.id))
+    .where(where as any)
+    .orderBy(desc(s.orders.createdAt))
+    .limit(Math.min(opts.limit ?? 100, 300));
 }

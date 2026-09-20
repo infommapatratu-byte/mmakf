@@ -175,6 +175,29 @@ const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^.
             </div>
           )}
 
+          {/* ── What buyers said about the SERVICE ─────────────────────────
+                 A different question from what they said about the goods: an
+                 item review lives on the item's own page. Every one here is
+                 attached to a completed order — there is no row shape for an
+                 unverified seller review — and only MMAKF can publish one.
+
+                 NO AUTHOR IS NAMED. A review carries a person id and this page
+                 does not join it: publishing a customer's identity to settle a
+                 dispute about a parcel is not something the federation needs to
+                 do, and many of its members are children. */}
+          {store.reviews.length > 0 && (
+            <div class="card">
+              <h2 class="h4">What buyers said about this shop ({store.reviews.length})</h2>
+              {store.reviews.map((r: any) => (
+                <article class="review">
+                  <p><strong>{r.ratingOverall} out of 5</strong></p>
+                  {r.body && <p>{r.body}</p>}
+                  {r.sellerReply && <p class="muted"><strong>The shop replied:</strong> {r.sellerReply}</p>}
+                </article>
+              ))}
+            </div>
+          )}
+
           <div class="card">
             <h2 class="h4">Returns</h2>
             {store.returnPolicy.windowDays != null ? (
@@ -203,6 +226,8 @@ const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^.
   .logo { border-radius: 12px; object-fit: cover; }
   .tagline { font-size: 1.15rem; margin: 8px 0; }
   .badges { list-style: none; padding: 0; display: grid; gap: 10px; }
+  .review { border-top: 1px solid rgba(128,128,128,0.3); padding: 10px 0; }
+  .review:first-of-type { border-top: 0; }
   .items { display: grid; gap: 14px; grid-template-columns: 1fr; }
   @media (min-width: 640px) { .items { grid-template-columns: 1fr 1fr; } }
   @media (min-width: 1000px) { .items { grid-template-columns: repeat(3, 1fr); } }

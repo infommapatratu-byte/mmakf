@@ -60,6 +60,10 @@ import { applyFactor } from '@/db/fees';
 import { reserveForLine, commitReservations, releaseReservations, dispatchReservations } from '@/db/inventory';
 import { freezeCommissionForLine, refreshSellerOrderCommission, accrueSellerOrder, SLA_NOT_SET } from '@/db/marketplace-finance';
 import { quoteCarriage } from '@/db/shipping';
+// A tracking URL is never invented. The adapter answers null for a courier this
+// deployment does not know, and null is what gets stored — see the note at the
+// insert below and src/lib/carriers/provider.ts.
+import { trackingUrlFor } from '@/lib/carriers';
 
 type DB = any;
 
@@ -805,7 +809,21 @@ export async function shipSellerOrder(db: DB, ctx: AuditContext, sellerOrderId: 
     carrier: input.carrier?.trim() || null,
     service: input.service?.trim() || null,
     trackingNumber: input.trackingNumber?.trim() || null,
-    trackingUrl: input.trackingUrl?.trim() || null,
+    // ── The tracking LINK ─────────────────────────────────────────────────
+    //
+    // The seller's own URL first, because they may have one this deployment
+    // does not know about. Where they gave none — which is almost always, since
+    // a counter receipt carries a number and not a link — the active carrier
+    // adapter is asked whether it knows the pattern for the courier they named.
+    //
+    // IT RETURNS NULL FOR AN UNKNOWN COURIER, and null is stored. A guessed URL
+    // is worse than none: the buyer follows it, meets a 404 at a courier's
+    // site, and concludes the parcel is lost. See src/lib/carriers/manual.ts.
+    trackingUrl: input.trackingUrl?.trim()
+      || (input.trackingNumber?.trim()
+        ? trackingUrlFor(input.trackingNumber.trim(), input.carrier?.trim() ?? null)
+        : null)
+      || null,
     status: 'picked_up',
     fromLocationId: input.fromLocationId ?? so.fulfilmentLocationId ?? null,
     weightGrams: input.weightGrams ?? null,

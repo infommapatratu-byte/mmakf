@@ -496,6 +496,20 @@ export interface Badge {
   basis: string;
   grantedAt?: Date | null;
   expiresAt?: Date | null;
+  /**
+   * The `seller_badge_grants` row behind a GRANTED badge, and absent on a
+   * derived one.
+   *
+   * Carried because revokeBadge() takes a grant id and nothing had one:
+   * badgesFor() is the only reader of that table anywhere, so an
+   * administrator could grant `mmakf_official` and had no way to take it
+   * back — an endorsement that could be given and never withdrawn.
+   *
+   * A DERIVED BADGE HAS NO ID BY CONSTRUCTION, which is the correct shape: it
+   * is not revocable, it lapses on its own the moment the verification behind
+   * it does, and a revoke control on one would be a control that cannot work.
+   */
+  grantId?: number;
 }
 
 const BADGE_LABELS: Record<MarketplaceBadge, string> = {
@@ -589,6 +603,7 @@ export async function badgesFor(db: DB, sellerId: number, listingId?: number | n
         : `Granted by MMAKF: ${g.reason}`,
       grantedAt: g.grantedAt,
       expiresAt: g.expiresAt,
+      grantId: g.id,
     });
   }
 
@@ -737,6 +752,17 @@ export async function publicStorefront(db: DB, slug: string) {
 
   const badges = await badgesFor(db, seller.id);
   const returnPolicy = await (await import('@/db/returns')).effectiveReturnPolicy(db, seller.id);
+  // PUBLISHED SERVICE REVIEWS, composed here rather than fetched by the page.
+  //
+  // The page cannot fetch them itself because this allow-list deliberately does
+  // not carry `seller.id`, and adding one so a page could re-query would be the
+  // first hole in the rule the list exists to keep. Composed here, the id never
+  // leaves this function.
+  //
+  // THEY MAKE THE RATING EXPLICABLE. `ratingAvgBps` is already published above
+  // and, with nothing behind it, is a number a reader is asked to take on
+  // trust — which is exactly what the badges on this page refuse to be.
+  const reviews = await (await import('@/db/marketplace-trust')).publishedSellerReviews(db, seller.id, 20);
 
   return {
     // A DELIBERATE ALLOW-LIST, not a redaction of the row. Adding a column to
@@ -757,6 +783,7 @@ export async function publicStorefront(db: DB, slug: string) {
     ratingCount: seller.ratingCount,
     memberSince: seller.approvedAt,
     badges,
+    reviews,
     returnPolicy: {
       windowDays: returnPolicy.windowDays,
       source: returnPolicy.source,

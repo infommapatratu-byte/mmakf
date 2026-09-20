@@ -940,3 +940,329 @@ export async function decideAuthenticityCase(
   });
   return { caseId, status: decision.status };
 }
+
+/**
+ * Open authenticity cases, oldest first.
+ *
+ * openAuthenticityCase() and decideAuthenticityCase() both existed and neither
+ * could be reached by a human: a rights holder's complaint could be recorded
+ * over the API and then nothing in MMAKF listed it. A counterfeit allegation
+ * that nobody can find is the one class of complaint the federation cannot
+ * afford to lose — the complainant's next step is not another email.
+ *
+ * OLDEST FIRST, with no severity to sort on. There is no severity column here
+ * and inventing an ordering by allegation text would be the system deciding
+ * which trademark holder matters more.
+ */
+export async function authenticityQueue(db: DB, principal: Principal, limit = 200) {
+  assertCan(principal, 'marketplace:read', {});
+  return db.select({
+    kase: s.authenticityCases,
+    sellerName: s.sellers.tradingName,
+    sellerRef: s.sellers.ref,
+    listingTitle: s.listings.title,
+    listingRef: s.listings.ref,
+    brandName: s.brands.name,
+  })
+    .from(s.authenticityCases)
+    .innerJoin(s.sellers, eq(s.authenticityCases.sellerId, s.sellers.id))
+    .leftJoin(s.listings, eq(s.authenticityCases.listingId, s.listings.id))
+    .leftJoin(s.brands, eq(s.authenticityCases.brandId, s.brands.id))
+    .where(inArray(s.authenticityCases.status, [
+      'opened', 'evidence_requested', 'seller_responded', 'under_review',
+    ]))
+    .orderBy(asc(s.authenticityCases.openedAt))
+    .limit(Math.min(limit, 500));
+}
+
+/**
+ * Everything currently quarantined, with who did it and why.
+ *
+ * QUARANTINE IS ONE COLUMN AND IT IS REVERSIBLE — that is its whole design, and
+ * it is what makes it safe to use quickly on a suspicion. But liftQuarantine()
+ * had no caller outside the API, so the reversal was the half nobody could
+ * perform: an item pulled during an investigation stayed pulled until somebody
+ * wrote a curl command. An action that is easy to apply and hard to undo stops
+ * being used, and then the fast remedy is not available when it is needed.
+ */
+export async function quarantinedListings(db: DB, principal: Principal, limit = 200) {
+  assertCan(principal, 'marketplace:read', {});
+  return db.select({
+    listing: s.listings,
+    sellerName: s.sellers.tradingName,
+    sellerRef: s.sellers.ref,
+  })
+    .from(s.listings)
+    .innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
+    .where(sql`${s.listings.quarantinedAt} is not null`)
+    .orderBy(desc(s.listings.quarantinedAt))
+    .limit(Math.min(limit, 500));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MANAGING THE TAXONOMY, NOT ONLY ADOPTING IT
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// adoptProposedTaxonomy() writes the twenty-six categories from the federation's
+// own brief, in one act, and that was the whole of category management: a
+// category MMAKF wanted afterwards could not be created, one it had retired
+// could not be retired, and a name it had spelled wrongly could not be
+// corrected. The brief asks for categories to be admin-controlled
+// configuration; adoption is a starting position, not control.
+//
+// ─── THE SLUG IS IMMUTABLE, AND THAT IS THE WHOLE DESIGN ────────────────────
+//
+// `marketplace_categories.path` is MATERIALISED ANCESTRY — 'protective-
+// equipment/headgear' — and it is what /shop/category/[...path] resolves, what
+// the sitemap advertises, and what browseCategory()'s single prefix match
+// scans. Renaming a slug would therefore:
+//
+//   · break every URL a buyer bookmarked and every one Google holds;
+//   · orphan the materialised path of every descendant, silently, so a whole
+//     subtree would vanish from browsing while remaining on sale;
+//   · leave `legacy_category` and any commission rule keyed on the old slug
+//     pointing at nothing.
+//
+// So a slug is set once. A NAME — the words a reader sees — is freely editable,
+// because nothing resolves on it. That division is the reason this file offers
+// updateCategory() and not a general-purpose edit.
+//
+// ─── AND NOTHING IS EVER DELETED ────────────────────────────────────────────
+//
+// Listings point at a category and orders point at listings. Deactivating is
+// the retirement: the node stops being offered as a place to file something
+// new, its own page stops resolving, and every item already filed under it goes
+// on being sold and goes on appearing under its ANCESTORS — which is what
+// browseCategory() means when it says the subtree does not require its
+// descendants to be active.
+
+export interface CreateCategoryInput {
+  /** Lowercase letters, digits and single hyphens. Set once, for ever. */
+  slug: string;
+  name: string;
+  /** Null makes a top-level category. */
+  parentSlug?: string | null;
+  description?: string | null;
+  policy?: 'allowed' | 'requires_review' | 'restricted' | 'prohibited';
+  policyReason?: string | null;
+  requiresSafetyClassification?: boolean;
+  requiresAgeStatement?: boolean;
+  requiresCertification?: boolean;
+  requiresFederationApproval?: boolean;
+}
+
+/**
+ * The slug grammar, and it is deliberately the SAME one assertBrowsablePath()
+ * enforces on a URL.
+ *
+ * If this accepted a slug that grammar refuses, the category would be created,
+ * filed under, approved — and its page would 404, because the router refuses
+ * the path before it ever reaches a query. One grammar, checked at both ends.
+ */
+const CATEGORY_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export async function createCategory(db: DB, ctx: AuditContext, input: CreateCategoryInput) {
+  assertCan(ctx.principal, 'marketplace:review', {});
+
+  const slug = String(input?.slug ?? '').trim().toLowerCase();
+  if (!CATEGORY_SLUG.test(slug)) {
+    throw new MarketplaceError(
+      'bad_slug',
+      'A category address is lowercase letters and digits, separated by single hyphens — ' +
+      '"protective-equipment", not "Protective Equipment". It becomes part of the public URL and ' +
+      'cannot be changed afterwards, because every link to it would break.'
+    );
+  }
+  const name = String(input?.name ?? '').trim();
+  if (!name) throw new MarketplaceError('name_required', 'A category needs a name a reader can see.');
+
+  const existing = (await db.select({ id: s.marketplaceCategories.id })
+    .from(s.marketplaceCategories).where(eq(s.marketplaceCategories.slug, slug)).limit(1))[0];
+  if (existing) {
+    throw new MarketplaceError('duplicate_slug', `There is already a category at "${slug}".`);
+  }
+
+  let parent: any = null;
+  if (input.parentSlug) {
+    parent = (await db.select().from(s.marketplaceCategories)
+      .where(eq(s.marketplaceCategories.slug, String(input.parentSlug).trim())).limit(1))[0] ?? null;
+    if (!parent) {
+      throw new MarketplaceError('unknown_parent', `There is no category "${input.parentSlug}" to file this under.`);
+    }
+    // A RETIRED PARENT TAKES NO NEW CHILDREN. Its own page does not resolve, so
+    // a child created beneath it would be reachable only by typing the full
+    // path — findable by nobody, and filed where the federation stopped filing.
+    if (!parent.active) {
+      throw new MarketplaceError(
+        'parent_retired',
+        `"${parent.name}" has been retired, so nothing new can be filed beneath it.`
+      );
+    }
+  }
+
+  const [row] = await db.insert(s.marketplaceCategories).values({
+    slug,
+    name,
+    parentId: parent?.id ?? null,
+    path: parent ? `${parent.path}/${slug}` : slug,
+    depth: parent ? parent.depth + 1 : 0,
+    description: input.description?.trim() || null,
+    // REQUIRES REVIEW UNLESS SOMEBODY SAYS OTHERWISE, exactly as adoption
+    // writes it. A category created as `allowed` is a category whose items
+    // reach the public without anybody looking at them, and that is not a
+    // default anything should have.
+    policy: (input.policy ?? 'requires_review') as any,
+    policyReason: input.policyReason?.trim() || null,
+    requiresSafetyClassification: !!input.requiresSafetyClassification,
+    requiresAgeStatement: !!input.requiresAgeStatement,
+    requiresCertification: !!input.requiresCertification,
+    requiresFederationApproval: !!input.requiresFederationApproval,
+    createdByUserId: ctx.principal?.userId ?? null,
+  }).returning({ id: s.marketplaceCategories.id, path: s.marketplaceCategories.path });
+
+  await writeAudit(db, ctx, {
+    entityType: 'marketplace_category', entityId: row.id, action: 'create',
+    newValue: { slug, name, path: row.path, policy: input.policy ?? 'requires_review' },
+  });
+
+  return { categoryId: row.id, slug, path: row.path };
+}
+
+export interface UpdateCategoryInput {
+  name?: string;
+  description?: string | null;
+  policy?: 'allowed' | 'requires_review' | 'restricted' | 'prohibited';
+  policyReason?: string | null;
+  requiresSafetyClassification?: boolean;
+  requiresAgeStatement?: boolean;
+  requiresCertification?: boolean;
+  requiresFederationApproval?: boolean;
+}
+
+/**
+ * Correct what a category SAYS. Never where it lives.
+ *
+ * There is no `slug` and no `parentSlug` here, and their absence is the point —
+ * see the note at the top of this block. Moving a category is not an edit, it
+ * is a re-materialisation of every descendant path plus a redirect strategy for
+ * every URL that has been published, and offering it as a form field would
+ * invite somebody to do it in an afternoon.
+ */
+export async function updateCategory(
+  db: DB, ctx: AuditContext, slug: string, patch: UpdateCategoryInput
+) {
+  assertCan(ctx.principal, 'marketplace:review', {});
+
+  const node = (await db.select().from(s.marketplaceCategories)
+    .where(eq(s.marketplaceCategories.slug, String(slug ?? '').trim())).limit(1))[0];
+  if (!node) throw new MarketplaceError('unknown_category', 'No such category.');
+
+  const next: Record<string, unknown> = {};
+  if (patch.name !== undefined) {
+    const name = String(patch.name).trim();
+    if (!name) throw new MarketplaceError('name_required', 'A category needs a name a reader can see.');
+    next.name = name;
+  }
+  if (patch.description !== undefined) next.description = patch.description?.trim() || null;
+  if (patch.policy !== undefined) next.policy = patch.policy;
+  if (patch.policyReason !== undefined) next.policyReason = patch.policyReason?.trim() || null;
+  for (const k of [
+    'requiresSafetyClassification', 'requiresAgeStatement',
+    'requiresCertification', 'requiresFederationApproval',
+  ] as const) {
+    if (patch[k] !== undefined) next[k] = !!patch[k];
+  }
+
+  if (Object.keys(next).length === 0) {
+    throw new MarketplaceError('nothing_to_change', 'Nothing was given to change.');
+  }
+
+  await db.update(s.marketplaceCategories).set(next)
+    .where(eq(s.marketplaceCategories.id, node.id));
+
+  await writeAudit(db, ctx, {
+    entityType: 'marketplace_category', entityId: node.id, action: 'update',
+    oldValue: { name: node.name, policy: node.policy },
+    newValue: next,
+  });
+
+  return { categoryId: node.id, slug: node.slug };
+}
+
+/**
+ * Retire a category, or bring it back. NEVER delete one.
+ *
+ * ─── WHAT RETIRING DOES AND, MORE IMPORTANTLY, DOES NOT DO ──────────────────
+ *
+ * It stops the category being OFFERED: its own page 404s and it disappears from
+ * the tree a seller files against.
+ *
+ * IT DOES NOT WITHDRAW A SINGLE ITEM. Every listing filed under it stays on
+ * sale, keeps its own product page, stays in its seller's shop, and still
+ * appears under its ANCESTOR categories — browseCategory() joins the taxonomy
+ * without requiring descendants to be active, precisely so that retiring
+ * 'mitts' does not make every mitt unfindable while leaving them all purchasable.
+ *
+ * Withdrawing goods from sale is a decision about GOODS and is taken with
+ * quarantine or delisting, against the items, with a reason recorded on each.
+ * Retiring a category is a decision about the FILING SYSTEM. Conflating them
+ * would let somebody empty a shelf by tidying a menu.
+ */
+export async function setCategoryActive(
+  db: DB, ctx: AuditContext, slug: string, active: boolean, reason: string
+) {
+  assertCan(ctx.principal, 'marketplace:review', {});
+  if (!String(reason ?? '').trim()) {
+    throw new MarketplaceError(
+      'reason_required',
+      'Retiring or restoring a category requires a reason. It changes what sellers may file against.'
+    );
+  }
+
+  const node = (await db.select().from(s.marketplaceCategories)
+    .where(eq(s.marketplaceCategories.slug, String(slug ?? '').trim())).limit(1))[0];
+  if (!node) throw new MarketplaceError('unknown_category', 'No such category.');
+  if (node.active === active) {
+    throw new MarketplaceError('already', `That category is already ${active ? 'in use' : 'retired'}.`);
+  }
+
+  // ── The subtree goes with it ─────────────────────────────────────────────
+  //
+  // ONE prefix UPDATE, not a recursion, on the same materialised path the
+  // browse queries scan. Retiring a parent and leaving its children offered
+  // would leave a seller filing into a branch whose trunk the federation has
+  // withdrawn — reachable, unbrowsable from above, and impossible to explain.
+  const affected = await db.update(s.marketplaceCategories)
+    .set({ active })
+    .where(or(
+      eq(s.marketplaceCategories.path, node.path),
+      sql`${s.marketplaceCategories.path} like ${node.path + '/'} || '%'`,
+    ))
+    .returning({ id: s.marketplaceCategories.id });
+
+  // How many items this quietly stopped being browsable BY THIS NODE, counted
+  // and returned so the surface can say it rather than leaving an officer to
+  // discover the size of what they did.
+  const items = (await db.select({ n: sql<number>`count(*)::int` })
+    .from(s.listings)
+    .innerJoin(s.marketplaceCategories, eq(s.listings.categoryId, s.marketplaceCategories.id))
+    .where(or(
+      eq(s.marketplaceCategories.path, node.path),
+      sql`${s.marketplaceCategories.path} like ${node.path + '/'} || '%'`,
+    )))[0]?.n ?? 0;
+
+  await writeAudit(db, { ...ctx, reason }, {
+    entityType: 'marketplace_category', entityId: node.id,
+    action: active ? 'reinstate' : 'suspend',
+    oldValue: { active: node.active },
+    newValue: { active, subtree: affected.length, itemsFiledUnder: items },
+  });
+
+  return {
+    categoryId: node.id,
+    slug: node.slug,
+    active,
+    categoriesChanged: affected.length,
+    itemsFiledUnder: items,
+  };
+}

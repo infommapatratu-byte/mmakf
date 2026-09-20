@@ -1,0 +1,387 @@
+---
+// /admin/marketplace/categories — the filing system, under the federation's hand.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// WHAT COULD BE DONE BEFORE, AND WHAT COULD NOT
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The marketplace console can ADOPT the twenty-six categories from MMAKF's own
+// brief, in one act. That was the whole of category management: a category the
+// federation wanted afterwards could not be created, one it had retired could
+// not be retired, a name it had spelled wrongly could not be corrected, and the
+// per-category product policy — what needs a certificate, an age statement, a
+// safety classification — could be read and never changed.
+//
+// Adoption is a starting position. This page is the control.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// THE TWO RULES THIS PAGE MAKES VISIBLE
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// A SLUG IS SET ONCE. `marketplace_categories.path` is materialised ancestry —
+// 'protective-equipment/headgear' — and it is what /shop/category resolves,
+// what the sitemap advertises and what one prefix match scans. Renaming it
+// breaks every published URL and orphans the path of every descendant. So the
+// address is offered at creation and is read-only ever after, and the page says
+// why rather than leaving somebody to discover it.
+//
+// RETIRING WITHDRAWS NOTHING FROM SALE. Items filed under a retired category
+// stay on sale, keep their own pages, and stay browsable under its ancestors.
+// The count of what is filed beneath is shown before the button, because an
+// officer tidying a menu is entitled to know how much is behind it — and
+// because the opposite belief (that retiring pulls the goods) is exactly the
+// belief that would get it used as an enforcement tool it is not.
+
+import AdminShell from '@/components/AdminShell.astro';
+import { identify } from '@/lib/session';
+import { isConfigured, db } from '@/db';
+import { and, eq, sql } from 'drizzle-orm';
+import * as s from '@/db/schema';
+import { canAnywhere } from '@/lib/rbac';
+import { categoryTree, TAXONOMY_NOT_ADOPTED } from '@/db/catalogue';
+
+export const prerender = false;
+
+const configured = isConfigured();
+const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
+const principal = identity?.principal ?? null;
+const mayEdit = principal ? canAnywhere(principal, 'marketplace:review') : false;
+
+let nodes: any[] = [];
+let counts = new Map<number, number>();
+let loadError: string | null = null;
+
+if (configured && principal && canAnywhere(principal, 'marketplace:read')) {
+  try {
+    // INCLUDING THE RETIRED ONES. This is the page where a retired category has
+    // to be visible — it is the only place it can be brought back.
+    nodes = await categoryTree(db(), { includeInactive: true });
+
+    // How many listings are filed under each node ITSELF (not its subtree):
+    // one grouped count rather than one query per category.
+    const rows = await db().select({
+      categoryId: s.listings.categoryId,
+      n: sql<number>`count(*)::int`,
+    })
+      .from(s.listings)
+      .where(sql`${s.listings.categoryId} is not null`)
+      .groupBy(s.listings.categoryId);
+    for (const r of rows as any[]) counts.set(Number(r.categoryId), Number(r.n) || 0);
+  } catch (err: any) {
+    console.error('[admin/marketplace/categories]', err);
+    loadError = 'The taxonomy could not be read. The fault has been logged; nothing has been changed.';
+  }
+}
+
+const titleCase = (v: unknown) => String(v ?? '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+
+/** Items filed under this node and everything beneath it, from the paths. */
+function subtreeCount(node: any): number {
+  let n = 0;
+  for (const other of nodes) {
+    if (other.path === node.path || String(other.path).startsWith(`${node.path}/`)) {
+      n += counts.get(other.id) ?? 0;
+    }
+  }
+  return n;
+}
+
+const active = nodes.filter((n: any) => n.active);
+const retired = nodes.filter((n: any) => !n.active);
+/** Only an ACTIVE node can take a new child — a retired parent takes none. */
+const parents = active;
+---
+
+<AdminShell title="Product categories" requires="marketplace:read">
+  <section>
+    <div class="container">
+      <p><a href="/admin/marketplace">← Marketplace console</a></p>
+
+      {loadError && <p class="error" role="alert">{loadError}</p>}
+
+      {!mayEdit && (
+        <div class="card">
+          <p class="muted">
+            You can see the taxonomy but not change it. Creating, correcting or retiring a category
+            takes <code>marketplace:review</code>.
+          </p>
+        </div>
+      )}
+
+      {nodes.length === 0 && !loadError && (
+        <div class="card">
+          <h2 class="h3">No taxonomy yet.</h2>
+          <p>{TAXONOMY_NOT_ADOPTED}</p>
+          <p>
+            The federation's own proposed list can be adopted in one act from the
+            <a href="/admin/marketplace"> marketplace console</a>. Categories can also be created
+            here one at a time.
+          </p>
+        </div>
+      )}
+
+      {mayEdit && (
+        <details class="card">
+          <summary><strong>Create a category</strong></summary>
+          <form id="create-form">
+            <label for="c-slug">Address</label>
+            <input id="c-slug" name="slug" type="text" required maxlength="60"
+              pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="protective-equipment" />
+            <p class="hint warn">
+              Lowercase letters, digits and single hyphens. This becomes part of the public URL and
+              <strong> cannot be changed afterwards</strong> — every link to the category, every
+              sitemap entry and the stored path of every category beneath it are built from it.
+            </p>
+
+            <label for="c-name">Name a reader sees</label>
+            <input id="c-name" name="name" type="text" required maxlength="120" />
+            <p class="hint">This is freely editable later. Nothing resolves on it.</p>
+
+            <label for="c-parent">Inside</label>
+            <select id="c-parent" name="parentSlug">
+              <option value="">Nothing — a top-level category</option>
+              {parents.map((n: any) => (
+                <option value={n.slug}>{'— '.repeat(n.depth)}{n.name}</option>
+              ))}
+            </select>
+
+            <label for="c-desc">Description (optional)</label>
+            <textarea id="c-desc" name="description" rows="2" maxlength="2000"></textarea>
+
+            <label for="c-policy">Product policy</label>
+            <select id="c-policy" name="policy">
+              <option value="requires_review">Requires review — an item is looked at before it is public</option>
+              <option value="allowed">Allowed</option>
+              <option value="restricted">Restricted — only sellers MMAKF has cleared for it</option>
+              <option value="prohibited">Prohibited — nothing may be listed here</option>
+            </select>
+            <p class="hint">
+              Adoption writes every category as <em>requires review</em>, and so does this unless you
+              change it. A category created as <em>allowed</em> is one whose items reach the public without
+              anybody looking at them.
+            </p>
+
+            <label for="c-policy-why">Why that policy (optional)</label>
+            <input id="c-policy-why" name="policyReason" type="text" maxlength="500" />
+
+            <div class="checks">
+              <span class="check">
+                <input id="c-safety" name="requiresSafetyClassification" type="checkbox" value="1" />
+                <label for="c-safety">Needs a safety classification</label>
+              </span>
+              <span class="check">
+                <input id="c-age" name="requiresAgeStatement" type="checkbox" value="1" />
+                <label for="c-age">Needs an age statement</label>
+              </span>
+              <span class="check">
+                <input id="c-cert" name="requiresCertification" type="checkbox" value="1" />
+                <label for="c-cert">Needs a certification</label>
+              </span>
+              <span class="check">
+                <input id="c-fed" name="requiresFederationApproval" type="checkbox" value="1" />
+                <label for="c-fed">Needs federation approval</label>
+              </span>
+            </div>
+
+            <button class="btn btn-primary btn-small" type="submit">Create the category</button>
+          </form>
+        </details>
+      )}
+
+      <h2 class="h3">In use ({active.length})</h2>
+      {active.length === 0 && <div class="card"><p class="muted">Nothing in use.</p></div>}
+      {active.length > 0 && (
+        <table class="card">
+          <caption class="sr-only">Categories in use</caption>
+          <thead><tr>
+            <th scope="col">Category</th><th scope="col">Address</th>
+            <th scope="col">Policy</th><th scope="col">Requires</th>
+            <th scope="col" class="num">Items</th><th scope="col"></th>
+          </tr></thead>
+          <tbody>
+            {active.map((n: any) => (
+              <tr>
+                <th scope="row">
+                  <span style={`padding-left:${n.depth * 16}px`}>{n.name}</span>
+                  {n.description && <div class="muted">{n.description}</div>}
+                </th>
+                <td>
+                  <a href={`/shop/category/${n.path}`}><code>{n.path}</code></a>
+                </td>
+                <td>{titleCase(n.policy)}</td>
+                <td class="muted">
+                  {[
+                    n.requiresSafetyClassification ? 'safety' : null,
+                    n.requiresAgeStatement ? 'age' : null,
+                    n.requiresCertification ? 'certification' : null,
+                    n.requiresFederationApproval ? 'federation approval' : null,
+                  ].filter(Boolean).join(', ') || '—'}
+                </td>
+                <td class="num">{subtreeCount(n)}</td>
+                <td>
+                  {mayEdit && (
+                    <div class="row">
+                      <button class="btn btn-small" data-edit={n.slug}
+                        data-name={n.name} data-policy={n.policy}>Correct</button>
+                      <button class="btn btn-small" data-retire={n.slug}
+                        data-items={subtreeCount(n)} data-label={n.name}>Retire</button>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {retired.length > 0 && (
+        <>
+          <h2 class="h3">Retired ({retired.length})</h2>
+          <p class="hint">
+            A retired category is no longer offered to sellers and its own page no longer resolves.
+            Items already filed under it are <strong>still on sale</strong> and still appear under its
+            ancestors — retiring a category is a decision about the filing system, not about goods.
+          </p>
+          <table class="card">
+            <caption class="sr-only">Retired categories</caption>
+            <thead><tr>
+              <th scope="col">Category</th><th scope="col">Address</th>
+              <th scope="col" class="num">Items still filed</th><th scope="col"></th>
+            </tr></thead>
+            <tbody>
+              {retired.map((n: any) => (
+                <tr>
+                  <th scope="row">{n.name}</th>
+                  <td><code>{n.path}</code></td>
+                  <td class="num">{subtreeCount(n)}</td>
+                  <td>
+                    {mayEdit && <button class="btn btn-small" data-restore={n.slug}>Bring back</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      <p id="page-error" class="error" role="alert" hidden></p>
+    </div>
+  </section>
+</AdminShell>
+
+<script>
+  const pageError = document.getElementById('page-error');
+  const say = (m: string) => {
+    if (!pageError) { window.alert(m); return; }
+    pageError.textContent = m; pageError.hidden = false;
+    pageError.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  async function post(action: string, body: Record<string, unknown> = {}) {
+    const r = await fetch(`/api/marketplace/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const b = await r.json().catch(() => ({}));
+    return { ok: r.ok && b.ok, body: b };
+  }
+  const reloadOr = (res: any, fallback: string) => {
+    if (res.ok) { window.location.reload(); return; }
+    say(res.body.error || fallback);
+  };
+
+  const createForm = document.getElementById('create-form') as HTMLFormElement | null;
+  if (createForm) {
+    createForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(createForm);
+      const checked = (name: string) =>
+        (createForm.querySelector(`input[name="${name}"]`) as HTMLInputElement | null)?.checked ?? false;
+      const text = (k: string) => {
+        const v = String(f.get(k) ?? '').trim();
+        return v === '' ? null : v;
+      };
+      reloadOr(await post('category/create', {
+        slug: String(f.get('slug') ?? '').trim().toLowerCase(),
+        name: f.get('name'),
+        parentSlug: text('parentSlug'),
+        description: text('description'),
+        policy: f.get('policy'),
+        policyReason: text('policyReason'),
+        requiresSafetyClassification: checked('requiresSafetyClassification'),
+        requiresAgeStatement: checked('requiresAgeStatement'),
+        requiresCertification: checked('requiresCertification'),
+        requiresFederationApproval: checked('requiresFederationApproval'),
+      }), 'The category could not be created.');
+    });
+  }
+
+  // ── Correcting ────────────────────────────────────────────────────────────
+  //
+  // NAME AND POLICY ONLY. There is no slug field and no parent field, because
+  // neither can change: the address is materialised into the path of every
+  // descendant and into every published URL. Offering them as prompts would
+  // invite somebody to move a category in an afternoon.
+  document.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', async () => {
+    const el = b as HTMLElement;
+    const name = window.prompt('Name a reader sees:', el.dataset.name ?? '');
+    if (name === null) return;
+    const policy = window.prompt(
+      'Product policy — one of: allowed, requires_review, restricted, prohibited',
+      el.dataset.policy ?? 'requires_review',
+    );
+    if (policy === null) return;
+    const allowed = ['allowed', 'requires_review', 'restricted', 'prohibited'];
+    if (!allowed.includes(policy.trim())) {
+      say(`"${policy}" is not a policy. Choose one of: ${allowed.join(', ')}.`);
+      return;
+    }
+    reloadOr(await post('category/update', {
+      slug: el.dataset.edit, name: name.trim(), policy: policy.trim(),
+    }), 'The category could not be corrected.');
+  }));
+
+  document.querySelectorAll('[data-retire]').forEach((b) => b.addEventListener('click', async () => {
+    const el = b as HTMLElement;
+    const items = Number(el.dataset.items) || 0;
+    // THE SIZE OF IT, BEFORE THE DECISION. And the sentence says plainly what
+    // retiring does not do, because the opposite belief is the dangerous one.
+    const ok = window.confirm(
+      `Retire “${el.dataset.label}”?\n\n` +
+      `${items} item${items === 1 ? '' : 's'} ${items === 1 ? 'is' : 'are'} filed under it or beneath it. ` +
+      'They STAY ON SALE and stay browsable under its parent categories — retiring stops the ' +
+      'category being offered, it does not withdraw anything.\n\n' +
+      'Every category beneath it is retired with it.'
+    );
+    if (!ok) return;
+    const reason = window.prompt('Why is it being retired? This is recorded.');
+    if (!reason) return;
+    reloadOr(await post('category/retire', { slug: el.dataset.retire, reason }),
+      'The category could not be retired.');
+  }));
+
+  document.querySelectorAll('[data-restore]').forEach((b) => b.addEventListener('click', async () => {
+    const reason = window.prompt('Why is it being brought back? This is recorded.');
+    if (!reason) return;
+    reloadOr(await post('category/restore', { slug: (b as HTMLElement).dataset.restore, reason }),
+      'The category could not be brought back.');
+  }));
+</script>
+
+<style>
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .checks { display: flex; flex-wrap: wrap; gap: 16px; margin: 14px 0; }
+  .check { display: inline-flex; align-items: center; gap: 8px; }
+  .check label { display: inline; margin: 0; }
+  .muted { opacity: 0.75; }
+  .warn { font-weight: 600; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
+  .error { color: #b00020; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(128,128,128,0.3); vertical-align: top; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .btn-small { padding: 4px 10px; font-size: 0.9em; }
+  #create-form label { display: block; margin-top: 10px; font-size: 0.9em; }
+  #create-form input, #create-form select, #create-form textarea { width: 100%; max-width: 520px; }
+  #create-form .check label { margin-top: 0; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style>

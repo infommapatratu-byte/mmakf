@@ -34,11 +34,14 @@
 // only. This is the same discipline as `invoices.fxRateId` — a figure that
 // points into a table whose purpose is to change is a figure that moves.
 
-import { and, asc, desc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { writeAudit, allocateFederationId, type AuditContext } from '@/db/federation';
 import { assertCan, type Principal } from '@/lib/rbac';
 import { MarketplaceError } from '@/db/marketplace';
+// The federation's own day, not the server's clock. One definition of where a
+// day begins, shared with order numbering — see src/db/orders.ts.
+import { federationToday } from '@/db/orders';
 import {
   publishPayoutInitiated, publishPayoutPaid, publishSettlementBlocked,
 } from '@/db/marketplace-events';
@@ -1261,4 +1264,223 @@ export async function refreshPayoutFromProvider(
     payoutId, status: status.status, changed,
     failureReason: status.failureReason ?? null,
   };
+}
+
+/**
+ * The trading position, for the marketplace console.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * EVERY FIGURE IS A COUNT OF ROWS, AND NONE OF THEM IS AN ESTIMATE
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * The console showed QUEUES — how many things are waiting — and nothing about
+ * what the marketplace had actually done. An officer could see six items
+ * awaiting review and had no way to answer "did anything sell today?" without a
+ * database client.
+ *
+ * The reason a dashboard is dangerous, and the rule this function keeps: a
+ * fabricated number on a dashboard is believed for years. So every figure below
+ * is `count(*)` or `sum()` over rows that exist, computed in SQL, with the
+ * WHERE stated. Nothing is extrapolated, nothing is annualised, and nothing has
+ * a target beside it.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * "TODAY" IS THE FEDERATION'S DAY
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * federationToday() decides where the day begins — the same function order
+ * numbering uses — so a sale at 11pm in Ranchi counts on the day the seller
+ * thinks it did, rather than on whatever day the server's clock is in.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * AND WHAT IS NOT COUNTED
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * GROSS IS PAID ORDERS ONLY. An order awaiting payment is not revenue, and
+ * counting it would make the figure fall whenever a basket was abandoned —
+ * a dashboard that goes DOWN when nothing happened is one nobody trusts twice.
+ *
+ * COMMISSION IS WHAT WAS FROZEN ONTO THE LINES, not a rate applied here. The
+ * rate lives in published commission versions and is frozen per line at
+ * checkout; recomputing it on a dashboard would produce a second number that
+ * disagrees with what sellers are actually charged.
+ */
+export interface CommerceSnapshot {
+  /** The federation date these figures are for, as YYYY-MM-DD. */
+  on: string;
+  todayOrders: number;
+  todayPaidOrders: number;
+  todayGrossMinor: number;
+  paymentsCaptured: number;
+  paymentsPending: number;
+  paymentsFailed: number;
+  refundsMinor: number;
+  refundCount: number;
+  openReturns: number;
+  /** Seller orders paid and not yet dispatched — the fulfilment backlog. */
+  awaitingDispatch: number;
+  /** Dispatched and not yet delivered. */
+  inTransit: number;
+  /** Live variants at or below their seller's configured threshold. NULL when
+   *  no seller has configured one — an unset threshold is not zero. */
+  lowStock: number | null;
+  outOfStock: number;
+  /** Commission frozen onto paid seller-order lines, all time. */
+  commissionMinor: number;
+  settlementsOpen: number;
+  settlementsAwaitingPayout: number;
+}
+
+export async function commerceSnapshot(db: DB, principal: Principal): Promise<CommerceSnapshot> {
+  assertCan(principal, 'marketplace:read', {});
+  const on = federationToday();
+
+  const one = async (q: any): Promise<number> => Number((await q)[0]?.n ?? 0);
+
+  // ── Today ────────────────────────────────────────────────────────────────
+  //
+  // BOTH SIDES OF THE COMPARISON ARE IN THE FEDERATION'S TIMEZONE, and that is
+  // the whole of this block's difficulty.
+  //
+  // federationToday() answers in Asia/Kolkata. `orders.created_at` is a
+  // `timestamptz`, and bare `date(created_at)` resolves in the SESSION's
+  // timezone — UTC on every deployment this runs on. India is 5½ hours ahead,
+  // so between midnight and 05:30 IST the two disagree by a day and every
+  // figure on this band reads ZERO while the shop is trading. It is the same
+  // defect the docstring on federationToday() was written about, in the other
+  // direction, and a test written before midnight passes it happily.
+  //
+  // `AT TIME ZONE` converts the timestamptz to the federation's local time
+  // before the date is taken, so the day the dashboard counts is the day the
+  // seller thinks it is.
+  const istDate = (col: any) => sql`date(${col} at time zone 'Asia/Kolkata')`;
+
+  const todayOrders = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.orders)
+    .where(sql`${istDate(s.orders.createdAt)} = ${on}`));
+
+  const todayPaidOrders = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.orders)
+    .where(and(
+      sql`${istDate(s.orders.createdAt)} = ${on}`,
+      inArray(s.orders.status, ['paid', 'fulfilled']),
+    )));
+
+  const todayGrossMinor = await one(db.select({ n: sql<number>`coalesce(sum(${s.orders.totalPaise}), 0)::int` })
+    .from(s.orders)
+    .where(and(
+      sql`${istDate(s.orders.createdAt)} = ${on}`,
+      inArray(s.orders.status, ['paid', 'fulfilled']),
+    )));
+
+  // ── Payments ─────────────────────────────────────────────────────────────
+  const paymentsCaptured = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.payments).where(eq(s.payments.status, 'captured')));
+  const paymentsPending = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.payments).where(inArray(s.payments.status, ['created', 'authorized'])));
+  const paymentsFailed = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.payments).where(eq(s.payments.status, 'failed')));
+
+  // ── Refunds and returns ──────────────────────────────────────────────────
+  //
+  // COMPLETED REFUNDS ONLY. A requested refund is money the federation intends
+  // to return and has not; adding it here would make the figure a forecast.
+  const refundCount = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.refunds).where(eq(s.refunds.status, 'completed')));
+  const refundsMinor = await one(db.select({ n: sql<number>`coalesce(sum(${s.refunds.amountPaise}), 0)::int` })
+    .from(s.refunds).where(eq(s.refunds.status, 'completed')));
+
+  const openReturns = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.returnRequests)
+    .where(inArray(s.returnRequests.status, [
+      'requested', 'seller_reviewing', 'authorised', 'in_transit', 'received', 'inspected',
+    ])));
+
+  // ── Fulfilment ───────────────────────────────────────────────────────────
+  const awaitingDispatch = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.sellerOrders)
+    .where(inArray(s.sellerOrders.status, ['paid', 'seller_accepted', 'processing', 'packed'])));
+  const inTransit = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.sellerOrders)
+    .where(inArray(s.sellerOrders.status, ['shipped', 'in_transit'])));
+
+  // ── Stock ────────────────────────────────────────────────────────────────
+  //
+  // LOW STOCK IS NULL WHERE NOBODY HAS SET A THRESHOLD. There is no default
+  // anywhere in this codebase for what "low" means — it is a seller's own
+  // judgement about their own replenishment — and a dashboard that picked one
+  // would be reporting a shortage the seller never declared.
+  const rules = await one(db.select({ n: sql<number>`count(*)::int` }).from(s.lowStockRules));
+  const lowStock = rules === 0 ? null : await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.listingVariants)
+    .innerJoin(s.lowStockRules, eq(s.lowStockRules.variantId, s.listingVariants.id))
+    .where(and(
+      ne(s.listingVariants.status, 'discontinued'),
+      sql`${s.listingVariants.availableQty} <= ${s.lowStockRules.threshold}`,
+    )));
+
+  const outOfStock = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.listingVariants)
+    .where(and(
+      ne(s.listingVariants.status, 'discontinued'),
+      sql`${s.listingVariants.availableQty} <= 0`,
+    )));
+
+  // ── Money owed and paid ──────────────────────────────────────────────────
+  // FROM THE SELLER ORDER, where the figure is frozen. `commission_minor` is
+  // nullable there by design — null means MMAKF has published no rule that
+  // matches, and the sale is HELD rather than charged at a rate nobody
+  // approved. coalesce sums the resolved ones; the unresolved are the queue
+  // this console already leads with.
+  const commissionMinor = await one(db.select({
+    n: sql<number>`coalesce(sum(${s.sellerOrders.commissionMinor}), 0)::int`,
+  })
+    .from(s.sellerOrders)
+    .where(sql`${s.sellerOrders.paidAt} is not null`));
+
+  const settlementsOpen = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.sellerSettlements).where(eq(s.sellerSettlements.status, 'open')));
+  const settlementsAwaitingPayout = await one(db.select({ n: sql<number>`count(*)::int` })
+    .from(s.sellerSettlements).where(inArray(s.sellerSettlements.status, ['closed', 'approved'])));
+
+  return {
+    on,
+    todayOrders, todayPaidOrders, todayGrossMinor,
+    paymentsCaptured, paymentsPending, paymentsFailed,
+    refundsMinor, refundCount, openReturns,
+    awaitingDispatch, inTransit,
+    lowStock, outOfStock,
+    commissionMinor, settlementsOpen, settlementsAwaitingPayout,
+  };
+}
+
+/**
+ * The items that have actually sold most, by units on PAID seller orders.
+ *
+ * Ordered by units rather than by revenue, because a dashboard heading of "top
+ * products" that ranked by value would put one expensive item above fifty
+ * ordinary ones and answer a question nobody asked.
+ *
+ * PAID ONLY, through `seller_orders.paid_at is not null`. An abandoned basket
+ * is not a sale, and an unpaid line counted here would let anybody move a
+ * product up this list by adding it to a basket and walking away.
+ */
+export async function topSellingItems(db: DB, principal: Principal, limit = 10) {
+  assertCan(principal, 'marketplace:read', {});
+  return db.select({
+    listingId: s.orderLines.listingId,
+    title: s.listings.title,
+    ref: s.listings.ref,
+    sellerName: s.sellers.tradingName,
+    units: sql<number>`sum(${s.orderLines.quantity})::int`,
+    grossMinor: sql<number>`sum(${s.orderLines.totalPaise})::int`,
+  })
+    .from(s.orderLines)
+    .innerJoin(s.sellerOrders, eq(s.orderLines.sellerOrderId, s.sellerOrders.id))
+    .innerJoin(s.listings, eq(s.orderLines.listingId, s.listings.id))
+    .innerJoin(s.sellers, eq(s.listings.sellerId, s.sellers.id))
+    .where(sql`${s.sellerOrders.paidAt} is not null`)
+    .groupBy(s.orderLines.listingId, s.listings.title, s.listings.ref, s.sellers.tradingName)
+    .orderBy(sql`sum(${s.orderLines.quantity}) desc`)
+    .limit(Math.min(limit, 50));
 }

@@ -26,6 +26,12 @@ import { isConfigured, db } from '@/db';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { canAnywhere } from '@/lib/rbac';
+// WHETHER A TRANSFER CAN BE SENT AT ALL, asked of the same function the API
+// asks. `payout/send` and `payout/refresh` had no control anywhere, and drawing
+// one unconditionally would have offered a button that answers "no payout rail
+// on this deployment" — a button whose only function is to explain why it does
+// not work.
+import { activePayoutProvider } from '@/lib/payouts';
 
 export const prerender = false;
 
@@ -33,6 +39,7 @@ const configured = isConfigured();
 const identity = configured ? await identify(Astro.request.headers.get('cookie')) : null;
 const principal = identity?.principal ?? null;
 const maySettle = principal ? canAnywhere(principal, 'marketplace:settle') : false;
+const payoutProvider = activePayoutProvider();
 
 let rows: any[] = [];
 let payouts: any[] = [];
@@ -145,7 +152,21 @@ const blocked = open.filter((r: any) => r.st.hasUnresolvedCommission);
                 <td>{date(r.st.periodStart)} — {date(r.st.periodEnd)}</td>
                 <td class="num"><strong>{money(r.st.netPayableMinor)}</strong></td>
                 <td>{date(r.st.closedAt)}</td>
-                <td>{maySettle && <button class="btn btn-small btn-primary" data-approve={r.st.id}>Release for payment</button>}</td>
+                <td>
+                  {maySettle && (
+                    <div class="row">
+                      <button class="btn btn-small btn-primary" data-approve={r.st.id}>Release for payment</button>
+                      {/* THE STATEMENT IS WHAT THE SELLER SEES. generateStatement()
+                          writes the row /portal/seller/money reads, and it had no
+                          control anywhere — so a period could be closed, approved
+                          and paid without the seller ever being handed the
+                          document that explains the figure. */}
+                      <button class="btn btn-small" data-statement={r.st.id} data-seller={r.st.sellerId}>
+                        Issue the statement
+                      </button>
+                    </div>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -187,6 +208,11 @@ const blocked = open.filter((r: any) => r.st.hasUnresolvedCommission);
           idempotency key the database enforces, so a retried request collides on the index rather than
           sending a second payment — the one operation here that no status change could undo.
         </p>
+        <p class="hint">
+          {payoutProvider
+            ? `A transfer can be sent end to end on this deployment through ${payoutProvider.id}. Sending is an instruction to move money and cannot be undone from here.`
+            : 'No payout rail is configured on this deployment, so nothing can be sent from this page. The federation office makes the transfer and records it here — which is a complete answer, not a degraded one.'}
+        </p>
         {payouts.length === 0 ? (
           <p class="muted">None in flight.</p>
         ) : (
@@ -203,7 +229,23 @@ const blocked = open.filter((r: any) => r.st.hasUnresolvedCommission);
                   <td>{x.sellerName}</td>
                   <td class="num">{money(x.p.amountMinor)}</td>
                   <td>{titleCase(x.p.status)}{x.p.failureReason ? ` — ${x.p.failureReason}` : ''}</td>
-                  <td>{maySettle && <button class="btn btn-small" data-paid={x.p.id}>Record as paid</button>}</td>
+                  <td>
+                    {maySettle && (
+                      <div class="row">
+                        {/* SENDING IS OFFERED ONLY WHERE A RAIL EXISTS. Where
+                            none does, the honest instruction is the one the API
+                            itself gives: make the transfer at the office and
+                            record it here. */}
+                        {payoutProvider && ['pending', 'queued', 'failed'].includes(x.p.status) && (
+                          <button class="btn btn-small" data-send={x.p.id}>Send through {payoutProvider.id}</button>
+                        )}
+                        {payoutProvider && ['queued', 'processing'].includes(x.p.status) && (
+                          <button class="btn btn-small" data-refresh={x.p.id}>Ask the provider</button>
+                        )}
+                        <button class="btn btn-small" data-paid={x.p.id}>Record as paid</button>
+                      </div>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -274,6 +316,39 @@ const blocked = open.filter((r: any) => r.st.hasUnresolvedCommission);
     reloadOr(res, 'Could not create the payout.');
   }));
 
+  // SENDING MONEY IS CONFIRMED IN WORDS, not with a bare "OK?". This is the one
+  // control on the page that moves funds out of the federation's account, and
+  // sendPayoutThroughProvider() is idempotent at the provider but not
+  // reversible from here.
+  document.querySelectorAll('[data-statement]').forEach((b) => b.addEventListener('click', async () => {
+    const el = b as HTMLElement;
+    const res = await post('settlement/statement', {
+      settlementId: Number(el.dataset.statement),
+      sellerId: Number(el.dataset.seller),
+      // MONTHLY IS THE DEFAULT THE API ALREADY APPLIES and is passed explicitly
+      // rather than omitted, so the cadence on the document is a value somebody
+      // can see on this page rather than one buried in a route.
+      cadence: 'monthly',
+    });
+    if (res.ok) {
+      window.alert('The statement has been issued. The seller sees it under Money in their portal.');
+      window.location.reload();
+      return;
+    }
+    say(res.body.error || 'Could not issue the statement.');
+  }));
+
+  document.querySelectorAll('[data-send]').forEach((b) => b.addEventListener('click', async () => {
+    if (!window.confirm('Send this payout to the seller\u2019s bank now? This instructs a real transfer.')) return;
+    reloadOr(await post('payout/send', { payoutId: Number((b as HTMLElement).dataset.send) }),
+      'Could not send the payout. Nothing has been transferred.');
+  }));
+
+  document.querySelectorAll('[data-refresh]').forEach((b) => b.addEventListener('click', async () => {
+    reloadOr(await post('payout/refresh', { payoutId: Number((b as HTMLElement).dataset.refresh) }),
+      'Could not ask the provider about this payout.');
+  }));
+
   document.querySelectorAll('[data-paid]').forEach((b) => b.addEventListener('click', async () => {
     const utr = window.prompt('Bank reference (UTR) for this transfer, if you have it:');
     if (utr === null) return;
@@ -284,6 +359,8 @@ const blocked = open.filter((r: any) => r.st.hasUnresolvedCommission);
 </script>
 
 <style>
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .hint { font-size: 0.9em; opacity: 0.8; }
   .pill { padding: 2px 10px; border-radius: 999px; border: 1px solid currentColor; font-size: 0.85em; white-space: nowrap; }
   .muted { opacity: 0.75; }
   .error { color: #b00020; font-weight: 600; }

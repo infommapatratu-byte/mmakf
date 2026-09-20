@@ -28,6 +28,12 @@ import { db } from '@/db';
 import { asc, eq } from 'drizzle-orm';
 import * as s from '@/db/schema';
 import { myZones, carriageExposure, UNZONED_SELLER_POLICY_NOT_SET } from '@/db/shipping';
+// THE RETURN WINDOW A SELLER OFFERS. setReturnPolicy() existed and had no
+// control anywhere, so no seller could ever state one — and with the
+// marketplace floor also unset, effectiveReturnPolicy() had nothing to work
+// from and requestReturn() refused every return with "no policy". The whole
+// returns engine was gated behind a value nobody could enter.
+import { effectiveReturnPolicy, RETURN_FLOOR_NOT_SET, RETURN_POLICY_NOT_SET } from '@/db/returns';
 import { sellerContext, readableError, money, titleCase, SELLER_TABS } from './_gate';
 
 export const prerender = false;
@@ -35,6 +41,7 @@ export const prerender = false;
 const ctx = await sellerContext(Astro.request.headers.get('cookie'));
 
 let zones: any[] = [];
+let returnPolicy: any = null;
 let exposure: any = null;
 let states: any[] = [];
 let pageError: string | null = ctx.loadError;
@@ -43,6 +50,10 @@ if (ctx.gate === 'seller' && ctx.approved && !pageError) {
   try {
     // No seller id passed. Both resolve the shop from the session.
     zones = await myZones(db(), ctx.identity!.principal);
+    // The EFFECTIVE policy, which is the more generous of this seller's window
+    // and the marketplace floor. Reading the seller's own row alone would show
+    // them seven days while their buyers are entitled to fourteen.
+    returnPolicy = await effectiveReturnPolicy(db(), ctx.seller.id);
     exposure = await carriageExposure(db(), ctx.identity!.principal);
     states = await db()
       .select({ state: s.stateUnits.state })
@@ -332,6 +343,66 @@ const describeZone = (z: any): string => {
                 <p id="preview-out" role="status"></p>
               </div>
 
+              {/* ── Returns ──────────────────────────────────────────────
+                   ON THE SHIPPING PAGE because a return is a delivery in the
+                   other direction, and the question a seller answers here —
+                   who pays the carriage — is the same question.
+
+                   THE EFFECTIVE WINDOW IS SHOWN, NOT THE SELLER'S OWN. Where
+                   MMAKF has set a floor above what the seller offers, the floor
+                   is what a buyer gets, and a page that displayed the seller's
+                   number would be quoting them a promise they do not have. */}
+              <div class="card">
+                <div class="eyebrow">Returns</div>
+                <h2 class="h3">What you accept back</h2>
+
+                <p>
+                  {returnPolicy?.windowDays == null
+                    ? 'You have not stated a return window, and MMAKF has not set one either — so a buyer asking to return something is refused, with that as the reason.'
+                    : `Buyers have ${returnPolicy.windowDays} day${returnPolicy.windowDays === 1 ? '' : 's'} to ask to return something, ${returnPolicy.source === 'marketplace_floor' ? 'which is the MMAKF minimum rather than your own figure' : 'which is your own figure'}.`}
+                </p>
+                {returnPolicy?.notes?.map((n: string) => <p class="hint">{n}</p>)}
+
+                <form id="return-policy-form">
+                  <label for="rp-window">Return window in days</label>
+                  <input id="rp-window" name="windowDays" type="number" min="0" max="365"
+                    value={returnPolicy?.sellerWindowDays ?? ''} />
+                  <p class="hint">
+                    Leave blank to state nothing. Where MMAKF publishes a minimum, the more generous of
+                    the two applies — a longer window of your own is honoured, a shorter one is not.
+                  </p>
+
+                  <label for="rp-carriage">Who pays return carriage</label>
+                  <select id="rp-carriage" name="returnShippingPaidBy">
+                    <option value="">Not stated</option>
+                    <option value="buyer" selected={returnPolicy?.returnShippingPaidBy === 'buyer'}>The buyer</option>
+                    <option value="seller" selected={returnPolicy?.returnShippingPaidBy === 'seller'}>Me, the seller</option>
+                  </select>
+
+                  <label for="rp-condition">What condition you require goods to come back in</label>
+                  <textarea id="rp-condition" name="conditionRequirements" rows="2" maxlength="2000"
+                  >{returnPolicy?.conditionRequirements ?? ''}</textarea>
+
+                  <span class="check">
+                    <input id="rp-exchange" name="exchangeOffered" type="checkbox" value="1"
+                      checked={returnPolicy?.exchangeOffered === true} />
+                    <label for="rp-exchange">I offer exchanges as well as refunds</label>
+                  </span>
+
+                  <span class="check">
+                    <input id="rp-nonreturnable" name="nonReturnable" type="checkbox" value="1"
+                      checked={returnPolicy?.nonReturnable === true} />
+                    <label for="rp-nonreturnable">My goods are not returnable at all</label>
+                  </span>
+
+                  <label for="rp-nonreason">If not returnable, why — a buyer reads this before they buy</label>
+                  <input id="rp-nonreason" name="nonReturnableReason" type="text" maxlength="500"
+                    value={returnPolicy?.nonReturnableReason ?? ''} />
+
+                  <button class="btn btn-primary btn-small" type="submit">Save the return policy</button>
+                </form>
+              </div>
+
               <p id="page-error" class="error" role="alert" hidden></p>
             </>
           )}
@@ -453,9 +524,46 @@ const describeZone = (z: any): string => {
     const days = q.minDays != null && q.maxDays != null ? `, ${q.minDays}–${q.maxDays} working days` : '';
     out.textContent = `${rupees} — ${q.methodName} in “${q.zoneName}”${q.carrier ? ` via ${q.carrier}` : ''}${days}.`;
   });
+
+  // ── The return policy ─────────────────────────────────────────────────────
+  //
+  // A BLANK WINDOW IS SENT AS null, NOT AS ZERO. Zero days is a real policy —
+  // "no returns after the parcel arrives" — and it is a different statement
+  // from having stated nothing at all, which is what setReturnPolicy() records
+  // as null and what effectiveReturnPolicy() reports as unset.
+  const rpForm = document.getElementById('return-policy-form') as HTMLFormElement | null;
+  if (rpForm) {
+    rpForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(rpForm);
+      const checked = (name: string) =>
+        (rpForm.querySelector(`input[name="${name}"]`) as HTMLInputElement | null)?.checked ?? false;
+      const text = (k: string) => {
+        const v = String(f.get(k) ?? '').trim();
+        return v === '' ? null : v;
+      };
+      const windowRaw = String(f.get('windowDays') ?? '').trim();
+
+      const res = await post('return-policy/set', {
+        windowDays: windowRaw === '' ? null : Number(windowRaw),
+        returnShippingPaidBy: text('returnShippingPaidBy'),
+        conditionRequirements: text('conditionRequirements'),
+        exchangeOffered: checked('exchangeOffered'),
+        nonReturnable: checked('nonReturnable'),
+        nonReturnableReason: text('nonReturnableReason'),
+      });
+      if (res.ok) { window.location.reload(); return; }
+      say(res.body.error || 'Could not save the return policy.');
+    });
+  }
 </script>
 
 <style>
+  .check { display: inline-flex; align-items: center; gap: 8px; margin: 10px 0; }
+  .check label { display: inline; margin: 0; }
+  #return-policy-form label { display: block; margin-top: 10px; font-size: 0.9em; }
+  #return-policy-form input, #return-policy-form select, #return-policy-form textarea { width: 100%; max-width: 520px; }
+
   .tabs { display: flex; gap: 16px; margin: 18px 0; flex-wrap: wrap; }
   .tabs a { padding: 6px 0; border-bottom: 2px solid transparent; text-decoration: none; }
   .tabs a[aria-current='page'] { border-bottom-color: currentColor; font-weight: 600; }

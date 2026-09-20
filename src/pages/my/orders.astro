@@ -39,6 +39,12 @@ import { identify } from '@/lib/session';
 import { isConfigured, db } from '@/db';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import * as s from '@/db/schema';
+// The FEDERATION's own orders — memberships, course fees, event entries and
+// anything bought from the federation's half of /shop. They were invisible
+// here: this page inner-joins seller_orders, so an order with no seller was
+// filtered out, and nothing else in /my listed one. A member could be charged
+// by MMAKF and have nowhere to see what for.
+import { myFederationOrders } from '@/db/orders';
 
 export const prerender = false;
 
@@ -48,6 +54,11 @@ const principal = identity?.principal ?? null;
 
 let personId: number | null = null;
 let orders: any[] = [];
+let fedOrders: any[] = [];
+/** Order-line ids this buyer has already reviewed, so the form is not offered twice. */
+let reviewedLines = new Set<number>();
+/** Seller-order ids this buyer has already rated, for the same reason. */
+let reviewedSellerOrders = new Set<number>();
 let loadError: string | null = null;
 
 if (configured && principal?.userId != null) {
@@ -89,6 +100,18 @@ if (configured && principal?.userId != null) {
           ? await db().select().from(s.returnRequests).where(inArray(s.returnRequests.sellerOrderId, soIds))
           : [];
 
+        // ALREADY-REVIEWED, read once for the whole page. Both review tables
+        // carry a unique index on the purchase — the engine refuses a second
+        // review with `already_reviewed` — so offering the form again would be
+        // offering a control that always fails.
+        const priorProduct = await db().select({ orderLineId: s.productReviews.orderLineId })
+          .from(s.productReviews).where(eq(s.productReviews.personId, personId));
+        for (const r of priorProduct as any[]) reviewedLines.add(r.orderLineId);
+
+        const priorSeller = await db().select({ sellerOrderId: s.sellerReviews.sellerOrderId })
+          .from(s.sellerReviews).where(eq(s.sellerReviews.personId, personId));
+        for (const r of priorSeller as any[]) reviewedSellerOrders.add(r.sellerOrderId);
+
         orders = rows.map((r: any) => ({
           ...r.order,
           sellerOrders: sellerOrders
@@ -103,6 +126,8 @@ if (configured && principal?.userId != null) {
             })),
         }));
       }
+
+      fedOrders = await myFederationOrders(db(), personId, 50);
     }
   } catch (err: any) {
     console.error('[my/orders]', err);
@@ -140,6 +165,18 @@ function progress(so: any): string {
     default:                return titleCase(so.status);
   }
 }
+
+/**
+ * A review is about what arrived, so it waits until something has.
+ *
+ * THE SAME FOUR STATES THE ENGINE ACCEPTS, not a shorter list of this page's
+ * own. leaveProductReview() permits delivered, return_requested, returned and
+ * refunded — because a buyer who had to return something has the most to say
+ * about it, and a marketplace that only collects reviews from untroubled orders
+ * is publishing a rating it curated.
+ */
+const canReview = (so: any) =>
+  ['delivered', 'return_requested', 'returned', 'refunded'].includes(so.status);
 
 /** Returns may only be asked for once goods have arrived. */
 const canReturn = (so: any) =>
@@ -182,8 +219,12 @@ const canReturn = (so: any) =>
 
       {configured && personId != null && !loadError && orders.length === 0 && (
         <div class="card">
-          <h2 class="h3">Nothing yet.</h2>
-          <p>You have not bought anything on the marketplace. <a href="/shop">Have a look at the shop</a>.</p>
+          <h2 class="h3">Nothing from the marketplace yet.</h2>
+          <p>
+            You have not bought anything from a marketplace seller.
+            <a href="/shop"> Have a look at the shop</a>.
+            {fedOrders.length > 0 && ' Your federation fees and purchases are below.'}
+          </p>
         </div>
       )}
 
@@ -226,9 +267,19 @@ const canReturn = (so: any) =>
               {so.shipments.map((sh: any) => (
                 <p class="muted">
                   {/* NO FAKE TRACKING. A number appears only where the seller
-                      recorded one; otherwise the honest sentence. */}
+                      recorded one, and it becomes a LINK only where the carrier
+                      adapter knows that courier's public tracking page — see
+                      src/lib/carriers. An unknown courier keeps the number as
+                      plain text rather than becoming a URL that 404s at a
+                      courier's site and tells the buyer their parcel is lost. */}
                   {sh.trackingNumber
-                    ? <>Dispatched {when(sh.dispatchedAt)}{sh.carrier ? ` by ${sh.carrier}` : ''} — tracking <code>{sh.trackingNumber}</code>.</>
+                    ? <>
+                        Dispatched {when(sh.dispatchedAt)}{sh.carrier ? ` by ${sh.carrier}` : ''} — tracking{' '}
+                        {sh.trackingUrl
+                          ? <a href={sh.trackingUrl} rel="nofollow noopener" target="_blank"><code>{sh.trackingNumber}</code></a>
+                          : <code>{sh.trackingNumber}</code>}
+                        {!sh.trackingUrl && <> (no tracking page for this courier — quote the number to them)</>}.
+                      </>
                     : <>Dispatched {when(sh.dispatchedAt)} without a tracking number, so there is nothing to follow.</>}
                   {sh.deliveredAt && <> Delivered {when(sh.deliveredAt)}.</>}
                 </p>
@@ -246,7 +297,78 @@ const canReturn = (so: any) =>
                   <button class="btn btn-small open-return" data-so={so.id}>Ask to return</button>
                 )}
                 <button class="btn btn-small open-report" data-so={so.id}>Report a problem</button>
+                {canReview(so) && !reviewedSellerOrders.has(so.id) && (
+                  <button class="btn btn-small open-review" data-so={so.id}>Rate this shop</button>
+                )}
               </div>
+
+              {/* ── Reviewing what arrived ──────────────────────────────────
+                   leaveProductReview() and leaveSellerReview() were written,
+                   tested, exposed on the API — and had no control anywhere. A
+                   review lands as `pending` and refreshSellerRating() counts
+                   only PUBLISHED ones, so with nothing able to write one, every
+                   seller in the marketplace would have stayed unrated for ever
+                   and the rating column would have stayed null.
+
+                   TWO REVIEWS, NOT ONE, because they are different questions:
+                   the goods are one thing and the service is another, and a
+                   shop that packs beautifully can still sell a poor gi. */}
+              {canReview(so) && (
+                <form class="review-form" data-so={so.id} hidden>
+                  <h4 class="h5">Rate this shop</h4>
+                  <p class="muted">
+                    About the service — how it was packed, how it was communicated, how long it took.
+                    MMAKF reads every review before it is published; it appears once it has been.
+                  </p>
+                  <label>
+                    Overall, out of 5
+                    <select name="ratingOverall" required>
+                      <option value="5">5 — excellent</option>
+                      <option value="4">4 — good</option>
+                      <option value="3">3 — acceptable</option>
+                      <option value="2">2 — poor</option>
+                      <option value="1">1 — very poor</option>
+                    </select>
+                  </label>
+                  <label>
+                    Anything you want to say
+                    <textarea name="body" rows="3" maxlength="4000"></textarea>
+                  </label>
+                  <button class="btn" type="submit">Send the rating</button>
+                  <span class="form-error" role="alert" hidden></span>
+                </form>
+              )}
+
+              {canReview(so) && so.lines.some((l: any) => !reviewedLines.has(l.id)) && (
+                <details class="item-reviews">
+                  <summary>Review what you bought</summary>
+                  {so.lines.filter((l: any) => !reviewedLines.has(l.id)).map((l: any) => (
+                    <form class="product-review-form" data-line={l.id}>
+                      <h4 class="h5">{l.description}</h4>
+                      <label>
+                        Out of 5
+                        <select name="rating" required>
+                          <option value="5">5 — excellent</option>
+                          <option value="4">4 — good</option>
+                          <option value="3">3 — acceptable</option>
+                          <option value="2">2 — poor</option>
+                          <option value="1">1 — very poor</option>
+                        </select>
+                      </label>
+                      <label>
+                        A headline
+                        <input type="text" name="title" maxlength="160" />
+                      </label>
+                      <label>
+                        What should another buyer know?
+                        <textarea name="body" rows="3" maxlength="4000"></textarea>
+                      </label>
+                      <button class="btn btn-small" type="submit">Send the review</button>
+                      <span class="form-error" role="alert" hidden></span>
+                    </form>
+                  ))}
+                </details>
+              )}
 
               {canReturn(so) && (
                 <form class="return-form" data-so={so.id} hidden>
@@ -314,6 +436,56 @@ const canReturn = (so: any) =>
           ))}
         </div>
       ))}
+
+      {/* ── The federation's own orders ────────────────────────────────────
+           A DIFFERENT KIND OF ORDER AND SHOWN AS ONE. These carry no seller,
+           no parcel and no consignment: a membership, a course fee, an event
+           entry, or something bought from the federation's own half of the
+           shop. Putting them in the table above would print "awaiting
+           dispatch" against a membership renewal.
+
+           THE INVOICE LINK IS THE POINT OF THIS SECTION. issueInvoice() has
+           been freezing a complete receipt inside every payment confirmation,
+           and until /my/invoice/[no] there was no address at which the person
+           who paid could read one. */}
+      {configured && personId != null && !loadError && fedOrders.length > 0 && (
+        <div class="card">
+          <div class="eyebrow">MMAKF</div>
+          <h2 class="h3">Fees, memberships and federation purchases</h2>
+          <p class="muted">
+            Paid to the federation itself rather than to a shop, so there is nothing to dispatch or
+            track — but there is a receipt.
+          </p>
+          <table>
+            <caption class="sr-only">Orders placed with the federation</caption>
+            <thead>
+              <tr>
+                <th scope="col">Order</th><th scope="col">Date</th>
+                <th scope="col">Status</th><th scope="col">Total</th><th scope="col">Receipt</th>
+              </tr>
+            </thead>
+            <tbody>
+              {fedOrders.map((f: any) => (
+                <tr>
+                  <th scope="row">{f.order.orderNo}</th>
+                  <td>{when(f.order.createdAt)}</td>
+                  <td>{titleCase(f.order.status)}</td>
+                  <td>{money(f.order.totalPaise)}</td>
+                  <td>
+                    {f.invoiceNo
+                      ? <a href={`/my/invoice/${encodeURIComponent(f.invoiceNo)}`}>{f.invoiceNo}</a>
+                      : <span class="muted">
+                          {f.order.status === 'paid' || f.order.status === 'fulfilled'
+                            ? 'Not issued'
+                            : 'Issued once paid'}
+                        </span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   </section>
 </Base>
@@ -344,6 +516,7 @@ const canReturn = (so: any) =>
   };
   toggle('.open-return', '.return-form');
   toggle('.open-report', '.report-form');
+  toggle('.open-review', '.review-form');
 
   document.querySelectorAll('.return-form').forEach((form) => {
     form.addEventListener('submit', async (e) => {
@@ -393,6 +566,55 @@ const canReturn = (so: any) =>
         return;
       }
       err.textContent = res.body.error || 'The report could not be sent.'; err.hidden = false;
+    });
+  });
+
+  // ── Rating the shop ───────────────────────────────────────────────────────
+  //
+  // The page is NOT reloaded on success. A review lands as `pending` and
+  // nothing about the order changes, so a reload would redraw an identical page
+  // and leave the buyer wondering whether it worked. Saying what happened —
+  // including that it is not public yet — is the honest answer.
+  document.querySelectorAll('.review-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = form as HTMLFormElement;
+      const err = f.querySelector('.form-error') as HTMLElement;
+      err.hidden = true;
+      const data = new FormData(f);
+      const res = await post('review/seller', {
+        sellerOrderId: Number((f as HTMLElement).dataset.so),
+        ratingOverall: Number(data.get('ratingOverall')),
+        body: data.get('body') || null,
+      });
+      if (res.ok && res.body.ok) {
+        say('Thank you. MMAKF reads every review before it is published, so it will appear once it has been.');
+        f.hidden = true;
+        return;
+      }
+      err.textContent = res.body.error || 'The rating could not be sent.'; err.hidden = false;
+    });
+  });
+
+  document.querySelectorAll('.product-review-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = form as HTMLFormElement;
+      const err = f.querySelector('.form-error') as HTMLElement;
+      err.hidden = true;
+      const data = new FormData(f);
+      const res = await post('review/product', {
+        orderLineId: Number((f as HTMLElement).dataset.line),
+        rating: Number(data.get('rating')),
+        title: data.get('title') || null,
+        body: data.get('body') || null,
+      });
+      if (res.ok && res.body.ok) {
+        say('Thank you. MMAKF reads every review before it is published, so it will appear once it has been.');
+        f.hidden = true;
+        return;
+      }
+      err.textContent = res.body.error || 'The review could not be sent.'; err.hidden = false;
     });
   });
 </script>
