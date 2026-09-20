@@ -82,9 +82,15 @@ if (authed) {
               <label class="input-label" for="reset-dob">Date of birth</label>
               <input class="input" type="date" id="reset-dob" autocomplete="bday" />
               <label class="input-label" for="reset-new-password" style="margin-top:12px">New password</label>
-              <input class="input" type="password" id="reset-new-password" autocomplete="new-password" />
+              <div style="position:relative">
+                <input class="input" type="password" id="reset-new-password" autocomplete="new-password" style="padding-right:72px" />
+                <button type="button" class="reset-password-toggle" data-target="reset-new-password" aria-controls="reset-new-password" aria-pressed="false" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:0;padding:8px;font-family:var(--font-display);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);cursor:pointer">Show</button>
+              </div>
               <label class="input-label" for="reset-confirm-password" style="margin-top:12px">Repeat new password</label>
-              <input class="input" type="password" id="reset-confirm-password" autocomplete="new-password" />
+              <div style="position:relative">
+                <input class="input" type="password" id="reset-confirm-password" autocomplete="new-password" style="padding-right:72px" />
+                <button type="button" class="reset-password-toggle" data-target="reset-confirm-password" aria-controls="reset-confirm-password" aria-pressed="false" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:0;padding:8px;font-family:var(--font-display);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);cursor:pointer">Show</button>
+              </div>
               <div id="resetErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
               <button type="button" id="resetSubmit" class="btn btn-ghost" style="width:100%;margin-top:14px;justify-content:center">Reset password</button>
             </div>
@@ -134,6 +140,18 @@ if (authed) {
     </section>
 
     <script>
+      document.querySelectorAll<HTMLButtonElement>('.reset-password-toggle').forEach((button) => {
+        button.addEventListener('click', () => {
+          const input = document.getElementById(button.dataset.target || '') as HTMLInputElement | null;
+          if (!input) return;
+          const revealed = input.type === 'text';
+          input.type = revealed ? 'password' : 'text';
+          button.textContent = revealed ? 'Show' : 'Hide';
+          button.setAttribute('aria-pressed', String(!revealed));
+          input.focus();
+        });
+      });
+
       // The Quick-links buttons. Delegated so the markup carries no inline
       // JavaScript — see the note beside them for what inline cost here.
       document.addEventListener('click', (e) => {

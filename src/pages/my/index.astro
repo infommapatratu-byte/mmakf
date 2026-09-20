@@ -316,9 +316,15 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
                 <label class="input-label" for="member-reset-dob">Date of birth</label>
                 <input class="input" type="date" id="member-reset-dob" autocomplete="bday" />
                 <label class="input-label" for="member-reset-new" style="margin-top:12px">New password</label>
-                <input class="input" type="password" id="member-reset-new" autocomplete="new-password" />
+                <div style="position:relative">
+                  <input class="input" type="password" id="member-reset-new" autocomplete="new-password" style="padding-right:72px" />
+                  <button type="button" class="reset-password-toggle" data-target="member-reset-new" aria-controls="member-reset-new" aria-pressed="false" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:0;padding:8px;font-family:var(--font-display);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);cursor:pointer">Show</button>
+                </div>
                 <label class="input-label" for="member-reset-confirm" style="margin-top:12px">Repeat new password</label>
-                <input class="input" type="password" id="member-reset-confirm" autocomplete="new-password" />
+                <div style="position:relative">
+                  <input class="input" type="password" id="member-reset-confirm" autocomplete="new-password" style="padding-right:72px" />
+                  <button type="button" class="reset-password-toggle" data-target="member-reset-confirm" aria-controls="member-reset-confirm" aria-pressed="false" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:0;padding:8px;font-family:var(--font-display);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);cursor:pointer">Show</button>
+                </div>
                 <div id="member-reset-error" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
                 <button type="button" id="member-reset-submit" class="btn btn-ghost" style="width:100%;margin-top:14px;min-height:44px">Reset password</button>
               </div>
@@ -690,6 +696,18 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
 </style>
 
 <script>
+  document.querySelectorAll<HTMLButtonElement>('.reset-password-toggle').forEach((button) => {
+    button.addEventListener('click', () => {
+      const input = document.getElementById(button.dataset.target || '') as HTMLInputElement | null;
+      if (!input) return;
+      const revealed = input.type === 'text';
+      input.type = revealed ? 'password' : 'text';
+      button.textContent = revealed ? 'Show' : 'Hide';
+      button.setAttribute('aria-pressed', String(!revealed));
+      input.focus();
+    });
+  });
+
   // Sign-in. Posts JSON so the CSRF middleware accepts it, and repeats exactly
   // what the server said rather than guessing at the reason.
   const form = document.getElementById('signInForm') as HTMLFormElement | null;
