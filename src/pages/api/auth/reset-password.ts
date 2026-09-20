@@ -18,7 +18,9 @@ function json(body: unknown, status: number) {
 }
 
 export const POST: APIRoute = async ({ request }) => {
-  const rl = await rateLimit(request, 'password-reset', 5, 3600);
+  // Allow legitimate admin recovery retries while retaining an hourly abuse limit.
+  // The versioned bucket also clears counters created by the previous 5-attempt limit.
+  const rl = await rateLimit(request, 'password-reset-v2', 15, 3600);
   if (!rl.ok) return tooManyRequests(rl.retryAfterSeconds);
   if (!isConfigured()) return json({ error: 'Password reset is not available on this deployment.' }, 503);
 
