@@ -141,13 +141,43 @@ export const MEMBERSHIP: ProposedRule[] = [
     basis: 'Above a coach. An examiner holds the federation\'s grading authority, which is its most consequential delegation.' },
 
   { code: 'MEM-DOJO', label: 'Dojo or club affiliation, annual', kind: 'base',
-    amountMinor: R(3000), audience: 'club', sortOrder: 20,
-    basis: 'USA Karate charges $200 for a club — roughly four times its athlete rate. This is six times, because a club bills its own students and can carry more than an individual.' },
+    amountMinor: R(8000), audience: 'club', sortOrder: 20,
+    basis: 'Federation policy: annual club affiliation is ₹8,000.' },
 
   { code: 'MEM-INSTITUTION', label: 'Institutional affiliation, annual', kind: 'base',
-    amountMinor: R(5000), audience: 'school', sortOrder: 21,
-    basis: 'Above a club. A school or university carries an institutional budget rather than a teacher\'s income.' },
+    amountMinor: R(8000), audience: 'school', sortOrder: 21,
+    basis: 'Federation policy: annual school or corporate affiliation is ₹8,000.' },
 ];
+
+/** Affiliate charter fees, adopted as the federation's requested schedule. */
+export const AFFILIATION: ProposedRule[] = [
+  { code: 'AFF-INDIVIDUAL', label: 'Individual affiliation, annual', kind: 'base',
+    amountMinor: R(5000), audience: 'member', conditions: { level: 'individual' }, sortOrder: 22,
+    basis: 'Federation policy: individual affiliation starts at ₹5,000 per year.' },
+  { code: 'AFF-CLUB', label: 'Club affiliation, annual', kind: 'base',
+    amountMinor: R(8000), audience: 'club', conditions: { level: 'club' }, sortOrder: 23,
+    basis: 'Federation policy: club affiliation is ₹8,000 per year.' },
+  { code: 'AFF-DISTRICT', label: 'District affiliation, annual', kind: 'base',
+    amountMinor: R(20000), audience: 'district_unit', conditions: { level: 'district' }, sortOrder: 24,
+    basis: 'Federation policy: district affiliation is ₹20,000 per year.' },
+  { code: 'AFF-STATE', label: 'State affiliation, annual', kind: 'base',
+    amountMinor: R(50000), audience: 'state_unit', conditions: { level: 'state' }, sortOrder: 25,
+    basis: 'Federation policy: state affiliation is ₹50,000 per year.' },
+];
+
+/**
+ * International pricing is kept outside the INR framework. The current fee
+ * schema has one currency per framework, so CHF 1,000 must be published in a
+ * separate CHF framework before it can be sent to a gateway.
+ */
+export const INTERNATIONAL_AFFILIATION = {
+  code: 'AFF-INTERNATIONAL',
+  label: 'International affiliation, annual',
+  amountMinor: 100000,
+  currency: 'CHF',
+  audience: 'organisation',
+  conditions: { level: 'international' },
+} as const;
 
 /**
  * GRADING.
@@ -305,7 +335,7 @@ export const INSTITUTIONAL: ProposedRule[] = [
 
 /** Every proposed rule, in the order they apply. */
 export const PROPOSED_RULES: ProposedRule[] = [
-  ...MEMBERSHIP, ...GRADING, ...COMPETITION, ...EDUCATION,
+  ...MEMBERSHIP, ...AFFILIATION, ...GRADING, ...COMPETITION, ...EDUCATION,
   ...INDIVIDUAL_TRAINING, ...INSTITUTIONAL,
 ];
 
