@@ -311,6 +311,8 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
             <details id="member-reset" style="margin-top:18px">
               <summary style="cursor:pointer;color:var(--gold);font-size:.78rem">Reset password with date of birth</summary>
               <div style="margin-top:12px">
+                <label class="input-label" for="member-reset-email">Account email</label>
+                <input class="input" type="email" id="member-reset-email" autocomplete="username" placeholder="you@example.com" required />
                 <label class="input-label" for="member-reset-dob">Date of birth</label>
                 <input class="input" type="date" id="member-reset-dob" autocomplete="bday" />
                 <label class="input-label" for="member-reset-new" style="margin-top:12px">New password</label>
@@ -729,7 +731,7 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
   const reset = document.getElementById('member-reset-submit');
   reset?.addEventListener('click', async () => {
     const error = document.getElementById('member-reset-error');
-    const email = (document.getElementById('member-email') as HTMLInputElement).value.trim();
+    const email = (document.getElementById('member-reset-email') as HTMLInputElement).value.trim();
     const dob = (document.getElementById('member-reset-dob') as HTMLInputElement).value;
     const newPassword = (document.getElementById('member-reset-new') as HTMLInputElement).value;
     const confirm = (document.getElementById('member-reset-confirm') as HTMLInputElement).value;
