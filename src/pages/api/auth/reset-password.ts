@@ -48,11 +48,17 @@ export const POST: APIRoute = async ({ request }) => {
       ? await resetPasswordByRegistration(db(), registrationNumber, email, newPassword)
       : await resetPasswordByDob(db(), email, dob, newPassword);
     if (!verified) return json({ error: GENERIC }, 401);
-    await writeAudit(
-      db(),
-      { principal: { userId: null, label: 'password-recovery', bindings: [] }, ip: clientIp(request) },
-      { entityType: 'user', entityId: email, action: 'password_reset', newValue: { via: registrationNumber ? 'registration_number' : 'date_of_birth' } }
-    );
+    try {
+      await writeAudit(
+        db(),
+        { principal: { userId: null, label: 'password-recovery', bindings: [] }, ip: clientIp(request) },
+        { entityType: 'user', entityId: email, action: 'password_reset', newValue: { via: registrationNumber ? 'registration_number' : 'date_of_birth' } }
+      );
+    } catch (auditError) {
+      // Do not report a valid credential change as failed if an older production
+      // database has not applied the password-reset audit migration yet.
+      console.error('password reset audit failed after credential update', auditError);
+    }
     return json({ ok: true, message: 'Password updated. You can now sign in.' }, 200);
   } catch (err) {
     console.error('password reset failed', err);
