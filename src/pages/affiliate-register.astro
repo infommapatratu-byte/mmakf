@@ -3,7 +3,7 @@ import Base from '@/layouts/Base.astro';
 export const prerender = false;
 ---
 <Base title="Affiliate registration — MMAKF" description="Register an individual, club, district, state, school, corporate or international MMAKF affiliate.">
-  <main class="container" style="max-width:760px;padding:72px 20px">
+  <section class="container" style="max-width:760px;padding:72px 20px">
     <div class="eyebrow">MMAKF registration</div>
     <h1 class="display-2">Register as an <em class="r">affiliate</em>.</h1>
     <p class="lead">Submit your details for review. Approval and payment are handled by the federation; submitting this form does not create a charter.</p>
@@ -25,7 +25,7 @@ export const prerender = false;
       <div id="result" role="status" style="margin-top:16px;display:none"></div>
       <button class="btn btn-primary" style="margin-top:20px" type="submit">Submit registration</button>
     </form>
-  </main>
+  </section>
   <script>
     const form = document.getElementById('affiliateForm');
     const result = document.getElementById('result');

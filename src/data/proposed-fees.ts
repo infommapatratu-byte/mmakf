@@ -152,7 +152,7 @@ export const MEMBERSHIP: ProposedRule[] = [
 /** Affiliate charter fees, adopted as the federation's requested schedule. */
 export const AFFILIATION: ProposedRule[] = [
   { code: 'AFF-INDIVIDUAL', label: 'Individual affiliation, annual', kind: 'base',
-    amountMinor: R(5000), audience: 'member', conditions: { level: 'individual' }, sortOrder: 22,
+    amountMinor: R(5000), audience: 'organisation', conditions: { level: 'individual' }, sortOrder: 22,
     basis: 'Federation policy: individual affiliation starts at ₹5,000 per year.' },
   { code: 'AFF-CLUB', label: 'Club affiliation, annual', kind: 'base',
     amountMinor: R(8000), audience: 'club', conditions: { level: 'club' }, sortOrder: 23,
