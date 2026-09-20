@@ -14,6 +14,7 @@ const store: Record<string, any[]> = {};
 
 vi.mock('../src/lib/storage', () => ({
   getList: async (key: string) => store[key] ?? [],
+  replaceList: async (key: string, value: any[]) => { store[key] = value; },
   set: async (key: string, value: any) => { store[key] = value; },
   get: async (key: string) => store[key] ?? null,
 }));
