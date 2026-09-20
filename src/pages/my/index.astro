@@ -308,6 +308,20 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
 
             <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;min-height:44px">Sign in</button>
 
+            <details style="margin-top:18px">
+              <summary style="cursor:pointer;color:var(--gold);font-size:.78rem">Reset password with date of birth</summary>
+              <div style="margin-top:12px">
+                <label class="input-label" for="member-reset-dob">Date of birth</label>
+                <input class="input" type="date" id="member-reset-dob" autocomplete="bday" />
+                <label class="input-label" for="member-reset-new" style="margin-top:12px">New password</label>
+                <input class="input" type="password" id="member-reset-new" autocomplete="new-password" />
+                <label class="input-label" for="member-reset-confirm" style="margin-top:12px">Repeat new password</label>
+                <input class="input" type="password" id="member-reset-confirm" autocomplete="new-password" />
+                <div id="member-reset-error" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
+                <button type="button" id="member-reset-submit" class="btn btn-ghost" style="width:100%;margin-top:14px;min-height:44px">Reset password</button>
+              </div>
+            </details>
+
             <p class="text-muted" style="margin-top:18px;font-size:.78rem;line-height:1.7">
               Member accounts are created by the federation office and linked to your member record. If you have no
               account, write to <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a> quoting your member
@@ -711,4 +725,29 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
       button.textContent = 'Sign in';
     });
   }
+
+  const reset = document.getElementById('member-reset-submit');
+  reset?.addEventListener('click', async () => {
+    const error = document.getElementById('member-reset-error');
+    const email = (document.getElementById('member-email') as HTMLInputElement).value.trim();
+    const dob = (document.getElementById('member-reset-dob') as HTMLInputElement).value;
+    const newPassword = (document.getElementById('member-reset-new') as HTMLInputElement).value;
+    const confirm = (document.getElementById('member-reset-confirm') as HTMLInputElement).value;
+    if (error) error.style.display = 'none';
+    reset.setAttribute('disabled', 'true');
+    const response = await fetch('/api/auth/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, dob, newPassword, confirm }),
+    }).catch(() => null);
+    reset.removeAttribute('disabled');
+    const body = await response?.json().catch(() => ({}));
+    if (error) {
+      error.textContent = response?.ok
+        ? 'Password updated. Sign in with your new password.'
+        : (body?.error || 'Password reset could not be completed.');
+      error.style.color = response?.ok ? 'var(--gold-2)' : 'var(--red-2)';
+      error.style.display = 'block';
+    }
+  });
 </script>

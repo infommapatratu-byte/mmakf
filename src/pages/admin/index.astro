@@ -74,6 +74,20 @@ if (authed) {
           <div id="loginErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
           <button type="submit" class="btn btn-primary" style="width:100%;margin-top:20px;justify-content:center">Sign in</button>
 
+          <details style="margin-top:18px">
+            <summary style="cursor:pointer;font-size:.78rem;color:var(--gold);font-family:var(--font-display);letter-spacing:.04em">Reset password with date of birth</summary>
+            <div style="margin-top:12px">
+              <label class="input-label" for="reset-dob">Date of birth</label>
+              <input class="input" type="date" id="reset-dob" autocomplete="bday" />
+              <label class="input-label" for="reset-new-password" style="margin-top:12px">New password</label>
+              <input class="input" type="password" id="reset-new-password" autocomplete="new-password" />
+              <label class="input-label" for="reset-confirm-password" style="margin-top:12px">Repeat new password</label>
+              <input class="input" type="password" id="reset-confirm-password" autocomplete="new-password" />
+              <div id="resetErr" role="alert" style="color:var(--red-2);font-size:.85rem;margin-top:12px;display:none"></div>
+              <button type="button" id="resetSubmit" class="btn btn-ghost" style="width:100%;margin-top:14px;justify-content:center">Reset password</button>
+            </div>
+          </details>
+
           <!--
             Recovery, stated rather than hidden — and SHORT.
 
@@ -207,6 +221,37 @@ if (authed) {
         err.textContent = message;
         err.style.display = 'block';
         f.querySelector('input[name=password]').select();
+      });
+
+      const resetButton = document.getElementById('resetSubmit');
+      resetButton?.addEventListener('click', async () => {
+        const resetErr = document.getElementById('resetErr');
+        const email = String((document.getElementById('login-email') as HTMLInputElement)?.value || '').trim();
+        const dob = String((document.getElementById('reset-dob') as HTMLInputElement)?.value || '');
+        const newPassword = String((document.getElementById('reset-new-password') as HTMLInputElement)?.value || '');
+        const confirm = String((document.getElementById('reset-confirm-password') as HTMLInputElement)?.value || '');
+        if (resetErr) resetErr.style.display = 'none';
+        resetButton.setAttribute('disabled', 'true');
+        const response = await fetch('/api/auth/reset-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, dob, newPassword, confirm }),
+        }).catch(() => null);
+        resetButton.removeAttribute('disabled');
+        const body = await response?.json().catch(() => ({}));
+        if (response?.ok) {
+          if (resetErr) {
+            resetErr.textContent = 'Password updated. Sign in with your new password.';
+            resetErr.style.color = 'var(--gold-2)';
+            resetErr.style.display = 'block';
+          }
+          return;
+        }
+        if (resetErr) {
+          resetErr.textContent = body?.error || 'Password reset could not be completed.';
+          resetErr.style.color = 'var(--red-2)';
+          resetErr.style.display = 'block';
+        }
       });
     </script>
   ) : (

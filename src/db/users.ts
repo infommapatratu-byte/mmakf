@@ -219,6 +219,7 @@ export async function changePassword(
   if (!(await verifyPassword(currentPassword, row.passwordHash))) {
     throw new Error('Current password is incorrect');
   }
+
   const problem = passwordProblem(newPassword);
   if (problem) throw new Error(problem);
   if (await verifyPassword(newPassword, row.passwordHash)) {
@@ -242,6 +243,53 @@ export async function changePassword(
     action: 'update',
     newValue: { passwordChanged: true, sessionsRevoked: true },
   });
+}
+
+/**
+ * Reset a person's password after DOB verification.
+ *
+ * The email identifies the account; the date of birth is the only recovery
+ * factor. The caller must rate-limit this operation and use the generic
+ * failure result so it cannot be used to enumerate accounts.
+ */
+export async function resetPasswordByDob(
+  db: DB,
+  email: unknown,
+  dob: unknown,
+  newPassword: string
+): Promise<boolean> {
+  const addr = normalizeEmail(email);
+  const birthDate = typeof dob === 'string' ? dob.trim() : '';
+  const row = (
+    await db
+      .select({ id: s.users.id, personId: s.users.personId, storedDob: s.persons.dob })
+      .from(s.users)
+      .leftJoin(s.persons, eq(s.users.personId, s.persons.id))
+      .where(eq(s.users.email, addr))
+      .limit(1)
+  )[0];
+
+  if (!row || !row.personId || !row.storedDob || row.storedDob !== birthDate) {
+    await equalizeTiming(newPassword);
+    return false;
+  }
+
+  const problem = passwordProblem(newPassword);
+  if (problem) throw new Error(problem);
+
+  await db
+    .update(s.users)
+    .set({
+      passwordHash: await hashPassword(newPassword),
+      failedAttempts: 0,
+      lockedUntil: null,
+      mustChangePassword: 'no',
+      sessionEpoch: sql`${s.users.sessionEpoch} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(eq(s.users.id, row.id));
+
+  return true;
 }
 
 /**
