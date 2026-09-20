@@ -8,7 +8,7 @@
 // One generic engine covers all three, because the shape is identical: a record
 // moves between states, each move needs authority and leaves a trail.
 
-import { getList, set as storageSet, get as storageGet } from './storage';
+import { getList, replaceList } from './storage';
 import { can, type Action, type Principal } from './rbac';
 
 /** Lists that carry an approvable status, and who may decide on each. */
@@ -188,7 +188,7 @@ export async function decide(
   // `eventEntries` — the decision vanished and the original row kept its old
   // status for ever. A half-applied fix is worse than none, because the comment
   // above says it is handled.
-  await storageSet(storageKeyFor(decision.queue), rows);
+  await replaceList(storageKeyFor(decision.queue), rows);
 
   // `record` is the DECIDED row, not the one read at the top — a caller
   // provisioning from it must see the status the decision just set.

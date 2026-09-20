@@ -223,6 +223,34 @@ export async function getList<T = any>(key: string, limit = 500): Promise<T[]> {
   return (localGet<any[]>(`mmakf:${key}`, []) as T[]) || ([] as T[]);
 }
 
+/**
+ * Replace a private list in the same storage primitive that getList() reads.
+ *
+ * Queue decisions are read-modify-write operations. Writing the result through
+ * set() would put it in the legacy JSON key while the current list remained
+ * unchanged, so the next queue read resurrected the old status.
+ */
+export async function replaceList(key: string, rows: any[]): Promise<void> {
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      const listKey = `mmakf:list:${key}`;
+      await redis.del(listKey);
+      if (rows.length) {
+        await redis.rpush(listKey, ...rows.map((row) => JSON.stringify(row)));
+      }
+      // Do not merge an old JSON blob back into the newly replaced list.
+      await redis.del(`mmakf:${key}`);
+      return;
+    } catch (e) {
+      console.error('[storage] list replacement failed for', key, e);
+      throw new StorageWriteError(key, e);
+    }
+  }
+
+  localSet(`mmakf:${key}`, rows);
+}
+
 function safeParse(s: string): any {
   try { return JSON.parse(s); } catch { return null; }
 }

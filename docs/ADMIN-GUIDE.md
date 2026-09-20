@@ -4,11 +4,18 @@
 
 ## Signing in
 
-1. Go to **www.mmakf.in/admin** (or `/admin` on any environment).
-2. Enter the admin password. Sessions last **7 days** per browser.
-3. **Logout** is at the bottom of the left sidebar.
+1. Go to **https://mmakf.in/admin** (or `/admin` on any environment). The
+   `admin.mmakf.in` alias is only available after its DNS record is configured.
+2. Enter the email address and password for your personal administrator account.
+   The old shared office password is retired automatically after the first
+   account is created.
+3. Sessions last **7 days** per browser.
+4. **Logout** is at the bottom of the left sidebar.
 
-If the password is lost, the site maintainer resets it in Vercel → Settings → Environment Variables → `ADMIN_PASSWORD` (see RUNBOOK).
+If the password is lost, contact the MMAKF system maintainer with the email
+address used for the administrator account. The maintainer verifies the account
+and runs the secure recovery command against the production database. Do not
+send passwords by email or chat.
 
 ## What appears where
 

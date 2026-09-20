@@ -93,17 +93,19 @@ if (authed) {
           <details style="margin-top:18px">
             <summary style="cursor:pointer;font-size:.78rem;color:var(--gold);font-family:var(--font-display);letter-spacing:.04em">Forgotten your password?</summary>
             <div style="margin-top:10px;font-size:.75rem;color:var(--muted);line-height:1.7">
-              <p style="margin:0">
-                No self-service reset — this console sends no mail. A federation officer
-                reissues it:
-                <code style="font-size:.72rem">npm run user:reset-password -- --email you@mmakf.in</code>
+              <p style="margin:0 0 10px">
+                Use this address exactly: <a class="text-gold" href="/admin">mmakf.in/admin</a>.
+                The old shared office password is retired after the first personal account is created.
+                Enter the email address belonging to your administrator account above.
               </p>
-              <p style="margin:8px 0 0">
-                Not sure which address is registered? <code style="font-size:.72rem">npm run user:list</code>
+              <p style="margin:0">
+                Password reset is handled securely by the MMAKF system maintainer.
+                Contact the federation office and include the email address used for
+                your administrator account. Do not send a password by email or chat.
               </p>
               <p style="margin:8px 0 0;opacity:.8">
-                Leave the email blank only when bootstrapping a deployment that has no
-                accounts yet.
+                If every administrator is locked out, the maintainer will verify the
+                account and issue a temporary sign-in credential.
               </p>
             </div>
           </details>
@@ -234,6 +236,7 @@ if (authed) {
           <a href="#circulars">Circulars</a>
           <a href="#members">Members Register</a>
           <a href="#applications">Applications</a>
+          <a href="/admin/queue#registrations">Work registration queue →</a>
           <a href="#eventRegs">Event Entries</a>
           <a href="#unitAccess">Unit Access</a>
           <a href="#submissions">Unit Submissions</a>
@@ -395,14 +398,21 @@ if (authed) {
 
         <section id="applications" class="admin-panel">
           <h2 class="admin-h">Registration Applications</h2>
-          <p class="admin-sub">Submitted from /registration. Verify with the unit, collect the fee, then add the member to the Members Register above. Most recent first.</p>
+          <p class="admin-sub">
+            Submitted from /registration. Review and decide these applications in the
+            <a href="/admin/queue#registrations" class="text-gold">membership approval queue</a>;
+            approved applications can then be issued into the Members Register above. Most recent first.
+          </p>
           <div class="card" style="margin-top:20px;padding:0;overflow:hidden">
             {regList.length === 0 ? (
-              <div style="padding:32px;text-align:center;color:var(--muted)">No applications yet.</div>
+              <div style="padding:32px;text-align:center;color:var(--muted)">
+                No applications are visible in this content view.
+                <div style="margin-top:12px"><a href="/admin/queue#registrations" class="text-gold">Open the membership approval queue →</a></div>
+              </div>
             ) : (
               <div style="overflow-x:auto">
                 <table class="schedule-tbl" style="min-width:760px">
-                  <thead><tr><th scope="col">When</th><th scope="col">App No.</th><th scope="col">Name</th><th scope="col">Phone</th><th scope="col">Type</th><th scope="col">State / District</th><th scope="col">Grade</th></tr></thead>
+                  <thead><tr><th scope="col">When</th><th scope="col">App No.</th><th scope="col">Name</th><th scope="col">Phone</th><th scope="col">Type</th><th scope="col">State / District</th><th scope="col">Status</th><th scope="col">Grade</th></tr></thead>
                   <tbody>
                     {regList.slice(0, 200).map((r: any) => (
                       <tr>
@@ -412,6 +422,7 @@ if (authed) {
                         <td>{r.phone}</td>
                         <td>{r.type}</td>
                         <td class="text-muted">{r.state}{r.district ? ` · ${r.district}` : ''}</td>
+                        <td class="text-muted">{r.status || 'Received'}</td>
                         <td class="text-muted">{r.grade || '—'}</td>
                       </tr>
                     ))}
