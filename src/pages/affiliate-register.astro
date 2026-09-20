@@ -1,0 +1,43 @@
+---
+import Base from '@/layouts/Base.astro';
+export const prerender = false;
+---
+<Base title="Affiliate registration — MMAKF" description="Register an individual, club, district, state, school, corporate or international MMAKF affiliate.">
+  <main class="container" style="max-width:760px;padding:72px 20px">
+    <div class="eyebrow">MMAKF registration</div>
+    <h1 class="display-2">Register as an <em class="r">affiliate</em>.</h1>
+    <p class="lead">Submit your details for review. Approval and payment are handled by the federation; submitting this form does not create a charter.</p>
+    <form id="affiliateForm" class="card" style="padding:28px;margin-top:28px">
+      <label class="input-label" for="level">Affiliate level</label>
+      <select class="input" id="level" required>
+        <option value="">Choose one</option><option value="individual">Individual — ₹5,000/year</option>
+        <option value="club">Club — ₹8,000/year</option><option value="district">District — ₹20,000/year</option>
+        <option value="state">State — ₹50,000/year</option><option value="school">School — ₹8,000/year</option>
+        <option value="corporate">Corporate — ₹8,000/year</option><option value="international">International — CHF 1,000/year (manual review)</option>
+      </select>
+      <label class="input-label" for="name" style="margin-top:14px">Name</label><input class="input" id="name" required maxlength="180" />
+      <label class="input-label" for="contactName" style="margin-top:14px">Responsible person</label><input class="input" id="contactName" required maxlength="120" />
+      <label class="input-label" for="email" style="margin-top:14px">Email</label><input class="input" type="email" id="email" required maxlength="254" />
+      <label class="input-label" for="phone" style="margin-top:14px">Phone</label><input class="input" id="phone" maxlength="40" />
+      <label class="input-label" for="address" style="margin-top:14px">Address</label><input class="input" id="address" maxlength="240" />
+      <label class="input-label" for="city" style="margin-top:14px">City</label><input class="input" id="city" maxlength="100" />
+      <label class="input-label" for="state" style="margin-top:14px">State / country</label><input class="input" id="state" maxlength="100" />
+      <div id="result" role="status" style="margin-top:16px;display:none"></div>
+      <button class="btn btn-primary" style="margin-top:20px" type="submit">Submit registration</button>
+    </form>
+  </main>
+  <script>
+    const form = document.getElementById('affiliateForm');
+    const result = document.getElementById('result');
+    form?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const value = (id) => document.getElementById(id)?.value || '';
+      const response = await fetch('/api/affiliate/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        level: value('level'), name: value('name'), contactName: value('contactName'), email: value('email'),
+        phone: value('phone'), address: value('address'), city: value('city'), state: value('state')
+      }) });
+      const body = await response.json().catch(() => ({}));
+      if (result) { result.textContent = response.ok ? `${body.message} Reference: ${body.ref}` : (body.error || 'Registration failed.'); result.style.display = 'block'; result.style.color = response.ok ? 'var(--gold-2)' : 'var(--red-2)'; }
+    });
+  </script>
+</Base>

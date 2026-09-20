@@ -14,6 +14,8 @@
 
 import { and, eq, sql } from 'drizzle-orm';
 import * as s from './schema';
+import * as o from './operations.schema';
+import * as e from './engagement.schema';
 import { hashPassword, verifyPassword, needsRehash, equalizeTiming, passwordProblem } from '@/lib/password';
 import { ROLES, type Binding, type Principal, type Role, type ScopeType } from '@/lib/rbac';
 import { writeAudit, type AuditContext } from './federation';
@@ -289,6 +291,41 @@ export async function resetPasswordByDob(
     })
     .where(eq(s.users.id, row.id));
 
+  return true;
+}
+
+/** Reset an institution/affiliate account using its MMAKF registration code. */
+export async function resetPasswordByRegistration(
+  db: DB,
+  registrationNumber: unknown,
+  email: unknown,
+  newPassword: string
+): Promise<boolean> {
+  const code = typeof registrationNumber === 'string' ? registrationNumber.trim().toUpperCase() : '';
+  const addr = normalizeEmail(email);
+  const row = (
+    await db
+      .select({ id: s.users.id })
+      .from(s.users)
+      .innerJoin(o.institutionUsers, eq(o.institutionUsers.userId, s.users.id))
+      .innerJoin(e.institutions, eq(e.institutions.id, o.institutionUsers.institutionId))
+      .where(and(eq(s.users.email, addr), eq(e.institutions.code, code)))
+      .limit(1)
+  )[0];
+  if (!row) {
+    await equalizeTiming(newPassword);
+    return false;
+  }
+  const problem = passwordProblem(newPassword);
+  if (problem) throw new Error(problem);
+  await db.update(s.users).set({
+    passwordHash: await hashPassword(newPassword),
+    failedAttempts: 0,
+    lockedUntil: null,
+    mustChangePassword: 'no',
+    sessionEpoch: sql`${s.users.sessionEpoch} + 1`,
+    updatedAt: new Date(),
+  }).where(eq(s.users.id, row.id));
   return true;
 }
 
