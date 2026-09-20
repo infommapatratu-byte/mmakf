@@ -37,7 +37,33 @@ export const prerender = false;
         phone: value('phone'), address: value('address'), city: value('city'), state: value('state')
       }) });
       const body = await response.json().catch(() => ({}));
-      if (result) { result.textContent = response.ok ? `${body.message} Reference: ${body.ref}` : (body.error || 'Registration failed.'); result.style.display = 'block'; result.style.color = response.ok ? 'var(--gold-2)' : 'var(--red-2)'; }
+      if (result && response.ok) {
+        result.textContent = `${body.message} Reference: ${body.ref}`;
+        if (value('level') !== 'international') {
+          const payment = await fetch('/api/payments/checkout', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: value('contactName'), email: value('email'),
+              lines: [{ kind: 'affiliation', description: `${value('level')} affiliation`, feeCode: body.feeCode, refType: 'institution_application', refId: body.applicationId }]
+            })
+          }).then((r) => r.json().catch(() => ({})));
+          if (payment?.checkout?.url) {
+            const link = document.createElement('a');
+            link.className = 'text-gold';
+            link.href = payment.checkout.url;
+            link.textContent = 'Continue to payment';
+            result.append(' ', link);
+          }
+          else result.textContent += ' Payment will be issued after federation review.';
+        } else {
+          result.textContent += ' International payment is arranged after federation review.';
+        }
+        result.style.display = 'block'; result.style.color = 'var(--gold-2)';
+      } else if (result) {
+        result.textContent = body.error || 'Registration failed.';
+        result.style.display = 'block'; result.style.color = 'var(--red-2)';
+      }
     });
   </script>
 </Base>
