@@ -67,6 +67,7 @@ import { confirmPayment, federationToday, markWebhookProcessed, recordWebhook } 
 import { writeAudit, type AuditContext } from '@/db/federation';
 import { createTask } from '@/db/tasks';
 import { razorpay, type VerifiedPayment } from '@/lib/payments';
+import { queuePaymentReceiptSafely } from '@/lib/receipts';
 
 export const prerender = false;
 
@@ -380,6 +381,12 @@ async function applyCapture(dbi: any, ctx: AuditContext, verified: VerifiedPayme
   }
 
   const outcome = await confirmPayment(dbi, ctx, verified);
+  // The receipt goes out once: only on the FIRST confirmation of this capture.
+  // A redelivery reports alreadyProcessed and queues nothing; the dedupe key in
+  // queuePaymentReceipt() is the second guard. It never throws into this path.
+  if (outcome && !outcome.alreadyProcessed) {
+    await queuePaymentReceiptSafely(dbi, outcome.orderId);
+  }
   return {
     note: outcome?.alreadyProcessed ? 'payment.captured (already confirmed)' : 'payment.captured',
     orderId: expected.order.id,

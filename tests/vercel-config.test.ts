@@ -27,7 +27,19 @@ describe('the cron schedule the Hobby plan will actually accept', () => {
     // build step, and the build was clean locally. Production simply kept serving
     // a build from the previous morning. A rejection that leaves no artefact is
     // indistinguishable from a webhook that never fired.
+    // ONE DELIBERATE EXCEPTION, after the move to the Pro plan (2026-11-06):
+    // /api/cron/notify carries no heavy work and must run often, or a payment
+    // receipt waits a day. Its floor is five minutes. Everything else keeps the
+    // daily rule — reconcile is heavy, and the rule is what kept a Hobby project
+    // deployable.
+    const FREQUENT: Record<string, number> = { '/api/cron/notify': 5 };
     for (const cron of cfg.crons ?? []) {
+      if (cron.path in FREQUENT) {
+        const m = String(cron.schedule).match(/^\*\/(\d+) \* \* \* \*$/);
+        expect(m, `${cron.path}: expected "*/N * * * *"`).toBeTruthy();
+        expect(Number(m![1]), `${cron.path}: runs more often than every ${FREQUENT[cron.path]} minutes`).toBeGreaterThanOrEqual(FREQUENT[cron.path]);
+        continue;
+      }
       const [minute, hour] = String(cron.schedule).split(/\s+/);
       expect(minute, `${cron.path}: a wildcard minute runs 60× a day`).not.toBe('*');
       expect(hour, `${cron.path}: a wildcard hour runs 24× a day`).not.toBe('*');

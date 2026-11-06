@@ -161,6 +161,26 @@ export interface TransportStatus {
  * a federation that believes it is emailing members and is not has a worse
  * problem than one that knows it is not.
  */
+/**
+ * SMTP, for a federation whose mail lives in an ordinary mailbox (GoDaddy /
+ * Titan: smtp.titan.email, port 465, implicit TLS). All three of host, user and
+ * password must be present; a partial configuration is NOT configured, so a
+ * missing password parks mail in the queue instead of failing every row.
+ */
+export function smtpConfig(): { host: string; port: number; secure: boolean; user: string; pass: string } | null {
+  const host = (process.env.SMTP_HOST || '').trim();
+  const user = (process.env.SMTP_USER || '').trim();
+  const pass = process.env.SMTP_PASS || '';
+  if (!host || !user || !pass) return null;
+  const port = Number(process.env.SMTP_PORT || 465) || 465;
+  const secure = process.env.SMTP_SECURE ? process.env.SMTP_SECURE === 'true' : port === 465;
+  return { host, port, secure, user, pass };
+}
+
+function emailConfigured(): boolean {
+  return Boolean(process.env.EMAIL_FROM && (process.env.EMAIL_PROVIDER_URL || smtpConfig()));
+}
+
 export function transportStatus(): TransportStatus[] {
   return [
     {
@@ -170,10 +190,10 @@ export function transportStatus(): TransportStatus[] {
     },
     {
       channel: 'email',
-      configured: Boolean(process.env.EMAIL_PROVIDER_URL && process.env.EMAIL_FROM),
-      reason: process.env.EMAIL_PROVIDER_URL && process.env.EMAIL_FROM
-        ? 'Configured.'
-        : 'No email provider is configured (EMAIL_PROVIDER_URL / EMAIL_FROM unset). Email notifications are QUEUED, not sent.',
+      configured: emailConfigured(),
+      reason: emailConfigured()
+        ? (smtpConfig() ? `Configured (SMTP via ${smtpConfig()!.host}).` : 'Configured (HTTP provider).')
+        : 'No email transport is configured (set EMAIL_FROM plus either SMTP_HOST/SMTP_USER/SMTP_PASS or EMAIL_PROVIDER_URL). Email notifications are QUEUED, not sent.',
     },
     {
       channel: 'sms',
@@ -418,6 +438,11 @@ async function sendVia(channel: string, notification: any, db: DB): Promise<void
     );
   }
 
+  if (channel === 'email' && smtpConfig()) {
+    await sendViaSmtp(to, notification);
+    return;
+  }
+
   const endpoint = channel === 'email' ? process.env.EMAIL_PROVIDER_URL : process.env.SMS_PROVIDER_URL;
   const res = await fetch(endpoint!, {
     method: 'POST',
@@ -440,6 +465,86 @@ async function sendVia(channel: string, notification: any, db: DB): Promise<void
   if (!res.ok) {
     throw new NotificationError('provider_rejected', `Provider returned HTTP ${res.status}`);
   }
+}
+
+/**
+ * Send one email through the configured SMTP mailbox. The link, which the HTTP
+ * provider receives as a field, is appended to the text so it survives in a
+ * plain message. A rejection throws, so deliverQueued() marks the row failed
+ * with the server's reason.
+ */
+async function sendViaSmtp(to: string, notification: any): Promise<void> {
+  const cfg = smtpConfig()!;
+  const nodemailer: any = await import('nodemailer');
+  const transport = (nodemailer.default ?? nodemailer).createTransport({
+    host: cfg.host,
+    port: cfg.port,
+    secure: cfg.secure,
+    auth: { user: cfg.user, pass: cfg.pass },
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
+  });
+  const link = notification.linkUrl ? `
+
+Open: https://www.mmakf.in${notification.linkUrl}` : '';
+  try {
+    await transport.sendMail({
+      from: process.env.EMAIL_FROM,
+      to,
+      subject: String(notification.title ?? ''),
+      text: `${notification.body ?? ''}${link}`,
+    });
+  } catch (err: any) {
+    throw new NotificationError('provider_rejected', `SMTP: ${String(err?.message ?? err).slice(0, 200)}`);
+  }
+}
+
+/**
+ * Give every ESSENTIAL inbox notification an email twin.
+ *
+ * notifyForEvent() writes the in-app row only. Receipts of record — a grading
+ * result, a certificate, a confirmed entry, a confirmed enrolment — must also
+ * reach the member's mailbox, so this pairs each recent essential in-app row
+ * with an email row. queue() dedupes on (domain event, person, channel), so a
+ * rerun queues nothing twice. Rows written while no transport is configured
+ * park, and send once one is.
+ */
+export async function queueEmailForEssentialNotifications(db: DB, limit = 200): Promise<{ considered: number; queued: number }> {
+  const essential = Object.entries(NOTIFIABLE)
+    .filter(([, spec]) => (spec as any).essential)
+    .map(([type]) => type);
+  const rows = await db
+    .select({
+      personId: s.notifications.personId,
+      title: s.notifications.title,
+      body: s.notifications.body,
+      linkUrl: s.notifications.linkUrl,
+      domainEventId: s.notifications.domainEventId,
+    })
+    .from(s.notifications)
+    .innerJoin(s.domainEvents, eq(s.notifications.domainEventId, s.domainEvents.id))
+    .where(and(
+      eq(s.notifications.channel, 'in_app'),
+      inArray(s.domainEvents.eventType, essential as any),
+      sql`${s.notifications.createdAt} > now() - interval '7 days'`,
+    ))
+    .orderBy(desc(s.notifications.id))
+    .limit(limit);
+  let queued = 0;
+  for (const r of rows) {
+    if (r.personId == null || r.domainEventId == null) continue;
+    const result: any = await queue(db, {
+      personId: r.personId,
+      channel: 'email',
+      title: r.title,
+      body: r.body,
+      linkUrl: r.linkUrl,
+      domainEventId: r.domainEventId,
+    });
+    if (!result.deduplicated) queued++;
+  }
+  return { considered: rows.length, queued };
 }
 
 // ─── Reads ──────────────────────────────────────────────────────────────────

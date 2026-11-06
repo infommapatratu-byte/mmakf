@@ -407,6 +407,23 @@ What:  {{what}}
 When:  {{when}}
 Where: {{where}}${SIGNATURE}`,
   },
+
+  payment_receipt: {
+    key: 'payment_receipt', topic: 'payments',
+    requires: ['fullName', 'orderNo', 'amount', 'paidOn', 'invoiceNo'],
+    subject: 'Receipt: {{amount}} received for {{orderNo}}',
+    body: `Dear {{fullName}},
+
+Thank you. We have received your payment.
+
+Order:    {{orderNo}}
+Amount:   {{amount}}
+Paid on:  {{paidOn}}
+Invoice:  {{invoiceNo}}
+
+Your invoice is available when you sign in at https://www.mmakf.in/my/orders.
+Keep this email as your receipt.${SIGNATURE}`,
+  },
 };
 
 export class TemplateError extends Error {

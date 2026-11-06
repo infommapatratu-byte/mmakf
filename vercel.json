@@ -47,6 +47,10 @@
     {
       "path": "/api/cron/reconcile",
       "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/notify",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

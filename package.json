@@ -40,6 +40,7 @@
     "@vercel/blob": "^2.8.0",
     "astro": "^5.18.2",
     "drizzle-orm": "^0.45.2",
+    "nodemailer": "^10.2.1",
     "postgres": "^3.4.9"
   },
   "devDependencies": {
