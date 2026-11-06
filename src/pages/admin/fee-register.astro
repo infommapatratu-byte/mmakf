@@ -1,0 +1,205 @@
+---
+// /admin/fee-register — the prices checkout charges, and who approved them.
+//
+// The fee FRAMEWORK (/admin/fees) prices institutional quotations. This page is
+// the other register: `fee_schedule`, read by createOrder() for every fee-coded
+// line — a course, a month of training, a grading. Before it existed nothing
+// wrote that table, so nothing fee-coded could be bought.
+//
+// Governance shown here, exactly as the office stated it: Approved fees are
+// charged; Proposed fees are recorded but never charged until a person holding
+// feeframework:publish approves them; Archived fees are history. Fees the
+// student rule refuses are shown as Refused, with the reason, and cannot be
+// approved from here.
+import AdminShell from '@/components/AdminShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere } from '@/lib/rbac';
+import { feeRegister, type FeeRegisterRow, type FeeState } from '@/db/fee-register';
+import { FEE_GROUPS, FEE_MASTER, FEE_MASTER_EXCLUSIONS, FEE_MASTER_SOURCE } from '@/data/fee-master-2026';
+import { formatINR } from '@/db/fees';
+
+export const prerender = false;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const mayWrite = !!principal && !identity?.shared && canAnywhere(principal, 'feeframework:write');
+const mayPublish = !!principal && !identity?.shared && canAnywhere(principal, 'feeframework:publish');
+
+let rows: FeeRegisterRow[] = [];
+let loadError: string | null = null;
+if (isConfigured() && principal && canAnywhere(principal, 'feeframework:read')) {
+  try {
+    rows = await feeRegister(db());
+  } catch (err: any) {
+    loadError = String(err?.message ?? err).slice(0, 300);
+  }
+}
+
+const masterCodes = new Set(FEE_MASTER.map((r) => r.code));
+const loadedMaster = rows.filter((r) => masterCodes.has(r.code)).length;
+const groups = [...FEE_GROUPS, 'Other fees'];
+const byGroup = (g: string) => rows.filter((r) => (r.group ?? 'Other fees') === g);
+
+const counts: Record<FeeState, number> = { approved: 0, scheduled: 0, proposed: 0, refused: 0, archived: 0 };
+for (const r of rows) counts[r.state]++;
+
+const STATE_LABEL: Record<FeeState, string> = {
+  approved: 'Approved — charged',
+  scheduled: 'Approved — starts later',
+  proposed: 'Proposed — not charged',
+  refused: 'Refused — not charged',
+  archived: 'Archived',
+};
+---
+
+<AdminShell
+  title="Fee register"
+  requires="feeframework:read"
+  intro="The prices checkout charges. Approved fees are charged; Proposed fees are recorded but never charged until an authorised administrator approves them; Archived fees are kept as history."
+>
+  {!isConfigured() && <p class="msg msg-bad" role="alert">The register is not available on this deployment.</p>}
+  {loadError && <p class="msg msg-bad" role="alert">The register could not be read: {loadError}</p>}
+
+  <section class="fr-summary" aria-label="Summary">
+    <span class="pill pill-ok">{counts.approved} approved</span>
+    <span class="pill">{counts.scheduled} starting later</span>
+    <span class="pill pill-warn">{counts.proposed} proposed</span>
+    <span class="pill pill-bad">{counts.refused} refused</span>
+    <span class="pill pill-mute">{counts.archived} archived</span>
+  </section>
+
+  {mayWrite && loadedMaster < FEE_MASTER.length && (
+    <section class="fr-card">
+      <h2>Load the fee master</h2>
+      <p>
+        {FEE_MASTER.length} fees from the {FEE_MASTER_SOURCE}. {loadedMaster > 0 ? `${loadedMaster} are already in the register and will be left exactly as they are.` : ''}
+        Confirmed fees are loaded as <strong>Approved</strong>; provisional ones as <strong>Proposed</strong> and are not charged until approved here.
+      </p>
+      <button type="button" class="btn btn-primary" data-action="import">Load the fee master</button>
+    </section>
+  )}
+
+  <p id="fr-msg" class="msg" role="status" hidden></p>
+
+  {groups.map((g) => {
+    const list = byGroup(g);
+    if (!list.length) return null;
+    return (
+      <section class="fr-group">
+        <h2>{g}</h2>
+        <div class="fr-scroll">
+          <table class="fr-table">
+            <thead>
+              <tr><th scope="col">Fee</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">From</th><th scope="col">Notes</th>{mayPublish && <th scope="col"><span class="sr-only">Actions</span></th>}</tr>
+            </thead>
+            <tbody>
+              {list.map((r) => (
+                <tr data-state={r.state}>
+                  <td><strong>{r.label}</strong><br /><code>{r.code}</code></td>
+                  <td class="fr-amt">{formatINR(r.amountPaise)}</td>
+                  <td><span class={`badge badge-${r.state}`}>{STATE_LABEL[r.state]}</span>{r.approvedBy && r.state !== 'proposed' && <div class="fr-by">by {r.approvedBy}</div>}</td>
+                  <td>{r.effectiveFrom}{r.effectiveTo && ` to ${r.effectiveTo}`}</td>
+                  <td class="fr-notes">{r.state === 'refused' ? r.refusal : r.notes}</td>
+                  {mayPublish && (
+                    <td class="fr-actions">
+                      {r.state === 'proposed' && <button type="button" class="btn btn-sm" data-action="approve" data-id={r.id} data-label={r.label}>Approve</button>}
+                      {(r.state === 'approved' || r.state === 'scheduled') && <button type="button" class="btn btn-sm btn-ghost" data-action="archive" data-id={r.id} data-label={r.label}>Archive</button>}
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    );
+  })}
+
+  {rows.length === 0 && !loadError && isConfigured() && (
+    <p class="fr-empty">The register is empty, so nothing fee-coded can be charged yet.{mayWrite ? ' Load the fee master above.' : ''}</p>
+  )}
+
+  <section class="fr-card fr-excl">
+    <h2>Lines of the fee document that are not fees here</h2>
+    <ul>
+      {FEE_MASTER_EXCLUSIONS.map((x) => <li><strong>{x.item}</strong> — {x.reason}</li>)}
+    </ul>
+  </section>
+</AdminShell>
+
+<script>
+  const msg = document.getElementById('fr-msg') as HTMLElement | null;
+  function say(text: string, ok: boolean) {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.className = `msg ${ok ? 'msg-ok' : 'msg-bad'}`;
+    msg.hidden = false;
+    msg.scrollIntoView({ block: 'nearest' });
+  }
+  document.addEventListener('click', async (e) => {
+    const btn = (e.target as HTMLElement)?.closest('button[data-action]') as HTMLButtonElement | null;
+    if (!btn) return;
+    const action = btn.dataset.action!;
+    const label = btn.dataset.label ?? 'this fee';
+    // Confirmation is part of the page: the viewer refuses window.confirm().
+    if (btn.dataset.armed !== '1' && action !== 'import') {
+      btn.dataset.armed = '1';
+      btn.textContent = action === 'approve' ? `Confirm: charge "${label}"` : `Confirm: stop charging "${label}"`;
+      return;
+    }
+    btn.disabled = true;
+    const res = await fetch('/api/admin/fee-register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, id: btn.dataset.id ? Number(btn.dataset.id) : undefined }),
+    }).catch(() => null);
+    const body = res ? await res.json().catch(() => null) : null;
+    if (res && res.ok) {
+      if (action === 'import' && body?.report) {
+        const r = body.report;
+        say(`Loaded ${r.inserted}: ${r.approved} approved, ${r.proposed} proposed, ${r.refused} refused by the student rule; ${r.skippedExisting} already present. Reloading…`, true);
+      } else {
+        say('Saved. Reloading…', true);
+      }
+      setTimeout(() => location.reload(), 900);
+    } else {
+      btn.disabled = false;
+      delete btn.dataset.armed;
+      btn.textContent = action === 'approve' ? 'Approve' : action === 'archive' ? 'Archive' : 'Load the fee master';
+      say(body?.error ?? 'The register did not answer. Check your connection and try again.', false);
+    }
+  });
+</script>
+
+<style>
+  .fr-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 20px; }
+  .pill { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); font-size: .85rem; }
+  .pill-ok { border-color: #2e7d32; color: #1b5e20; }
+  .pill-warn { border-color: #b26a00; color: #8a5200; }
+  .pill-bad { border-color: #b3261e; color: #8c1d18; }
+  .pill-mute { opacity: .75; }
+  .fr-card { border: 1px solid var(--border); border-radius: var(--radius, 8px); padding: 16px 18px; margin: 0 0 20px; background: var(--card, #fff); }
+  .fr-card h2, .fr-group h2 { font-size: 1.05rem; margin: 0 0 10px; }
+  .fr-group { margin: 0 0 26px; }
+  .fr-scroll { overflow-x: auto; }
+  .fr-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  .fr-table th, .fr-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .fr-table code { font-size: .78rem; opacity: .75; }
+  .fr-amt { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .fr-notes { max-width: 34ch; font-size: .82rem; opacity: .9; }
+  .fr-by { font-size: .75rem; opacity: .7; margin-top: 4px; }
+  .fr-actions { white-space: nowrap; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .78rem; font-weight: 600; }
+  .badge-approved { background: #e8f5e9; color: #1b5e20; }
+  .badge-scheduled { background: #e3f2fd; color: #0d47a1; }
+  .badge-proposed { background: #fff3e0; color: #8a5200; }
+  .badge-refused { background: #fdecea; color: #8c1d18; }
+  .badge-archived { background: #eeeeee; color: #424242; }
+  .btn-sm { padding: 6px 10px; font-size: .8rem; min-height: 32px; }
+  .fr-empty { opacity: .8; }
+  .fr-excl ul { margin: 0; padding-left: 18px; font-size: .88rem; }
+  .msg { padding: 10px 12px; border-radius: 6px; }
+  .msg-ok { background: #e8f5e9; }
+  .msg-bad { background: #fdecea; }
+</style>

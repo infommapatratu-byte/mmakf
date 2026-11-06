@@ -508,6 +508,8 @@ export const ADMIN_GROUPS: AdminGroup[] = [
       // a quotation computed under them — and a different one again from
       // writing or publishing them. See the three feeframework:* actions.
       { href: '/admin/fees', label: 'Fee framework', action: 'feeframework:read' },
+      // The prices checkout charges (fee_schedule): load, approve, archive.
+      { href: '/admin/fee-register', label: 'Fee register (prices charged)', action: 'feeframework:read' },
       { href: '/admin/quotes', label: 'Quotes and proposals', action: 'quote:read' },
       { href: '/admin/bookings', label: 'Bookings and calendar', action: 'booking:read' },
       { href: '/admin/venues', label: 'Venues', action: 'venue:read' },

@@ -21,6 +21,8 @@
 // a shape that has no `correctAnswer` and no `explanation` field to leak.
 
 import Base from '@/layouts/Base.astro';
+import { feeInForce } from '@/db/course-payments';
+import { formatINR } from '@/db/fees';
 import { identify } from '@/lib/session';
 import { isConfigured, db } from '@/db';
 import * as s from '@/db/schema';
@@ -64,6 +66,9 @@ let person: any = null;
 let loadError: string | null = null;
 let enrolled: EnrolledCourse[] = [];
 let available: any[] = [];
+// The fee IN FORCE for each fee-coded course, read exactly as checkout reads it.
+// null = the office has not approved one, so the page offers no payment.
+let fees: Record<string, { amountPaise: number; label: string } | null> = {};
 
 if (!configured) {
   gate = 'no_database';
@@ -168,6 +173,10 @@ if (!configured) {
           .orderBy(asc(s.courses.title))
           .limit(50);
         available = published.filter((c: any) => !enrolledIds.includes(c.id));
+        const feeCodes = [...new Set(
+          [...available, ...enrolled.map((e: any) => e.course)].map((c: any) => c?.feeCode).filter(Boolean)
+        )] as string[];
+        for (const code of feeCodes) fees[code] = await feeInForce(db(), code);
       } catch (err: any) {
         loadError = String(err?.message ?? err);
       }
@@ -305,6 +314,13 @@ const learnable = (e: any): boolean => {
                   {c.course.feeCode ? ` of the fee recorded as ${c.course.feeCode}` : ''}. It becomes active only when a
                   captured payment for this course is recorded against it — the federation does not activate an
                   enrolment on an assurance that money was sent.
+                  {c.course.feeCode && fees[c.course.feeCode] && (
+                    <div style="margin-top:12px">
+                      <button type="button" class="btn btn-primary course-pay" data-course={c.course.id}>
+                        Complete payment — {formatINR(fees[c.course.feeCode]!.amountPaise)}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -494,16 +510,31 @@ const learnable = (e: any): boolean => {
                   {c.hasFreePreview && <span class="pill" style="margin-right:8px">Free preview</span>}
                   {c.certificateOnCompletion && <span class="pill">Certificate on completion</span>}
                 </div>
-                {c.feeCode && (
-                  <div class="note" style="margin-top:14px">
-                    This course carries the fee recorded as <strong>{c.feeCode}</strong>. Enrolling records you as
-                    awaiting payment; the enrolment becomes active only when a captured payment for this course is
-                    recorded. The amount is set by the federation office, not by this page.
+                {c.feeCode ? (
+                  fees[c.feeCode] ? (
+                    <>
+                      <div class="note" style="margin-top:14px">
+                        Fee <strong>{formatINR(fees[c.feeCode]!.amountPaise)}</strong>, paid online through Razorpay.
+                        Your enrolment becomes active as soon as the payment is confirmed, and your receipt is
+                        emailed to you. The amount is the federation office's approved fee, not set by this page.
+                      </div>
+                      <div style="margin-top:16px">
+                        <button type="button" class="btn btn-primary course-pay" data-course={c.id}>
+                          Pay {formatINR(fees[c.feeCode]!.amountPaise)} and enrol
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div class="note" style="margin-top:14px">
+                      The fee for this course has not been approved yet, so it cannot be paid online. Enrolment
+                      opens as soon as the federation office approves it.
+                    </div>
+                  )
+                ) : (
+                  <div style="margin-top:16px">
+                    <button type="button" class="btn btn-primary course-enrol" data-course={c.id}>Enrol</button>
                   </div>
                 )}
-                <div style="margin-top:16px">
-                  <button type="button" class="btn btn-primary course-enrol" data-course={c.id}>Enrol</button>
-                </div>
               </div>
             ))}
           </div>
@@ -700,6 +731,58 @@ const learnable = (e: any): boolean => {
       say(result.data.error || 'You could not be enrolled on that course.', true);
       button.disabled = false;
       button.textContent = 'Enrol';
+    });
+  });
+
+  // ── Pay for a course ──────────────────────────────────────────
+  //
+  // The server prices the course from the fee register, opens (or resumes) the
+  // order and returns PUBLIC checkout parameters. Nothing here marks anything
+  // paid: Razorpay's signed webhook does, and activates the enrolment.
+  function loadRazorpay(): Promise<boolean> {
+    if ((window as any).Razorpay) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const el = document.createElement('script');
+      el.src = 'https://checkout.razorpay.com/v1/checkout.js';
+      el.onload = () => resolve(true);
+      el.onerror = () => resolve(false);
+      document.head.appendChild(el);
+    });
+  }
+
+  document.querySelectorAll<HTMLButtonElement>('.course-pay').forEach((button) => {
+    const original = button.textContent ?? 'Pay and enrol';
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      button.textContent = 'Preparing payment…';
+      const result = await post('pay', { courseId: Number(button.dataset.course) });
+      if (!result.ok || !result.data?.checkout) {
+        say(result.data?.error || 'The payment could not be started. Nothing has been charged.', true);
+        button.disabled = false;
+        button.textContent = original;
+        return;
+      }
+      if (!(await loadRazorpay())) {
+        say('The payment window could not be loaded in this browser. Nothing has been charged — please try again or use another browser.', true);
+        button.disabled = false;
+        button.textContent = original;
+        return;
+      }
+      const rzp = new (window as any).Razorpay({
+        ...result.data.checkout,
+        handler: () => {
+          say('Payment submitted. MMAKF confirms it with Razorpay and activates your enrolment within a minute; your receipt is emailed to you. Refreshing shortly…');
+          window.setTimeout(() => window.location.reload(), 8000);
+        },
+        modal: {
+          ondismiss: () => {
+            say('The payment window was closed, so nothing has been charged. You can complete payment from this page at any time.');
+            button.disabled = false;
+            button.textContent = original;
+          },
+        },
+      });
+      rzp.open();
     });
   });
 

@@ -12,6 +12,7 @@
 //      (deliverPushForNotifications had no caller before this route)
 //   4. send what is queued: inbox, email (SMTP or HTTP provider)
 //   5. retry the push backlog
+//   (and first: activate any paid course enrolment the webhook did not reach)
 //
 // Every step is idempotent and deduplicated, so overlapping with the nightly run
 // is harmless. Each step is isolated: one failing step is reported and the rest
@@ -24,6 +25,7 @@ import { consume } from '@/lib/domain-events';
 import { notifyForEvent, deliverQueued, queueEmailForEssentialNotifications } from '@/lib/notifications';
 import { deliverPushForNotifications, deliverQueuedPush } from '@/lib/push';
 import { legacyAdminPrincipal } from '@/lib/rbac';
+import { activatePaidCourseEnrolments } from '@/db/course-payments';
 
 export const prerender = false;
 
@@ -72,6 +74,8 @@ export const GET: APIRoute = async ({ request }) => {
       skipped: drained.skipped, failedAtEventId: drained.failedAtEventId, backlog: drained.more,
     };
   });
+  // Paid course enrolments the webhook did not get to (interrupted, retried).
+  await step(report, 'courseActivation', () => activatePaidCourseEnrolments(db()));
   await step(report, 'emailFanOut', () => queueEmailForEssentialNotifications(db()));
   await step(report, 'pushFanOut', () => deliverPushForNotifications(db()));
   await step(report, 'delivery', () => deliverQueued(db()));

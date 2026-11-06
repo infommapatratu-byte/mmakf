@@ -20,6 +20,9 @@ import { isConfigured, db } from '@/db';
 import * as s from '@/db/schema';
 import { ForbiddenError, type Principal } from '@/lib/rbac';
 import type { AuditContext } from '@/db/federation';
+import { startCoursePayment, isCoursePaymentError } from '@/db/course-payments';
+import { beginPayment, OrderError } from '@/db/orders';
+import { activeProvider, PaymentProviderError } from '@/lib/payments';
 import {
   AcademyError,
   enrol,
@@ -267,6 +270,59 @@ export const POST: APIRoute = async ({ params, request }) => {
         return json({ ok: true, enrolment }, 200);
       }
 
+      // ── Pay for a course ────────────────────────────────────────────
+      //
+      // The learner's own enrolment and order, priced from the fee register,
+      // then a Razorpay payment against that order. Only PUBLIC checkout
+      // parameters leave the server. Nothing is marked paid here: the signed
+      // webhook confirms the capture and activates the enrolment. Calling this
+      // again resumes the same open order, so a closed window is never a dead end.
+      case 'pay': {
+        const courseId = intOf(body.courseId);
+        if (courseId == null) return json({ error: 'Provide a course' }, 400);
+        const provider = activeProvider();
+        if (!provider) {
+          return json({ error: 'Online payment is not available yet. Nothing has been charged.', code: 'no_provider' }, 503);
+        }
+        const person = (await db().select().from(s.persons).where(eq(s.persons.id, personId)).limit(1))[0];
+        const account = ctx.principal?.userId != null
+          ? (await db().select({ email: s.users.email }).from(s.users).where(eq(s.users.id, ctx.principal.userId)).limit(1))[0]
+          : null;
+        const started = await startCoursePayment(db(), ctx, {
+          courseId,
+          personId,
+          buyerName: person?.fullName ?? null,
+          email: account?.email ?? person?.email ?? null,
+          phone: person?.phone ?? null,
+        });
+        const idempotencyKey = crypto.randomUUID();
+        const providerOrder = await provider.createOrder({
+          amountPaise: started.totalPaise,
+          currency: started.currency,
+          reference: started.orderNo,
+          customer: {
+            name: started.buyerName ?? undefined,
+            email: started.email ?? undefined,
+            phone: started.phone ?? undefined,
+          },
+          notes: { orderNo: started.orderNo, course: String(courseId) },
+          idempotencyKey,
+        });
+        await beginPayment(db(), started.orderId, {
+          provider: provider.id,
+          providerOrderId: providerOrder.providerOrderId,
+          amountPaise: started.totalPaise,
+          idempotencyKey,
+        });
+        return json({
+          ok: true,
+          orderNo: started.orderNo,
+          amountPaise: started.totalPaise,
+          resumed: started.reused,
+          checkout: providerOrder.checkout,
+        }, 200);
+      }
+
       // ── Progress ─────────────────────────────────────────────────────────
       case 'lesson-complete': {
         const enrolmentId = intOf(body.enrolmentId);
@@ -365,6 +421,22 @@ export const POST: APIRoute = async ({ params, request }) => {
   } catch (err: any) {
     if (err instanceof ForbiddenError) {
       return json({ error: 'You are not permitted to do that.' }, 403);
+    }
+    if (isCoursePaymentError(err)) {
+      return json({ error: err.message, code: err.code }, err.code === 'course_not_available' ? 404 : 409);
+    }
+    if (err instanceof OrderError) {
+      // fee_not_published: the course's fee is proposed, archived or not entered.
+      return json({
+        error: err.code === 'fee_not_published'
+          ? 'The fee for this course has not been approved yet, so it cannot be paid online. Nothing has been charged.'
+          : err.message,
+        code: err.code,
+      }, 409);
+    }
+    if (err instanceof PaymentProviderError) {
+      console.error('[academy] pay: provider failure', err.message);
+      return json({ error: 'The payment provider could not be reached. Nothing has been charged — please try again.', code: 'provider_error' }, 502);
     }
     if (err instanceof AcademyError) {
       // The module's message was written to be read by the person who hit it.

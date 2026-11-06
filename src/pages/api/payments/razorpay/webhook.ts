@@ -68,6 +68,7 @@ import { writeAudit, type AuditContext } from '@/db/federation';
 import { createTask } from '@/db/tasks';
 import { razorpay, type VerifiedPayment } from '@/lib/payments';
 import { queuePaymentReceiptSafely } from '@/lib/receipts';
+import { activatePaidCourseEnrolmentsSafely } from '@/db/course-payments';
 
 export const prerender = false;
 
@@ -386,6 +387,11 @@ async function applyCapture(dbi: any, ctx: AuditContext, verified: VerifiedPayme
   // queuePaymentReceipt() is the second guard. It never throws into this path.
   if (outcome && !outcome.alreadyProcessed) {
     await queuePaymentReceiptSafely(dbi, outcome.orderId);
+  }
+  // A course paid for by this order becomes active now. Idempotent, never
+  // throws; the five-minute cron sweeps anything this misses.
+  if (outcome) {
+    await activatePaidCourseEnrolmentsSafely(dbi, outcome.orderId);
   }
   return {
     note: outcome?.alreadyProcessed ? 'payment.captured (already confirmed)' : 'payment.captured',
