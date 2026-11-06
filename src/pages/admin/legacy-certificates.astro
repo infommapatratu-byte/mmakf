@@ -1,0 +1,139 @@
+---
+// /admin/legacy-certificates — bring certificates issued before this system into the register.
+//
+// Paste or upload the spreadsheet, preview what will happen to every row, then
+// import. Each certificate keeps its original number, is linked to the right
+// member (or a record is created once for a holder the register has never
+// seen), and is marked as a legacy record wherever it is verified.
+import AdminShell from '@/components/AdminShell.astro';
+import { isConfigured } from '@/db';
+export const prerender = false;
+const SAMPLE = [
+  'certificate_no,holder_name,date_of_birth,member_id,kind,title,issued_on,issuing_authority',
+  'BB/2015/0007,Ravi Kumar,02-03-1990,,dan,Shodan (1st Dan),15-08-2015,MMAKF',
+  'KY/2019/0412,Asha Devi,11-07-2006,MMAKF-MEM-2019-000412,kyu,Green belt (6th Kyu),20-01-2019,MMAKF',
+].join('\n');
+---
+
+<AdminShell
+  title="Historical certificates"
+  requires="certificate:issue"
+  intro="Import certificates issued before this system, with their original numbers. Each is linked to the right member, appears in that member's area once they link their account, and can be checked at /verify — where it is shown honestly as a legacy record, not as an examination result held in this system."
+>
+  {!isConfigured() && <p class="msg msg-bad" role="alert">The register is not available on this deployment.</p>}
+
+  <section class="lc-card">
+    <h2>1. The spreadsheet</h2>
+    <p class="lc-sub">
+      Save the sheet as CSV (Excel: File → Save As → CSV UTF-8) and choose it, or paste it below. Required columns:
+      <code>certificate_no</code>, <code>holder_name</code>, <code>title</code>, <code>issued_on</code>.
+      Strongly recommended: <code>date_of_birth</code> or <code>member_id</code>, so each certificate is linked to the right person.
+      Optional: <code>kind</code> (kyu, dan, instructor, referee, course, event), <code>issuing_authority</code>, <code>notes</code>.
+      Dates as DD-MM-YYYY or YYYY-MM-DD.
+    </p>
+    <input type="file" id="lc-file" accept=".csv,text/csv" />
+    <textarea id="lc-csv" rows="10" spellcheck="false" placeholder={SAMPLE}></textarea>
+    <label class="lc-label">Where these came from<input id="lc-source" maxlength="120" placeholder="e.g. Dan register 2005–2020 (office spreadsheet)" /></label>
+    <div class="lc-actions">
+      <button type="button" class="btn btn-primary" id="lc-preview">Preview</button>
+      <button type="button" class="btn" id="lc-import" disabled>Import the accepted rows</button>
+    </div>
+  </section>
+
+  <p id="lc-msg" class="msg" role="status" hidden></p>
+  <section id="lc-result" class="lc-card" hidden>
+    <h2 id="lc-result-title">2. Preview</h2>
+    <p id="lc-summary" class="lc-sub"></p>
+    <div class="lc-scroll"><table class="lc-table"><thead><tr>
+      <th scope="col">Line</th><th scope="col">Certificate</th><th scope="col">Holder</th><th scope="col">Title</th><th scope="col">Issued</th><th scope="col">Result</th>
+    </tr></thead><tbody id="lc-rows"></tbody></table></div>
+  </section>
+</AdminShell>
+
+<script>
+  const $ = (id: string) => document.getElementById(id)!;
+  const csvBox = $('lc-csv') as HTMLTextAreaElement;
+  const importBtn = $('lc-import') as HTMLButtonElement;
+  const msg = $('lc-msg');
+  let previewed = '';
+
+  ($('lc-file') as HTMLInputElement).addEventListener('change', async (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (file) { csvBox.value = await file.text(); importBtn.disabled = true; }
+  });
+  csvBox.addEventListener('input', () => { importBtn.disabled = true; });
+
+  function say(text: string, ok: boolean) {
+    msg.textContent = text;
+    msg.className = `msg ${ok ? 'msg-ok' : 'msg-bad'}`;
+    msg.hidden = false;
+  }
+  const esc = (v: unknown) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+  const HOLDER: Record<string, string> = {
+    member_id: 'linked by member ID', name_and_dob: 'linked by name and date of birth', new_record: 'new member record created',
+  };
+  function render(rows: any[], title: string) {
+    $('lc-result-title').textContent = title;
+    const tbody = $('lc-rows');
+    tbody.innerHTML = rows.map((r) => {
+      const result = r.outcome === 'import'
+        ? `<span class="b b-ok">${title.startsWith('2') ? 'Will import' : 'Imported'}</span> <span class="lc-sub">${esc(HOLDER[r.holder] ?? '')}${r.federationId ? ' · ' + esc(r.federationId) : ''}</span>`
+        : r.outcome === 'exists' ? '<span class="b">Already in the register</span>'
+        : `<span class="b b-bad">Not imported</span> <span class="lc-sub">${esc(r.error)}</span>`;
+      return `<tr><td>${esc(r.line)}</td><td><code>${esc(r.certificateNo)}</code></td><td>${esc(r.holderName)}</td><td>${esc(r.title)}</td><td>${esc(r.issuedOn)}</td><td>${result}</td></tr>`;
+    }).join('');
+    $('lc-result').hidden = false;
+  }
+  async function post(action: string) {
+    const res = await fetch('/api/admin/legacy-certificates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, csv: csvBox.value, sourceLabel: ($('lc-source') as HTMLInputElement).value }),
+    }).catch(() => null);
+    return { ok: !!res && res.ok, body: res ? await res.json().catch(() => null) : null };
+  }
+
+  $('lc-preview').addEventListener('click', async () => {
+    msg.hidden = true;
+    const { ok, body } = await post('preview');
+    if (!ok) { say(body?.error ?? 'The preview failed.', false); importBtn.disabled = true; return; }
+    const rows = body.rows as any[];
+    const n = (o: string) => rows.filter((r) => r.outcome === o).length;
+    $('lc-summary').textContent = `${n('import')} will be imported · ${n('exists')} already in the register · ${n('error')} need fixing in the sheet (they are skipped).`;
+    render(rows, '2. Preview');
+    previewed = csvBox.value;
+    importBtn.disabled = n('import') === 0;
+  });
+
+  importBtn.addEventListener('click', async () => {
+    if (csvBox.value !== previewed) { say('The sheet changed after the preview. Preview it again first.', false); importBtn.disabled = true; return; }
+    if (importBtn.dataset.armed !== '1') { importBtn.dataset.armed = '1'; importBtn.textContent = 'Confirm: import into the register'; return; }
+    importBtn.disabled = true;
+    const { ok, body } = await post('import');
+    delete importBtn.dataset.armed;
+    importBtn.textContent = 'Import the accepted rows';
+    if (!ok) { say(body?.error ?? 'The import failed.', false); importBtn.disabled = false; return; }
+    const r = body.report;
+    say(`Imported ${r.imported} certificate(s): ${r.matchedRecords} linked to existing members, ${r.newRecords} new member record(s). ${r.existing} were already in the register; ${r.errors} skipped.`, true);
+    render(r.rows, '3. Result');
+  });
+</script>
+
+<style>
+  .lc-card { border: 1px solid var(--border); border-radius: var(--radius, 8px); padding: 18px 20px; margin: 0 0 20px; background: var(--card, #fff); display: grid; gap: 12px; }
+  .lc-card h2 { font-size: 1.05rem; margin: 0; }
+  .lc-sub { font-size: .85rem; opacity: .8; }
+  #lc-csv { width: 100%; font: .85rem/1.5 ui-monospace, Consolas, monospace; padding: 10px; border: 1px solid var(--border); border-radius: 6px; }
+  .lc-label { display: grid; gap: 4px; font-size: .85rem; font-weight: 600; }
+  .lc-label input { font: inherit; font-weight: 400; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; min-height: 40px; }
+  .lc-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .lc-scroll { overflow-x: auto; }
+  .lc-table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+  .lc-table th, .lc-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .b { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .76rem; font-weight: 600; background: #eeeeee; }
+  .b-ok { background: #e8f5e9; color: #1b5e20; }
+  .b-bad { background: #fdecea; color: #8c1d18; }
+  .msg { padding: 10px 12px; border-radius: 6px; }
+  .msg-ok { background: #e8f5e9; }
+  .msg-bad { background: #fdecea; }
+</style>

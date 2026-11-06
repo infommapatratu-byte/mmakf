@@ -1,0 +1,330 @@
+---
+// /admin/academy — author, publish and withdraw courses.
+//
+// The academy engine (src/db/academy.ts) existed complete and held 0 courses
+// because no page could create one. This is that page. It writes only through
+// the engine (src/pages/api/admin/academy.ts), so its rules hold here too:
+// content:write to author, structure editable only while a course is a draft,
+// and publication refused while any lesson cannot actually be delivered.
+import AdminShell from '@/components/AdminShell.astro';
+import { isConfigured, db } from '@/db';
+import { identify } from '@/lib/session';
+import { canAnywhere } from '@/lib/rbac';
+import { courseList, courseAuthoringView, TEACHING_CLASSES } from '@/db/course-authoring';
+import { feeRegister, type FeeRegisterRow } from '@/db/fee-register';
+import { formatINR } from '@/db/fees';
+
+export const prerender = false;
+
+const identity = await identify(Astro.request.headers.get('cookie'));
+const principal = identity?.principal ?? null;
+const mayAuthor = !!principal && !identity?.shared && canAnywhere(principal, 'content:write');
+
+const courseId = Number(Astro.url.searchParams.get('course')) || null;
+
+let loadError: string | null = null;
+let courses: any[] = [];
+let view: Awaited<ReturnType<typeof courseAuthoringView>> = null;
+let fees: FeeRegisterRow[] = [];
+if (isConfigured() && mayAuthor) {
+  try {
+    fees = (await feeRegister(db())).filter((f) => (f.kind === 'course' || f.kind === 'training') && f.state !== 'archived' && f.state !== 'refused');
+    if (courseId) view = await courseAuthoringView(db(), courseId);
+    else courses = await courseList(db());
+  } catch (err: any) {
+    loadError = String(err?.message ?? err).slice(0, 300);
+  }
+}
+const feeByCode = new Map(fees.map((f) => [f.code, f]));
+const feeText = (code: string | null | undefined) => {
+  if (!code) return 'Free';
+  const f = feeByCode.get(code);
+  if (!f) return `${code} — not in the fee register`;
+  return `${formatINR(f.amountPaise)}${f.state === 'approved' ? '' : ` — ${f.state}, not chargeable yet`}`;
+};
+const editable = view && (view.course.status === 'draft' || view.course.status === 'review');
+const CLASS_LABEL: Record<string, string> = {
+  master_teaching: 'Master teaching', shotokan_technical: 'Shotokan technical', federation_official: 'Federation official',
+  seminar: 'Seminar', competition: 'Competition',
+};
+---
+
+<AdminShell
+  title={view ? `Course: ${view.course.title}` : 'Academy courses'}
+  requires="content:write"
+  intro="Create courses, add modules and lessons (YouTube videos and readings), attach an approved fee from the fee register, and publish. A course can be published only when every lesson can actually be delivered."
+>
+  {!isConfigured() && <p class="msg msg-bad" role="alert">The academy is not available on this deployment.</p>}
+  {loadError && <p class="msg msg-bad" role="alert">The academy could not be read: {loadError}</p>}
+  <div id="ac-msg" class="msg" role="status" hidden></div>
+
+  {!courseId && mayAuthor && (
+    <>
+      <section class="ac-card">
+        <h2>New course</h2>
+        <form class="ac-form" data-action="create-course">
+          <label>Title<input name="title" required maxlength="200" placeholder="Course 01 – Taste the Discipline" /></label>
+          <label>Summary<input name="summary" maxlength="600" placeholder="One line a learner reads in the catalogue" /></label>
+          <div class="ac-row">
+            <label>Category
+              <select name="category">
+                <option value="shotokan">Shotokan</option>
+                <option value="wkf-performance">WKF Performance</option>
+                <option value="self-defence">Self-defence</option>
+                <option value="children">Children</option>
+                <option value="grading-preparation">Grading preparation</option>
+                <option value="instructor-development">Instructor development</option>
+              </select>
+            </label>
+            <label>Level<input name="level" maxlength="80" placeholder="White to Yellow belt" /></label>
+            <label>Estimated hours<input name="estimatedHours" type="number" min="1" max="2000" /></label>
+          </div>
+          <label>Fee
+            <select name="feeCode">
+              <option value="">No fee (free course)</option>
+              {fees.map((f) => (
+                <option value={f.code}>{f.label} — {formatINR(f.amountPaise)}{f.state === 'approved' ? '' : ' (proposed — not chargeable until approved)'}</option>
+              ))}
+            </select>
+          </label>
+          <label class="ac-check"><input type="checkbox" name="certificateOnCompletion" /> Certificate on completion</label>
+          <label>Description<textarea name="description" rows="4" maxlength="8000"></textarea></label>
+          <button type="submit" class="btn btn-primary">Create course</button>
+        </form>
+      </section>
+
+      <section class="ac-card">
+        <h2>Courses</h2>
+        {courses.length === 0 ? (
+          <p class="ac-empty">No course has been created yet. Create the first one above.</p>
+        ) : (
+          <div class="ac-scroll">
+            <table class="ac-table">
+              <thead><tr><th scope="col">Course</th><th scope="col">Status</th><th scope="col">Fee</th><th scope="col">Lessons</th><th scope="col">Enrolled</th><th scope="col"><span class="sr-only">Open</span></th></tr></thead>
+              <tbody>
+                {courses.map((c) => (
+                  <tr>
+                    <td><strong>{c.title}</strong>{c.summary && <div class="ac-sub">{c.summary}</div>}</td>
+                    <td><span class={`badge badge-${c.status}`}>{c.status}</span></td>
+                    <td>{feeText(c.feeCode)}</td>
+                    <td>{c.lessonCount}</td>
+                    <td>{c.enrolmentCount}</td>
+                    <td><a class="btn btn-sm" href={`/admin/academy?course=${c.id}`}>Open</a></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </>
+  )}
+
+  {courseId && mayAuthor && !view && !loadError && <p class="msg msg-bad" role="alert">No such course. <a href="/admin/academy">Back to courses</a></p>}
+
+  {view && (
+    <>
+      <p><a href="/admin/academy">← All courses</a></p>
+      <section class="ac-card ac-head">
+        <div>
+          <span class={`badge badge-${view.course.status}`}>{view.course.status}</span>
+          <h2>{view.course.title}</h2>
+          <p class="ac-sub">Fee: {feeText(view.course.feeCode)} · {view.enrolments} enrolled · {view.modules.reduce((n, m) => n + m.lessons.length, 0)} lessons</p>
+        </div>
+        <div class="ac-actions">
+          {editable && <button type="button" class="btn btn-primary" data-act="publish" data-course={view.course.id}>Publish</button>}
+          {view.course.status === 'published' && (
+            <form class="ac-form ac-inline" data-action="withdraw">
+              <input type="hidden" name="courseId" value={view.course.id} />
+              <input name="reason" required maxlength="1000" placeholder="Reason for withdrawing" />
+              <button type="submit" class="btn btn-ghost">Withdraw</button>
+            </form>
+          )}
+        </div>
+      </section>
+      <ul id="ac-blockers" class="ac-blockers" hidden></ul>
+
+      {!editable && (
+        <p class="msg">This course is {view.course.status}. Its structure is locked so enrolled learners are not given new requirements silently; withdraw it to edit.</p>
+      )}
+
+      {view.modules.map((m) => (
+        <section class="ac-card">
+          <h3>{m.title}</h3>
+          {m.summary && <p class="ac-sub">{m.summary}</p>}
+          {m.lessons.length === 0 ? <p class="ac-empty">No lessons yet.</p> : (
+            <ol class="ac-lessons">
+              {m.lessons.map((l) => (
+                <li>
+                  <span class={`kind kind-${l.kind}`}>{l.kind.replace(/_/g, ' ')}</span>
+                  <strong>{l.title}</strong>
+                  {l.durationMinutes != null && <span class="ac-sub"> · {l.durationMinutes} min</span>}
+                  {l.isPreview && <span class="pill">Free preview</span>}
+                  {l.kind === 'video' && (l.videoId
+                    ? <div class="ac-sub">Video: {l.videoTitle} <a href={`https://www.youtube.com/watch?v=${l.videoId}`} target="_blank" rel="noopener noreferrer">open on YouTube ↗</a></div>
+                    : <div class="ac-warn">No video linked: this lesson blocks publication.</div>)}
+                  {l.kind === 'reading' && !l.hasBody && <div class="ac-warn">No text: add the reading before publishing.</div>}
+                </li>
+              ))}
+            </ol>
+          )}
+          {editable && (
+            <details class="ac-add">
+              <summary>Add a lesson to “{m.title}”</summary>
+              <form class="ac-form" data-action="add-lesson">
+                <input type="hidden" name="moduleId" value={m.id} />
+                <label>Lesson title<input name="title" required maxlength="200" /></label>
+                <div class="ac-row">
+                  <label>Kind
+                    <select name="kind" data-kind-switch>
+                      <option value="video">Video (YouTube)</option>
+                      <option value="reading">Reading</option>
+                    </select>
+                  </label>
+                  <label>Minutes<input name="durationMinutes" type="number" min="1" max="600" /></label>
+                  <label class="ac-check"><input type="checkbox" name="isPreview" /> Free preview</label>
+                </div>
+                <div data-kind="video">
+                  <label>YouTube link<input name="videoUrl" placeholder="https://youtu.be/…  (Public or Unlisted, embedding allowed)" maxlength="500" /></label>
+                  <label>Classification
+                    <select name="classification">
+                      {TEACHING_CLASSES.map((c) => <option value={c}>{CLASS_LABEL[c] ?? c}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <div data-kind="reading" hidden>
+                  <label>Reading text<textarea name="body" rows="6" maxlength="20000"></textarea></label>
+                </div>
+                <button type="submit" class="btn btn-primary">Add lesson</button>
+              </form>
+            </details>
+          )}
+        </section>
+      ))}
+
+      {editable && (
+        <section class="ac-card">
+          <h3>Add a module</h3>
+          <form class="ac-form" data-action="add-module">
+            <input type="hidden" name="courseId" value={view.course.id} />
+            <label>Module title<input name="title" required maxlength="200" placeholder="Module 01 – Stances and blocks" /></label>
+            <label>Summary<input name="summary" maxlength="600" /></label>
+            <button type="submit" class="btn btn-primary">Add module</button>
+          </form>
+        </section>
+      )}
+    </>
+  )}
+</AdminShell>
+
+<script>
+  const msg = document.getElementById('ac-msg') as HTMLElement | null;
+  const blockers = document.getElementById('ac-blockers') as HTMLElement | null;
+  function say(text: string, ok: boolean) {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.className = `msg ${ok ? 'msg-ok' : 'msg-bad'}`;
+    msg.hidden = false;
+    msg.scrollIntoView({ block: 'nearest' });
+  }
+  function showBlockers(detail: any) {
+    if (!blockers) return;
+    const list = Array.isArray(detail) ? detail : Array.isArray(detail?.lessons) ? detail.lessons : [];
+    const items = list.filter((l: any) => l && (l.blocks || l.available === false));
+    blockers.innerHTML = '';
+    for (const l of items) {
+      const li = document.createElement('li');
+      li.textContent = `${l.title ?? 'Lesson'}: ${l.reason ?? 'cannot be delivered'}`;
+      blockers.appendChild(li);
+    }
+    blockers.hidden = items.length === 0;
+  }
+  async function send(payload: Record<string, unknown>) {
+    const res = await fetch('/api/admin/academy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(() => null);
+    const body = res ? await res.json().catch(() => null) : null;
+    return { ok: !!res && res.ok, body };
+  }
+
+  // Lesson kind switch: show the YouTube field or the reading text.
+  document.querySelectorAll<HTMLSelectElement>('select[data-kind-switch]').forEach((sel) => {
+    const form = sel.closest('form')!;
+    const sync = () => form.querySelectorAll<HTMLElement>('[data-kind]').forEach((el) => { el.hidden = el.dataset.kind !== sel.value; });
+    sel.addEventListener('change', sync);
+    sync();
+  });
+
+  document.querySelectorAll<HTMLFormElement>('form[data-action]').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = form.querySelector<HTMLButtonElement>('button[type=submit]');
+      const data = new FormData(form);
+      const payload: Record<string, unknown> = { action: form.dataset.action };
+      for (const [k, v] of data.entries()) payload[k] = typeof v === 'string' ? v : '';
+      for (const box of form.querySelectorAll<HTMLInputElement>('input[type=checkbox]')) payload[box.name] = box.checked;
+      if (btn) { btn.disabled = true; }
+      const { ok, body } = await send(payload);
+      if (btn) btn.disabled = false;
+      if (ok) {
+        if (form.dataset.action === 'create-course' && body?.course?.id) {
+          location.href = `/admin/academy?course=${body.course.id}`;
+          return;
+        }
+        say(body?.video && body.video.created ? `Saved. Registered the video “${body.video.title}”. Reloading…` : 'Saved. Reloading…', true);
+        setTimeout(() => location.reload(), 700);
+      } else {
+        say(body?.error ?? 'The academy did not answer. Check your connection and try again.', false);
+        showBlockers(body?.detail);
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('button[data-act="publish"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      // Confirmation lives in the page: the viewer refuses window.confirm().
+      if (btn.dataset.armed !== '1') { btn.dataset.armed = '1'; btn.textContent = 'Confirm: publish to learners'; return; }
+      btn.disabled = true;
+      const { ok, body } = await send({ action: 'publish', courseId: Number(btn.dataset.course) });
+      if (ok) { say('Published. Learners can now enrol. Reloading…', true); setTimeout(() => location.reload(), 900); return; }
+      btn.disabled = false; delete btn.dataset.armed; btn.textContent = 'Publish';
+      say(body?.error ?? 'The course could not be published.', false);
+      showBlockers(body?.detail);
+    });
+  });
+</script>
+
+<style>
+  .ac-card { border: 1px solid var(--border); border-radius: var(--radius, 8px); padding: 18px 20px; margin: 0 0 20px; background: var(--card, #fff); }
+  .ac-card h2 { font-size: 1.1rem; margin: 6px 0; }
+  .ac-card h3 { font-size: 1rem; margin: 0 0 8px; }
+  .ac-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+  .ac-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .ac-form { display: grid; gap: 12px; }
+  .ac-form label { display: grid; gap: 4px; font-size: .85rem; font-weight: 600; }
+  .ac-form input:not([type=checkbox]), .ac-form select, .ac-form textarea { font: inherit; font-weight: 400; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg, #fff); color: inherit; min-height: 40px; }
+  .ac-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; align-items: end; }
+  .ac-check { display: flex !important; align-items: center; gap: 8px; font-weight: 500 !important; }
+  .ac-inline { display: flex; gap: 8px; }
+  .ac-scroll { overflow-x: auto; }
+  .ac-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  .ac-table th, .ac-table td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .ac-sub { font-size: .82rem; opacity: .75; }
+  .ac-warn { font-size: .82rem; color: #8c1d18; }
+  .ac-empty { opacity: .75; }
+  .ac-lessons { margin: 8px 0 12px; padding-left: 20px; display: grid; gap: 8px; }
+  .ac-add summary { cursor: pointer; font-weight: 600; font-size: .9rem; padding: 6px 0; }
+  .ac-blockers { border: 1px solid #f2b8b5; background: #fdecea; border-radius: 6px; padding: 10px 10px 10px 28px; font-size: .88rem; }
+  .kind { display: inline-block; font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; padding: 2px 6px; border-radius: 4px; background: var(--bg-2, #f3f3f3); margin-right: 6px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .78rem; font-weight: 600; text-transform: capitalize; }
+  .badge-published { background: #e8f5e9; color: #1b5e20; }
+  .badge-draft, .badge-review { background: #fff3e0; color: #8a5200; }
+  .badge-withdrawn, .badge-archived { background: #eeeeee; color: #424242; }
+  .pill { margin-left: 8px; font-size: .72rem; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; }
+  .btn-sm { padding: 6px 10px; font-size: .8rem; min-height: 32px; }
+  .msg { padding: 10px 12px; border-radius: 6px; background: var(--bg-2, #f6f6f6); }
+  .msg-ok { background: #e8f5e9; }
+  .msg-bad { background: #fdecea; }
+</style>

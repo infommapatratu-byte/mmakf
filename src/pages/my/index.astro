@@ -358,16 +358,45 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
       {gate === 'no_person' && (
         <div class="card">
           <div class="eyebrow">Member area</div>
-          <h1 class="display-2" style="margin-top:14px">Your account is not linked to a member record.</h1>
+          <h1 class="display-2" style="margin-top:14px">One step left: your member record.</h1>
           <div class="rule"></div>
           <p class="lead">
-            Your sign-in works. What it is not yet attached to is a person in the federation's register, and everything
-            in the member area — grade, membership, entries, courses — is read from that record.
+            Your sign-in works. Courses, payments, grades and certificates are kept on a member record, so connect one
+            to this account. Choose the option that fits you.
           </p>
-          <p class="body-txt" style="margin-top:14px">
-            The federation office makes the link. Write to <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a>
-            with your member ID and the email address you signed in with. Nothing is lost in the meantime; the record
-            exists, this account simply does not point at it yet.
+
+          <div class="link-choices">
+            <form id="claimForm" class="link-card" novalidate>
+              <h2 class="link-title">I am already an MMAKF member</h2>
+              <p class="body-txt">Use the member ID on your card or certificate. Your grades and past certificates come with your record.</p>
+              <label class="input-label" for="claim-id">Member ID</label>
+              <input class="input" id="claim-id" name="federationId" autocomplete="off" placeholder="MMAKF-MEM-2024-000123" />
+              <label class="input-label" for="claim-dob" style="margin-top:12px">Date of birth</label>
+              <input class="input" id="claim-dob" name="dob" type="date" />
+              <button type="submit" class="btn btn-primary" style="width:100%;margin-top:16px;min-height:44px">Link my record</button>
+              <div class="link-err" role="alert" hidden></div>
+            </form>
+
+            <form id="createForm" class="link-card" novalidate>
+              <h2 class="link-title">I am new to MMAKF</h2>
+              <p class="body-txt">Create your learner record. You can enrol and pay for courses straight away.</p>
+              <label class="input-label" for="create-name">Full name</label>
+              <input class="input" id="create-name" name="fullName" autocomplete="name" maxlength="120" />
+              <label class="input-label" for="create-dob" style="margin-top:12px">Date of birth</label>
+              <input class="input" id="create-dob" name="dob" type="date" />
+              <label class="input-label" for="create-phone" style="margin-top:12px">Mobile number</label>
+              <input class="input" id="create-phone" name="phone" type="tel" autocomplete="tel" inputmode="tel" placeholder="98765 43210" />
+              <label class="input-label" for="create-city" style="margin-top:12px">City</label>
+              <input class="input" id="create-city" name="city" autocomplete="address-level2" maxlength="80" />
+              <button type="submit" class="btn btn-primary" style="width:100%;margin-top:16px;min-height:44px">Create my record</button>
+              <div class="link-err" role="alert" hidden></div>
+            </form>
+          </div>
+
+          <p class="body-txt" style="margin-top:18px">
+            Registering a child? A record for someone under 18 is created with a parent or guardian by the federation
+            office. Write to <a class="text-gold" href="mailto:admin@mmakf.in">admin@mmakf.in</a> with the child's name
+            and date of birth. For any other problem, write to the same address with the email you signed in with.
           </p>
         </div>
       )}
@@ -638,6 +667,10 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
 </Base>
 
 <style>
+  .link-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin-top: 22px; }
+  .link-card { border: 1px solid var(--border); border-radius: var(--radius, 8px); padding: 20px; display: grid; gap: 4px; align-content: start; }
+  .link-title { font-size: 1.05rem; margin: 0 0 4px; }
+  .link-err { color: var(--red-2); font-size: .85rem; margin-top: 10px; }
   /* House convention: every page defines its own alternating section ground.
      Without this the `.bg2` sections on this page rendered on the plain page
      ground, so the member area lost the banding every other page has. */
@@ -707,6 +740,36 @@ const otherCourses = courses.filter((c) => c.enrolment.status !== 'active');
       input.focus();
     });
   });
+
+  // Attach a member record to this account: an existing member claims theirs,
+  // someone new creates one. The rules live on the server (/api/my/profile).
+  for (const [formId, action] of [['claimForm', 'claim'], ['createForm', 'create']] as const) {
+    const f = document.getElementById(formId) as HTMLFormElement | null;
+    if (!f) continue;
+    f.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const errBox = f.querySelector('.link-err') as HTMLElement;
+      const btn = f.querySelector('button[type="submit"]') as HTMLButtonElement;
+      errBox.hidden = true;
+      btn.disabled = true;
+      const payload: Record<string, string> = { action };
+      new FormData(f).forEach((v, k) => { payload[k] = String(v); });
+      try {
+        const res = await fetch('/api/my/profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) { window.location.reload(); return; }
+        errBox.textContent = data.error || 'That did not work. Nothing was changed.';
+      } catch {
+        errBox.textContent = 'The request could not be sent. Check your connection and try again.';
+      }
+      errBox.hidden = false;
+      btn.disabled = false;
+    });
+  }
 
   // Sign-in. Posts JSON so the CSRF middleware accepts it, and repeats exactly
   // what the server said rather than guessing at the reason.

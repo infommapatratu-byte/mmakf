@@ -223,21 +223,25 @@ const DAY_FMT = (iso: string) =>
         <EmptyState
           title="The member area is not available on this deployment"
           body="Your training week is read from the federation register, which needs a database."
+          action={{ label: 'See the headquarters timetable', href: h('/schedule') }}
         />
       ) : gate === 'signed_out' ? (
         <EmptyState
           title="Sign in to see your week"
           body="Your classes, your bookings and any changes to them are on your own record. Sign in to read it."
+          action={{ label: 'Sign in', href: h('/my') }}
         />
       ) : gate === 'shared_credential' ? (
         <EmptyState
           title="This is a shared credential"
           body="A shared sign-in is attributable to no person, so it has no training record and cannot hold a place in a class. Sign in with your own account."
+          action={{ label: 'Sign in with your own account', href: h('/my') }}
         />
       ) : gate === 'no_person' ? (
         <EmptyState
           title="This account is not linked to a member record"
-          body="Your sign-in works; it is not yet attached to a person on the federation register, so there is no training week to show. The federation office can link them."
+          body="Your sign-in works; it is not yet attached to a person on the federation register, so there is no training week to show. Link your member record, or create one, from your member area."
+          action={{ label: 'Link or create your member record', href: h('/my') }}
         />
       ) : loadError ? (
         <ErrorState title="We couldn’t read your week" safe="Nothing has been changed." />
@@ -254,6 +258,8 @@ const DAY_FMT = (iso: string) =>
                   ? 'You hold no places in the next four weeks. Anything your club has open is listed below.'
                   : 'You hold no places, and your record is not attached to a club — so there is nothing to offer you. The federation office can place you at a club.'
               }
+              action={{ label: 'Browse courses', href: h('/my/courses') }}
+              secondary={{ href: h('/clubs'), label: 'Find a club' }}
             />
           ) : (
             <ul class="week">

@@ -92,10 +92,15 @@ const {
   {/* Additional guidance — the offline route, a caveat, a provenance line. */}
   <slot />
 
-  <div class="es-actions">
-    <a class="btn btn-primary es-btn" href={action.href}>{action.label}</a>
-    {secondary && <a class="btn btn-ghost es-btn" href={secondary.href}>{secondary.label}</a>}
-  </div>
+  {/* `action` is required by the type, but .astro files are not type-checked in
+      CI and a missing one crashed whole pages (/clubs, every visit). A page
+      must never die for want of a button: render what was given. */}
+  {(action?.href || secondary) && (
+    <div class="es-actions">
+      {action?.href && <a class="btn btn-primary es-btn" href={action.href}>{action.label}</a>}
+      {secondary && <a class="btn btn-ghost es-btn" href={secondary.href}>{secondary.label}</a>}
+    </div>
+  )}
 </div>
 
 <style>

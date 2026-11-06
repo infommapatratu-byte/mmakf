@@ -503,6 +503,10 @@ export const ADMIN_GROUPS: AdminGroup[] = [
       // and say which action would open them.
       { href: '/admin/pipeline', label: 'Pipeline', action: 'engagement:read' },
       { href: '/admin/leads', label: 'Leads and CRM', action: 'engagement:read' },
+      // Courses, lessons and their videos (the academy engine's authoring door).
+      { href: '/admin/academy', label: 'Academy courses', action: 'content:write' },
+      // Certificates issued before this system: imported with their original numbers.
+      { href: '/admin/legacy-certificates', label: 'Historical certificates', action: 'certificate:issue' },
       { href: '/admin/programs', label: 'Programmes', action: 'program:read' },
       // Reading the pricing RULES, which is a different authority from reading
       // a quotation computed under them — and a different one again from

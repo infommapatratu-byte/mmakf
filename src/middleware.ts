@@ -66,6 +66,29 @@ function deny(reason: string): Response {
 export const onRequest = defineMiddleware(async (context, next) => {
   const { request, url } = context;
 
+  // ── A deployment address is never where anyone should be ─────────────────
+  //
+  // Every Vercel deployment also answers on its own *.vercel.app address. The
+  // site refuses sign-ins and form posts from those hosts (the Origin
+  // allow-list names the federation's own domains only), and an old
+  // deployment's address keeps serving that old code for ever. An office user
+  // opened one from the Vercel dashboard and could not sign in at all, with
+  // nothing on the page saying why. So a page request on a *.vercel.app host is
+  // sent to the same path on www.mmakf.in. API and cron calls are left alone,
+  // so health checks and scheduled jobs on a deployment URL still answer.
+  const forwardedHost = (request.headers.get('x-forwarded-host') || url.hostname || '').split(',')[0].trim().toLowerCase();
+  if (
+    forwardedHost.endsWith('.vercel.app') &&
+    (request.method === 'GET' || request.method === 'HEAD') &&
+    !url.pathname.startsWith('/api/') &&
+    !url.pathname.startsWith('/_')
+  ) {
+    return new Response(null, {
+      status: 308,
+      headers: { Location: `https://www.mmakf.in${url.pathname}${url.search}`, 'Cache-Control': 'no-store' },
+    });
+  }
+
   // ── Which of the three surfaces was asked for ────────────────────────────
   //
   // Decided from the Host header and put on locals, so a page never has to

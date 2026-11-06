@@ -475,24 +475,14 @@ describe('Razorpay Checkout is permitted where the browser will ask', () => {
  * thing it excuses.
  */
 const KNOWN_BLOCKED: Array<{ file: string; origin: string; kind: Kind; reason: string }> = [
-  {
-    file: 'src/pages/live.astro',
-    origin: 'https://www.youtube-nocookie.com',
-    kind: 'frame',
-    reason:
-      'The live-class player. The page listens for securitypolicyviolation on frame-src and swaps the dead frame for an ' +
-      'explanation and a link to the channel, so a blocked frame is a handled state. Embedding it is a policy decision for ' +
-      'the federation: to allow it, add https://www.youtube-nocookie.com to frame-src.',
-  },
-  {
-    file: 'src/components/TechnicalPlayer.astro',
-    origin: 'https://www.youtube.com',
-    kind: 'script',
-    reason:
-      'The YouTube IFrame API, loaded for the federation\'s own cleared recordings on /shotokan/videos. script-src does not ' +
-      'name it, so window.YT never appears and the player never mounts; the component has no fallback for a blocked script. ' +
-      'To show them, add https://www.youtube.com to script-src and https://www.youtube.com (and youtube-nocookie.com) to frame-src together.',
-  },
+  // Empty since 2026-11-07. The two entries that stood here were both YouTube:
+  //   src/pages/live.astro -> https://www.youtube-nocookie.com (frame): the
+  //     live-class player, shown as a link because frame-src blocked it;
+  //   src/components/TechnicalPlayer.astro -> https://www.youtube.com (script):
+  //     the IFrame API for the federation's own recordings, which never mounted.
+  // The federation chose to embed its teaching video (official YouTube player
+  // only, no rehosting), so script-src and frame-src now name those origins and
+  // 'the YouTube players are permitted' below pins them.
 ];
 
 const SCAN_FILES = [
@@ -555,6 +545,12 @@ describe('every external origin the site loads is permitted by the policy that g
 });
 
 describe('the known gaps are still gaps (delete an entry the day its origin is permitted)', () => {
+  it('the YouTube players are permitted: embedded lessons, the live classroom and the technical library', () => {
+    const csp = parseCsp(headerOf('Content-Security-Policy'));
+    expect(permits(csp, 'frame-src', new URL('https://www.youtube-nocookie.com/embed/x'))).toBe(true);
+    expect(permits(csp, 'frame-src', new URL('https://www.youtube.com/embed/x'))).toBe(true);
+    expect(permits(csp, 'script-src', new URL('https://www.youtube.com/iframe_api'))).toBe(true);
+  });
   for (const known of KNOWN_BLOCKED) {
     it(`${known.file} -> ${known.origin} (${known.kind})`, () => {
       const hit = VERDICTS.filter((v) => v.load.file === known.file && v.origin === known.origin && v.load.kind === known.kind);

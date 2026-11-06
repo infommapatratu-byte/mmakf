@@ -416,10 +416,25 @@ const learnable = (e: any): boolean => {
                                 <div class="reading">{d.body}</div>
                               )}
 
+                              {l.available && l.kind === 'video' && d?.videoId && (
+                                <div class="lesson-player">
+                                  {/* The official YouTube embedded player, privacy-enhanced domain:
+                                      no cookies until the learner presses play. Nothing is
+                                      downloaded or rehosted. */}
+                                  <iframe
+                                    src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(d.videoId)}?rel=0&modestbranding=1`}
+                                    title={d.videoTitle ?? l.title}
+                                    loading="lazy"
+                                    allow="accelerometer; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+                                    referrerpolicy="strict-origin-when-cross-origin"
+                                    allowfullscreen
+                                  ></iframe>
+                                </div>
+                              )}
                               {l.available && l.kind === 'video' && d?.videoUrl && (
-                                <p style="margin-top:10px">
+                                <p style="margin-top:8px;font-size:.85rem">
                                   <a class="text-gold" href={d.videoUrl} target="_blank" rel="noopener noreferrer">
-                                    Watch {d.videoTitle ? `“${d.videoTitle}”` : 'this lesson'} on the federation's channel →
+                                    Open {d.videoTitle ? `“${d.videoTitle}”` : 'this lesson'} on YouTube ↗
                                   </a>
                                 </p>
                               )}
@@ -641,6 +656,8 @@ const learnable = (e: any): boolean => {
   .q-marks { font-size: 0.76rem; color: var(--muted); }
 
   .lesson-done, .quiz-start, .course-enrol { min-height: 44px; }
+  .lesson-player { position: relative; width: 100%; max-width: 860px; aspect-ratio: 16 / 9; margin-top: 12px; border-radius: 8px; overflow: hidden; background: #000; }
+  .lesson-player iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
 
   @media (max-width: 640px) {
     .lesson-head { align-items: flex-start; }

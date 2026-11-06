@@ -441,6 +441,15 @@ if (authed) {
             {n:'rank',l:'Rank (e.g. Shodan — I Dan)',full:true},{n:'note',l:'Eligibility note',full:true},{n:'wkf',l:'Pathway note',full:true}
           ]} />
 
+        {/* The real LMS lives at /admin/academy: courses with modules, YouTube
+            lessons, approved fees, online payment, enrolment and certificates.
+            This panel only edits the old text catalogue on the public /academy page. */}
+        <div class="card" style="padding:18px 20px;margin:0 0 16px;border-left:4px solid var(--red, #8b1a1a)">
+          <strong>Building a course people can enrol in and pay for?</strong>
+          Use <a href="/admin/academy" style="text-decoration:underline">Academy courses</a> — modules, YouTube lessons,
+          fees from the fee register, Razorpay payment, enrolment and certificates in one place. The list below only edits
+          the old text catalogue shown on the public /academy page.
+        </div>
         <ListPanel id="courses" title="Academy — Courses" subtitle="Course catalogue on /academy. Lessons attach by exact course title." apiKey="courses"
           rows={data!.courses} fields={[
             {n:'id',l:'Short id'},{n:'title',l:'Course title',full:true},{n:'belt',l:'Belt range (e.g. 10th – 9th Kyu)'},{n:'level',l:'Level label'},{n:'desc',l:'Description',full:true,textarea:true}

@@ -214,6 +214,7 @@ const activeFilters = [
         <EmptyState
           title="The club register is not available on this deployment"
           body="Club search reads the federation register, which needs a database. The affiliation register and the headquarters timetable are unaffected."
+          action={{ label: 'Open the affiliation register', href: h('/dojos') }}
         />
       ) : state === 'unavailable' ? (
         <ErrorState
@@ -229,6 +230,10 @@ const activeFilters = [
               ? `Nothing matched ${activeFilters.join(', ')}. Widen the search — a club that has not yet published its classes will not match a class filter even though it trains.`
               : 'No club is currently affiliated in the register. That is a statement about the register, not about the federation — units in the middle of chartering do not appear here.'
           }
+          action={activeFilters.length
+            ? { label: 'Clear the search', href: h('/clubs') }
+            : { label: 'How a club affiliates', href: h('/affiliation') }}
+          secondary={{ href: h('/training'), label: 'Train with the federation' }}
         />
       ) : (
         <>
