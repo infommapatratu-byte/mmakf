@@ -557,16 +557,17 @@ function money(currency: string, minor: number): string {
             </div>
           )}
 
+          {/* Primary first in the DOM so Enter means "continue", not "Back". */}
           <div class="ind-nav">
-            {!isFirst && (
-              <button class="btn btn-ghost" type="submit" name="intent" value="back">Back</button>
-            )}
             {isReview ? (
               <button class="btn btn-primary" type="submit" name="intent" value="send" disabled={outstanding.length > 0}>
                 Send to MMAKF
               </button>
             ) : (
               <button class="btn btn-primary" type="submit" name="intent" value="next">Continue</button>
+            )}
+            {!isFirst && (
+              <button class="btn btn-ghost" type="submit" name="intent" value="back">Back</button>
             )}
           </div>
         </form>
@@ -681,10 +682,9 @@ function money(currency: string, minor: number): string {
   .ind-fee-total { margin: 0; font-size: 1.4rem; font-variant-numeric: tabular-nums; }
 
   .ind-nav {
-    display: flex; gap: 12px; margin-top: 34px;
+    display: flex; flex-direction: row-reverse; justify-content: space-between; gap: 12px; margin-top: 34px;
     padding-top: 24px; border-top: 1px solid var(--border);
   }
-  .ind-nav .btn-primary { margin-left: auto; }
   .ind-nav .btn[disabled] { opacity: .5; cursor: not-allowed; }
 
   .ind-done { margin-top: 10px; }
@@ -696,7 +696,7 @@ function money(currency: string, minor: number): string {
        fifteen characters. */
     .rev-row { grid-template-columns: 1fr; gap: 2px; }
     .rev-row dt { font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; }
-    .ind-nav { flex-direction: column-reverse; }
+    .ind-nav { flex-direction: column; }
     .ind-nav .btn { width: 100%; text-align: center; margin-left: 0; }
     .ind-check { flex: 1 1 100%; }
   }

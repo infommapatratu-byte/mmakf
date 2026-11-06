@@ -270,6 +270,19 @@ const orgSchema = {
                 <span class="nav-search-word">Search</span>
               </a>
             )}
+            {/* Sign in. QA defect BUG_002: the masthead offered no way in for an
+                existing member. /my is the member sign-in; the training
+                surface has its own client portal. Not shown on admin, which
+                is already behind its own sign-in.
+
+                Written through h() (linkTo), not surfaceHref(): on the employee
+                host a bare /my is rewritten to /employee/my, which is a 404 —
+                the footer comment above describes the same trap. h() sends
+                /my to the origin that serves it and leaves the other two
+                surfaces exactly as surfaceHref() would. */}
+            {surface !== 'admin' && (
+              <a href={h(surface === 'learn' ? '/learn/portal' : '/my')} class="nav-signin">Sign in</a>
+            )}
             {/* WAS "Enroll", pointing at /contact#enroll — a dojo's call to
                 action on a national federation's masthead. The federation's
                 primary action is to register with it. */}
@@ -522,6 +535,22 @@ const orgSchema = {
       @media (min-width: 861px) and (max-width: 1080px) {
         .nav-search-word { display: none; }
       }
+      /* Measured with the real fonts: the bar only outgrows its 72px at 420px and
+         below (92px at 320, 360, 375, 400, 420; 73px from 440 up), because the
+         420px rule above squeezes the subtitle into three or four lines. The
+         first version of this hid the subtitle at 860px and below, which took
+         the federation's name off every tablet and large phone for no gain. */
+      @media (max-width: 860px) { .nav-inner { flex-wrap: wrap; gap: 8px; } }
+      @media (max-width: 420px) { .nav-name-2 { display: none; } }
+      .nav-links .nav-signin {
+        margin-left: 6px;
+        padding: 9px 12px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        font-weight: 600;
+      }
+      .nav-links .nav-signin:hover { border-color: var(--gold-dim); }
+      .nav-links .nav-signin::after { display: none; }
       .nav-links .nav-enroll {
         border: 1px solid var(--red-2);
         background: var(--red);
@@ -556,6 +585,15 @@ const orgSchema = {
           padding: 12px 18px 24px;
           border-bottom: 1px solid var(--border);
           transform: translateY(-120%);
+          /* A CEILING, because the drawer holds every group's links (about fifty)
+             and is position:fixed. Without one it is taller than the phone and
+             nothing scrolls it: measured 2028px tall at 375x667, with Search,
+             Sign in and Register all below the fold and unreachable by touch or
+             by keyboard. Capped to the space under the bar, and scrollable. */
+          max-height: calc(100vh - 72px);
+          max-height: calc(100dvh - 72px);
+          overflow-y: auto;
+          overscroll-behavior: contain;
           /* WCAG 2.4.7 / 2.4.3 (Q-28): `transform` alone hides the closed menu
              visually but leaves every link in the tab order. Measured at 375px:
              ten links took focus at y = -632 to -115 — off-screen, with a focus
@@ -590,6 +628,7 @@ const orgSchema = {
         }
         .nav-sub a { padding: 8px 10px; font-size: .84rem; border: 0; opacity: .82; }
         .nav-search { border: 0; border-radius: 0; margin-left: 0; padding: 0; }
+        .nav-links .nav-signin { text-align: center; margin: 12px 0 0; }
         .nav-links .nav-enroll { text-align: center; margin: 12px 0 0; }
         .nav-hamburger { display: flex; }
       }
@@ -734,5 +773,93 @@ const orgSchema = {
         window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
       }
     </script>
+    {/* A live region that exists from the first paint and only ever has its TEXT
+        changed. The first version kept the sentence inside the element and
+        toggled `hidden`; a region that goes from display:none to visible is not
+        reliably announced (WCAG 4.1.3). The :empty rule below makes it
+        zero-sized while it has no text without taking it out of the
+        accessibility tree. Keep it free of whitespace, or :empty stops matching. */}
+    <div id="offlineBanner" role="status" aria-live="polite"></div>
+    <script is:inline>
+      // QA exploratory sessions 1 and 3: a form submitted while offline failed
+      // silently, and a repeated Enter/click sent duplicate requests.
+      //
+      // This listener is registered BEFORE src/scripts/form-upgrade.ts (a
+      // deferred module), so it sees every submit first, and a preventDefault()
+      // here makes the upgrade stand down because it checks defaultPrevented.
+      (function () {
+        var banner = document.getElementById('offlineBanner');
+        var OFFLINE = 'You appear to be offline. Your changes have not been sent — reconnect and try again.';
+        function say(on) { if (banner) banner.textContent = on ? OFFLINE : ''; }
+        function sync() { say(navigator.onLine === false); }
+        window.addEventListener('online', sync);
+        window.addEventListener('offline', sync);
+        sync();
+
+        document.addEventListener('submit', function (e) {
+          var f = e.target;
+          if (!f || f.tagName !== 'FORM' || e.defaultPrevented) return;
+          if (navigator.onLine === false) {
+            e.preventDefault();
+            say(true);
+            return;
+          }
+          // Swallow a second submit of the same form within 1.5s.
+          var last = Number(f.getAttribute('data-submitted-at') || 0);
+          if (Date.now() - last < 1500) { e.preventDefault(); return; }
+          f.setAttribute('data-submitted-at', String(Date.now()));
+
+          var s = e.submitter;
+          if (!s) return;
+          // Remembered so a back/forward-cache restore can undo it (see pageshow).
+          s.setAttribute('data-submitting', '');
+          // KEEP THE PRESSED BUTTON'S OWN name=value.
+          //
+          // form-upgrade.ts disables the submitter BEFORE it serialises the form,
+          // and a disabled submitter is left out of FormData. Every named submit
+          // button therefore reached the server as nothing: Back, Send to MMAKF
+          // and Change all arrived as the default 'next', and the admin
+          // decision buttons (act / decision / action) lost their value. Seen in
+          // Chrome with the real script; the root cause is the order of two
+          // statements in form-upgrade.ts. This copy is the stop-gap — it is
+          // harmless once that is fixed, and it also survives the plain
+          // form.submit() fallback, which has no submitter at all.
+          if (s.name && (f.method || '').toLowerCase() === 'post') {
+            var c = f.querySelector('input[data-submitter-copy]');
+            if (!c) {
+              c = document.createElement('input');
+              c.type = 'hidden';
+              c.setAttribute('data-submitter-copy', '');
+              f.appendChild(c);
+            }
+            c.name = s.name;
+            c.value = s.value;
+          }
+        }, false);
+
+        // A back/forward-cache restore must not leave a form stuck in its "just
+        // submitted" state: neither our timestamp nor the submit button that
+        // form-upgrade.ts disabled and never re-enables once the request
+        // succeeded.
+        window.addEventListener('pageshow', function (ev) {
+          if (!ev.persisted) return;
+          document.querySelectorAll('form[data-submitted-at]').forEach(function (f) { f.removeAttribute('data-submitted-at'); });
+          document.querySelectorAll('[data-submitting]').forEach(function (b) { b.removeAttribute('data-submitting'); b.disabled = false; });
+        });
+
+        // A server-rendered "fix this" page puts `autofocus` on its first invalid
+        // control. A browser ignores autofocus once focus has already moved in the
+        // document, and it has: form-upgrade.ts swaps that page in with
+        // document.write() after the visitor pressed a button. So do it by hand —
+        // for controls the server marked invalid only, never for a page's own
+        // autofocus (search box, sign-in field), which the browser handles.
+        var bad = document.querySelector('[autofocus][aria-invalid="true"]');
+        if (bad && (!document.activeElement || document.activeElement === document.body)) bad.focus();
+      })();
+    </script>
+    <style is:global>
+      #offlineBanner { position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-toast, 800); padding: 12px 16px; background: #7a1c1c; color: #fff; text-align: center; font-size: .9rem; }
+      #offlineBanner:empty { padding: 0; height: 0; overflow: hidden; }
+    </style>
   </body>
 </html>

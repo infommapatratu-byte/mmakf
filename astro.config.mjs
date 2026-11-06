@@ -60,6 +60,35 @@ export default defineConfig({
   // — which is what the comment above wrongly claimed was unnecessary.
   cacheDir: process.env.ASTRO_CACHE_DIR || undefined,
   site: 'https://www.mmakf.in',
+
+  // WHICH HOSTS ASTRO MAY BELIEVE.
+  //
+  // With no `allowedDomains`, Astro's Node adapter trusts neither the Host nor
+  // the X-Forwarded-Host header and builds every request URL as
+  // `https://localhost/...`. Two things followed, both observed on the live site:
+  //
+  //   1. Astro's own CSRF check (`security.checkOrigin`, on by default) compares
+  //      the browser's Origin (https://www.mmakf.in) with that URL
+  //      (https://localhost) and refuses every plain form POST: "Cross-site POST
+  //      form submissions are forbidden". A visitor with JavaScript off, or an
+  //      older browser, could not submit the registration or enquiry forms.
+  //      This was misattributed in docs/RUNBOOK.md to a Vercel edge setting.
+  //   2. Anything built from Astro.url.origin was wrong: members were shown
+  //      https://localhost/my/calendar/<secret>.ics.
+  //
+  // Listing the hosts this site really answers on makes Astro take the public
+  // host from the request. The apex needs its own entry because `**.` requires at
+  // least one subdomain label. `**.vercel.app` covers the project's own alias and
+  // deployment URLs; src/middleware.ts still enforces its own initiator allow-list
+  // on every mutating request, so this does not widen who may POST.
+  security: {
+    allowedDomains: [
+      { protocol: 'https', hostname: 'mmakf.in' },
+      { protocol: 'https', hostname: '**.mmakf.in' },
+      { protocol: 'https', hostname: '**.vercel.app' },
+    ],
+  },
+
   compressHTML: true,
   prefetch: { prefetchAll: true, defaultStrategy: 'viewport' },
 });

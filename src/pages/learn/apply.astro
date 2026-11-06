@@ -96,8 +96,19 @@ if (Astro.request.method === 'POST') {
   }
   // Carried on the first step only; it seeds the institution type from the
   // audience page the applicant arrived from.
+  //
+  // CHECKED AGAINST STEP ONE'S OWN OPTIONS, as the GET path below does. The
+  // hidden field is the raw `?audience=` and /training/estimate sends
+  // `individual`, which step one does not offer: unchecked, a blank "Type of
+  // institution" was filled with it, saved, and then reported back as "is not
+  // one of the choices" for a question the applicant had not been shown a
+  // choice for. A hint that is not an option seeds nothing, so the field says
+  // what is true: it is needed.
   const audienceHint = form.get('audience');
-  if (audienceHint && !merged.institutionType) merged.institutionType = String(audienceHint);
+  const hintOptions = WIZARD_STEPS.find((s) => s.step === 1)?.fields.find((f) => f.name === 'institutionType')?.options ?? [];
+  if (audienceHint && !merged.institutionType && hintOptions.some((o) => o.value === String(audienceHint))) {
+    merged.institutionType = String(audienceHint);
+  }
 
   const outcome = await submitApplicationRequest(Astro.request, {
     intent: intent === 'submit' ? 'submit' : 'draft',
@@ -108,7 +119,15 @@ if (Astro.request.method === 'POST') {
     landingPath: url.pathname,
   });
 
-  if (outcome.kind === 'draft_saved') {
+  // Going forward validates the step just answered. The draft has already been
+  // saved above, so nothing typed is lost — but the applicant is not allowed to
+  // walk past a blank required field. Going Back never validates: leaving a
+  // step half-done is exactly what Back is for.
+  const stepProblems = outcome.kind === 'draft_saved' && intent !== 'back'
+    ? validateSubmission(merged).filter((p) => p.step === submittedStep)
+    : [];
+
+  if (outcome.kind === 'draft_saved' && stepProblems.length === 0) {
     const next = intent === 'back'
       ? Math.max(1, submittedStep - 1)
       : Math.min(TOTAL_STEPS, submittedStep + 1);
@@ -125,7 +144,19 @@ if (Astro.request.method === 'POST') {
   // Anything else: stay on the step and say what happened.
   saved = merged;
   step = submittedStep;
-  if (outcome.kind === 'invalid') {
+  if (outcome.kind === 'draft_saved') {
+    // Saved, but this step still has blank or invalid answers. Carry the draft's
+    // ref and key forward so the next submit continues THIS draft rather than
+    // opening a second one, and list every problem on the step at once.
+    ref = outcome.ref;
+    accessToken = outcome.accessToken;
+    problems = stepProblems;
+    const n = stepProblems.length;
+    banner = {
+      kind: 'error',
+      text: `${n} answer${n === 1 ? '' : 's'} on this step ${n === 1 ? 'needs' : 'need'} attention before you can continue. Your other answers are saved.`,
+    };
+  } else if (outcome.kind === 'invalid') {
     problems = outcome.problems;
     // Send them to the earliest step that has a problem, so they are not asked
     // to hunt through twenty pages for the one that is wrong.
@@ -182,6 +213,10 @@ if (audienceParam && !saved.institutionType
 
 const current: WizardStep = WIZARD_STEPS.find((s) => s.step === step) ?? WIZARD_STEPS[0];
 const problemFor = (name: string) => problems.find((p) => p.field === name)?.message ?? null;
+// The first control on this step with a problem. It takes focus when the page
+// loads (`autofocus`, which needs no script) so a keyboard or screen-reader user
+// lands on the thing to fix rather than back at the top of a long page.
+const firstErrorField = current.fields.find((f) => problemFor(f.name))?.name ?? null;
 const isReview = current.key === 'review';
 const isSubmit = current.key === 'submit';
 const outstanding = isSubmit || isReview ? validateSubmission(saved) : [];
@@ -313,6 +348,12 @@ function displayValue(name: string): string {
               const err = problemFor(f.name);
               const value = saved[f.name];
               const id = `f-${f.name}`;
+              // The help text AND the error, so a screen reader that lands on the
+              // control hears why it is wrong — not only the one-off alert that
+              // fired when the page loaded.
+              const describedBy = [f.help ? `${id}-help` : null, err ? `${id}-error` : null]
+                .filter(Boolean).join(' ') || undefined;
+              const focusHere = f.name === firstErrorField;
               return (
                 <div class={`wiz-field ${err ? 'has-error' : ''}`}>
                   <label class="input-label" for={id}>
@@ -324,14 +365,16 @@ function displayValue(name: string): string {
 
                   {f.kind === 'textarea' && (
                     <textarea class="input" id={id} name={f.name} rows="5"
-                      aria-describedby={f.help ? `${id}-help` : undefined}
-                      aria-invalid={err ? 'true' : undefined}>{value ? String(value) : ''}</textarea>
+                      aria-describedby={describedBy}
+                      aria-invalid={err ? 'true' : undefined}
+                      autofocus={focusHere}>{value ? String(value) : ''}</textarea>
                   )}
 
                   {f.kind === 'select' && (
                     <select class="input" id={id} name={f.name}
-                      aria-describedby={f.help ? `${id}-help` : undefined}
-                      aria-invalid={err ? 'true' : undefined}>
+                      aria-describedby={describedBy}
+                      aria-invalid={err ? 'true' : undefined}
+                      autofocus={focusHere}>
                       <option value="">Choose…</option>
                       {(f.options ?? []).map((opt) => (
                         <option value={opt.value} selected={String(value) === opt.value}>{opt.label}</option>
@@ -340,13 +383,14 @@ function displayValue(name: string): string {
                   )}
 
                   {f.kind === 'multiselect' && (
-                    <fieldset class="wiz-checks">
+                    <fieldset class="wiz-checks" aria-describedby={describedBy}>
                       <legend class="sr-only">{f.label}</legend>
-                      {(f.options ?? []).map((opt) => {
+                      {(f.options ?? []).map((opt, i) => {
                         const arr = Array.isArray(value) ? value.map(String) : [];
                         return (
                           <label class="wiz-check">
-                            <input type="checkbox" name={f.name} value={opt.value} checked={arr.includes(opt.value)} />
+                            <input type="checkbox" name={f.name} value={opt.value} checked={arr.includes(opt.value)}
+                              autofocus={focusHere && i === 0} />
                             <span>{opt.label}</span>
                           </label>
                         );
@@ -356,7 +400,10 @@ function displayValue(name: string): string {
 
                   {f.kind === 'boolean' && (
                     <label class="wiz-check wiz-check-single">
-                      <input type="checkbox" id={id} name={f.name} checked={value === true || value === 'true'} />
+                      <input type="checkbox" id={id} name={f.name} checked={value === true || value === 'true'}
+                        aria-describedby={describedBy}
+                        aria-invalid={err ? 'true' : undefined}
+                        autofocus={focusHere} />
                       <span>Yes</span>
                     </label>
                   )}
@@ -376,22 +423,23 @@ function displayValue(name: string): string {
                         : f.name === 'postcode' ? 'postal-code'
                         : undefined
                       }
-                      aria-describedby={f.help ? `${id}-help` : undefined}
+                      aria-describedby={describedBy}
                       aria-invalid={err ? 'true' : undefined}
+                      autofocus={focusHere}
                     />
                   )}
 
-                  {err && <p class="wiz-error" role="alert">{err}</p>}
+                  {err && <p class="wiz-error" id={`${id}-error`} role="alert">{err}</p>}
                 </div>
               );
             })}
           </div>
         )}
 
+        {/* The primary action is first in the DOM on purpose: pressing Enter in
+            a field activates the FIRST submit button, and that must be
+            "continue", never "Back". CSS (row-reverse) puts Back on the left. */}
         <div class="wiz-nav">
-          {step > 1 && (
-            <button class="btn btn-ghost" type="submit" name="intent" value="back">Back</button>
-          )}
           {isSubmit ? (
             <button class="btn btn-primary" type="submit" name="intent" value="submit" disabled={outstanding.length > 0}>
               Send to MMAKF
@@ -400,6 +448,9 @@ function displayValue(name: string): string {
             <button class="btn btn-primary" type="submit" name="intent" value="next">
               {step === TOTAL_STEPS - 1 ? 'Review and send' : 'Save and continue'}
             </button>
+          )}
+          {step > 1 && (
+            <button class="btn btn-ghost" type="submit" name="intent" value="back" formnovalidate>Back</button>
           )}
         </div>
       </form>
@@ -483,10 +534,9 @@ function displayValue(name: string): string {
   .rev-empty { color: var(--muted-2, var(--muted)); }
 
   .wiz-nav {
-    display: flex; gap: 12px; margin-top: 34px;
+    display: flex; flex-direction: row-reverse; justify-content: space-between; gap: 12px; margin-top: 34px;
     padding-top: 24px; border-top: 1px solid var(--border);
   }
-  .wiz-nav .btn-primary { margin-left: auto; }
   .wiz-nav .btn[disabled] { opacity: .5; cursor: not-allowed; }
 
   .wiz-foot { margin-top: 32px; font-size: .86rem; color: var(--muted); }
@@ -497,7 +547,7 @@ function displayValue(name: string): string {
        side about fifteen characters. */
     .rev-row { grid-template-columns: 1fr; gap: 2px; }
     .rev-row dt { font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; }
-    .wiz-nav { flex-direction: column-reverse; }
+    .wiz-nav { flex-direction: column; }
     .wiz-nav .btn { width: 100%; text-align: center; margin-left: 0; }
     .wiz-check { flex: 1 1 100%; }
   }
